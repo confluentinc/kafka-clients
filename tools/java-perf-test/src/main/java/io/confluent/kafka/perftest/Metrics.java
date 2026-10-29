@@ -198,16 +198,18 @@ public class Metrics {
     private Thread thread;
     private volatile boolean running = false;
 
-    public int totalExternalMetrics = 0;
-    public double totalCpu = 0;
-    public double totalRss = 0;
+    // Measured-interval totals: added by the collector thread and read by the
+    // main thread through the getters, both under this object's lock.
+    private int totalExternalMetrics = 0;
+    private double totalCpu = 0;
+    private double totalRss = 0;
     // Future-queue (handoff) depth, sampled once per measured window. By Little's
     // Law the average should sit at throughput × latency (λ·W); a depth that
     // grows over time signals the completion side lagging. Sampled via a
     // supplier so Metrics need not know the queue's concrete type.
-    public long totalQueue = 0;
-    public long maxQueue = 0;
-    private java.util.function.IntSupplier queueSizeSupplier = null;
+    private long totalQueue = 0;
+    private long maxQueue = 0;
+    private volatile java.util.function.IntSupplier queueSizeSupplier = null;
     public Map<String, Object> lastMetrics = null;
 
     /** Register a source for the handoff-queue depth, sampled each measured window. */
@@ -215,11 +217,21 @@ public class Metrics {
         this.queueSizeSupplier = supplier;
     }
 
-    public double getAverageQueueSize() {
+    /** Average CPU (% of one core) over the measured windows sampled so far. */
+    public synchronized double getAverageCpu() {
+        return totalExternalMetrics > 0 ? totalCpu / totalExternalMetrics : 0.0;
+    }
+
+    /** Average RSS (bytes) over the measured windows sampled so far. */
+    public synchronized double getAverageRss() {
+        return totalExternalMetrics > 0 ? totalRss / totalExternalMetrics : 0.0;
+    }
+
+    public synchronized double getAverageQueueSize() {
         return totalExternalMetrics > 0 ? (double) totalQueue / totalExternalMetrics : 0.0;
     }
 
-    public long getMaxQueueSize() {
+    public synchronized long getMaxQueueSize() {
         return maxQueue;
     }
 
@@ -266,14 +278,17 @@ public class Metrics {
                         Map<String, String> cpuMap = (Map<String, String>) snapshot.get("cpu");
                         @SuppressWarnings("unchecked")
                         Map<String, String> rssMap = (Map<String, String>) snapshot.get("rss");
-                        totalCpu += Double.parseDouble(cpuMap.get("average"));
-                        totalRss += Double.parseDouble(rssMap.get("average"));
-                        totalExternalMetrics++;
-                        if (queueSizeSupplier != null) {
-                            long q = queueSizeSupplier.getAsInt();
-                            totalQueue += q;
-                            if (q > maxQueue) {
-                                maxQueue = q;
+                        java.util.function.IntSupplier queue = queueSizeSupplier;
+                        long q = queue != null ? queue.getAsInt() : 0;
+                        synchronized (this) {
+                            totalCpu += Double.parseDouble(cpuMap.get("average"));
+                            totalRss += Double.parseDouble(rssMap.get("average"));
+                            totalExternalMetrics++;
+                            if (queue != null) {
+                                totalQueue += q;
+                                if (q > maxQueue) {
+                                    maxQueue = q;
+                                }
                             }
                         }
                     }

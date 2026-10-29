@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import datetime
 import json
 import os
@@ -7,6 +8,7 @@ import time
 import random
 import signal
 import gc
+from functools import partial
 from threading import Thread
 
 # This directory, for performance_common / librdkafka_helpers / conftest when
@@ -119,6 +121,13 @@ POST_TEST_AWAIT_SECONDS = 10
 # prints a `capped:` line and does not fail for the shortfall (the driver's
 # report flags a client that held less than 95% of the target rate).
 COUNTED_RUN_CAP_SLACK_S = 10
+
+# An unbounded run reads the clock for its duration bound once every this many
+# sends: a fraction of a second even at a large record's send rate, and nothing
+# measurable per record. The measured interval, the pacing and the bounds are on
+# time.perf_counter_ns(), the latencies' monotonic clock; wall-clock ms only
+# marks the metrics.jsonl windows.
+DURATION_CHECK_EVERY = 100
 
 # Cumulative latency histogram over the measured interval (1 ms buckets, plus
 # one overflow bucket), used for the final p50/p90/p99/p999 summary. Warmup
@@ -262,8 +271,8 @@ class CompatibleProducer:
         self._producer = None
 
 
-# How often AsyncCompatibleProducer.send checks the pending records: AIOProducer
-# hands librdkafka its records 1000 at a time (its batch_size).
+# The largest batch AIOProducer hands librdkafka (its default batch_size), and
+# so how often AsyncCompatibleProducer.send checks the pending records.
 CHECK_PENDING_EVERY = 1000
 
 
@@ -271,34 +280,54 @@ class AsyncCompatibleProducer:
     """Async confluent-kafka-python (librdkafka) producer, for async-vs-async.
 
     Wraps ``confluent_kafka.aio.producer.AIOProducer`` so it exposes the same
-    shape async_main expects: an async ``send`` returning a delivery future,
-    plus async context-manager / ``close``.
+    shape async_main expects: an async ``send`` returning the delivery future,
+    plus async context-manager / ``close``. A measured send passes its
+    ``start_ns`` and its outcome goes to ``on_complete(result, exception,
+    start_ns)``, once per record: positional, as the cheapest call per record.
     """
 
     def __init__(self, configuration):
         num_messages_conf = min(num_messages, 2147483647) \
             if num_messages > 0 else 2147483647
-        total_size_conf = min(total_size, 2147483647) \
+        # queue.buffering.max.kbytes is in KiB: the run's bytes, rounded up.
+        total_size_conf = min(-(-total_size // 1024), 2147483647) \
             if total_size > 0 else 2147483647
+        # Pending records (len(AIOProducer): queued in librdkafka or still in
+        # AIOProducer's buffer) are kept within librdkafka's default queue size
+        # in bytes (1 GiB, or BUFFER_MEMORY), as the sync CompatibleProducer's
+        # are: there produce() raises BufferError and the send waits.
+        # AIOProducer fails a record with QUEUE_FULL instead of waiting, and
+        # without BUFFER_MEMORY the limits are raised above, so this bound is
+        # the only one (an unbounded 100 KB run without it reached 63 GB and was
+        # OOM-killed). Bytes only, not librdkafka's 100000 messages, which would
+        # slow small records down. librdkafka counts a record's value bytes, so
+        # message_size per record never overstates what fits.
+        queue_kbytes = int(configuration.get('queue.buffering.max.kbytes', 1048576))
+        capacity = queue_kbytes * 1024 // max(1, message_size)
+        # The pending records are checked once a batch, since a check per send
+        # costs throughput: up to one batch is sent past a check, and when it
+        # runs AIOProducer's timeout flush may hold up to one more on its way to
+        # librdkafka, counted in neither queue. So a batch is at most a quarter
+        # of the capacity (32 MiB holds ~327 records of 100 KB: batches of 81,
+        # not AIOProducer's 1000), and the check leaves two batches of room.
+        self._batch = max(1, min(CHECK_PENDING_EVERY, capacity // 4))
+        self._max_pending = max(1, capacity - 2 * self._batch)
         self._producer = CKAIOProducer({
             'queue.buffering.max.messages': num_messages_conf,
             'queue.buffering.max.kbytes': total_size_conf,
             **configuration,
-        }, buffer_timeout=0.01)
+        }, buffer_timeout=0.01, batch_size=self._batch)
         self._closed = False
-        # At most about this many records pending (len(AIOProducer): queued in
-        # librdkafka or still in AIOProducer's buffer), so they hold at most
-        # librdkafka's default queue size in bytes (1 GiB, or BUFFER_MEMORY),
-        # as the sync CompatibleProducer's do: there produce() raises
-        # BufferError and the send waits. AIOProducer fails a record with
-        # QUEUE_FULL instead of waiting, and with the limits raised above an
-        # unbounded run had no bound at all: an unbounded 100 KB run reached
-        # 63 GB and was OOM-killed. Bytes only, not librdkafka's 100000
-        # messages, which would slow small records down; checked every
-        # CHECK_PENDING_EVERY sends, since a check per send costs throughput.
-        queue_kbytes = int(configuration.get('queue.buffering.max.kbytes', 1048576))
-        self._max_pending = max(CHECK_PENDING_EVERY, queue_kbytes * 1024 // max(1, message_size))
         self._sends = 0
+        # Set by async_main before the measured sends.
+        self.on_complete = None
+        # Bound once: a bound method made per record costs throughput.
+        self._on_delivery_cb = self._on_delivery
+        # (record, start_ns) of the records librdkafka rejected with QUEUE_FULL,
+        # sent again at the next check (see _on_delivery).
+        self._retries = collections.deque()
+        # Records rejected with QUEUE_FULL and queued to be sent again.
+        self.queue_full_retries = 0
 
         async def poll_producer():
             while not self._closed:
@@ -311,26 +340,69 @@ class AsyncCompatibleProducer:
     async def __aexit__(self, exc_type, exc_value, traceback):
         await self.close()
 
-    async def send(self, *, record):
+    @property
+    def queue_full_pending(self):
+        """Records rejected with QUEUE_FULL and not sent again yet: at the end of
+        the run, only when it is terminating, which stops the retries."""
+        return len(self._retries)
+
+    async def send(self, *, record, start_ns=None):
         # AIOProducer.produce is a coroutine that returns the delivery future;
-        # async_main adds a done-callback to it that records latency at the ack.
+        # with start_ns, on_complete runs on the loop when it completes, unless
+        # librdkafka rejected the record with QUEUE_FULL.
         self._sends += 1
-        if self._sends % CHECK_PENDING_EVERY == 0:
-            while len(self._producer) >= self._max_pending and not terminating:
-                await asyncio.sleep(0.001)
-        return await self._producer.produce(
+        if self._sends % self._batch == 0:
+            await self._wait_for_room()
+        fut = await self._producer.produce(
             topic=record.topic,
             key=record.key,
             value=record.value,
         )
+        if start_ns is not None:
+            fut.add_done_callback(partial(self._on_delivery_cb, record, start_ns))
+        return fut
+
+    def _on_delivery(self, record, start_ns, fut):
+        if fut.cancelled():
+            self.on_complete(None, CancelledError(), start_ns)
+            return
+        exc = fut.exception()
+        if exc is None:
+            self.on_complete(fut.result(), None, start_ns)
+        elif _is_queue_full(exc):
+            # Never handed to librdkafka: sent again at the next check, as the
+            # sync CompatibleProducer retries a BufferError, and on_complete
+            # runs once, with that send's outcome. Its latency still starts at
+            # start_ns, as the sync arm's includes its BufferError waits.
+            self.queue_full_retries += 1
+            self._retries.append((record, start_ns))
+        else:
+            self.on_complete(None, exc, start_ns)
+
+    async def _wait_for_room(self):
+        """Wait until the pending records leave room for a batch, sending the
+        records rejected with QUEUE_FULL first, one batch per check."""
+        while not terminating:
+            while len(self._producer) >= self._max_pending and not terminating:
+                await asyncio.sleep(0.001)
+            if not self._retries or terminating:
+                return
+            for _ in range(min(len(self._retries), self._batch)):
+                record, start_ns = self._retries.popleft()
+                fut = await self._producer.produce(
+                    topic=record.topic, key=record.key, value=record.value)
+                fut.add_done_callback(partial(self._on_delivery_cb, record, start_ns))
 
     async def flush(self):
-        # AIOProducer exposes an async flush(); if a given version doesn't, the
-        # caller's drain-wait still catches stragglers via the poll task.
-        try:
+        # A record the flush hands librdkafka can be rejected with QUEUE_FULL
+        # too: flush again until none is left to send (or the run terminates).
+        while True:
+            await self._wait_for_room()
             await self._producer.flush()
-        except AttributeError:
-            pass
+            # Let the rejected records' done callbacks run.
+            await asyncio.sleep(0)
+            if not self._retries or terminating:
+                return
 
     async def close(self):
         self._closed = True
@@ -416,8 +488,9 @@ def configuration_from_env(common_default_configuration, v2=False):
         if 'MAX_REQUEST_SIZE' in os.environ:
             max_request_size = int(os.environ['MAX_REQUEST_SIZE']) * 1024  # Convert KB to bytes
         else:
-            # batch.size * 64, capped at 8 MiB — matches C/Rust/Java.
-            max_request_size = min(batch_size * 64, 8 * 1024 * 1024)
+            max_request_size = batch_size * 64
+        # Capped at 8 MiB, set or not — matches C/Rust/Java.
+        max_request_size = min(max_request_size, 8 * 1024 * 1024)
 
         if not v2:
             conf['max.request.size'] = max_request_size
@@ -511,13 +584,15 @@ def v2_async_producer(common_default_configuration):
 
 def print_measurement_summary(completed_messages, total_latency_ns,
                               min_latency_ns, max_latency_ns, before_ms,
-                              after_ms, after_ns, first_message_time):
+                              after_ms, after_ns, first_message_time,
+                              extra_results=None):
     """Print the throughput / latency / CPU / RSS report.
 
     Shared by the sync ``main()`` and the async ``async_main()`` so the two
     paths emit an identical summary. The latency min/avg/max are exact (ms,
     from the ns sum / min / max of the recorded latencies); the percentiles
-    come from the floor-ms histogram.
+    come from the floor-ms histogram. ``extra_results`` adds keys to
+    results.json.
     """
     metrics.measurement_end_ms = after_ms
     # Every recorded latency is in exactly one bucket (the overflow bucket
@@ -599,6 +674,7 @@ def print_measurement_summary(completed_messages, total_latency_ns,
         if external_metrics_aggregations["total_external_metrics"] > 0 else 0.0,
         "rss_avg_kib": round(external_metrics_aggregations.get('average_rss', 0.0) / 1024, 2)
         if external_metrics_aggregations["total_external_metrics"] > 0 else 0.0,
+        **(extra_results or {}),
     }
     try:
         with open(results_file, "w") as fh:
@@ -632,7 +708,7 @@ def pacing_wait_s(messages_sent, first_message_time, final=False):
     if not final and messages_sent % checkpoint != 0:
         return 0.0
     deadline_ns = first_message_time + messages_sent * 1e9 / limit_rps
-    return (deadline_ns - time.time_ns()) / 1e9
+    return (deadline_ns - time.perf_counter_ns()) / 1e9
 
 
 def fail_run():
@@ -644,27 +720,29 @@ def fail_run():
 def counted_run_capped(first_message_time):
     """True once a counted run's measured time reaches TEST_DURATION_SECONDS +
     COUNTED_RUN_CAP_SLACK_S (on the measured interval's clock, see main)."""
-    return time.time_ns() - first_message_time >= \
+    return time.perf_counter_ns() - first_message_time >= \
         (test_duration_s + COUNTED_RUN_CAP_SLACK_S) * 1_000_000_000
 
 
 def report_capped(messages_sent, first_message_time):
     """Print the one stdout line of a counted run stopped by the time cap."""
-    elapsed_s = (time.time_ns() - first_message_time) / 1e9
+    elapsed_s = (time.perf_counter_ns() - first_message_time) / 1e9
     print(f"capped: sent {messages_sent} of {num_messages} records in "
           f"{elapsed_s:.2f} s (TEST_DURATION_SECONDS + {COUNTED_RUN_CAP_SLACK_S} s)")
 
 
-def check_completion(completed_messages, messages_sent, capped):
+def check_completion(completed_messages, messages_sent, capped, dropped=0):
     """Fail the run, unless it was terminated by a signal, when not every
-    completed record verified or (with a message target) not every sent record
-    completed, or none did. ``messages_sent`` leaves out the async path's
-    QUEUE_FULL rejections (the sync path retries them), so those reduce the
-    throughput rather than fail the run. A counted run stopped by the time cap
-    (``capped``) sent fewer records than its target and is not failed for that.
-    The summary and results.json are written regardless."""
+    completed record verified, ``dropped`` records (rejected with QUEUE_FULL by
+    the async librdkafka producer) were never sent again, or (with a message
+    target) not every sent record completed, or none did. A counted run stopped
+    by the time cap (``capped``) sent fewer records than its target and is not
+    failed for that. The summary and results.json are written regardless."""
     if terminating:
         return
+    if dropped > 0:
+        print(f"{dropped} records rejected with QUEUE_FULL were never sent")
+        fail_run()
     if verified != completed_messages:
         print(f"Verified messages {verified} "
               "does not match completed messages "
@@ -736,8 +814,10 @@ def main(v2=False):
         # deadline.
         try:
             if exception is not None:
-                # A failed record counts as completed (in `finally`) but adds no
-                # latency or throughput, like the other producer harnesses.
+                # A failed record counts as completed (in `finally`), and so in
+                # the summary's throughput, as in the C/Rust/Java harnesses; it
+                # adds no latency nor metrics.jsonl sample, and is not verified,
+                # which fails the run (check_completion).
                 print(f"Produce call resulted in exception: {exception}")
                 return
             else:
@@ -764,9 +844,9 @@ def main(v2=False):
             generated_messages_len = len(generated_messages)           
             if warmup_s > 0:
                 print(f"Warming up for {warmup_s} seconds ...")
-                warmup_end_time = time.time_ns() + warmup_s * 1000000000
+                warmup_end_time = time.perf_counter_ns() + warmup_s * 1000000000
                 i = 0
-                while time.time_ns() < warmup_end_time:
+                while time.perf_counter_ns() < warmup_end_time and not terminating:
                     message = generated_messages[i % generated_messages_len]
                     try:
                         produce_call = producer.send(record=ProducerRecord(
@@ -790,7 +870,7 @@ def main(v2=False):
             verified = 0
 
             before_ms = int(time.time() * 1000)
-            first_message_time = time.time_ns()
+            first_message_time = time.perf_counter_ns()
             # Pace in ~100 ms windows: every max(floor(limit_rps / 10), 1)
             # messages, sleep until first_message_time + messages_sent /
             # limit_rps (see pacing_wait_s), matching the C, Rust and Java
@@ -804,7 +884,7 @@ def main(v2=False):
             # COUNTED_RUN_CAP_SLACK_S), checked before every send.
             capped = False
             if num_messages > 0:
-                continue_sending = messages_sent < num_messages
+                continue_sending = not terminating and messages_sent < num_messages
             else:
                 continue_sending = not terminating
 
@@ -830,8 +910,8 @@ def main(v2=False):
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
                     if time_to_wait_s > 0:
                         time.sleep(time_to_wait_s)
-                    if num_messages == 0 and messages_sent % 10000 == 0:
-                        duration = time.time_ns() - first_message_time
+                    if num_messages == 0 and messages_sent % DURATION_CHECK_EVERY == 0:
+                        duration = time.perf_counter_ns() - first_message_time
                         if duration > (test_duration_s + 1) * 1e9:
                             print(f"Test duration reached, {duration / 1e9:.2f} seconds. Interrupting...\n")  # noqa: E501
                             break
@@ -850,12 +930,12 @@ def main(v2=False):
                 # completion, then wait for the delivery callbacks (which record
                 # latency/metrics) to drain. Same barrier for both backends.
                 producer.flush()
-                drain_deadline = time.time() + 30
-                while completed_messages < messages_sent and time.time() < drain_deadline:
+                drain_deadline = time.monotonic() + 30
+                while completed_messages < messages_sent and time.monotonic() < drain_deadline:
                     time.sleep(0.01)
             measured_sent = messages_sent
             after_ms = int(time.time() * 1000)
-            after_ns = time.time_ns()
+            after_ns = time.perf_counter_ns()
 
             check_completion(completed_messages, messages_sent, capped)
             print_measurement_summary(
@@ -883,9 +963,6 @@ async def async_main():
     min_latency_ns = None
     max_latency_ns = 0
     completed_messages = 0
-    # Messages whose delivery failed with QUEUE_FULL (local queue overflow):
-    # they were never actually sent, so they are subtracted from measured_sent.
-    queue_full = 0
     before_ms = None
     first_message_time = None
 
@@ -918,39 +995,25 @@ async def async_main():
     producer = v2_async_producer(common_default_configuration) if v2 \
         else v3_async_producer(common_default_configuration)
 
-    def record_delivery_async(fut, start_ns):
-        # v2: runs on the event loop when the delivery future resolves
-        # (add_done_callback -> call_soon). A cancelled future carries no
-        # result/exception (calling .exception() on it would raise), so treat
-        # it like any other completion.
-        exc = None if fut.cancelled() else fut.exception()
-        record_completion_async(None if exc is not None or fut.cancelled() else fut.result(),
-                                exc, start_ns)
-
     def record_completion_async(result, exc, start_ns):
         # Runs on the event loop when the delivery completes (v3: the send()
         # callback, which runs on the loop before the record's future
-        # completes), stamping latency at completion so a backed-up reader can't
-        # inflate it. Single-threaded (the loop), so no lock is needed. Matches
-        # the sync path and the native rust/C apps.
+        # completes; v2: AsyncCompatibleProducer.on_complete, from the delivery
+        # future's done callback, once per record: a QUEUE_FULL rejection is
+        # sent again and reaches here with the outcome of that send), stamping
+        # latency at completion so a backed-up reader can't inflate it.
+        # Single-threaded (the loop), so no lock is needed. Matches the sync
+        # path and the native rust/C apps.
         nonlocal total_latency_ns, min_latency_ns, max_latency_ns, completed_messages
-        nonlocal queue_full
-        # QUEUE_FULL is the one outcome kept OUT of the throughput count: those
-        # records were never sent, so they are subtracted from measured_sent
-        # instead. Don't log it — it can occur tens of thousands of times.
-        if exc is not None and _is_queue_full(exc):
-            queue_full += 1
-            return
-        # Success, a non-QUEUE_FULL error, or a cancelled future all count toward
-        # completed_messages (errors included), mirroring the sync path's
-        # record_delivery. This also makes the drain converge — every message
-        # bumps exactly one of completed_messages / queue_full — so a stray
-        # error no longer leaves the drain waiting out its full 30s deadline.
-        # Same `finally` guard as the sync record_delivery: count the delivery
-        # even if the accounting raises.
+        # Success or an error both count toward completed_messages, mirroring
+        # the sync path's record_delivery, so the drain converges: a stray error
+        # does not leave it waiting out its full 30s deadline. Same `finally`
+        # guard as the sync record_delivery: count the delivery even if the
+        # accounting raises.
         try:
             if exc is not None:
-                # Counted as completed (in `finally`), no latency or throughput.
+                # As in the sync record_delivery: completed (in `finally`), no
+                # latency, the run then failed as not verified.
                 print(f"Produce call resulted in exception: {exc}")
                 return
             elif result is not None:
@@ -972,14 +1035,17 @@ async def async_main():
         finally:
             completed_messages += 1
 
+    if v2:
+        producer.on_complete = record_completion_async
+
     try:
         async with producer:
             generated_messages_len = len(generated_messages)
             if warmup_s > 0:
                 print(f"Warming up for {warmup_s} seconds ...")
-                warmup_end_time = time.time_ns() + warmup_s * 1000000000
+                warmup_end_time = time.perf_counter_ns() + warmup_s * 1000000000
                 i = 0
-                while time.time_ns() < warmup_end_time:
+                while time.perf_counter_ns() < warmup_end_time and not terminating:
                     message = generated_messages[i % generated_messages_len]
                     try:
                         produce_call = await producer.send(record=ProducerRecord(
@@ -1002,7 +1068,7 @@ async def async_main():
             verified = 0
 
             before_ms = int(time.time() * 1000)
-            first_message_time = time.time_ns()
+            first_message_time = time.perf_counter_ns()
             # Pace in ~100 ms windows: every max(floor(limit_rps / 10), 1)
             # messages, sleep until first_message_time + messages_sent /
             # limit_rps (see pacing_wait_s), matching the C, Rust and Java
@@ -1016,7 +1082,7 @@ async def async_main():
             # COUNTED_RUN_CAP_SLACK_S), checked before every send.
             capped = False
             if num_messages > 0:
-                continue_sending = messages_sent < num_messages
+                continue_sending = not terminating and messages_sent < num_messages
             else:
                 continue_sending = not terminating
 
@@ -1035,9 +1101,7 @@ async def async_main():
                     # Record latency in the delivery callback (stamped at the
                     # ack on the event loop), not in a recorder task.
                     if v2:
-                        fut = await producer.send(record=next_message)
-                        fut.add_done_callback(
-                            lambda f, st=start_ns: record_delivery_async(f, st))
+                        await producer.send(record=next_message, start_ns=start_ns)
                     else:
                         # The send() callback (Java's Callback), as the sync cell
                         # passes it: it runs on the event loop before the record's
@@ -1050,11 +1114,12 @@ async def async_main():
                     time_to_wait_s = pacing_wait_s(messages_sent, first_message_time)
                     if time_to_wait_s > 0:
                         await asyncio.sleep(time_to_wait_s)
-                    if messages_sent % 10000 == 0:
-                        # Yield to the in-flight completions and their delivery
-                        # done-callbacks (which record latency/metrics).
-                        await asyncio.sleep(0)
-                        duration = time.time_ns() - first_message_time
+                    if messages_sent % DURATION_CHECK_EVERY == 0:
+                        if messages_sent % 10000 == 0:
+                            # Yield to the in-flight completions and their
+                            # delivery callbacks (which record latency/metrics).
+                            await asyncio.sleep(0)
+                        duration = time.perf_counter_ns() - first_message_time
                         if num_messages == 0 and duration > (test_duration_s + 1) * 1e9:
                             print(f"Test duration reached, {duration / 1e9:.2f} seconds. Interrupting...\n")  # noqa: E501
                             break
@@ -1073,25 +1138,32 @@ async def async_main():
             # then yield until the delivery callbacks (which record
             # latency/metrics) have all fired.
             await producer.flush()
-            drain_deadline = time.time() + 30
-            while (completed_messages + queue_full) < messages_sent \
-                    and time.time() < drain_deadline:
+            drain_deadline = time.monotonic() + 30
+            while completed_messages < messages_sent \
+                    and time.monotonic() < drain_deadline:
+                if v2 and producer.queue_full_pending > 0 and not terminating:
+                    # Rejected after the flush: send them again.
+                    await producer.flush()
                 await asyncio.sleep(0.01)
-            # QUEUE_FULL deliveries were never sent — subtract them from the
-            # measured sent count.
-            measured_sent = messages_sent - queue_full
-            if queue_full > 0:
-                print(f"QUEUE_FULL errors: {queue_full} (subtracted from sent; "
-                      f"measured_sent={measured_sent})")
+            extra_results = None
+            dropped = 0
+            if v2:
+                # Records rejected with QUEUE_FULL are sent again; the ones left
+                # (only once terminating) were never sent.
+                dropped = producer.queue_full_pending
+                extra_results = {"queue_full_retries": producer.queue_full_retries,
+                                 "queue_full_dropped": dropped}
+                print(f"QUEUE_FULL: {producer.queue_full_retries} records sent "
+                      f"again, {dropped} never sent")
+            measured_sent = messages_sent - dropped
             after_ms = int(time.time() * 1000)
-            after_ns = time.time_ns()
+            after_ns = time.perf_counter_ns()
 
-            # measured_sent, not messages_sent: a QUEUE_FULL record never
-            # completes (see check_completion).
-            check_completion(completed_messages, measured_sent, capped)
+            check_completion(completed_messages, messages_sent, capped, dropped)
             print_measurement_summary(
                 completed_messages, total_latency_ns, min_latency_ns,
-                max_latency_ns, before_ms, after_ms, after_ns, first_message_time)
+                max_latency_ns, before_ms, after_ms, after_ns, first_message_time,
+                extra_results)
     except CancelledError:
         print("Main cancelled")
 
@@ -1104,17 +1176,11 @@ def signal_handler(sig, frame):
     # a "reentrant call RuntimeError"
     os.write(sys.stdout.fileno(),
              b"Termination signal received, shutting down...\n")
+    # Only the flag, as the other harnesses do: it ends the warmup and send
+    # loops, and the `with` / `async with` block closes the producer on the way
+    # out. Closing it here, between two bytecodes of a send, would hang it (v3)
+    # or pull the client from under it (v2).
     terminating = True
-
-    try:
-        # The async producer's close() is a coroutine; it cannot be driven from
-        # a signal handler. Setting `terminating` breaks async_main's send loop,
-        # and its `async with` block awaits close() on the way out.
-        if producer and not run_async:
-            producer.close()
-    except Exception as e:
-        os.write(sys.stdout.fileno(),
-                 f"Exception during close: {e}".encode())
 
 
 def test_producer_e2e_latency(kafka_broker):

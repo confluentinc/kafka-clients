@@ -17,9 +17,10 @@
 //! The markdown opens with the results and ends with the run's parameters, as
 //! a list, the machine the clients ran on first. A run of one test (as CI
 //! runs) lists the test's settings there too; a run of several lists each
-//! test's settings under its results. Headings stay at `###` and below, which
-//! renderers draw without a rule under them. Each test has a table with a
-//! row per metric, a column per client that ran and, after the clients, a Δ
+//! test's settings under its results. Below the `#` title, headings stay at
+//! `###` and below, which renderers draw without a rule under them. Each test
+//! has a table with a row per metric, a column per client that ran and, after
+//! the clients, a Δ
 //! column per comparison giving a client's change against its librdkafka
 //! baseline: in the `rust` group Rust and Java each against librdkafka, in
 //! the `python` group each Rust-based client against the librdkafka-based one
@@ -31,14 +32,25 @@
 //! - 🔴 worse;
 //! - no color when it rounds to no change.
 //!
-//! Counts (messages, transactions) get no Δ. A Δ is `n/a` unless both clients
-//! passed: a failed arm's numbers (from a partial run) are shown in its
-//! column but never compared. A throughput Δ is `cluster-bound` when either
-//! client's ingress came near the cluster's limit, which then capped it
-//! rather than the client. The table's first row, Status, says how each
-//! client ended: passed, failed, or not run, and whether it missed a fixed
-//! rate (`below rate`) or its consumer load did (`load short`). The report
-//! has no notes.
+//! Counts (messages, transactions) get no Δ, and neither does a CPU or RSS
+//! of 0, which a harness writes when it took no sample: it shows as missing.
+//! A Δ is `n/a` unless both clients passed: a failed arm's numbers (from a
+//! partial run) are shown in its column but never compared. A throughput Δ is
+//! `cluster-bound` when either client's ingress came near the cluster's
+//! limit, which then capped it rather than the client; never in a compressed
+//! test, whose ingress is unknown (the harnesses report uncompressed bytes,
+//! the cluster meters compressed ones). The table's first row, Status, says
+//! how each client ended: passed, failed, or not run, and whether it missed a
+//! fixed rate (`below rate`), or missed it after its consumer load did
+//! (`load short`). A client below its rate still passed: its Δ are colored
+//! like any other, and its Status tells the reader it missed its rate. A
+//! latency percentile in the harnesses' top histogram bucket, which holds
+//! every longer latency too, is shown as at least that bucket (`≥ 10,001.00`).
+//!
+//! The report has one note, under its title, when the librdkafka client ran
+//! a producer or transactional (`produce`) test: its harness produces without
+//! `RD_KAFKA_MSG_F_COPY`, so its CPU and RSS leave out the payload copy every
+//! other client makes.
 //!
 //! While a test runs, the report so far ([`Live`], written by
 //! [`super::live`]) opens with when it was written. Its running client shows
@@ -51,7 +63,9 @@
 use std::fmt::Write as _;
 
 use super::live::{SoFar, INTERVAL};
-use super::{Arm, ArmResult, Group, Metrics, Outcome, PerfTest, RunInfo, TestResult, Workload};
+use super::{
+    Arm, ArmResult, Group, Metrics, Outcome, PerfTest, RunInfo, TestResult, Workload, PLAN_BUFFER_MEMORY_MIB, PRODUCING,
+};
 
 /// A report written while the last of its tests runs.
 pub(crate) struct Live {
@@ -73,7 +87,8 @@ pub(crate) struct Running {
 const NEAR_INGRESS_SHARE: f64 = 0.85;
 
 /// Below this share of a fixed-rate test's target a client did not hold the
-/// rate, so its latency is not comparable with one that did.
+/// rate. Its Δ are still colored like any other's: its Status (`below rate`,
+/// `load short`) tells the reader it missed the rate.
 const HELD_RATE_SHARE: f64 = 0.95;
 
 const MIB: f64 = 1024.0 * 1024.0;
@@ -135,6 +150,8 @@ struct Row {
     transactional: bool,
     /// A rate the cluster's ingress limit can cap.
     throughput: bool,
+    /// A latency percentile, read from the harnesses' histograms.
+    percentile: bool,
     /// How to read it from a running client's numbers so far; `None` for the
     /// rows only a finished client has.
     so_far: Option<fn(&SoFar) -> Option<f64>>,
@@ -145,6 +162,11 @@ impl Row {
     const fn so_far(self, value: fn(&SoFar) -> Option<f64>) -> Row {
         Row { so_far: Some(value), ..self }
     }
+
+    /// The row, a latency percentile.
+    const fn percentile(self) -> Row {
+        Row { percentile: true, ..self }
+    }
 }
 
 const fn row(
@@ -154,7 +176,16 @@ const fn row(
     better: Option<Better>,
     transactional: bool,
 ) -> Row {
-    Row { label, value, decimals, better, transactional, throughput: false, so_far: None }
+    Row {
+        label,
+        value,
+        decimals,
+        better,
+        transactional,
+        throughput: false,
+        percentile: false,
+        so_far: None,
+    }
 }
 
 const fn rate_row(
@@ -170,7 +201,37 @@ const fn rate_row(
         better: Some(Better::Higher),
         transactional,
         throughput: true,
+        percentile: false,
         so_far: None,
+    }
+}
+
+/// A CPU or RSS average, `None` when 0: what a harness writes when it took
+/// no sample.
+fn sampled(value: f64) -> Option<f64> {
+    (value > 0.0).then_some(value)
+}
+
+/// The latency, in ms, of the top bucket of the histograms the harnesses of
+/// `workload` read their percentiles from: that bucket holds every longer
+/// latency too, so a percentile there is that or more.
+fn histogram_top_ms(workload: Workload) -> f64 {
+    match workload {
+        // 1 ms buckets to 10,000 ms, then one for anything longer.
+        Workload::Producer | Workload::Transactional => 10_001.0,
+        // 1 ms buckets to 600,000 ms, the last holding anything longer.
+        Workload::Consumer => 600_000.0,
+    }
+}
+
+/// `mark` before a latency percentile of `workload` in its histogram's top
+/// bucket (see [`histogram_top_ms`]), which is at least that; `""` before any
+/// other.
+fn at_least(value: f64, workload: Workload, mark: &'static str) -> &'static str {
+    if value >= histogram_top_ms(workload) {
+        mark
+    } else {
+        ""
     }
 }
 
@@ -179,11 +240,11 @@ const ROWS: &[Row] = &[
     rate_row("Throughput (MiB/s)", |m| Some(m.mib_s), 2, false).so_far(SoFar::mib_s),
     rate_row("Transactions/s", |m| m.txn.as_ref().map(|t| t.per_s), 2, true),
     row("Latency avg (ms)", |m| Some(m.avg), 2, Some(Better::Lower), false).so_far(|s| s.latency_avg),
-    row("Latency p50 (ms)", |m| Some(m.p50), 2, Some(Better::Lower), false),
-    row("Latency p90 (ms)", |m| Some(m.p90), 2, Some(Better::Lower), false),
-    row("Latency p95 (ms)", |m| Some(m.p95), 2, Some(Better::Lower), false),
-    row("Latency p99 (ms)", |m| Some(m.p99), 2, Some(Better::Lower), false),
-    row("Latency p99.9 (ms)", |m| Some(m.p999), 2, Some(Better::Lower), false),
+    row("Latency p50 (ms)", |m| Some(m.p50), 2, Some(Better::Lower), false).percentile(),
+    row("Latency p90 (ms)", |m| Some(m.p90), 2, Some(Better::Lower), false).percentile(),
+    row("Latency p95 (ms)", |m| Some(m.p95), 2, Some(Better::Lower), false).percentile(),
+    row("Latency p99 (ms)", |m| Some(m.p99), 2, Some(Better::Lower), false).percentile(),
+    row("Latency p99.9 (ms)", |m| Some(m.p999), 2, Some(Better::Lower), false).percentile(),
     row("Latency max (ms)", |m| Some(m.max), 2, Some(Better::Lower), false).so_far(|s| s.latency_max),
     row(
         "Commit latency p50 (ms)",
@@ -191,16 +252,18 @@ const ROWS: &[Row] = &[
         2,
         Some(Better::Lower),
         true,
-    ),
+    )
+    .percentile(),
     row(
         "Commit latency p99 (ms)",
         |m| m.txn.as_ref().map(|t| t.commit_p99),
         2,
         Some(Better::Lower),
         true,
-    ),
-    row("CPU (%)", |m| Some(m.cpu_pct), 1, Some(Better::Lower), false).so_far(|s| s.cpu_pct),
-    row("RSS (MiB)", |m| Some(m.rss_mib), 1, Some(Better::Lower), false).so_far(|s| s.rss_mib),
+    )
+    .percentile(),
+    row("CPU (%)", |m| sampled(m.cpu_pct), 1, Some(Better::Lower), false).so_far(|s| s.cpu_pct.and_then(sampled)),
+    row("RSS (MiB)", |m| sampled(m.rss_mib), 1, Some(Better::Lower), false).so_far(|s| s.rss_mib.and_then(sampled)),
     row("Messages measured", |m| Some(m.messages), 0, None, false).so_far(|s| Some(s.messages)),
     row("Committed transactions", |m| m.txn.as_ref().map(|t| t.committed), 0, None, true),
     row("Aborted transactions", |m| m.txn.as_ref().map(|t| t.aborted), 0, None, true),
@@ -236,6 +299,12 @@ const SETTING_NAMES: &[(&str, &str, &str, &str)] = &[
     ("ENABLE_IDEMPOTENCE", "idempotence", "Idempotence", ""),
     ("MAX_IN_FLIGHT", "in-flight", "Max in-flight requests", ""),
     ("BUFFER_MEMORY", "buffer", "Buffer memory", " MiB"),
+    (
+        "BUFFER_MEMORY_ALLOCATION_STRATEGY",
+        "buffer allocation",
+        "Buffer allocation strategy",
+        "",
+    ),
     ("MAX_REQUEST_SIZE", "max request", "Max request size", " KiB"),
     (
         "RECORDS_PER_TRANSACTION",
@@ -272,6 +341,20 @@ fn setting_value(key: &str, value: &str, unit: &str, number: fn(&str) -> String)
     }
 }
 
+/// `test`'s `key` as a scenario or a parameter table shows it: the value the
+/// test sets or, for `BUFFER_MEMORY` in a producing test, the driver's
+/// default, which every producing client gets when the test sets none.
+fn shown_setting(test: &PerfTest, key: &str, unit: &str, number: fn(&str) -> String) -> Option<String> {
+    match test.setting(key) {
+        Some(value) => Some(setting_value(key, value, unit, number)),
+        None if key == "BUFFER_MEMORY" && PRODUCING.contains(&test.workload) => Some(format!(
+            "{} (default)",
+            setting_value(key, &PLAN_BUFFER_MEMORY_MIB.to_string(), unit, number)
+        )),
+        None => None,
+    }
+}
+
 /// A one-line description of a test's settings.
 pub(crate) fn scenario(test: &PerfTest) -> String {
     let workload = match test.workload {
@@ -289,8 +372,8 @@ pub(crate) fn scenario(test: &PerfTest) -> String {
         Some(rps) => parts.push(format!("{rps} msg/s")),
     }
     for &(key, label, _, unit) in SETTING_NAMES {
-        if let Some(v) = test.setting(key) {
-            parts.push(format!("{label} {}", setting_value(key, v, unit, str::to_string)));
+        if let Some(value) = shown_setting(test, key, unit, str::to_string) {
+            parts.push(format!("{label} {value}"));
         }
     }
     parts.join(", ")
@@ -322,7 +405,7 @@ fn parameters(test: &PerfTest) -> Vec<(String, String)> {
         }),
     );
     for &(key, _, name, unit) in SETTING_NAMES {
-        add(name, test.setting(key).map(|v| setting_value(key, v, unit, grouped)));
+        add(name, shown_setting(test, key, unit, grouped));
     }
     rows
 }
@@ -417,7 +500,8 @@ fn passed_metrics_of(arms: &[ArmResult], arm: Arm) -> Option<&Metrics> {
 }
 
 /// The MB/s a client sent to (or, in a consumer test, read from) the
-/// cluster. A transactional test's throughput counts committed records only,
+/// cluster, uncompressed: only an uncompressed test's is what the cluster
+/// meters. A transactional test's throughput counts committed records only,
 /// while its aborted records crossed the ingress too.
 fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
     let committed = m.mib_s * MIB / 1e6;
@@ -426,6 +510,18 @@ fn ingress_mb_s(m: &Metrics, abort_rate: f64) -> f64 {
     } else {
         committed
     }
+}
+
+/// Whether the run has the librdkafka client produce from its harness's
+/// payloads without copying them: the C producer harness and the
+/// transactional one in `produce` mode pass no `RD_KAFKA_MSG_F_COPY` (`eos`
+/// copies each consumed record).
+fn librdkafka_skips_copy(info: &RunInfo) -> bool {
+    info.arms.contains(&Arm::Librdkafka)
+        && info
+            .tests
+            .iter()
+            .any(|t| t.workload == Workload::Producer || (t.workload == Workload::Transactional && !t.is_eos()))
 }
 
 /// The report of `results`; with `live`, the report so far, whose last test
@@ -443,6 +539,14 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult], live: Option<&Liv
             hours_minutes(INTERVAL.as_secs() / 60)
         );
     }
+    if librdkafka_skips_copy(info) {
+        let _ = writeln!(
+            out,
+            "\n> In producer and transactional (produce) tests the librdkafka harness produces without \
+             `RD_KAFKA_MSG_F_COPY`: librdkafka sends the harness's pre-generated payloads in place, so its CPU and \
+             RSS leave out the payload copy every other client makes."
+        );
+    }
     // A run of one test (as CI runs) lists the test's settings with the
     // run's; a run of several lists each test's under its results.
     let single = match info.tests.as_slice() {
@@ -455,8 +559,8 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult], live: Option<&Liv
     }
     for (i, result) in results.iter().enumerate() {
         let live = live.filter(|_| i + 1 == results.len());
-        // `###` and below: renderers draw a rule under `#` and `##`, which
-        // would sit between a heading and its table.
+        // `###` and below, under the `#` title: renderers draw a rule under
+        // `#` and `##`, which would sit between a heading and its table.
         match single {
             Some(_) => {
                 let _ = writeln!(out, "\n### Results\n");
@@ -507,7 +611,7 @@ fn inline(text: &str) -> String {
 /// How `arm` ended in `result`'s test, as its Status cell: `passed`, `failed`
 /// or `not run`; with `live`, `running` or `waiting` until it finishes. A
 /// client that passed but missed a fixed rate is `below rate`, or `load
-/// short` when its consumer load is what fell short.
+/// short` when its consumer load fell short too.
 fn status(arm: Arm, result: &TestResult, live: Option<&Live>) -> &'static str {
     let Some(a) = find(&result.arms, arm) else {
         return match live {
@@ -528,17 +632,19 @@ fn status(arm: Arm, result: &TestResult, live: Option<&Live>) -> &'static str {
     let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let rate: f64 = test.setting("LIMIT_RPS").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
     let target = rate * (1.0 - abort_rate);
-    // A consumer reads what its load produced: when the load fell short, so
-    // did the consumer, through no fault of its own.
+    let below_rate = target > 0.0 && m.msg_s < HELD_RATE_SHARE * target;
+    if !below_rate {
+        return "passed";
+    }
+    // A consumer reads what its load produced: when the load fell short too,
+    // so did the consumer, through no fault of its own.
     let short_load = a
         .load_msg_s
-        .is_some_and(|r| test.workload == Workload::Consumer && target > 0.0 && r < HELD_RATE_SHARE * target);
+        .is_some_and(|r| test.workload == Workload::Consumer && r < HELD_RATE_SHARE * target);
     if short_load {
         "load short"
-    } else if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
-        "below rate"
     } else {
-        "passed"
+        "below rate"
     }
 }
 
@@ -566,9 +672,11 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
 
     let transactional = test.workload == Workload::Transactional;
     let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    // The cluster meters compressed bytes, which no harness reports.
+    let compressed = test.setting("COMPRESSION_TYPE").is_some_and(|c| c != "none");
     // Whether `arm`'s ingress came near the cluster's limit.
     let near_ingress = |arm: Arm| match (metrics_of(&result.arms, arm), info.ingress_mb_s) {
-        (Some(m), Some(limit)) => ingress_mb_s(m, abort_rate) >= NEAR_INGRESS_SHARE * limit,
+        (Some(m), Some(limit)) if !compressed => ingress_mb_s(m, abort_rate) >= NEAR_INGRESS_SHARE * limit,
         _ => false,
     };
     for row in ROWS.iter().filter(|r| transactional || !r.transactional) {
@@ -581,6 +689,9 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
                         None => metrics_of(&result.arms, *arm).and_then(row.value),
                     };
                     match value {
+                        Some(v) if row.percentile => {
+                            format!("{}{}", at_least(v, test.workload, "≥ "), number(v, row.decimals))
+                        },
                         Some(v) => number(v, row.decimals),
                         None => "–".to_string(),
                     }
@@ -672,17 +783,31 @@ pub(crate) fn junit(results: &[TestResult]) -> String {
                 xml(a.arm.label()),
                 a.elapsed.as_secs_f64()
             );
+            let percentile = |v: f64| format!("{}{v:.2}", at_least(v, t.test.workload, "≥"));
             let summary = a.metrics.as_ref().map(|m| {
                 let mut s = format!(
-                    "client={} messages={:.0} msg/s={:.0} MiB/s={:.2} p50={:.2}ms p99={:.2}ms p99.9={:.2}ms \
-                     max={:.2}ms cpu={:.1}% rss={:.1}MiB",
-                    m.client, m.messages, m.msg_s, m.mib_s, m.p50, m.p99, m.p999, m.max, m.cpu_pct, m.rss_mib
+                    "client={} messages={:.0} msg/s={:.0} MiB/s={:.2} p50={}ms p99={}ms p99.9={}ms max={:.2}ms \
+                     cpu={:.1}% rss={:.1}MiB",
+                    m.client,
+                    m.messages,
+                    m.msg_s,
+                    m.mib_s,
+                    percentile(m.p50),
+                    percentile(m.p99),
+                    percentile(m.p999),
+                    m.max,
+                    m.cpu_pct,
+                    m.rss_mib
                 );
-                if let Some(t) = &m.txn {
+                if let Some(txn) = &m.txn {
                     let _ = write!(
                         s,
-                        " txn/s={:.2} committed={:.0} aborted={:.0} commit_p50={:.2}ms commit_p99={:.2}ms",
-                        t.per_s, t.committed, t.aborted, t.commit_p50, t.commit_p99
+                        " txn/s={:.2} committed={:.0} aborted={:.0} commit_p50={}ms commit_p99={}ms",
+                        txn.per_s,
+                        txn.committed,
+                        txn.aborted,
+                        percentile(txn.commit_p50),
+                        percentile(txn.commit_p99)
                     );
                 }
                 s
@@ -882,24 +1007,31 @@ mod tests {
             test("t rust PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000 BATCH_SIZE=1024 COMPRESSION_TYPE=lz4 ACKS=1");
         assert_eq!(
             scenario(&t),
-            "producer, 200 partitions, 1024 B values, 10000 msg/s, acks 1, compression lz4, batch 1024 KiB"
+            "producer, 200 partitions, 1024 B values, 10000 msg/s, acks 1, compression lz4, batch 1024 KiB, buffer 32 \
+             MiB (default)"
         );
-        let t = test("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
-        assert_eq!(scenario(&t), "producer, 1 partitions, 1 B values, unbounded rate");
+        let t = test("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 BUFFER_MEMORY=64");
+        assert_eq!(
+            scenario(&t),
+            "producer, 1 partitions, 1 B values, unbounded rate, buffer 64 MiB"
+        );
         let t = test(
             "t rust WORKLOAD=transactional TXN_MODE=eos PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=1000 \
              RECORDS_PER_TRANSACTION=1000 ABORT_RATE=0.5 NUM_TRANSACTIONAL_PRODUCERS=16",
         );
         assert_eq!(
             scenario(&t),
-            "transactional (eos), 36 partitions, 1024 B values, 1000 msg/s, records per transaction 1000, abort rate \
-             0.5, transactional producers 16"
+            "transactional (eos), 36 partitions, 1024 B values, 1000 msg/s, buffer 32 MiB (default), records per \
+             transaction 1000, abort rate 0.5, transactional producers 16"
         );
         let t = test("t rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0");
         assert_eq!(
             scenario(&t),
-            "transactional (produce), 1 partitions, 1 B values, unbounded rate"
+            "transactional (produce), 1 partitions, 1 B values, unbounded rate, buffer 32 MiB (default)"
         );
+        // A consumer test's load keeps its own buffer.
+        let t = test("t rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=10");
+        assert_eq!(scenario(&t), "consumer, 1 partitions, 1 B values, 10 msg/s");
     }
 
     #[test]
@@ -925,10 +1057,16 @@ mod tests {
         }];
         let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
         let md = render(Group::Rust, &all, Some(600.0), &results);
-        // The results first, the parameters after them, as a list; no heading
-        // above `###`, so none is drawn with a rule under it.
+        // The results first, the parameters after them, as a list; under the
+        // title no heading above `###`, so none is drawn with a rule under it.
+        // The librdkafka producer's note, under the title, is the only one.
         assert!(
-            md.starts_with("# Rust client performance results\n\n### Results\n\n| Metric |"),
+            md.starts_with(
+                "# Rust client performance results\n\n> In producer and transactional (produce) tests the librdkafka \
+                 harness produces without `RD_KAFKA_MSG_F_COPY`: librdkafka sends the harness's pre-generated \
+                 payloads in place, so its CPU and RSS leave out the payload copy every other client makes.\n\n### \
+                 Results\n\n| Metric |"
+            ),
             "{md}"
         );
         assert!(!md.contains("\n## "), "{md}");
@@ -948,8 +1086,9 @@ mod tests {
             md.lines().skip_while(|l| !l.starts_with("|---|")).nth(1),
             Some("| Status | passed | passed | failed |  |  |")
         );
-        // Rust came near the cluster's ingress limit: its throughput may be
-        // the cluster's, so it is not compared.
+        // Rust came near the cluster's ingress limit (500k × 1 KiB/s is
+        // 512 MB/s, 85 % of 600): its throughput may be the cluster's, so it
+        // is not compared.
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
             "| Throughput (msg/s) | 500,000 | 400,000 | – | cluster-bound | n/a |"
@@ -964,7 +1103,6 @@ mod tests {
         );
         // No transaction rows for a producer test.
         assert!(!md.contains("Transactions/s"), "{md}");
-        // 500k × 1 KiB/s is 512 MB/s, 85 % of 600.
         // No notes: the table goes straight on to the parameters.
         assert!(!md.contains("Notes"), "{md}");
         assert!(md.contains("| – |  |  |\n\n### Parameters\n"), "{md}");
@@ -1068,6 +1206,7 @@ mod tests {
                  - Partitions: 1\n\
                  - Value size: 100 B\n\
                  - Rate: Unbounded\n\
+                 - Buffer memory: 32 MiB (default)\n\
                  \n### b\n\n| Metric | Rust |\n|---|---:|\n| Status | not run |\n"
             ),
             "{md}"
@@ -1080,6 +1219,7 @@ mod tests {
                  - Partitions: 36\n\
                  - Value size: 1,024 B\n\
                  - Rate: 1,000 msg/s\n\
+                 - Buffer memory: 32 MiB (default)\n\
                  - Records per transaction: 1,000\n\
                  - Abort rate: 0.5\n\
                  - Transactional producers: 16\n\
@@ -1194,6 +1334,151 @@ mod tests {
         let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
         // Rust held 99.9 % of the rate; librdkafka 90 %.
         assert_eq!(line_starting(&md, "| Status |"), "| Status | passed | below rate |  |");
+        // A client below the rate is still compared: its Status says it
+        // missed the rate.
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 9,990 | 9,000 | 🟢 +11.0% |"
+        );
+    }
+
+    #[test]
+    fn markdown_never_calls_a_compressed_test_cluster_bound() {
+        let result = |compression: &str| TestResult {
+            test: test(&format!(
+                "t rust PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 COMPRESSION_TYPE={compression}"
+            )),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 500_000.0, 9.0))),
+                arm(Arm::Librdkafka, Outcome::Passed, Some(metrics("librdkafka", 400_000.0, 10.0))),
+            ],
+        };
+        let arms = [Arm::Rust, Arm::Librdkafka];
+        // 512 MB/s of uncompressed records, 85 % of 600: the cluster may have
+        // capped them.
+        let md = render(Group::Rust, &arms, Some(600.0), &[result("none")]);
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 500,000 | 400,000 | cluster-bound |"
+        );
+        // Compressed, far fewer bytes may have crossed the ingress, so the
+        // clients are compared.
+        let md = render(Group::Rust, &arms, Some(600.0), &[result("lz4")]);
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 500,000 | 400,000 | 🟢 +25.0% |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (MiB/s) |"),
+            "| Throughput (MiB/s) | 488.28 | 390.62 | 🟢 +25.0% |"
+        );
+    }
+
+    #[test]
+    fn markdown_shows_no_cpu_or_rss_sample_as_missing() {
+        let unsampled = Metrics { cpu_pct: 0.0, rss_mib: 0.0, ..metrics("rust", 1_000.0, 9.0) };
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(Arm::Rust, Outcome::Passed, Some(unsampled)),
+                arm(Arm::Librdkafka, Outcome::Passed, Some(metrics("librdkafka", 1_000.0, 9.0))),
+            ],
+        }];
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let live = Live {
+            updated: "2026-10-21T10:05:00Z".to_string(),
+            running: Some(Running {
+                arm: Arm::Java,
+                so_far: Some(SoFar { cpu_pct: Some(0.0), rss_mib: Some(0.0), ..so_far(1_000.0, 1.0) }),
+            }),
+        };
+        let md = render_live(Group::Rust, &all, None, &results, Some(&live));
+        assert_eq!(line_starting(&md, "| CPU (%) |"), "| CPU (%) | – | 50.0 | – | n/a | pending |");
+        assert_eq!(
+            line_starting(&md, "| RSS (MiB) |"),
+            "| RSS (MiB) | – | 100.0 | – | n/a | pending |"
+        );
+        assert_rectangular(&md);
+    }
+
+    #[test]
+    fn markdown_notes_a_librdkafka_producer_that_does_not_copy() {
+        const NOTE: &str = "the librdkafka harness produces without `RD_KAFKA_MSG_F_COPY`";
+        let noted = |group: Group, arms: &[Arm], lines: &[&str]| {
+            let results: Vec<TestResult> =
+                lines.iter().map(|line| TestResult { test: test(line), arms: vec![] }).collect();
+            render(group, arms, None, &results).contains(NOTE)
+        };
+        let producer = "p rust,python PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0";
+        let produce = "t rust,python WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0";
+        let eos = "e rust WORKLOAD=transactional TXN_MODE=eos PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=10";
+        let consumer = "c rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=10";
+        let rust = [Arm::Rust, Arm::Librdkafka];
+        assert!(noted(Group::Rust, &rust, &[producer]));
+        assert!(noted(Group::Rust, &rust, &[produce]));
+        assert!(noted(Group::Rust, &rust, &[consumer, producer]));
+        // The eos harness copies each record it consumed; a consumer
+        // produces nothing.
+        assert!(!noted(Group::Rust, &rust, &[eos]));
+        assert!(!noted(Group::Rust, &rust, &[consumer]));
+        // Without the librdkafka (C) client, or in the Python group, whose
+        // librdkafka clients copy.
+        assert!(!noted(Group::Rust, &[Arm::Rust, Arm::Java], &[producer]));
+        assert!(!noted(Group::Python, Group::Python.arms(), &[producer, produce]));
+    }
+
+    #[test]
+    fn markdown_marks_a_percentile_past_the_histogram() {
+        let results = vec![TestResult {
+            test: test("txn rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                arm(
+                    Arm::Rust,
+                    Outcome::Passed,
+                    Some(Metrics { p999: 10_001.0, max: 25_000.0, ..txn_metrics("rust-txn", 1_000.0, 10_001.0) }),
+                ),
+                arm(
+                    Arm::Librdkafka,
+                    Outcome::Passed,
+                    Some(Metrics { p999: 10_000.0, ..txn_metrics("librdkafka-txn", 1_000.0, 50.0) }),
+                ),
+            ],
+        }];
+        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
+        // The top bucket holds every latency from 10,001 ms; the one below it
+        // and the exact maximum are what they say.
+        assert_eq!(
+            line_starting(&md, "| Latency p99.9 (ms) |"),
+            "| Latency p99.9 (ms) | ≥ 10,001.00 | 10,000.00 | 0.0% |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Commit latency p99 (ms) |"),
+            "| Commit latency p99 (ms) | ≥ 10,001.00 | 50.00 | 🔴 +19902.0% |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Latency max (ms) |"),
+            "| Latency max (ms) | 25,000.00 | 20.00 | 🔴 +124900.0% |"
+        );
+        let xml = junit(&results);
+        assert!(xml.contains("p99.9=≥10001.00ms max=25000.00ms"), "{xml}");
+        assert!(xml.contains("commit_p99=≥10001.00ms"), "{xml}");
+        assert!(xml.contains("p99.9=10000.00ms max=20.00ms"), "{xml}");
+
+        // A consumer's histogram goes on to 600,000 ms.
+        let consumer = |p99: f64| TestResult {
+            test: test("c rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=10000"),
+            arms: vec![arm(
+                Arm::Rust,
+                Outcome::Passed,
+                Some(metrics("rust-consumer", 10_000.0, p99)),
+            )],
+        };
+        let p99 = |p99: f64| {
+            let md = render(Group::Rust, &[Arm::Rust], None, &[consumer(p99)]);
+            line_starting(&md, "| Latency p99 (ms) |").to_string()
+        };
+        assert_eq!(p99(10_001.0), "| Latency p99 (ms) | 10,001.00 |");
+        assert_eq!(p99(600_000.0), "| Latency p99 (ms) | ≥ 600,000.00 |");
     }
 
     #[test]
@@ -1300,12 +1585,18 @@ mod tests {
             arms: vec![
                 consumer("rust-consumer", 9_000.0, 9_000.0, Arm::Rust),
                 consumer("librdkafka-consumer", 9_000.0, 9_990.0, Arm::Librdkafka),
+                consumer("java-consumer", 10_000.0, 9_400.0, Arm::Java),
             ],
         }];
-        let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let md = render(Group::Rust, &all, None, &results);
         // Rust's load fell short, so its shortfall is the load's; librdkafka's
-        // load held, so its shortfall is the client's.
-        assert_eq!(line_starting(&md, "| Status |"), "| Status | load short | below rate |  |");
+        // load held, so its shortfall is the client's. Java held the rate,
+        // whatever its load averaged.
+        assert_eq!(
+            line_starting(&md, "| Status |"),
+            "| Status | load short | below rate | passed |  |  |"
+        );
         // How a consumer test measures is the documentation's, not the report's.
         assert!(!md.contains("kafka-producer-perf-test.sh"), "{md}");
     }
@@ -1339,11 +1630,12 @@ mod tests {
             md.starts_with(
                 "# Rust client performance results\n\n> In progress, updated 2026-10-21 10:05:00 UTC and every 5 \
                  min while a test runs. A running client shows its throughput, average and maximum latency, CPU, \
-                 RSS and messages so far; the full report replaces this one when the test finishes.\n\n### \
-                 Results\n"
+                 RSS and messages so far; the full report replaces this one when the test finishes.\n\n> In \
+                 producer and transactional (produce) tests"
             ),
             "{md}"
         );
+        assert!(md.contains("every other client makes.\n\n### Results\n"), "{md}");
         assert_eq!(
             line_starting(&md, "| Status |"),
             "| Status | passed | running | waiting |  |  |"

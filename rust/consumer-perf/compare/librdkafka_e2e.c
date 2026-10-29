@@ -33,8 +33,9 @@
  *      per-record allocation in the hot loop.
  *   5. Every `interval` s: sample CPU% (percent of one core:
  *      (ru_utime+ru_stime) delta / wall delta * 100 via getrusage(RUSAGE_SELF))
- *      and RSS (ru_maxrss; on macOS this is BYTES, on Linux KILOBYTES). Print
- *      interval lines, reset interval histogram, append metrics.jsonl.
+ *      and RSS (on Linux the current RSS, from /proc/self/statm; on macOS the
+ *      peak ru_maxrss). Print interval lines, reset interval histogram, append
+ *      metrics.jsonl.
  *   6. After `duration` s of measurement: stop the producer, print + persist a
  *      summary with the same JSONL schema (client:"librdkafka-c"), and with
  *      --results-file also in the shape of the producer harnesses'
@@ -48,6 +49,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdint.h>
@@ -236,6 +238,23 @@ static double cpu_sampler_sample(cpu_sampler_t *c, double *rss_mb_out) {
 }
 
 /* ------------------------------- args --------------------------------- */
+
+/* The whole-number value of option `opt`. One that is not a whole number in
+ * [min, max] exits with an error rather than run with another value (atoi
+ * reads "10k" as 10). */
+static long long parse_number_arg(const char *opt, const char *value,
+                                  long long min, long long max) {
+    char *end = NULL;
+    errno = 0;
+    long long v = strtoll(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || v < min || v > max) {
+        fprintf(stderr,
+                "invalid %s '%s': expected a whole number from %lld to %lld\n",
+                opt, value, min, max);
+        exit(2);
+    }
+    return v;
+}
 
 typedef struct {
     const char *bootstrap;
@@ -543,23 +562,23 @@ int main(int argc, char **argv) {
         else if (!strcmp(arg, "--group-id") || !strcmp(arg, "-g"))
             snprintf(a.group_id, sizeof(a.group_id), "%s", NEXT());
         else if (!strcmp(arg, "--throughput") || !strcmp(arg, "-r"))
-            a.throughput = atoi(NEXT());
+            a.throughput = (int)parse_number_arg(arg, NEXT(), -1, INT_MAX);
         else if (!strcmp(arg, "--duration") || !strcmp(arg, "-d"))
-            a.duration = atoi(NEXT());
+            a.duration = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--message-size"))
-            a.message_size = atoi(NEXT());
+            a.message_size = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--partitions"))
-            a.partitions = atoi(NEXT());
+            a.partitions = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--warmup") || !strcmp(arg, "-w"))
-            a.warmup = atoll(NEXT());
+            a.warmup = parse_number_arg(arg, NEXT(), 0, INT64_MAX);
         else if (!strcmp(arg, "--interval"))
-            a.interval = atoi(NEXT());
+            a.interval = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--poll-timeout-ms"))
-            a.poll_timeout_ms = atoi(NEXT());
+            a.poll_timeout_ms = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--join-timeout"))
-            a.join_timeout = atoi(NEXT());
+            a.join_timeout = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--max-poll-records"))
-            a.max_poll_records = atoi(NEXT());
+            a.max_poll_records = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--single-poll"))
             a.single_poll = 1;
         else if (!strcmp(arg, "--fetch-min-bytes"))
@@ -805,6 +824,10 @@ int main(int argc, char **argv) {
     double interval_start = 0.0;
     int interval_count = 0;
     double loop_start = monotonic_s();
+    /* Until the measurement starts, the run fails when no record arrives by
+     * this deadline: the first within 120 s (the load never started), then
+     * each within 120 s of the last during the warmup (the load stopped before
+     * --warmup records). The measurement itself ends after --duration. */
     double no_data_deadline = loop_start + 120;
     if (a.warmup <= 0) {
         /* No warmup: the measurement starts with the first poll. */
@@ -851,10 +874,17 @@ int main(int argc, char **argv) {
             break;
         }
         if (n == 0) {
-            if (monotonic_s() >= no_data_deadline && messages_consumed == 0) {
-                fprintf(stderr,
-                        "ERROR: no records within 120s (producer not "
-                        "running?)\n");
+            if ((!warmup_complete || messages_consumed == 0) &&
+                monotonic_s() >= no_data_deadline) {
+                if (messages_consumed == 0)
+                    fprintf(stderr,
+                            "ERROR: no records within 120s (producer not "
+                            "running?)\n");
+                else
+                    fprintf(stderr,
+                            "ERROR: no records for 120s during the warmup "
+                            "(%lld of %lld; did the load stop?)\n",
+                            (long long)messages_consumed, (long long)a.warmup);
                 failed = 1;
                 break;
             }
@@ -868,6 +898,7 @@ int main(int argc, char **argv) {
          * the wall clock once per poll() and applies it to every record in the
          * returned batch. */
         int64_t poll_now = now_millis();
+        int64_t consumed_before = messages_consumed;
         batch_calls++;
         batch_records += (int64_t)n;
         /* Records-per-batch distribution, post-warmup only (mirrors the Rust
@@ -920,6 +951,8 @@ int main(int argc, char **argv) {
         }
 
         double now_mono = monotonic_s();
+        if (!warmup_complete && messages_consumed > consumed_before)
+            no_data_deadline = now_mono + 120;
         if (warmup_complete && (now_mono - interval_start) >= a.interval) {
             double elapsed_s = now_mono - interval_start;
             double rss_mb = 0.0;

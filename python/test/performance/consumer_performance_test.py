@@ -93,7 +93,7 @@ def _env_int(name, default):
 
 # The tuned fetch size the manual benchmark uses unless USE_DEFAULTS=True.
 _TUNED_FETCH_BYTES = 4 * 1024 * 1024
-# The consume() batch of the librdkafka backend under USE_DEFAULTS=True: the
+# The poll_batch cap of the librdkafka backend under USE_DEFAULTS=True: the
 # Java and Rust clients' default max.poll.records.
 _DEFAULT_MAX_POLL_RECORDS = 500
 
@@ -164,13 +164,15 @@ class Config:
         self.fetch_min_bytes = _env_int("FETCH_MIN_BYTES", tuned_fetch)
         self.fetch_max_bytes = _env_int("MAX_PARTITION_FETCH_BYTES", tuned_fetch)
         self.fetch_max_wait_ms = _env_int("FETCH_MAX_WAIT_MS", None)
-        # Batch size per poll, applied to BOTH backends so they batch
-        # identically: the Rust binding's max.poll.records and librdkafka's
-        # consume(num_messages=...). MAX_POLL_RECORDS sets both exactly;
-        # otherwise the tuned CONSUMER_BATCH_SIZE (max.poll.records 500 above
-        # it), or under USE_DEFAULTS the client default.
+        # Most records per poll, the same cap for BOTH backends: the Rust
+        # binding's max.poll.records and the librdkafka backend's poll_batch.
+        # MAX_POLL_RECORDS sets it; otherwise the tuned CONSUMER_BATCH_SIZE, or
+        # under USE_DEFAULTS the client default (500). The tuned 2500 is the
+        # max.poll.records the EC2 runs give the Java consumer, which the Rust
+        # backend took to match those runs as CONSUMER_BATCH_SIZE + 500,
+        # leaving the librdkafka backend at 2000 by accident.
         self.max_poll_records = _env_int("MAX_POLL_RECORDS", None)
-        self.batch_size = _env_int("CONSUMER_BATCH_SIZE", 2000)
+        self.batch_size = _env_int("CONSUMER_BATCH_SIZE", 2500)
         # Async mode toggle — same env var/convention as the producer perf test
         # (producer_performance_test.py). When set, the benchmark drives the
         # asyncio-native consumer of the selected CLIENT_VERSION.
@@ -199,7 +201,7 @@ def _rust_tuning(cfg):
     if cfg.max_poll_records is not None:
         conf["max.poll.records"] = str(cfg.max_poll_records)
     elif not cfg.use_defaults:
-        conf["max.poll.records"] = str(cfg.batch_size + 500)
+        conf["max.poll.records"] = str(cfg.batch_size)
     return conf
 
 
@@ -219,7 +221,7 @@ def _librdkafka_tuning(cfg):
 
 
 def _librdkafka_batch(cfg):
-    """The records one librdkafka consume() returns at most."""
+    """The most records one librdkafka poll_batch returns."""
     if cfg.max_poll_records is not None:
         return cfg.max_poll_records
     return _DEFAULT_MAX_POLL_RECORDS if cfg.use_defaults else cfg.batch_size
@@ -317,7 +319,16 @@ class _LibrdkafkaConsumer:
             return False
 
     def poll_batch(self):
-        msgs = self._c.consume(num_messages=self._batch, timeout=self._timeout)
+        """Yield (timestamp_ms, nbytes) for each record of one two-phase read,
+        as librdkafka_e2e.c's: wait up to the poll timeout for one record, then
+        take what is already buffered (timeout 0), up to the batch, without
+        waiting to fill it. One consume(num_messages=batch, timeout) waits until
+        the batch is full or the timeout, adding the fill time to the records'
+        latency at a low rate, where a Rust or Java poll returns what is there.
+        A message carrying an error is skipped, as librdkafka_e2e.c does."""
+        msgs = self._c.consume(num_messages=1, timeout=self._timeout)
+        if msgs and self._batch > 1:
+            msgs += self._c.consume(num_messages=self._batch - 1, timeout=0)
         for msg in msgs:
             if msg is None or msg.error():
                 continue
@@ -434,7 +445,10 @@ class _AsyncLibrdkafkaConsumer:
             return False
 
     async def poll_batch(self):
-        msgs = await self._c.consume(num_messages=self._batch, timeout=self._timeout)
+        """The two-phase read of _LibrdkafkaConsumer.poll_batch."""
+        msgs = await self._c.consume(num_messages=1, timeout=self._timeout)
+        if msgs and self._batch > 1:
+            msgs += await self._c.consume(num_messages=self._batch - 1, timeout=0)
         for msg in msgs:
             if msg is None or msg.error():
                 continue
@@ -481,33 +495,59 @@ def spawn_producer(cfg, total_records):
         props["compression.type"] = cfg.compression_type
     props.update(sasl_config_from_env(v2=False))
     fd, props_path = tempfile.mkstemp(prefix="producer_perf_", suffix=".properties")
-    with os.fdopen(fd, "w") as f:
-        for k, v in props.items():
-            # A Java .properties value must be one logical line: a raw newline
-            # ends the entry. sasl.jaas.config from sasl_config_from_env carries
-            # cosmetic "\n\t" between its terms, so collapse all whitespace runs
-            # to single spaces before writing (the value is whitespace-insensitive).
-            one_line = " ".join(str(v).split())
-            f.write(f"{k}={one_line}\n")
-    cmd = [
-        bin_path,
-        "--topic", cfg.topic,
-        "--num-records", str(total_records),
-        "--record-size", str(cfg.message_size),
-        "--throughput", str(cfg.throughput),
-        "--producer.config", props_path,
-    ]
-    print(f">>> Launching producer: throughput={cfg.throughput} msg/s, "
-          f"{cfg.message_size} bytes, ~{total_records} records, "
-          f"compression={cfg.compression_type or 'default'}", flush=True)
-    # Capture producer output to a file (cwd is the results dir) instead of
-    # discarding it: a silent producer failure looks identical to "no data" on
-    # the consumer side, so its stdout/stderr must remain inspectable.
-    log = open("producer.log", "w")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
-    # The caller removes this once the producer is killed (see run / run_async).
+    try:
+        with os.fdopen(fd, "w") as f:
+            for k, v in props.items():
+                # A Java .properties value must be one logical line: a raw
+                # newline ends the entry. sasl.jaas.config from
+                # sasl_config_from_env carries cosmetic "\n\t" between its terms,
+                # so collapse all whitespace runs to single spaces before writing
+                # (the value is whitespace-insensitive).
+                one_line = " ".join(str(v).split())
+                f.write(f"{k}={one_line}\n")
+        cmd = [
+            bin_path,
+            "--topic", cfg.topic,
+            "--num-records", str(total_records),
+            "--record-size", str(cfg.message_size),
+            "--throughput", str(cfg.throughput),
+            "--producer.config", props_path,
+        ]
+        print(f">>> Launching producer: throughput={cfg.throughput} msg/s, "
+              f"{cfg.message_size} bytes, ~{total_records} records, "
+              f"compression={cfg.compression_type or 'default'}", flush=True)
+        # Capture producer output to a file (cwd is the results dir) instead of
+        # discarding it: a silent producer failure looks identical to "no data"
+        # on the consumer side, so its stdout/stderr must remain inspectable.
+        with open("producer.log", "w") as log:
+            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    except BaseException:
+        # Not launched: the file holds the SASL password, delete it now.
+        _unlink_quietly(props_path)
+        raise
+    # stop_producer deletes it once the producer is killed (see run / run_async).
     proc.props_path = props_path
     return proc
+
+
+def _unlink_quietly(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def stop_producer(producer):
+    """Kill a spawn_producer process and delete its properties file, which
+    holds the SASL password. A no-op for None."""
+    if producer is None:
+        return
+    try:
+        producer.kill()
+        producer.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
+    _unlink_quietly(producer.props_path)
 
 
 # ---------------------------------------------------------------------------
@@ -728,27 +768,27 @@ def run(cfg, metrics=None):
     print(">>> at live edge", flush=True)
 
     producer = None
-    if cfg.kafka_bin:
-        pad = cfg.warmup_seconds + cfg.test_duration_seconds + 30
-        total = cfg.num_messages if cfg.num_messages > 0 else cfg.throughput * pad
-        producer = spawn_producer(cfg, total)
-
-    # Readiness gate before the timed window (see _readiness_ok). Records
-    # consumed here are warmup, not measured.
-    ready_deadline = time.monotonic() + cfg.readiness_timeout_s
-    ready_measurable = ready_received = 0
-    while ready_measurable < cfg.readiness_min_records and time.monotonic() < ready_deadline:
-        for ts_ms, _nbytes in poll():
-            ready_received += 1
-            if _measurable_latency_ms(ts_ms) is not None:
-                ready_measurable += 1
-    if not _readiness_ok(ready_measurable, ready_received, cfg):
-        _close_consumer(consumer)
-        return SETUP_NOT_READY
-
-    meas = _Measurement(cfg, metrics)
-    meas.begin()
+    # Every exit from here on stops the load generator (see the outer finally).
     try:
+        if cfg.kafka_bin:
+            pad = cfg.warmup_seconds + cfg.test_duration_seconds + 30
+            total = cfg.num_messages if cfg.num_messages > 0 else cfg.throughput * pad
+            producer = spawn_producer(cfg, total)
+
+        # Readiness gate before the timed window (see _readiness_ok). Records
+        # consumed here are warmup, not measured.
+        ready_deadline = time.monotonic() + cfg.readiness_timeout_s
+        ready_measurable = ready_received = 0
+        while ready_measurable < cfg.readiness_min_records and time.monotonic() < ready_deadline:
+            for ts_ms, _nbytes in poll():
+                ready_received += 1
+                if _measurable_latency_ms(ts_ms) is not None:
+                    ready_measurable += 1
+        if not _readiness_ok(ready_measurable, ready_received, cfg):
+            return SETUP_NOT_READY
+
+        meas = _Measurement(cfg, metrics)
+        meas.begin()
         try:
             while not _terminating:
                 poll_now_ms = None
@@ -765,22 +805,18 @@ def run(cfg, metrics=None):
         finally:
             measured_duration = meas.measured_duration()
             metrics.measurement_end_ms = _now_ms()
-            if producer is not None:
-                try:
-                    producer.kill()
-                    producer.wait(timeout=5)
-                except Exception:
-                    pass
-                try:
-                    os.unlink(producer.props_path)
-                except OSError:
-                    pass
+            # The load stops with the measurement.
+            stop_producer(producer)
+            producer = None
             if own_metrics:
                 metrics.stop_collecting()
         # Summary and results.json before the close, so a failing close
         # cannot discard them.
         stats = _summarize(cfg, meas, measured_duration, metrics)
     finally:
+        # Also on a setup failure (SETUP_NOT_READY) or an error: the load
+        # generator must not outlive the run, nor its properties file.
+        stop_producer(producer)
         _close_consumer(consumer)
     return stats
 
@@ -829,27 +865,27 @@ async def run_async(cfg, metrics=None):
     print(">>> at live edge", flush=True)
 
     producer = None
-    if cfg.kafka_bin:
-        pad = cfg.warmup_seconds + cfg.test_duration_seconds + 30
-        total = cfg.num_messages if cfg.num_messages > 0 else cfg.throughput * pad
-        producer = spawn_producer(cfg, total)
-
-    # Readiness gate before the timed window (see _readiness_ok). Records
-    # consumed here are warmup, not measured.
-    ready_deadline = time.monotonic() + cfg.readiness_timeout_s
-    ready_measurable = ready_received = 0
-    while ready_measurable < cfg.readiness_min_records and time.monotonic() < ready_deadline:
-        async for ts_ms, _nbytes in poll():
-            ready_received += 1
-            if _measurable_latency_ms(ts_ms) is not None:
-                ready_measurable += 1
-    if not _readiness_ok(ready_measurable, ready_received, cfg):
-        await _close_consumer_async(consumer)
-        return SETUP_NOT_READY
-
-    meas = _Measurement(cfg, metrics)
-    meas.begin()
+    # Every exit from here on stops the load generator (see the outer finally).
     try:
+        if cfg.kafka_bin:
+            pad = cfg.warmup_seconds + cfg.test_duration_seconds + 30
+            total = cfg.num_messages if cfg.num_messages > 0 else cfg.throughput * pad
+            producer = spawn_producer(cfg, total)
+
+        # Readiness gate before the timed window (see _readiness_ok). Records
+        # consumed here are warmup, not measured.
+        ready_deadline = time.monotonic() + cfg.readiness_timeout_s
+        ready_measurable = ready_received = 0
+        while ready_measurable < cfg.readiness_min_records and time.monotonic() < ready_deadline:
+            async for ts_ms, _nbytes in poll():
+                ready_received += 1
+                if _measurable_latency_ms(ts_ms) is not None:
+                    ready_measurable += 1
+        if not _readiness_ok(ready_measurable, ready_received, cfg):
+            return SETUP_NOT_READY
+
+        meas = _Measurement(cfg, metrics)
+        meas.begin()
         try:
             while not _terminating:
                 poll_now_ms = None
@@ -866,22 +902,18 @@ async def run_async(cfg, metrics=None):
         finally:
             measured_duration = meas.measured_duration()
             metrics.measurement_end_ms = _now_ms()
-            if producer is not None:
-                try:
-                    producer.kill()
-                    producer.wait(timeout=5)
-                except Exception:
-                    pass
-                try:
-                    os.unlink(producer.props_path)
-                except OSError:
-                    pass
+            # The load stops with the measurement.
+            stop_producer(producer)
+            producer = None
             if own_metrics:
                 metrics.stop_collecting()
         # Summary and results.json before the close, so a failing close
         # cannot discard them.
         stats = _summarize(cfg, meas, measured_duration, metrics)
     finally:
+        # Also on a setup failure (SETUP_NOT_READY) or an error: the load
+        # generator must not outlive the run, nor its properties file.
+        stop_producer(producer)
         await _close_consumer_async(consumer)
     return stats
 
