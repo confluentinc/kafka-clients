@@ -10,7 +10,7 @@ sources are the `kafka/` submodule at the repository root).
 - **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
 - **C FFI: (experimental)** Behind the `ffi` feature, the crate exports the C API that the
   bindings in `../c/` and `../python/` are built on; the build writes its header
-  to `target/include/confluent_kafka.h` for C users or to `target/include/confluent_kafka_bindings.h` for usage by other bindings. The FFI layer is experimental right now.
+  to `target/include/confluent_kafka.h` for C users or to `target/include/confluent_kafka_bindings.h` for usage by other bindings. The FFI layer is experimental right now, it means it's not supported and its API is not stable yet.
 
 ## Status
 
