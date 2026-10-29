@@ -31,6 +31,7 @@ VENV = . venv/bin/activate
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
 	transactional-producer-perf-test-python \
+	build-javascript test-javascript verify-javascript \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-sandbox format-check lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
@@ -78,6 +79,11 @@ init-venv-librdkafka:
 
 build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
+
+# The Node.js client (javascript/): standalone for now, not part of `build`,
+# `test` or `verify`, so those need no Node.js.
+build-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) build
 
 devel-build: devel-build-rust devel-build-c devel-build-python
 
@@ -262,6 +268,13 @@ test-python-macos-docker: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-unit)
 
 verify: build format-check check-generated lint test check-bindings
+
+# The Node.js client's unit tests, then its broker-backed test against a
+# scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS when set).
+test-javascript: build-javascript
+	$(MAKE) -C javascript $(ROOTS) test
+
+verify-javascript: test-javascript
 
 verify-c: test-c
 
