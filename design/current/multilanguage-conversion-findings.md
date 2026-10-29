@@ -104,7 +104,13 @@ state:
   binding's `ListenerCtx` comment already says this for `unsubscribe()` ("an unsubscribe leaves
   the Java listener registered"); the binding, the C header texts and the comments above should
   all say it in one text.
-- **State**: reverted to Rust-only (`// MULTILANGUAGE: blocked by finding #1`); needs owner (Python
-  binding and C header fix, outside this run). Found by the Java-parity change of COMMENTS.121
-  item 5 (owner decision 4, approved); the previous form of the test registered no listener and so
-  never reached it.
+- **State**: fixed on this branch, in the `finding-1: ` commits; a separate PR is to follow (owner
+  ruling 1). The binding keeps the earlier `ListenerCtx` after a `KafkaConsumer`'s `subscribe([])`
+  and drops the new one; the C header texts and the Python `subscribe` docstring state the target
+  release point. A `MockConsumer` is unchanged: Java's mock registers the listener on every
+  `subscribe`, empty topics included (`SubscriptionState#subscribe`), so its `subscribe([])` does
+  replace it. Regression tests: `python/test/integration/test_listener_release_broker.py` and
+  `test_empty_subscribe_keeps_the_listener_until_destroy` in `c/tests/test_consumer_callbacks.c`.
+  The scenario's un-revert is Actor 121's. Found by the Java-parity change of COMMENTS.121 item 5
+  (owner decision 4, approved); the previous form of the test registered no listener and so never
+  reached it.
