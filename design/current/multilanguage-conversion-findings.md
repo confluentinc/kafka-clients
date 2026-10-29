@@ -20,6 +20,11 @@ state:
 - **reverted to Rust-only**: the test went back to its Rust-only form, marked
   `// MULTILANGUAGE: blocked by finding #k`, so the suite stays green.
 - **needs owner**: the conversion cannot continue without a decision.
+- **fixed on this branch (separate PR to follow)**: the cause is fixed by commits on this branch
+  that can be taken out into their own PR, and the scenario runs on every arm again.
+- **skipped in the body on the affected arms**: the scenario stays multilanguage; the arms named
+  return at the start of the body with a `[multilanguage] <test> backend=<arm> skipped: blocked by
+  finding #k` stderr line, marked `// MULTILANGUAGE: blocked by finding #k`, and the other arms run.
 
 ## Findings
 
@@ -185,3 +190,73 @@ state:
   use after free.
 - **State**: needs owner (core change outside this run). Found by Critic 120 round 6, item 2;
   rows 2 and 3 and the reproduction by Critic 120 round 7, item 2.
+
+### 3. gRPC-backed consumer `close(CloseOptions)` overruns its timeout when every broker is down
+
+- **Scenario**: `consumer_bounce_test::test_async_close` (Java `ConsumerBounceTest#testAsyncClose`,
+  body `#testClose`), its last part `checkCloseWithClusterFailure`:
+  - two consumers have each received 10 records; `consumer1` is subscribed (group `group4`),
+    `consumer2` is manually assigned with `request.timeout.ms=6000` (group `group5`);
+  - every broker of the dedicated 3-broker cluster is stopped;
+  - `consumer1.close(CloseOptions.timeout(2000 ms))` must return in less than 2000 + 2000 ms;
+  - `consumer2.close(CloseOptions.timeout(Long.MAX_VALUE ms))` must return in less than
+    6000 + 2000 ms, Java's `request.timeout.ms` plus its 2 s `closeGraceTimeMs`.
+- **Arms**: every gRPC arm, intermittently, on images with fdd2df838. The counts are of completed
+  runs; one more run never started, because Docker had run out of network pools:
+  - `__grpc_python`: 3 of 5 failed;
+  - `__grpc_c`: 1 of 3 failed;
+  - `__grpc_python_async`: 1 of 3 failed;
+  - `__rust`: 0 of 4 failed, and the test passed before the conversion too.
+
+  In each failing run one of the two closes overran:
+  - `consumer2`'s unbounded close, on every arm that failed: `python backend: Close took too long
+    8001` (twice, once after `consumer1` closed in 2098 ms), `c backend: Close took too long 8001`
+    (after `consumer1` closed in 2006 ms), `python_async backend: Close took too long 8002`;
+  - `consumer1`'s 2000 ms close, once, on `__grpc_python`: `python backend: Close took too long
+    4001`.
+
+  4001 and 8001 are not a fixed step of 2 s: they are the test's own limit firing,
+  `tokio::time::timeout(ms + CLOSE_GRACE_TIME_MS)` in `close_and_validate`. Those closes took at
+  least 2 s past their bound; how long they would have taken is unknown.
+- **Java / Rust**: `close(CloseOptions)` with the cluster down returns within the close timeout,
+  and with an unbounded timeout within `request.timeout.ms`
+  (`AsyncKafkaConsumer#close(Duration)` bounds each close step by the timer). The native client
+  returns in time on every run.
+- **Arm**: the bindings' close sometimes returns 2 s or more past the bound. The C and both
+  Python arms fail and the native one does not. The servers pass the timeout exactly (a
+  `timedelta` since fdd2df838, clamped to `timedelta.max` for `Long.MAX_VALUE`) and add no wait of
+  their own.
+- **Diagnosis (inferred, not confirmed: from reading the code, nothing was run)**:
+  - The sync Python wait adds no fixed delay. `_run_sync` loops `event.wait(0.1)` plus `_drain`,
+    and the notify hook sets the event (`python/confluent_kafka/consumer/_base.py` `_run_sync`,
+    `_on_pending_notify`; `python/_confluentkafka.c` `consumer_callbacks_notify`,
+    `Consumer__execute_callbacks`). There is no 2 s constant on the path, and `_finish_close`
+    waits only while another use of the handle is held. So the extra time is not in the binding's
+    waiting.
+  - Leading hypothesis: in container mode the backends reach the brokers by container hostname,
+    and a reconnect resolves it again (`tokio::net::lookup_host`). Once `docker stop` has removed
+    the name from Docker's DNS, a lookup can take seconds. The core's close step that joins the
+    `kafka-consumer-io` thread then waits, unbounded, for a lookup still in progress: the network
+    poll cannot be cancelled during resolution, and the drop of the io runtime waits for it. The
+    native arm uses `127.0.0.1:<port>` (the host listeners are advertised and bootstrapped as IP
+    literals), so no lookup runs and it is not exposed. That fits the evidence: every container arm
+    fails sometimes, the native one never.
+  - Java waits the same way: `ConsumerNetworkThread#closeInternal` wakes the thread and `join()`s
+    it with no bound, and Java resolves on that thread too (`NetworkClient#initiateConnect` ->
+    `ClusterConnectionStates#currentAddress` -> `ClientUtils#resolve`, again on each reconnect,
+    since `ClusterConnectionStates#connecting` empties the address list). What differs is that the
+    JVM caches `InetAddress` lookups (by default 30 s for a name found, 10 s for one not found),
+    while the core runs a fresh `tokio::net::lookup_host` each time (`default_host_resolver.rs`).
+    So "bound the io-thread exit in the core" would be a deviation from Java's unbounded `join()`.
+    Whether this is a core divergence (no DNS cache) or an environment effect Java's cache mostly
+    hides stays open: the confirmation run after batch 5 decides it. The other fix candidate is to
+    make a stopped broker's name fail fast in the harness.
+  - Suggested measurement: timestamps around the close submit, its completion, `_finish_close` and
+    the destroy; `RUST_LOG=debug` for `client_utils` and the network thread; each container arm
+    run about 10 times.
+- **Failing assertion**:
+  `assert!(time_taken_ms < ms + CLOSE_GRACE_TIME_MS, "{backend} backend: Close took too long {time_taken_ms}")`,
+  reached through the bounding `tokio::time::timeout`'s
+  `panic!("{backend} backend: Close took too long {}", ...)` in `close_and_validate`.
+- **State**: skipped in the body on the gRPC arms (e8370c9b3; the `__rust` arm runs); needs owner
+  (the diagnosis to confirm).
