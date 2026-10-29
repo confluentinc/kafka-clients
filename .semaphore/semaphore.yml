@@ -75,10 +75,11 @@ name: build-test-release
 #     rcN suffix, optionally followed by .devN, or a .devN suffix alone. The
 #     tag build builds and tests the wheels but publishes nothing. Every
 #     version goes to Test PyPI first, through the manual "Publish to Test
-#     PyPI" promotion of the tag build, and is checked there; a final version
-#     then goes to PyPI through the manual "Publish to PyPI" promotion of that
-#     Test PyPI pipeline, while a pre-release (an aN, bN or rcN suffix) or a
-#     dev version (a .devN suffix, python/v4.4.0a1.dev1) stops at Test PyPI.
+#     PyPI" promotion of the tag build, and is checked there; it then goes to
+#     PyPI through the manual "Publish to PyPI" promotion of that Test PyPI
+#     pipeline. This holds for a pre-release (an aN, bN or rcN suffix) and a
+#     dev version (a .devN suffix, python/v4.4.0a1.dev1) too: both publishes
+#     are manual, so a version reaches an index only when someone promotes it.
 #     The PyPI project is shared with confluent-kafka-python, the
 #     librdkafka-based client.
 #   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
@@ -937,10 +938,8 @@ blocks:
   # optional aN, bN or rcN suffix and an optional .devN suffix (PEP 440, in its
   # normalized form), and are skipped on every other build. They build, test
   # and package the wheels; the publishes are the manual promotions below.
-  # The blocks of publish-testpypi.yml use the same tag pattern; those of
-  # publish-pypi.yml use it without either suffix, so a pre-release or a dev
-  # tag stops at Test PyPI. Each pattern must stay identical in all of the
-  # blocks that use it; the first is also in publish-testpypi.yml,
+  # The blocks of publish-testpypi.yml and publish-pypi.yml use the same tag
+  # pattern. It must stay identical in all of the blocks that use it, and in
   # publish-wheels.sh and create-release-tag.yml.
   #
   # The blocks run in this order, each on a VM of its own:
@@ -961,10 +960,10 @@ blocks:
   #      (publish-testpypi.yml) uploads the release, and its post-publish
   #      blocks verify the wheels as users receive them from Test PyPI. It
   #      refuses unless the packaging block passed.
-  #   5. For a final version, the manual "Publish to PyPI" promotion of that
-  #      Test PyPI pipeline (publish-pypi.yml) uploads the same wheels to PyPI
-  #      and verifies them there. It refuses unless they passed the Test PyPI
-  #      checks in this workflow. A pre-release is published to Test PyPI only.
+  #   5. The manual "Publish to PyPI" promotion of that Test PyPI pipeline
+  #      (publish-pypi.yml) uploads the same wheels to PyPI and verifies them
+  #      there. It refuses unless they passed the Test PyPI checks in this
+  #      workflow.
   # No VM of this pipeline holds a PyPI token, and the publishes build
   # nothing: a wheel is uploaded only if it is byte-identical to a tested one.
   # The publish and checksum logic, shared by both indexes, is in
@@ -1229,16 +1228,15 @@ promotions:
             [project] version in python/pyproject.toml at this commit (for
             example 4.4.0 or 4.4.0rc1). The tag build builds and tests the
             wheels; its \"Publish to Test PyPI\" promotion publishes them to
-            Test PyPI and, for a final version, that pipeline's \"Publish to
-            PyPI\" promotion then to PyPI. Leave empty to not release the
-            wheels."
+            Test PyPI, and that pipeline's \"Publish to PyPI\" promotion then
+            to PyPI. Leave empty to not release the wheels."
   # Manual. Publishes a Python version to Test PyPI and checks it there
   # (publish-testpypi.yml). Run it on the build of its python/v<version> tag
   # once "Release (Python): packaging" has passed. Its blocks are skipped on
   # any other build, and its publish job refuses unless that block recorded
   # the wheels in this workflow, so starting it from a failed or unrelated
-  # pipeline publishes nothing. For a final version, its own "Publish to PyPI"
-  # promotion (publish-pypi.yml) then publishes the same wheels to PyPI.
+  # pipeline publishes nothing. Its own "Publish to PyPI" promotion
+  # (publish-pypi.yml) then publishes the same wheels to PyPI.
   - name: Publish to Test PyPI
     pipeline_file: publish-testpypi.yml
   - name: Ask agent

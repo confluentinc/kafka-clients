@@ -6,9 +6,9 @@ name: publish-testpypi
 # exactly the wheels that build's "Release (Python): packaging" block recorded
 # (see the Python release blocks of semaphore.yml), and checks them there. Its
 # blocks run on the tag of any Python version, final or not; the tag pattern
-# must stay the pattern of semaphore.yml. For a final version, the "Publish to
-# PyPI" promotion of this pipeline (publish-pypi.yml) then publishes the same
-# wheels to PyPI once the checks here have passed.
+# must stay the pattern of semaphore.yml. The "Publish to PyPI" promotion of
+# this pipeline (publish-pypi.yml) then publishes the same wheels to PyPI once
+# the checks here have passed.
 #
 # A promotion can be started even from a failed pipeline, so the publish job
 # does not rely on the result of the build it was promoted from:
@@ -97,9 +97,9 @@ blocks:
             - artifact push workflow /tmp/verified.sha256 --destination pypi/test.pypi.org/verified --force
 
 promotions:
-  # Manual. Publishes a final Python version to PyPI (publish-pypi.yml). Run it
-  # once the blocks of this pipeline have passed. Its blocks are skipped on the
-  # tag of any other version, and its publish job refuses unless the wheels
+  # Manual. Publishes the Python version to PyPI (publish-pypi.yml). Run it
+  # once the blocks of this pipeline have passed. Its blocks are skipped on
+  # any other build, and its publish job refuses unless the wheels
   # passed the Test PyPI checks in this workflow, so starting it from a failed
   # or unrelated pipeline publishes nothing.
   - name: Publish to PyPI
