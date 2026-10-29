@@ -84,16 +84,21 @@ pub mod multilanguage_admin;
 pub mod multilanguage_consumer;
 #[cfg(feature = "multilanguage-tests")]
 pub mod multilanguage_producer;
-#[cfg(feature = "multilanguage-tests")]
+// The three macros are available with just `integration-tests` — their three
+// container-backed arms are cfg'd out individually, leaving the `__rust` arm —
+// so the committed integration tests can be converted into scenarios instead of
+// being duplicated by them. See the macros' module docs.
+#[cfg(feature = "integration-tests")]
 #[macro_use]
 pub mod multilanguage_test_macro;
-#[cfg(feature = "multilanguage-tests")]
+#[cfg(feature = "integration-tests")]
 #[macro_use]
 pub mod multilanguage_consumer_test_macro;
-// The admin macro is available with just `integration-tests` — its three
-// container-backed arms are cfg'd out individually, leaving the `__rust` arm —
-// so the committed admin integration tests could be converted into scenarios
-// instead of being duplicated by them. See the macro's module docs.
 #[cfg(feature = "integration-tests")]
 #[macro_use]
 pub mod multilanguage_admin_test_macro;
+// Helpers of the consumer scenarios, available at the same level as their macro.
+#[cfg(feature = "integration-tests")]
+// Fully used only once `multilanguage-tests` compiles the multilanguage suite.
+#[cfg_attr(not(feature = "multilanguage-tests"), expect(dead_code))]
+pub mod consumer_scenario;

@@ -26,6 +26,16 @@
 //! Consumer test bodies typically produce setup records with a *native* Rust
 //! producer (the producer is incidental fixture) and exercise the consumer
 //! under test through `factory`.
+//!
+//! The three container-backed arms are individually `#[cfg(feature =
+//! "multilanguage-tests")]` and the macro itself is available with only
+//! `integration-tests`, the shape [`crate::multilanguage_admin_test`] has.
+//! Under `integration-tests` alone (`make test-integration`, `verify-sandbox`)
+//! an invocation expands to the `__rust` arm only, which drives the production
+//! `Consumer` trait against the same broker, so converting a Rust-only consumer
+//! integration test into a scenario costs no coverage at any feature level. The
+//! helpers such a scenario needs at that level live in
+//! [`crate::common::consumer_scenario`].
 
 /// Expand a generic consumer test body into four `#[tokio::test]` wrappers,
 /// one per backend (rust / grpc_python / grpc_python_async / grpc_c). Two forms, mirroring
@@ -55,6 +65,7 @@ macro_rules! multilanguage_consumer_test {
             }
 
             $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
@@ -70,6 +81,7 @@ macro_rules! multilanguage_consumer_test {
             }
 
             $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
@@ -85,6 +97,7 @@ macro_rules! multilanguage_consumer_test {
             }
 
             $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {

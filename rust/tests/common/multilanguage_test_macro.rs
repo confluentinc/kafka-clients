@@ -16,7 +16,7 @@
 //!
 //! Each invocation expands to four `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers — one per backend — that call the same generic test body. The
-//! body must be `async fn body<F: ProducerBackendFactory>(factory: &F)`.
+//! body must be `async fn body<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F)`.
 //!
 //! Naming convention: `name__rust`, `name__grpc_python`,
 //! `name__grpc_python_async`, `name__grpc_c`. The double underscore is
@@ -30,10 +30,18 @@
 //! joining a job that has no image for it. `__rust` deliberately lacks the
 //! infix — it drives the native client with no container and no gRPC hop.
 //!
+//! The three container-backed arms are individually `#[cfg(feature =
+//! "multilanguage-tests")]` and the macro itself is available with only
+//! `integration-tests`, the shape [`crate::multilanguage_admin_test`] has.
+//! Under `integration-tests` alone (`make test-integration`, `verify-sandbox`)
+//! an invocation expands to the `__rust` arm only, which drives the production
+//! `Producer` trait against the same broker, so converting a Rust-only
+//! integration test into a scenario costs no coverage at any feature level.
+//!
 //! Example:
 //!
 //! ```ignore
-//! async fn produce_single_record_inner<F: ProducerBackendFactory>(factory: &F) {
+//! async fn produce_single_record_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
 //!     // ... shared assertions ...
 //! }
 //! multilanguage_test!(test_produce_single_record, produce_single_record_inner);
@@ -51,15 +59,24 @@
 ///
 /// Two-arg form delegates to three-arg with the default config; existing
 /// callers don't change.
+///
+/// Leading outer attributes (`#[ignore = "<reason>"]`) are applied to every
+/// arm: the form for a scenario that exposes a defect in the shared Rust core,
+/// which every backend reaches.
 #[macro_export]
 macro_rules! multilanguage_test {
-    ($name:ident, $body:ident) => {
-        $crate::multilanguage_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
+    ($(#[$attr:meta])* $name:ident, $body:ident) => {
+        $crate::multilanguage_test!(
+            $(#[$attr])* $name,
+            $body,
+            $crate::common::cluster_config::ClusterConfig::default()
+        );
     };
-    ($name:ident, $body:ident, $cluster_config:expr) => {
+    ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
             // Double underscore is intentional so backend labels are
             // easy to grep in cargo test output, hence non_snake_case.
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
@@ -68,6 +85,8 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
@@ -85,6 +104,8 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
@@ -99,6 +120,8 @@ macro_rules! multilanguage_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
