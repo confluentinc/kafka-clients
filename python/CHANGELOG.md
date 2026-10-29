@@ -69,7 +69,7 @@ API is the Apache Kafka Java client's (4.4.0), in Python form.
 - Limited pluggable interfaces.
 - Of the SASL mechanisms, only `PLAIN` is supported. Keys and certificates must
   be PEM (no JKS or PKCS12).
-- No Windows wheels.
+- Windows is not supported yet.
 - Free-threaded Python (3.13t, 3.14t) is not supported yet: no wheels are built
   for it, and a build from source turns the GIL back on when the module is
   imported.

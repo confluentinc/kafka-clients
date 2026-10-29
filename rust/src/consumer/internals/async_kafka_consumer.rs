@@ -4267,7 +4267,6 @@ where
         ));
 
         // Java: `config.logUnused()` → `log::debug!(...)`.
-        crate::preview_warning::log_preview_warning(&log_context);
         log::debug!("Kafka consumer initialized");
 
         // ── Bg-task spawn ──

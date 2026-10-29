@@ -10,6 +10,8 @@ links the Rust library's C API (`../rust`, feature `ffi`).
 
 **Preview:** the Python client is in preview and not yet recommended for production use. The public API is not stable before the GA release and may change. We welcome your feedback while the design is still open.
 
+Windows is not supported yet.
+
 ## Import paths
 
 The package mirrors Java's package tree with the `clients` segment dropped
