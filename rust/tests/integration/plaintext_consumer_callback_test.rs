@@ -93,12 +93,16 @@
 //!
 //! [`ConsumerHandle`]: confluent_kafka::consumer::ConsumerHandle
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::record::TimestampType;
+use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::consumer::DynConsumer;
+use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::callback_log::{
@@ -127,6 +131,36 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 /// partition 0 of `topic` and `newTopic`) with a native producer.
 async fn ensure_topic(ctx: &TestContext, topic: &str) {
     produce(ctx, topic, &[("__provisioner__", "__provisioner__")]).await;
+}
+
+/// Java's `ClientsTestUtils#sendRecords(ClusterInstance,TopicPartition,int,long)`:
+/// a fresh native producer sends `num_records` records `key i` / `value i` to
+/// `tp`, record `i` with timestamp `starting_timestamp + i`, then flushes and
+/// closes.
+async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
+    let mut props = HashMap::from([("acks".to_string(), "all".to_string())]);
+    ctx.configure(&mut props);
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
+        ProducerConfig::new(&props).expect("producer config"),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
+    )
+    .expect("create producer");
+    for i in 0..num_records {
+        let record = ProducerRecord::with_partition_timestamp_key(
+            tp.topic().to_string(),
+            Some(tp.partition()),
+            Some(starting_timestamp + i as i64),
+            Some(format!("key {i}").into_bytes()),
+            Some(format!("value {i}").into_bytes()),
+        )
+        .expect("valid producer record");
+        // Fully-qualified trait call: KafkaProducer also has an inherent
+        // 2-arg send(record, callback) that would otherwise shadow this.
+        Producer::send(&producer, record).await.expect("send");
+    }
+    producer.flush().await.expect("producer flush");
+    producer.close().await.expect("producer close");
 }
 
 /// Java's `createConsumer(protocol)` sets `group.protocol=consumer` and
@@ -537,12 +571,9 @@ async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned
 
     let starting_offset: i64 = 100;
     let total_records: usize = 120;
+    let starting_timestamp: i64 = 0;
 
-    // All records go to the topic's single partition.
-    let records: Vec<(String, String)> =
-        (0..total_records).map(|i| (format!("key-{i}"), format!("value-{i}"))).collect();
-    let record_refs: Vec<(&str, &str)> = records.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    produce(ctx, &topic, &record_refs).await;
+    send_records(ctx, &tp, total_records, starting_timestamp).await;
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
     let entries = trigger_on_partitions_assigned(
@@ -575,13 +606,17 @@ async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned
         "{backend} backend: tp must be paused after the callback paused it"
     );
 
-    // Resume and consume the remaining records from `starting_offset`.
+    // Resume and consume the remaining records from `starting_offset`:
+    // Java's `consumeAndVerifyRecords(consumer, tp, totalRecords - startingOffset,
+    // startingOffset, startingOffset, startingOffset)`, which checks each
+    // record's partition, timestamp type, timestamp, offset, key and value.
+    // (Java also checks the serialized sizes; the gRPC record does not carry
+    // them, so they are not checked on any arm.)
     consumer
         .resume(std::slice::from_ref(&tp))
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: resume: {e}"));
     let mut consumed: usize = 0;
-    let mut next_offset = starting_offset;
     let deadline = Instant::now() + Duration::from_secs(60);
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
@@ -590,12 +625,26 @@ async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: poll: {e}"));
         for rec in records.records_with_partition(&tp) {
+            let i = starting_offset + consumed as i64;
+            assert_eq!(rec.topic(), tp.topic(), "{backend} backend");
+            assert_eq!(rec.partition(), tp.partition(), "{backend} backend");
+            assert_eq!(rec.timestamp_type(), TimestampType::CreateTime, "{backend} backend");
+            assert_eq!(rec.timestamp(), starting_timestamp + i, "{backend} backend");
             assert_eq!(
                 rec.offset(),
-                next_offset,
+                i,
                 "{backend} backend: records must resume contiguously from {starting_offset}"
             );
-            next_offset += 1;
+            assert_eq!(
+                rec.key().map(Vec::as_slice),
+                Some(format!("key {i}").as_bytes()),
+                "{backend} backend"
+            );
+            assert_eq!(
+                rec.value().map(Vec::as_slice),
+                Some(format!("value {i}").as_bytes()),
+                "{backend} backend"
+            );
             consumed += 1;
         }
     }
