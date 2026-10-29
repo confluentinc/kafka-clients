@@ -85,6 +85,21 @@
 //! - `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance` (4.4,
 //!   45c4bdc48a) → `test_async_static_member_close_with_leave_group_triggers_rebalance`
 //!
+//! ## Translated on both assignment intervals (KIP-1263, KAFKA-20291)
+//!
+//! Java runs these on two broker configs, `group.consumer.assignment.interval.ms`
+//! `0` and `1000`. Each is three scenarios ([`assignment_interval_consumer_test!`],
+//! as `consumer_bounce_test.rs` does): `<name>_assignment_interval_0` and
+//! `<name>_assignment_interval_1000` are Java's two arms and run on a 4.3+
+//! broker; `<name>` runs the default config on an older broker, which has no
+//! interval (the `0` behaviour), and skips itself on 4.3+.
+//!
+//! - `testAsyncConsumerGroupConsumption` → `test_async_consumer_group_consumption`
+//! - `testAsyncConsumerGroupConsumptionWithTwoMembers`
+//!   → `test_async_consumer_group_consumption_with_two_members`
+//! - `testAsyncConsumerStaticConsumerDetectsNewPartitionCreatedAfterRestart`
+//!   → `test_async_consumer_static_consumer_detects_new_partition_created_after_restart`
+//!
 //! ## SKIPped (documented gaps — see PLAN.md)
 //!
 //! - SKIP `testAsyncConsumerHeadersSerializerDeserializer` — Java injects a
@@ -100,15 +115,11 @@
 //!   `interceptor.classes` loader is not translated, and the
 //!   `with_components` seam carrying interceptors is `pub(crate)`,
 //!   unreachable from an integration crate. Real API-shape gap.
-//! - SKIP `testAsyncConsumerStaticConsumerDetectsNewPartitionCreatedAfterRestart`
-//!   — needs `admin.createPartitions(increaseTo(2))` mid-test; the Rust
-//!   harness has no admin client / partition-increase API. `group.instance.id`
-//!   is config-accepted, but the observable cannot be driven.
 //! - SKIP `testAsyncConsumerStallBetweenPoll` — KAFKA-19259 timing /
 //!   perf-regression guard, not a behavioral contract; flaky under
 //!   shared-pool load.
 //! - SKIP `testAsyncConsumerSimpleConsumption` / `...AutoOffsetReset` /
-//!   `...GroupConsumption` / `...ConsumeMessagesWithCreateTime` — already
+//!   `...ConsumeMessagesWithCreateTime` — already
 //!   covered by `consumer_test.rs` and the assign/fetch suites (subscribe /
 //!   assign / seek / poll / CreateTime full per-record field verification).
 //! - SKIP (OUT_OF_SCOPE §20): all `testClassicConsumer*` twins,
@@ -139,6 +150,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::assignment_interval_consumer_test;
 use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::callback_log::{
     CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED, KIND_COMMIT, KIND_LOST, KIND_REVOKED,
@@ -2135,5 +2147,231 @@ async fn async_static_member_close_with_leave_group_triggers_rebalance<F: Consum
 multilanguage_consumer_test!(
     test_async_static_member_close_with_leave_group_triggers_rebalance,
     async_static_member_close_with_leave_group_triggers_rebalance,
+    cluster_config_kip848()
+);
+
+// ── Group consumption on both assignment intervals (KIP-1263, KAFKA-20291) ──
+
+/// Translates `PlaintextConsumerTest#testAsyncConsumerGroupConsumption` (body
+/// `PlaintextConsumerTest#testGroupConsumption`): 10 records to `tp`, a
+/// subscription, and the first record consumed and verified.
+async fn async_consumer_group_consumption<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
+    let topic = ctx.topic("topic");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let group_id = ctx.group_id("g_group_consumption");
+    // Empty topic so the records start at offset 0, as the class's other tests
+    // create it (`createTopic(TOPIC, 2, BROKER_COUNT)`).
+    create_test_topic(ctx, &topic, 2, BROKER_COUNT).await;
+
+    let producer = build_producer(ctx);
+    // `cluster.consumer(...)` keeps Java's default `enable.auto.commit=true`.
+    let mut consumer = make_consumer(ctx, factory, &group_id, &[("enable.auto.commit", "true")]).await;
+    let starting_timestamp = current_time_ms();
+    send_records(&producer, &tp, 10, starting_timestamp).await;
+    producer.close().await.expect("producer close");
+
+    consumer
+        .subscribe_with_topics(vec![topic.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe: {e}"));
+    consume_and_verify_records(consumer.as_mut(), backend, &tp, 1, 0, 0, starting_timestamp).await;
+
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
+}
+
+assignment_interval_consumer_test!(
+    test_async_consumer_group_consumption,
+    async_consumer_group_consumption,
+    cluster_config_kip848()
+);
+
+/// Translates `PlaintextConsumerTest#testAsyncConsumerGroupConsumptionWithTwoMembers`
+/// (body `PlaintextConsumerTest#testGroupConsumptionWithTwoMembers`). Both
+/// group members are subjects, so both come from the backend factory.
+///
+/// `consumer1` alone gets both partitions of `foo` and consumes 10 records from
+/// each; once `consumer2` joins, each member owns exactly one partition, and each
+/// consumes the next 10 records of its own partition.
+async fn async_consumer_group_consumption_with_two_members<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
+    // Java's fixed `foo` and `group_two_members`, namespaced per test run.
+    let foo_topic = ctx.topic("foo");
+    let foo0 = TopicPartition::new(foo_topic.clone(), 0);
+    let foo1 = TopicPartition::new(foo_topic.clone(), 1);
+    create_test_topic(ctx, &foo_topic, 2, BROKER_COUNT).await;
+    let group_id = ctx.group_id("group_two_members");
+
+    let producer = build_producer(ctx);
+    // `cluster.consumer(...)` keeps Java's default `enable.auto.commit=true`:
+    // the revoked partition's position is committed, so the member that gets
+    // it next starts at offset 10.
+    let overrides = [("enable.auto.commit", "true")];
+    let mut consumer1 = make_consumer(ctx, factory, &group_id, &overrides).await;
+    let mut consumer2 = make_consumer(ctx, factory, &group_id, &overrides).await;
+    let starting_timestamp = current_time_ms();
+
+    consumer1
+        .subscribe_with_topics(vec![foo_topic.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 subscribe: {e}"));
+    await_assignment(
+        consumer1.as_mut(),
+        backend,
+        &HashSet::from([foo0.clone(), foo1.clone()]),
+        DEFAULT_MAX_WAIT,
+    )
+    .await;
+
+    send_records(&producer, &foo0, 10, starting_timestamp).await;
+    consume_and_verify_records(consumer1.as_mut(), backend, &foo0, 10, 0, 0, starting_timestamp).await;
+
+    send_records(&producer, &foo1, 10, starting_timestamp).await;
+    consume_and_verify_records(consumer1.as_mut(), backend, &foo1, 10, 0, 0, starting_timestamp).await;
+
+    consumer2
+        .subscribe_with_topics(vec![foo_topic.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 subscribe: {e}"));
+    // Java: `TestUtils.waitForCondition(() -> { consumer1.poll(100ms);
+    // consumer2.poll(100ms); return both assignments have size 1; },
+    // "Timed out waiting for rebalance to complete")`, 15 s.
+    let deadline = Instant::now() + DEFAULT_MAX_WAIT;
+    loop {
+        consumer1
+            .poll(Duration::from_millis(100))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: consumer1 poll: {e}"));
+        consumer2
+            .poll(Duration::from_millis(100))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: consumer2 poll: {e}"));
+        if consumer1.assignment().len() == 1 && consumer2.assignment().len() == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out waiting for rebalance to complete ({backend} backend)"
+        );
+    }
+
+    let assignment1 = consumer1.assignment();
+    let assignment2 = consumer2.assignment();
+    assert!(
+        assignment1.contains(&foo0) || assignment1.contains(&foo1),
+        "consumer1 assignment {assignment1:?} ({backend} backend)"
+    );
+    assert!(
+        assignment2.contains(&foo0) || assignment2.contains(&foo1),
+        "consumer2 assignment {assignment2:?} ({backend} backend)"
+    );
+    assert_ne!(assignment1, assignment2, "the two members' assignments ({backend} backend)");
+
+    send_records(&producer, &foo0, 10, starting_timestamp).await;
+    send_records(&producer, &foo1, 10, starting_timestamp).await;
+    producer.close().await.expect("producer close");
+    let tp1 = assignment1.into_iter().next().expect("consumer1 has one partition");
+    let tp2 = assignment2.into_iter().next().expect("consumer2 has one partition");
+    consume_and_verify_records(consumer1.as_mut(), backend, &tp1, 10, 10, 0, starting_timestamp).await;
+    consume_and_verify_records(consumer2.as_mut(), backend, &tp2, 10, 10, 0, starting_timestamp).await;
+
+    consumer1
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 close: {e}"));
+    consumer2
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 close: {e}"));
+}
+
+assignment_interval_consumer_test!(
+    test_async_consumer_group_consumption_with_two_members,
+    async_consumer_group_consumption_with_two_members,
+    cluster_config_kip848()
+);
+
+/// Translates `PlaintextConsumerTest#testAsyncConsumerStaticConsumerDetectsNewPartitionCreatedAfterRestart`
+/// (body `PlaintextConsumerTest#testStaticConsumerDetectsNewPartitionCreatedAfterRestart`).
+/// Both static members (one `group.instance.id`) are subjects, so both come
+/// from the backend factory.
+///
+/// `consumer1` gets `foo-0` and closes; `consumer2`, the same static member
+/// restarted, gets `foo-0`; an admin then grows `foo` to 2 partitions and
+/// `consumer2`'s assignment grows to both.
+async fn async_consumer_static_consumer_detects_new_partition_created_after_restart<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig, NewPartitions};
+
+    let backend = factory.name();
+    // Java's fixed `foo` and `my-group-id`, namespaced per test run.
+    let foo_topic = ctx.topic("foo");
+    let foo0 = TopicPartition::new(foo_topic.clone(), 0);
+    let foo1 = TopicPartition::new(foo_topic.clone(), 1);
+    create_test_topic(ctx, &foo_topic, 1, 1).await;
+    let group_id = ctx.group_id("my-group-id");
+    let overrides = [
+        ("group.instance.id", "my-instance-id"),
+        ("metadata.max.age.ms", "100"),
+        ("max.poll.interval.ms", "6000"),
+        // `cluster.consumer(...)` keeps Java's default `enable.auto.commit=true`.
+        ("enable.auto.commit", "true"),
+    ];
+
+    let mut consumer1 = make_consumer(ctx, factory, &group_id, &overrides).await;
+    let mut consumer2 = make_consumer(ctx, factory, &group_id, &overrides).await;
+    let mut props = HashMap::from([("client.id".to_string(), "plaintext-consumer-test-admin".to_string())]);
+    ctx.configure(&mut props);
+    let admin: Box<dyn Admin> =
+        AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client");
+
+    consumer1
+        .subscribe_with_topics(vec![foo_topic.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 subscribe: {e}"));
+    await_assignment(consumer1.as_mut(), backend, &HashSet::from([foo0.clone()]), DEFAULT_MAX_WAIT).await;
+    consumer1
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 close: {e}"));
+
+    consumer2
+        .subscribe_with_topics(vec![foo_topic.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 subscribe: {e}"));
+    await_assignment(consumer2.as_mut(), backend, &HashSet::from([foo0.clone()]), DEFAULT_MAX_WAIT).await;
+
+    admin
+        .create_partitions(&HashMap::from([(foo_topic.clone(), NewPartitions::increase_to(2))]))
+        .all()
+        .get()
+        .await
+        .expect("create_partitions should succeed");
+    await_assignment(
+        consumer2.as_mut(),
+        backend,
+        &HashSet::from([foo0.clone(), foo1.clone()]),
+        DEFAULT_MAX_WAIT,
+    )
+    .await;
+
+    consumer2
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 close: {e}"));
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+assignment_interval_consumer_test!(
+    test_async_consumer_static_consumer_detects_new_partition_created_after_restart,
+    async_consumer_static_consumer_detects_new_partition_created_after_restart,
     cluster_config_kip848()
 );
