@@ -19,6 +19,7 @@
 
 const native = require('./_native');
 const { KafkaError } = require('./common/kafka_error');
+const { KafkaFuture } = require('./common/kafka_future');
 const { KafkaProducer } = require('./producer/kafka_producer');
 const { ProducerRecord } = require('./producer/producer_record');
 const { RecordMetadata } = require('./producer/record_metadata');
@@ -31,6 +32,7 @@ native.setFactories(
 
 module.exports = {
   KafkaError,
+  KafkaFuture,
   KafkaProducer,
   ProducerRecord,
   RecordMetadata,

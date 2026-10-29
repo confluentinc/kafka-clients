@@ -23,7 +23,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { KafkaError, KafkaProducer, ProducerRecord, RecordMetadata } = require('../..');
+const { KafkaError, KafkaFuture, KafkaProducer, ProducerRecord, RecordMetadata } = require('../..');
 
 const MAX_BLOCK_MS = 300;
 const UNREACHABLE = {
@@ -35,20 +35,30 @@ const UNREACHABLE = {
 };
 const TIMEOUT_MESSAGE = (topic) => `Topic ${topic} not present in metadata after ${MAX_BLOCK_MS} ms.`;
 const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed';
+const BOOTSTRAP_MESSAGE =
+  'Failed to resolve bootstrap servers after 1000ms. Please check your bootstrap.servers configuration and DNS settings.';
 const FLUSH_IN_CALLBACK =
   'KafkaProducer.flush() invocation inside a callback is not permitted because it may lead to deadlock.';
 
-test('send rejects with the core timeout after the callback ran once', async () => {
+test('send resolves at hand-over; the future fails after the callback ran once', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   try {
     const calls = [];
-    const promise = producer.send(new ProducerRecord({ topic: 'unit-t', key: 'k', value: 'v' }), (metadata, error) =>
+    const sent = producer.send(new ProducerRecord({ topic: 'unit-t', key: 'k', value: 'v' }), (metadata, error) =>
       calls.push({ metadata, error }),
     );
-    assert.ok(promise instanceof Promise);
-    await assert.rejects(promise, (e) => {
-      // The callback ran exactly once, before the rejection.
-      assert.equal(calls.length, 1);
+    assert.ok(sent instanceof Promise);
+    // Java's send() returns after max.block.ms with a failed future (its
+    // TimeoutException is an ApiException): the callback has run by then.
+    const future = await sent;
+    assert.ok(future instanceof KafkaFuture);
+    assert.equal(calls.length, 1);
+    assert.equal(future.isDone(), true);
+    assert.equal(future.isCompletedExceptionally(), true);
+    assert.equal(future.isCancelled(), false);
+    assert.equal(future.cancel(true), false);
+    assert.equal(future.isCancelled(), false);
+    await assert.rejects(future.get(), (e) => {
       assert.ok(e instanceof KafkaError);
       assert.equal(e.name, 'REQUEST_TIMED_OUT');
       assert.equal(e.code, 7);
@@ -57,6 +67,8 @@ test('send rejects with the core timeout after the callback ran once', async () 
       assert.equal(e.apiError, true);
       return true;
     });
+    // get() again rejects the same way.
+    await assert.rejects(future.get(), { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-t') });
     const [{ metadata, error }] = calls;
     assert.ok(metadata instanceof RecordMetadata);
     assert.equal(metadata.topic, 'unit-t');
@@ -71,10 +83,11 @@ test('send rejects with the core timeout after the callback ran once', async () 
   }
 });
 
-test('a send without a callback rejects the same way', async () => {
+test('a send without a callback fails its future the same way', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   try {
-    await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-u', value: Buffer.from([0]) })), {
+    const future = await producer.send(new ProducerRecord({ topic: 'unit-u', value: Buffer.from([0]) }));
+    await assert.rejects(future.get(), {
       name: 'REQUEST_TIMED_OUT',
       message: TIMEOUT_MESSAGE('unit-u'),
     });
@@ -87,11 +100,11 @@ test('a throwing callback does not change the outcome', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   try {
     let ran = 0;
-    const promise = producer.send(new ProducerRecord({ topic: 'unit-x', value: 'v' }), () => {
+    const future = await producer.send(new ProducerRecord({ topic: 'unit-x', value: 'v' }), () => {
       ran++;
       throw new Error('boom');
     });
-    await assert.rejects(promise, { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-x') });
+    await assert.rejects(future.get(), { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-x') });
     assert.equal(ran, 1);
   } finally {
     await producer.close();
@@ -102,10 +115,10 @@ test('flush inside a callback rejects with the core error', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   try {
     let flushed;
-    const sent = producer.send(new ProducerRecord({ topic: 'unit-f', value: 'v' }), () => {
+    const future = await producer.send(new ProducerRecord({ topic: 'unit-f', value: 'v' }), () => {
       flushed = producer.flush();
     });
-    await assert.rejects(sent, { name: 'REQUEST_TIMED_OUT' });
+    await assert.rejects(future.get(), { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-f') });
     assert.ok(flushed instanceof Promise);
     await assert.rejects(flushed, (e) => {
       assert.ok(e instanceof KafkaError);
@@ -117,6 +130,32 @@ test('flush inside a callback rejects with the core error', async () => {
   } finally {
     await producer.close();
   }
+});
+
+test('a hand-over failure rejects send() and never reaches the callback', async () => {
+  const producer = new KafkaProducer({
+    'bootstrap.servers': 'does-not-exist.invalid:9092',
+    'bootstrap.resolve.timeout.ms': 1000,
+  });
+  try {
+    let calls = 0;
+    await assert.rejects(
+      producer.send(new ProducerRecord({ topic: 'unit-h', value: 'v' }), () => calls++),
+      (e) => {
+        assert.ok(e instanceof KafkaError);
+        assert.equal(e.name, 'BOOTSTRAP_RESOLUTION');
+        assert.equal(e.message, BOOTSTRAP_MESSAGE);
+        return true;
+      },
+    );
+    assert.equal(calls, 0);
+  } finally {
+    await producer.close();
+  }
+});
+
+test('KafkaFuture is made only by the client', () => {
+  assert.throws(() => new KafkaFuture(), { name: 'TypeError', message: 'KafkaFuture is not constructible' });
 });
 
 test('after close: send throws, flush resolves, close is idempotent', async () => {
@@ -147,10 +186,16 @@ test('a negative close timeout is rejected by the core and closes nothing', asyn
     assert.equal(e.message, 'The timeout cannot be negative.');
     return true;
   });
-  // Still open.
-  const sent = producer.send(new ProducerRecord({ topic: 'unit-n', value: 'v' }), () => {});
+  // Still open: the record is handed over (it fails only for the missing
+  // metadata, as any record to this broker does).
+  const future = await producer.send(new ProducerRecord({ topic: 'unit-n', value: 'v' }));
   await producer.close({ timeoutMs: 0 });
-  await assert.rejects(sent, KafkaError);
+  await assert.rejects(future.get(), (e) => {
+    assert.ok(e instanceof KafkaError);
+    assert.equal(e.name, 'REQUEST_TIMED_OUT');
+    assert.equal(e.message, TIMEOUT_MESSAGE('unit-n'));
+    return true;
+  });
 });
 
 test('argument errors throw synchronously', async () => {
@@ -212,7 +257,7 @@ test('terminating a worker with records in flight tears its producer down cleanl
       const { KafkaProducer, ProducerRecord } = require(\${JSON.stringify(process.cwd())});
       const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 50, 'linger.ms': 0 });
       for (let i = 0; i < 200; i++) {
-        p.send(new ProducerRecord({ topic: 'teardown', value: String(i) }), () => {}).catch(() => {});
+        p.send(new ProducerRecord({ topic: 'teardown', value: String(i) }), () => {});
       }
       parentPort.postMessage('sent');
     \`;
@@ -228,4 +273,33 @@ test('terminating a worker with records in flight tears its producer down cleanl
   `);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'done\n');
+});
+
+test('an un-awaited send whose hand-over fails surfaces as an unhandled rejection', () => {
+  const r = runNode(`
+    const { KafkaProducer, ProducerRecord } = require('.');
+    process.on('unhandledRejection', (e) => {
+      console.log('unhandled:', e.name, e.message);
+      p.close();
+    });
+    const p = new KafkaProducer({ 'bootstrap.servers': 'does-not-exist.invalid:9092', 'bootstrap.resolve.timeout.ms': 1000 });
+    p.send(new ProducerRecord({ topic: 'h', value: 'v' }), () => console.log('callback ran'));
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, `unhandled: BOOTSTRAP_RESOLUTION ${BOOTSTRAP_MESSAGE}\n`);
+});
+
+test('a failed future whose get() is never called raises no unhandled rejection', () => {
+  const r = runNode(`
+    const { KafkaProducer, ProducerRecord } = require('.');
+    process.on('unhandledRejection', (e) => console.log('unhandled:', e.message));
+    (async () => {
+      const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 });
+      const future = await p.send(new ProducerRecord({ topic: 'unread', value: 'v' }));
+      await p.close();
+      console.log('done', future.isCompletedExceptionally());
+    })();
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'done true\n');
 });

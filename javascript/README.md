@@ -7,7 +7,8 @@ release supporting Node-API version 8, under a thin CommonJS layer (`lib/`)
 with TypeScript declarations (`index.d.ts`).
 
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
-`RecordMetadata`), with JavaScript idioms (`Promise` for `Future`). This first
+`RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
+blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). This first
 slice covers the producer only; the package is private and not published.
 
 ## Requirements
@@ -43,15 +44,48 @@ that directory.
 const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust');
 
 const producer = new KafkaProducer({ 'bootstrap.servers': 'localhost:9092' });
-const metadata = await producer.send(
+const future = await producer.send(                    // resolves at hand-over
   new ProducerRecord({ topic: 'demo', key: 'k1', value: 'hello' }),
-  (metadata, error) => { /* optional Java Callback, runs before the Promise settles */ });
+  (metadata, error) => { /* optional Java Callback, runs before the future completes */ });
+const metadata = await future.get();                   // resolves at delivery
 console.log(metadata.topic, metadata.partition, metadata.offset, metadata.timestamp);
 await producer.flush();
 await producer.close();          // or close({ timeoutMs })
 ```
 
-`examples/producer.js` produces one record and prints its metadata:
+### `send` in two steps
+
+`send(record, callback?)` returns a `Promise<KafkaFuture<RecordMetadata>>`,
+the shape of Java's `send()`, which blocks until the record is in the
+producer's buffer and then returns a `Future`:
+
+1. The `send()` Promise resolves once the record has been **handed over** to
+   the producer: at once, or after waiting up to `max.block.ms` for metadata
+   or buffer memory. It rejects with the error Java's `send()` would throw (a
+   closed producer, a bootstrap resolution failure, ...); such an error never
+   reaches the callback, so do not leave a `send()` Promise unhandled.
+2. The future's `get()` resolves at **delivery** with the record's
+   `RecordMetadata`, or rejects with the delivery error. The callback, when
+   given, runs first. A future whose `get()` is never called raises no
+   unhandled rejection. `isDone()` and `isCompletedExceptionally()` tell its
+   state; `cancel()` returns `false` (Java's `FutureRecordMetadata`).
+
+**Ordering is the caller's.** Records from code that awaits each `send()`
+before the next reach the producer in that order (records to one partition
+are appended in send order) and are covered by a following `flush()` or
+`close()`: when `flush()` resolves, every such record's future is done.
+Sends that are not awaited one by one (e.g. `Promise.all(records.map(r =>
+producer.send(r)))`) are concurrent, like Java `send()` calls on several
+threads: there is no order between them, and a `flush()` or `close()`
+started before they resolved does not wait for them.
+
+**Buffers are borrowed, not copied.** A `Buffer` / `Uint8Array` key or value
+must not be modified or detached (transferred) until its `send()` Promise
+settles; it may be reused after that. A string key or value is encoded into a
+`Buffer` of the client's own and is unaffected.
+
+`examples/producer.js` produces one record, awaiting its hand-over and then
+its delivery, and prints its metadata:
 
 ```bash
 docker run -d --rm --name kafka-js -p 9092:9092 apache/kafka:4.3.1

@@ -28,8 +28,12 @@ These decide every question, in this order:
    read as Java's `null`) and whether the producer is already closed.
 2. **The notify hook only signals.** `producer_callbacks_notify` calls
    `napi_call_threadsafe_function(..., napi_tsfn_nonblocking)` and nothing
-   else. It may fire on any thread, including the JS thread inside
-   `send_with_callback_cb`.
+   else, under the producer's `notify_mtx` and only while `notify_open`. It
+   may fire on any thread, including the JS thread inside
+   `send_with_callback_cb`. Replacing the hook does not wait for a call in
+   flight, so the JS thread clears `notify_open` under that lock before the
+   threadsafe function is released or once it is finalized; no hook call can
+   then reach a deleted threadsafe function.
 3. **One drainer per client.** `kafka_producer_Producer__execute_callbacks_err`
    runs only on the JS main thread, in the threadsafe function's `call_js`,
    looped while it returns > 0. The binding never calls `_destroy` from inside
@@ -42,17 +46,32 @@ These decide every question, in this order:
    hand-over completion receives is destroyed unread; the delivery result comes
    from the record's `kafka_producer_Callback_t`.
 6. **One `Callback_t` per record.** In `on_completion` the order is: run the
-   user callback; settle the record's Promise; call
+   user callback; complete the record's `KafkaFuture`; call
    `__set_callback_result_err(view, id, NULL, err)` exactly once, `err` NULL or
    an owned `kafka_common_Error_local_callback` error carrying the message the
    callback threw. No report is sent once destroy has begun (`_destroy`
    completes the unreported ones itself).
-7. **No binding-side send queue, cap or lock.** The core serialises sends.
-8. **Zero extra copies of key and value.** A `Buffer` / `Uint8Array` crosses as
-   a `kafka_Bytes_t` over its own memory; the addon keeps a `napi_ref` on it
-   until the hand-over completion fires (the bytes are borrowed until then).
-   A string is encoded to UTF-8 once (`Buffer.from`), the equivalent of Java's
-   `StringSerializer`. Header values are copied by the core during the call.
+7. **No binding-side send queue, buffer, cap or lock** (PLAN D8). The core
+   does NOT serialise a caller that does not wait: a record it cannot take at
+   once is queued and may be overtaken by a later one, and `flush` / `close`
+   do not wait for it (`rust/src/ffi/producer/mod.rs`, module docs on
+   `send_cb`). Ordering is put on the caller instead, as the FFI says: `send()`
+   resolves at the hand-over completion (inline inside
+   `send_with_callback_cb`, or later), where Java's blocking `send()`
+   returns, so a caller that awaits each `send()` meets the FFI's "wait for
+   the hand-over before the next send" contract. Sends not awaited one by one
+   are concurrent, like Java sends on several threads; this is documented on
+   `send`, in `index.d.ts` and in the README. The binding never holds records
+   back itself.
+8. **Zero extra copies of key and value** (PLAN D9). A `Buffer` /
+   `Uint8Array` crosses as a `kafka_Bytes_t` over its own memory; the addon
+   keeps a `napi_ref` on it until the hand-over completion fires (the bytes
+   are borrowed until then). The user-facing contract, documented wherever
+   `send` is: a caller's `Buffer` / `Uint8Array` must not be modified or
+   detached until `send()` resolves, and may be reused after. A string is
+   encoded to UTF-8 once (`Buffer.from`) into a Buffer of the binding's own,
+   the equivalent of Java's `StringSerializer`, so it is unaffected. Header
+   values are copied by the core during the call.
 9. **Ownership follows the signature.** Errors from `out_err` and from `_cb`
    completions are owned: copied into a JS `KafkaError`, then destroyed. The
    error and metadata a delivery callback receives are borrowed: copied, never
@@ -89,12 +108,21 @@ These decide every question, in this order:
 - One Java overload set is one function. Overloaded constructors take one
   options object (`new ProducerRecord({topic, partition, timestamp, key, value,
   headers})`), `close()` / `close(Duration)` is `close({timeoutMs}?)`.
-- `Future<RecordMetadata>` is `Promise<RecordMetadata>`; `void` blocking
-  methods return `Promise<void>`. `Callback` is a function
-  `(metadata, error) => void`, run before the Promise settles, as Java fires
-  the callback before completing the future. When a callback is given the
-  returned Promise is marked handled, so a fire-and-forget send with a
-  callback does not raise an unhandled rejection; awaiting it still rejects.
+- A blocking Java method returns a `Promise` (`void` ones `Promise<void>`).
+  `send` blocks in Java and returns a `Future`, so it is two-step (PLAN D8):
+  `send()` returns `Promise<KafkaFuture<RecordMetadata>>`, resolving at the
+  hand-over, and the future's `get()` returns `Promise<RecordMetadata>`,
+  settling at delivery. `KafkaFuture` is Java's: `get()`, `isDone()`,
+  `isCompletedExceptionally()`, `isCancelled()` (false) and `cancel()`
+  (false, as `FutureRecordMetadata`).
+- A hand-over error (what Java's `doSend` rethrows) rejects the `send()`
+  Promise and never reaches the callback; that Promise is never marked
+  handled, so an un-awaited failing send surfaces as an unhandled rejection,
+  as Java's `send()` would throw. Only delivery failures are kept from
+  surfacing unread: a future rejects only the Promises its `get()` returned,
+  so a failed future nobody reads raises no unhandled rejection.
+- `Callback` is a function `(metadata, error) => void`, run before the
+  future completes, as Java fires the callback before completing the future.
 - Java `null` is `null` (`undefined` accepted on input). A Java `long` crosses
   as a JS `number` (offsets and timestamps stay below 2^53).
 - Errors: every `kafka_common_Error_t` becomes a `KafkaError extends Error`

@@ -112,6 +112,26 @@ export class RecordMetadata {
  */
 export type Callback = (metadata: RecordMetadata, error: KafkaError | null) => void;
 
+/**
+ * A future result of an asynchronous operation, Java's `KafkaFuture`; the one
+ * {@link KafkaProducer.send} resolves to is Java's `FutureRecordMetadata`. A
+ * failed future rejects only the Promises `get()` returned: one whose `get()`
+ * is never called raises no unhandled rejection.
+ */
+export class KafkaFuture<T> {
+  private constructor(token: never);
+  /** Waits if necessary for this future to complete, then resolves to its result or rejects with its error. */
+  get(): Promise<T>;
+  /** true if completed in any fashion: normally, exceptionally, or via cancellation. */
+  isDone(): boolean;
+  /** true if completed exceptionally. */
+  isCompletedExceptionally(): boolean;
+  /** false: a record's future is never cancelled. */
+  isCancelled(): boolean;
+  /** Java's `FutureRecordMetadata.cancel`: cancels nothing and returns false. */
+  cancel(mayInterruptIfRunning?: boolean): false;
+}
+
 /** A producer's configuration: Java's ProducerConfig keys. */
 export type ProducerConfigs =
   | Record<string, string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined>
@@ -128,12 +148,28 @@ export class KafkaProducer {
   /** @throws {KafkaError} when the configuration is invalid or the producer cannot be built */
   constructor(configs: ProducerConfigs);
   /**
-   * Asynchronously send a record to a topic; `callback` runs before the Promise settles.
+   * Asynchronously send a record to a topic, in two steps. The returned Promise resolves once
+   * the record has been handed over to the producer (where Java's blocking `send()` returns:
+   * at once, or after up to `max.block.ms` waiting for metadata or buffer memory), with the
+   * future of its metadata; it rejects with the error Java's `send()` would throw, which never
+   * reaches the callback. The future's `get()` settles at delivery; `callback` runs first.
+   *
+   * Ordering is the caller's: records from code that awaits each `send()` before the next reach
+   * the producer in that order and are covered by a following `flush()` / `close()`. Sends not
+   * awaited one by one (e.g. under `Promise.all`) are concurrent, like Java `send()` calls on
+   * several threads, with no order between them.
+   *
+   * A `Buffer` / `Uint8Array` key or value is borrowed, not copied, until the returned Promise
+   * settles: do not modify or detach it before then; it may be reused after. A string key or
+   * value is encoded into a Buffer of the client's own and is unaffected.
    *
    * @throws {KafkaError} `LOCAL_ILLEGAL_STATE` when the producer is closed
    */
-  send(record: ProducerRecord, callback?: Callback | null): Promise<RecordMetadata>;
-  /** Makes all buffered records immediately available to send and waits for them to complete. */
+  send(record: ProducerRecord, callback?: Callback | null): Promise<KafkaFuture<RecordMetadata>>;
+  /**
+   * Makes all buffered records immediately available to send and waits for them to complete:
+   * the records whose `send()` had resolved before, whose futures are all done when it resolves.
+   */
   flush(): Promise<void>;
   /** Close this producer, waiting for previously sent requests (up to `timeoutMs` when given). */
   close(options?: CloseOptions): Promise<void>;

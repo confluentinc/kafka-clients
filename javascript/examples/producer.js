@@ -30,9 +30,12 @@ async function main(argv) {
   }
   const producer = new KafkaProducer({ 'bootstrap.servers': bootstrap });
   try {
-    const metadata = await producer.send(new ProducerRecord({ topic, key, value }), (m, error) => {
+    // Resolves once the producer has the record (Java's send() returning)...
+    const future = await producer.send(new ProducerRecord({ topic, key, value }), (m, error) => {
       if (error !== null) console.error(`delivery failed: ${error.name}: ${error.message}`);
     });
+    // ...and the future once the broker acknowledged it.
+    const metadata = await future.get();
     console.log(
       `RecordMetadata topic=${metadata.topic} partition=${metadata.partition} ` +
         `offset=${metadata.offset} timestamp=${metadata.timestamp}`,

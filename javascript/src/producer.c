@@ -300,7 +300,7 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
 // Java's Callback.onCompletion (kafka_producer_Callback_on_completion_fn_t),
 // run by the drain or by destroy on the JS thread. Both arguments are
 // BORROWED. Order (javascript/CLAUDE.md, rule 6): the JS side runs the user
-// callback and then settles the Promise; then the result is reported, once.
+// callback and then completes the KafkaFuture; then the result is reported, once.
 static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_t* metadata,
                                const kafka_common_Error_t* error, int64_t callback_id) {
     SendCtx* ctx = (SendCtx*)self_;

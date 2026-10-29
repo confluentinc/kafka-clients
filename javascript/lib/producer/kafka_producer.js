@@ -21,6 +21,7 @@
 const native = require('../_native');
 const { configEntries } = require('../_config');
 const { illegalState } = require('../common/kafka_error');
+const { KafkaFuture } = require('../common/kafka_future');
 const { checkCallback, thrownMessage } = require('./callback');
 const { ProducerRecord } = require('./producer_record');
 
@@ -33,7 +34,8 @@ const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed'
  * The producer is thread safe in Java; here every call is made from the JS
  * thread, and the delivery callbacks run there too, from the event loop.
  * Records are batched and sent by the client in the background; `send`
- * returns a Promise of the record's metadata.
+ * resolves once the record has reached the producer, with a future of the
+ * record's metadata.
  */
 class KafkaProducer {
   #handle;
@@ -59,16 +61,40 @@ class KafkaProducer {
    * Asynchronously send a record to a topic and invoke the provided callback
    * when the send has been acknowledged.
    *
-   * The send is asynchronous and this method will return immediately (once
-   * the record has been handed to the producer) with a Promise of the
-   * RecordMetadata assigned to the record. The callback, when given, runs
-   * before the Promise settles, on the JS thread.
+   * The send is asynchronous in two steps, as Java's `send()` returns a
+   * `Future` once the record has been stored in the buffer of records waiting
+   * to be sent:
+   *
+   * 1. The returned Promise resolves once the record has been handed to the
+   *    producer (where Java's blocking `send()` returns: at once, or after
+   *    waiting up to `max.block.ms` for metadata or buffer memory), with a
+   *    {@link KafkaFuture} of the record's metadata. It rejects with the error
+   *    Java's `send()` would throw (a closed producer, a bootstrap resolution
+   *    failure, ...); such an error never reaches the callback.
+   * 2. The future's `get()` resolves to the RecordMetadata assigned to the
+   *    record once the record is acknowledged, or rejects with the error the
+   *    delivery failed with. The callback, when given, runs first, on the JS
+   *    thread. A future whose `get()` is never called raises no unhandled
+   *    rejection.
+   *
+   * Ordering is the caller's: records from code that awaits each `send()`
+   * before the next reach the producer in that order (so records to one
+   * partition are appended in that order) and are covered by a following
+   * `flush()` or `close()`. Sends that are not awaited one by one (e.g. under
+   * `Promise.all`) are concurrent, like Java `send()` calls on several
+   * threads: there is no order between them, and a `flush()` or `close()`
+   * started before they resolved does not wait for them.
+   *
+   * A Buffer or Uint8Array key or value is borrowed, not copied, until the
+   * returned Promise settles: it must not be modified or detached (transferred)
+   * before then, and may be reused after. A string key or value is encoded
+   * into a Buffer of the client's own and is unaffected.
    *
    * @param {ProducerRecord} record The record to send
    * @param {((metadata: RecordMetadata, error: KafkaError | null) => void) | null} [callback] A
    *   user-supplied callback to execute when the record has been acknowledged by the server
-   * @returns {Promise<RecordMetadata>} resolving to the record's metadata, rejecting with the
-   *   KafkaError the send or the delivery failed with
+   * @returns {Promise<KafkaFuture<RecordMetadata>>} resolving at hand-over to the future of the
+   *   record's metadata, rejecting with the KafkaError Java's send() would throw
    * @throws {KafkaError} `LOCAL_ILLEGAL_STATE` when the producer is closed
    * @throws {TypeError} when `record` is not a ProducerRecord or `callback` not a function
    */
@@ -77,22 +103,22 @@ class KafkaProducer {
     const userCallback = checkCallback(callback);
     if (this.#closed) throw illegalState(CLOSED_MESSAGE);
     const args = record._toNative();
+    const future = KafkaFuture._create();
     let resolve;
     let reject;
-    const promise = new Promise((res, rej) => {
+    const handedOver = new Promise((res, rej) => {
       resolve = res;
       reject = rej;
     });
-    let settled = false;
-    // The hand-over: an error is the one Java's send() would throw.
+    // The hand-over, inside producerSend for a record taken or refused at once,
+    // later otherwise: an error is the one Java's send() would throw. Never
+    // marked handled, so an un-awaited send that fails surfaces.
     const onHandover = (error) => {
-      if (error !== null && !settled) {
-        settled = true;
-        reject(error);
-      }
+      if (error !== null) reject(error);
+      else resolve(future);
     };
     // The record's delivery callback: the user callback first, then the
-    // Promise; a message returned is what the callback threw, for the core to log.
+    // future; a message returned is what the callback threw, for the core to log.
     const onComplete = (metadata, error) => {
       let failure;
       if (userCallback !== null) {
@@ -102,24 +128,19 @@ class KafkaProducer {
           failure = thrownMessage(thrown);
         }
       }
-      if (!settled) {
-        settled = true;
-        if (error !== null) reject(error);
-        else resolve(metadata);
-      }
+      future._complete(metadata, error);
       return failure;
     };
     native.producerSend(this.#handle, ...args, onHandover, onComplete);
-    // A send with a callback is commonly not awaited: its failure reached the
-    // callback, so it must not also surface as an unhandled rejection.
-    if (userCallback !== null) promise.catch(() => {});
-    return promise;
+    return handedOver;
   }
 
   /**
    * Invoking this method makes all buffered records immediately available to
    * send and resolves once the requests associated with these records
-   * complete and their callbacks ran.
+   * complete and their callbacks ran. The records are those whose `send()`
+   * had resolved before `flush()` was called: their futures are all done when
+   * it resolves.
    *
    * Calling it from inside a callback rejects, as Java's flush() throws there.
    *
@@ -139,8 +160,10 @@ class KafkaProducer {
   /**
    * Close this producer. Waits until all previously sent requests complete
    * (`close()`), or up to `timeoutMs` for them (`close({timeoutMs})`, Java's
-   * close(Duration)), then releases the native client. Calling it again
-   * returns the close in progress, or resolves once the producer is closed.
+   * close(Duration)), then releases the native client. The records waited
+   * for are those whose `send()` had resolved before `close()` was called.
+   * Calling it again returns the close in progress, or resolves once the
+   * producer is closed.
    *
    * @param {{timeoutMs?: number}} [options] `timeoutMs`: the maximum time to wait for the
    *   producer to complete any pending requests. A timeout of zero means do not wait.
