@@ -255,3 +255,39 @@ pub fn kip848_3_broker(num_partitions: u16) -> ClusterConfig {
     cfg.server_properties = props;
     cfg
 }
+
+/// The first broker release with `group.consumer.assignment.interval.ms`
+/// (KIP-1263, KAFKA-20291, Kafka 4.3). An older broker ignores the config and
+/// assigns as soon as the target changes, which is the `0` behaviour.
+pub const ASSIGNMENT_INTERVAL_RELEASE: (u32, u32) = (4, 3);
+
+/// Whether this run's broker (`INTEGRATION_TEST_BROKER_TAG`, see
+/// [`super::kafka_cluster::broker_release`]) has
+/// `group.consumer.assignment.interval.ms`.
+pub fn broker_has_assignment_interval() -> bool {
+    super::kafka_cluster::broker_release() >= ASSIGNMENT_INTERVAL_RELEASE
+}
+
+/// `cfg` with `group.consumer.assignment.interval.ms` set: one
+/// `@ClusterTest(serverProperties = ...)` arm of a Java test that runs on both
+/// `0` and `1000`. Pooled like `cfg`: the pool keys on the whole config, so each
+/// interval value is one more pooled cluster.
+pub fn with_assignment_interval(mut cfg: ClusterConfig, interval_ms: u32) -> ClusterConfig {
+    cfg.server_properties.insert(
+        "KAFKA_GROUP_CONSUMER_ASSIGNMENT_INTERVAL_MS".to_string(),
+        interval_ms.to_string(),
+    );
+    cfg
+}
+
+/// The cluster of an `_assignment_interval_<interval_ms>` arm:
+/// [`with_assignment_interval`] on a broker that has the config, `cfg`
+/// unchanged on an older one, where the arm skips itself, so that a skipped
+/// arm shares `cfg`'s pooled cluster instead of starting one of its own.
+pub fn assignment_interval_arm(cfg: ClusterConfig, interval_ms: u32) -> ClusterConfig {
+    if broker_has_assignment_interval() {
+        with_assignment_interval(cfg, interval_ms)
+    } else {
+        cfg
+    }
+}
