@@ -47,8 +47,9 @@
 //! immediately — see `poll_until_kind` in the integration tests.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent_kafka::common::{Error, TopicPartition};
@@ -94,12 +95,15 @@ pub struct CallbackLogEntry {
     /// `error_code` (the FFI error code) and `error`, as a `KafkaError` reply
     /// is.
     pub error_value: Option<Error>,
-    /// [`KIND_LISTENER_ACTION`] only: the listener method the action ran in,
-    /// [`KIND_ASSIGNED`] or [`KIND_REVOKED`]. Empty for every other kind.
+    /// [`KIND_LISTENER_ACTION`] only: the listener method the step ran in,
+    /// [`KIND_ASSIGNED`], [`KIND_REVOKED`] or [`KIND_LOST`]. Empty for every
+    /// other kind.
     pub method: String,
     /// [`KIND_LISTENER_ACTION`] only: the `assignment()` the
-    /// [`ListenerActionKind::Assignment`] action read. Empty otherwise.
+    /// [`ListenerStep::Assignment`] step read. Empty otherwise.
     pub result_partitions: Vec<(String, i32)>,
+    /// [`KIND_LISTENER_ACTION`] only: the step, [`ListenerStep::name`].
+    pub step: String,
 }
 
 impl CallbackLogEntry {
@@ -138,133 +142,276 @@ fn rebalance_entry(kind: &str, partitions: &[TopicPartition]) -> CallbackLogEntr
 }
 
 // ---------------------------------------------------------------------------
-// Listener actions
+// Listener scripts
 // ---------------------------------------------------------------------------
 
-/// The consumer call of a [`ListenerAction`] (the proto `ListenerAction`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListenerActionKind {
-    /// Java's `consumer.assignment()`; the result is the entry's
-    /// `result_partitions`.
+/// One step of a [`ListenerScript`] (the proto `ListenerStep`). Each step is
+/// logged as one [`KIND_LISTENER_ACTION`] entry whose `step` is
+/// [`Self::name`]. A step whose call fails is logged with its error and ends
+/// the script, as a throwing call ends Java's listener body.
+#[derive(Debug, Clone)]
+pub enum ListenerStep {
+    /// Java's `consumer.assignment()`; logged in `result_partitions`.
     Assignment,
-    /// Java's `consumer.beginningOffsets(List.of(tp))`; the result is the
-    /// entry's `offsets`.
-    BeginningOffsets,
-    /// Java's `consumer.position(tp)`; the result is the entry's `offsets`,
-    /// keyed by `tp`.
-    Position,
-    /// Java's `consumer.seek(tp, offset)` then `consumer.pause(List.of(tp))`;
-    /// success is an empty `error`.
-    SeekAndPause(i64),
+    /// Java's `consumer.beginningOffsets(partitions)`; logged in `offsets`.
+    BeginningOffsets(Vec<TopicPartition>),
+    /// Java's `consumer.position(tp)`; logged as `{tp: position}`.
+    Position(TopicPartition),
+    /// Java's `consumer.seek(tp, offset)`.
+    Seek(TopicPartition, i64),
+    /// Java's `consumer.pause(partitions)`.
+    Pause(Vec<TopicPartition>),
+    /// Java's `Thread.sleep(ms)` inside the listener.
+    Sleep(u64),
+    /// Java's `consumer.commitSync(Map.of(tp, new OffsetAndMetadata(position)))`
+    /// with the position the latest [`Self::Position`] step of this invocation
+    /// read for `tp`; logged as `{tp: committed offset}`.
+    CommitSyncPosition(TopicPartition),
+    /// The listener method fails with a `LocalIllegalState` error carrying this
+    /// message (the class the Rust tests return; Java's tests throw
+    /// `IllegalArgumentException`). Logged first, with that error.
+    Fail(String),
 }
 
-/// A call back into the consumer that a logging rebalance listener makes from
-/// inside one of its methods, once, the first time that method's partitions
-/// contain `partition` — the in-callback reentrancy of `consumer-threading.md`
-/// §31. Registered with
-/// [`ConsumerCallbackLog::subscribe_with_logging_listener_action`], logged as a
-/// [`KIND_LISTENER_ACTION`] entry right after the invocation's own
-/// `assigned` / `revoked` entry.
+impl ListenerStep {
+    /// The step's name in the log, the proto `ListenerStepKind` name without
+    /// its prefix.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ListenerStep::Assignment => "ASSIGNMENT",
+            ListenerStep::BeginningOffsets(_) => "BEGINNING_OFFSETS",
+            ListenerStep::Position(_) => "POSITION",
+            ListenerStep::Seek(..) => "SEEK",
+            ListenerStep::Pause(_) => "PAUSE",
+            ListenerStep::Sleep(_) => "SLEEP",
+            ListenerStep::CommitSyncPosition(_) => "COMMIT_SYNC_POSITION",
+            ListenerStep::Fail(_) => "FAIL",
+        }
+    }
+}
+
+/// Which invocations of a listener method run its script (the proto
+/// `ListenerTriggerKind`).
 #[derive(Debug, Clone)]
+pub enum ListenerTrigger {
+    /// Every invocation.
+    Always,
+    /// The first `n` invocations of the method, whatever their partitions.
+    FirstNCalls(u32),
+    /// Every invocation whose partitions contain the partition (Java's
+    /// `if (!partitions.isEmpty() && partitions.contains(tp))`).
+    WhenContains(TopicPartition),
+    /// The first invocation whose partitions contain the partition, once.
+    OnceWhenContains(TopicPartition),
+}
+
+/// The steps one listener method runs on the invocations its trigger selects.
+#[derive(Debug, Clone)]
+pub struct ListenerScript {
+    trigger: ListenerTrigger,
+    steps: Vec<ListenerStep>,
+}
+
+impl ListenerScript {
+    /// Run `steps`, in order, on the invocations `trigger` selects.
+    pub fn new(trigger: ListenerTrigger, steps: Vec<ListenerStep>) -> Self {
+        Self { trigger, steps }
+    }
+}
+
+/// The scripts of a logging listener's three methods, which it runs from
+/// inside them — the in-callback reentrancy of `consumer-threading.md` §31.
+/// Registered with
+/// [`ConsumerCallbackLog::subscribe_with_logging_listener_action`]; on the
+/// gRPC backends sent as `SetListenerAction`.
+#[derive(Debug, Clone, Default)]
 pub struct ListenerAction {
-    kind: ListenerActionKind,
-    method: &'static str,
-    partition: TopicPartition,
+    on_assigned: Option<ListenerScript>,
+    on_revoked: Option<ListenerScript>,
+    on_lost: Option<ListenerScript>,
 }
 
 impl ListenerAction {
-    /// Run `kind` against `partition` inside `on_partitions_assigned`.
-    pub fn on_assigned(kind: ListenerActionKind, partition: TopicPartition) -> Self {
-        Self { kind, method: KIND_ASSIGNED, partition }
+    /// No scripts: the listener only logs.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Run `kind` against `partition` inside `on_partitions_revoked`.
-    pub fn on_revoked(kind: ListenerActionKind, partition: TopicPartition) -> Self {
-        Self { kind, method: KIND_REVOKED, partition }
+    /// The script of `on_partitions_assigned`.
+    pub fn on_assigned(mut self, trigger: ListenerTrigger, steps: Vec<ListenerStep>) -> Self {
+        self.on_assigned = Some(ListenerScript::new(trigger, steps));
+        self
     }
 
-    /// The listener method that runs the action, as a log `kind`.
-    pub fn method(&self) -> &'static str {
-        self.method
+    /// The script of `on_partitions_revoked`.
+    pub fn on_revoked(mut self, trigger: ListenerTrigger, steps: Vec<ListenerStep>) -> Self {
+        self.on_revoked = Some(ListenerScript::new(trigger, steps));
+        self
     }
 
-    /// The partition the action waits for and acts on.
-    pub fn partition(&self) -> &TopicPartition {
-        &self.partition
+    /// The script of `on_partitions_lost`. Without one the listener only logs
+    /// a lost invocation; a test translating a Java listener that keeps the
+    /// interface's default (`onPartitionsLost` calls `onPartitionsRevoked`)
+    /// gives it the revoked script too.
+    pub fn on_lost(mut self, trigger: ListenerTrigger, steps: Vec<ListenerStep>) -> Self {
+        self.on_lost = Some(ListenerScript::new(trigger, steps));
+        self
     }
 
-    /// The consumer call.
-    pub fn kind(&self) -> ListenerActionKind {
-        self.kind
+    fn script(&self, method: &str) -> Option<&ListenerScript> {
+        match method {
+            KIND_ASSIGNED => self.on_assigned.as_ref(),
+            KIND_REVOKED => self.on_revoked.as_ref(),
+            KIND_LOST => self.on_lost.as_ref(),
+            _ => None,
+        }
     }
 
-    /// Run the action through `handle` (Java's listener calling back into its
-    /// captured `consumer`) and build its log entry.
-    async fn run(&self, handle: &ConsumerHandle, partitions: &[TopicPartition]) -> CallbackLogEntry {
-        let mut entry = CallbackLogEntry {
-            kind: KIND_LISTENER_ACTION.to_string(),
-            partitions: tp_pairs(partitions),
-            method: self.method.to_string(),
-            ..Default::default()
+    #[cfg(feature = "multilanguage-tests")]
+    pub(crate) fn scripts(&self) -> [Option<&ListenerScript>; 3] {
+        [
+            self.on_assigned.as_ref(),
+            self.on_revoked.as_ref(),
+            self.on_lost.as_ref(),
+        ]
+    }
+}
+
+#[cfg(feature = "multilanguage-tests")]
+impl ListenerScript {
+    pub(crate) fn trigger(&self) -> &ListenerTrigger {
+        &self.trigger
+    }
+
+    pub(crate) fn steps(&self) -> &[ListenerStep] {
+        &self.steps
+    }
+}
+
+/// A native logging listener's scripts, with the handle it calls the consumer
+/// back through and the per-method trigger state.
+struct NativeListenerAction {
+    action: ListenerAction,
+    handle: ConsumerHandle,
+    /// Invocations so far, per method (assigned, revoked, lost).
+    calls: [AtomicU32; 3],
+    /// Whether a `OnceWhenContains` script has run, per method.
+    done: [AtomicBool; 3],
+}
+
+impl NativeListenerAction {
+    fn new(action: ListenerAction, handle: ConsumerHandle) -> Self {
+        Self { action, handle, calls: Default::default(), done: Default::default() }
+    }
+
+    fn method_index(method: &str) -> usize {
+        match method {
+            KIND_ASSIGNED => 0,
+            KIND_REVOKED => 1,
+            _ => 2,
+        }
+    }
+
+    /// Whether this invocation of `method` runs the method's script.
+    fn triggered(&self, method: &str, trigger: &ListenerTrigger, partitions: &[TopicPartition]) -> bool {
+        let i = Self::method_index(method);
+        let call = self.calls[i].fetch_add(1, Ordering::SeqCst) + 1;
+        match trigger {
+            ListenerTrigger::Always => true,
+            ListenerTrigger::FirstNCalls(n) => call <= *n,
+            ListenerTrigger::WhenContains(tp) => partitions.contains(tp),
+            ListenerTrigger::OnceWhenContains(tp) => {
+                partitions.contains(tp) && !self.done[i].swap(true, Ordering::SeqCst)
+            },
+        }
+    }
+
+    /// Run `method`'s script for this invocation if its trigger selects it,
+    /// logging each step; the error a `Fail` step makes the method return.
+    async fn run(&self, log: &SharedLog, method: &str, partitions: &[TopicPartition]) -> Result<(), Error> {
+        let Some(script) = self.action.script(method) else {
+            return Ok(());
         };
-        let tp = &self.partition;
-        let result: Result<(), Error> = match self.kind {
-            ListenerActionKind::Assignment => {
+        if !self.triggered(method, &script.trigger, partitions) {
+            return Ok(());
+        }
+        let mut positions: HashMap<TopicPartition, i64> = HashMap::new();
+        for step in &script.steps {
+            let mut entry = CallbackLogEntry {
+                kind: KIND_LISTENER_ACTION.to_string(),
+                partitions: tp_pairs(partitions),
+                method: method.to_string(),
+                step: step.name().to_string(),
+                ..Default::default()
+            };
+            let result = self.run_step(step, &mut entry, &mut positions).await;
+            let failed = result.is_err();
+            if let Err(e) = &result {
+                entry.error = e.to_string();
+                entry.error_value = Some(e.clone());
+            }
+            push(log, entry);
+            if let (ListenerStep::Fail(_), Err(e)) = (step, result) {
+                return Err(e);
+            }
+            if failed {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_step(
+        &self,
+        step: &ListenerStep,
+        entry: &mut CallbackLogEntry,
+        positions: &mut HashMap<TopicPartition, i64>,
+    ) -> Result<(), Error> {
+        let handle = &self.handle;
+        match step {
+            ListenerStep::Assignment => {
                 let mut assignment: Vec<TopicPartition> = handle.assignment().into_iter().collect();
                 assignment.sort_by(|a, b| (a.topic(), a.partition()).cmp(&(b.topic(), b.partition())));
                 entry.result_partitions = tp_pairs(&assignment);
                 Ok(())
             },
-            ListenerActionKind::BeginningOffsets => {
-                handle.beginning_offsets(std::slice::from_ref(tp)).await.map(|offsets| {
-                    for (p, offset) in offsets {
-                        entry
-                            .offsets
-                            .insert(CallbackLogEntry::offset_key(p.topic(), p.partition()), offset);
-                    }
-                })
+            ListenerStep::BeginningOffsets(tps) => {
+                for (p, offset) in handle.beginning_offsets(tps).await? {
+                    entry
+                        .offsets
+                        .insert(CallbackLogEntry::offset_key(p.topic(), p.partition()), offset);
+                }
+                Ok(())
             },
-            ListenerActionKind::Position => handle.position(tp).await.map(|position| {
+            ListenerStep::Position(tp) => {
+                let position = handle.position(tp).await?;
+                positions.insert(tp.clone(), position);
                 entry
                     .offsets
                     .insert(CallbackLogEntry::offset_key(tp.topic(), tp.partition()), position);
-            }),
-            ListenerActionKind::SeekAndPause(offset) => {
-                async {
-                    handle.seek_with_offset(tp.clone(), offset).await?;
-                    handle.pause(std::slice::from_ref(tp)).await
-                }
-                .await
+                Ok(())
             },
-        };
-        if let Err(e) = result {
-            entry.error = e.to_string();
-            entry.error_value = Some(e);
+            ListenerStep::Seek(tp, offset) => handle.seek_with_offset(tp.clone(), *offset).await,
+            ListenerStep::Pause(tps) => handle.pause(tps).await,
+            ListenerStep::Sleep(ms) => {
+                tokio::time::sleep(Duration::from_millis(*ms)).await;
+                Ok(())
+            },
+            ListenerStep::CommitSyncPosition(tp) => {
+                let Some(&position) = positions.get(tp) else {
+                    return Err(Error::local_illegal_state(format!(
+                        "no position was read for {tp} before COMMIT_SYNC_POSITION"
+                    )));
+                };
+                let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::new(position)?)]);
+                handle.commit_sync_with_offsets(offsets).await?;
+                entry
+                    .offsets
+                    .insert(CallbackLogEntry::offset_key(tp.topic(), tp.partition()), position);
+                Ok(())
+            },
+            ListenerStep::Fail(message) => Err(Error::local_illegal_state(message.clone())),
         }
-        entry
-    }
-}
-
-/// A native listener's pending [`ListenerAction`], with the handle it calls
-/// the consumer back through.
-struct NativeListenerAction {
-    action: ListenerAction,
-    handle: ConsumerHandle,
-    done: AtomicBool,
-}
-
-impl NativeListenerAction {
-    /// Run the action if `method` and `partitions` are its trigger and it has
-    /// not run yet.
-    async fn maybe_run(&self, log: &SharedLog, method: &str, partitions: &[TopicPartition]) {
-        if method != self.action.method || !partitions.contains(&self.action.partition) {
-            return;
-        }
-        if self.done.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let entry = self.action.run(&self.handle, partitions).await;
-        push(log, entry);
     }
 }
 
@@ -279,8 +426,8 @@ impl NativeListenerAction {
 /// distinguishable from a revoke in the log — otherwise the two kinds could not
 /// be told apart, and `unsubscribe`/fence paths fire `lost`.
 ///
-/// With an `action` it also runs that [`ListenerAction`] from inside the
-/// targeted method, through the consumer's [`ConsumerHandle`], as the servers'
+/// With an `action` it also runs that [`ListenerAction`]'s scripts from inside
+/// its methods, through the consumer's [`ConsumerHandle`], as the servers'
 /// listeners do through their bindings.
 struct LoggingRebalanceListener {
     log: SharedLog,
@@ -288,10 +435,11 @@ struct LoggingRebalanceListener {
 }
 
 impl LoggingRebalanceListener {
-    async fn log_and_act(&self, kind: &str, partitions: &[TopicPartition]) {
+    async fn log_and_act(&self, kind: &str, partitions: &[TopicPartition]) -> Result<(), Error> {
         push(&self.log, rebalance_entry(kind, partitions));
-        if let Some(action) = &self.action {
-            action.maybe_run(&self.log, kind, partitions).await;
+        match &self.action {
+            Some(action) => action.run(&self.log, kind, partitions).await,
+            None => Ok(()),
         }
     }
 }
@@ -299,18 +447,15 @@ impl LoggingRebalanceListener {
 #[async_trait]
 impl ConsumerRebalanceListener for LoggingRebalanceListener {
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.log_and_act(KIND_REVOKED, partitions).await;
-        Ok(())
+        self.log_and_act(KIND_REVOKED, partitions).await
     }
 
     async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.log_and_act(KIND_ASSIGNED, partitions).await;
-        Ok(())
+        self.log_and_act(KIND_ASSIGNED, partitions).await
     }
 
     async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        push(&self.log, rebalance_entry(KIND_LOST, partitions));
-        Ok(())
+        self.log_and_act(KIND_LOST, partitions).await
     }
 }
 
@@ -428,7 +573,7 @@ impl ConsumerCallbackLog {
     ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {
-                let action = NativeListenerAction { action, handle: consumer.handle(), done: AtomicBool::new(false) };
+                let action = NativeListenerAction::new(action, consumer.handle());
                 let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log), action: Some(action) });
                 consumer.subscribe_with_topics_listener(topics, listener).await
             },
@@ -671,9 +816,60 @@ pub mod grpc {
     use multilanguage_test_server::proto::{self};
     use tonic::transport::Channel;
 
-    use super::{CallbackLogEntry, ListenerAction, ListenerActionKind};
+    use super::{CallbackLogEntry, ListenerAction, ListenerScript, ListenerStep, ListenerTrigger};
     use crate::common::multilanguage_consumer::{offset_map_to_proto, tp_to_proto};
     use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
+
+    fn script_to_proto(script: &ListenerScript) -> proto::ListenerScript {
+        use proto::{ListenerStepKind as K, ListenerTriggerKind as T};
+        let (trigger, first_n_calls, partition) = match script.trigger() {
+            ListenerTrigger::Always => (T::ListenerTriggerAlways, 0, None),
+            ListenerTrigger::FirstNCalls(n) => (T::ListenerTriggerFirstNCalls, *n as i32, None),
+            ListenerTrigger::WhenContains(tp) => (T::ListenerTriggerWhenContains, 0, Some(tp_to_proto(tp))),
+            ListenerTrigger::OnceWhenContains(tp) => (T::ListenerTriggerOnceWhenContains, 0, Some(tp_to_proto(tp))),
+        };
+        let steps = script
+            .steps()
+            .iter()
+            .map(|step| {
+                let mut s = proto::ListenerStep::default();
+                match step {
+                    ListenerStep::Assignment => s.kind = K::ListenerStepAssignment as i32,
+                    ListenerStep::BeginningOffsets(tps) => {
+                        s.kind = K::ListenerStepBeginningOffsets as i32;
+                        s.partitions = tps.iter().map(tp_to_proto).collect();
+                    },
+                    ListenerStep::Position(tp) => {
+                        s.kind = K::ListenerStepPosition as i32;
+                        s.partition = Some(tp_to_proto(tp));
+                    },
+                    ListenerStep::Seek(tp, offset) => {
+                        s.kind = K::ListenerStepSeek as i32;
+                        s.partition = Some(tp_to_proto(tp));
+                        s.value = *offset;
+                    },
+                    ListenerStep::Pause(tps) => {
+                        s.kind = K::ListenerStepPause as i32;
+                        s.partitions = tps.iter().map(tp_to_proto).collect();
+                    },
+                    ListenerStep::Sleep(ms) => {
+                        s.kind = K::ListenerStepSleep as i32;
+                        s.value = *ms as i64;
+                    },
+                    ListenerStep::CommitSyncPosition(tp) => {
+                        s.kind = K::ListenerStepCommitSyncPosition as i32;
+                        s.partition = Some(tp_to_proto(tp));
+                    },
+                    ListenerStep::Fail(message) => {
+                        s.kind = K::ListenerStepFail as i32;
+                        s.message = message.clone();
+                    },
+                }
+                s
+            })
+            .collect();
+        proto::ListenerScript { trigger: trigger as i32, first_n_calls, partition, steps }
+    }
 
     fn entries_from_proto(response: proto::CallbackLogResponse) -> Vec<CallbackLogEntry> {
         response
@@ -694,6 +890,7 @@ pub mod grpc {
                 error: e.error,
                 method: e.method,
                 result_partitions: e.result_partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
+                step: e.step,
             })
             .collect()
     }
@@ -770,20 +967,14 @@ pub mod grpc {
         /// `SetListenerAction`: the listener the next `Subscribe` with
         /// `with_listener = true` registers runs `action`.
         pub async fn set_listener_action(&self, action: &ListenerAction) -> Result<(), Error> {
-            let (kind, offset) = match action.kind() {
-                ListenerActionKind::Assignment => (proto::ListenerAction::Assignment, 0),
-                ListenerActionKind::BeginningOffsets => (proto::ListenerAction::BeginningOffsets, 0),
-                ListenerActionKind::Position => (proto::ListenerAction::Position, 0),
-                ListenerActionKind::SeekAndPause(offset) => (proto::ListenerAction::SeekAndPause, offset),
-            };
+            let [on_assigned, on_revoked, on_lost] = action.scripts().map(|s| s.map(script_to_proto));
             let mut client = self.client.clone();
             let response = client
                 .set_listener_action(proto::ListenerActionRequest {
                     consumer_id: self.consumer_id,
-                    action: kind as i32,
-                    method: action.method().to_string(),
-                    partition: Some(tp_to_proto(action.partition())),
-                    offset,
+                    on_assigned,
+                    on_revoked,
+                    on_lost,
                 })
                 .await
                 .map_err(|s| status_to_kafka_error(&s, self.backend))?

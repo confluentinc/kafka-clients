@@ -310,24 +310,26 @@ message CallbackLogPartition {
 //
 // `offsets` keys are always `"<topic>-<partition>"` (e.g. `"my-topic-0"`).
 //
-// A "listener_action" entry records the consumer call a logging rebalance
-// listener made from inside `on_partitions_assigned` / `on_partitions_revoked`,
-// as configured by consumer_service.proto's SetListenerAction. It is appended
-// right after the "assigned" / "revoked" entry of the same invocation, and
-// `method` names that invocation ("assigned" or "revoked"). The result goes in:
+// A "listener_action" entry records one step of the script a logging
+// rebalance listener ran from inside one of its methods, as configured by
+// consumer_service.proto's SetListenerAction. The steps of an invocation are
+// appended in order right after that invocation's "assigned" / "revoked" /
+// "lost" entry; `method` names the invocation and `step` the step kind. The
+// result goes in:
 //
 // ```text
-//   action            | result_partitions        | offsets
-//   ------------------+--------------------------+-------------------------------------
-//   ASSIGNMENT        | assignment() as returned | empty
-//   BEGINNING_OFFSETS | empty                    | beginningOffsets([tp]) as returned
-//   POSITION          | empty                    | {"<tp>": position(tp)}
-//   SEEK_AND_PAUSE    | empty                    | empty (seek(tp, offset), then pause([tp]))
+//   step                 | result_partitions        | offsets
+//   ---------------------+--------------------------+-------------------------------------
+//   ASSIGNMENT           | assignment() as returned | empty
+//   BEGINNING_OFFSETS    | empty                    | beginningOffsets(partitions) as returned
+//   POSITION             | empty                    | {"<tp>": position(tp)}
+//   COMMIT_SYNC_POSITION | empty                    | {"<tp>": the committed offset}
+//   SEEK, PAUSE, SLEEP   | empty                    | empty
+//   FAIL                 | empty                    | empty; `error` is the step's message
 // ```
 //
-// On failure `error` holds the failing call's message and the result fields
-// stay empty; the listener itself still returns normally, so the rebalance is
-// not failed by the action.
+// On failure `error` / `error_code` describe the failing call and the result
+// fields stay empty.
 message CallbackLogEntry {
   // One of "assigned", "revoked", "lost", "commit", "delivery",
   // "listener_action".
@@ -338,16 +340,19 @@ message CallbackLogEntry {
   // The callback's error message; empty string when the callback was
   // invoked with no error.
   string error = 4;
-  // "listener_action" only: the listener method the action ran in,
-  // "assigned" or "revoked". Empty for every other kind.
+  // "listener_action" only: the listener method the step ran in, "assigned",
+  // "revoked" or "lost". Empty for every other kind.
   string method = 5;
-  // "listener_action" only: the partition set the ASSIGNMENT action read.
-  // Empty for every other kind and action.
+  // "listener_action" only: the partition set the ASSIGNMENT step read.
+  // Empty for every other kind and step.
   repeated CallbackLogPartition result_partitions = 6;
   // The class of the error `error` describes, as KafkaError.code: the FFI
   // error code (kafka_common_Error_e), so the reader rebuilds the error's class
   // without parsing text. 0 (NONE) when the callback saw no error.
   int32 error_code = 7;
+  // "listener_action" only: the step's kind, consumer_service.proto's
+  // ListenerStepKind name without its prefix ("POSITION", "FAIL", ...).
+  string step = 8;
 }
 
 message CallbackLogResponse {
@@ -387,6 +392,8 @@ message KafkaError {
   repeated string unauthorized_topics = 6; // TOPIC_AUTHORIZATION_FAILED
   repeated string invalid_topics = 7;      // INVALID_TOPIC_ERROR
   optional string group_id = 8;            // GROUP_AUTHORIZATION_FAILED
+  // CONSUMER_NO_OFFSET_FOR_PARTITION: the error's partitions().
+  repeated CallbackLogPartition partitions = 9;
 }
 
 // ---------------------------------------------------------------------------

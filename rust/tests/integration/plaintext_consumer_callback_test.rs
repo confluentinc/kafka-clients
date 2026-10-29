@@ -30,10 +30,11 @@
 //! registers the backend's own logging listener
 //! ([`ConsumerCallbackLog`]) and asserts on what it logged. For the
 //! in-callback-reentrancy scenarios the listener is given a
-//! [`ListenerAction`]: the consumer call Java's anonymous listener makes
-//! (`assignment()`, `beginningOffsets`, `position`, `seek` + `pause`), run once
-//! from inside the targeted method when its partitions contain the test
-//! partition, its result logged as a `listener_action` entry. The native
+//! [`ListenerAction`] script: the consumer calls Java's anonymous listener
+//! makes (`assignment()`, `beginningOffsets`, `position`, `seek` then
+//! `pause`), run once from inside the targeted method when its partitions
+//! contain the test partition, each step's result logged as a
+//! `listener_action` entry. The native
 //! listener makes the call through a captured [`ConsumerHandle`] (the Rust
 //! equivalent of Java capturing the `consumer` variable; the listener trait
 //! stays Java-identical, `&self` + partitions); the Python servers through the
@@ -102,7 +103,7 @@ use confluent_kafka::consumer::DynConsumer;
 use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::callback_log::{
     CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED, KIND_LISTENER_ACTION, KIND_REVOKED, ListenerAction,
-    ListenerActionKind,
+    ListenerStep, ListenerTrigger,
 };
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::consumer_scenario::{consumer_config_for, poll_until_entry, produce};
@@ -241,47 +242,66 @@ async fn on_partitions_assigned_called_with_new_partitions_only<F: ConsumerBacke
 // the test partition and logs its outcome (a `listener_action` entry). The
 // harness then asserts the logged outcome matches Java's assertion.
 
+/// The `listener_action` entries of `entries`, in log order.
+fn action_entries(entries: &[CallbackLogEntry]) -> Vec<CallbackLogEntry> {
+    entries.iter().filter(|e| e.kind == KIND_LISTENER_ACTION).cloned().collect()
+}
+
 /// Java's `triggerOnPartitionsAssigned(tp, consumer, execute)`: subscribe
-/// with a listener that runs `kind` from inside `onPartitionsAssigned`
-/// once `tp` is assigned, then poll until the action has run. Returns the
-/// action's log entry.
+/// with a listener that runs `steps` from inside `onPartitionsAssigned`
+/// once `tp` is assigned, then poll until they have run. Returns the steps'
+/// log entries, in order.
 async fn trigger_on_partitions_assigned(
     consumer: &mut BytesConsumer,
     log: &ConsumerCallbackLog,
     backend: &str,
     topic: &str,
     tp: &TopicPartition,
-    kind: ListenerActionKind,
-) -> CallbackLogEntry {
+    steps: Vec<ListenerStep>,
+) -> Vec<CallbackLogEntry> {
+    let want = steps.len();
     log.subscribe_with_logging_listener_action(
         consumer,
         vec![topic.to_string()],
-        ListenerAction::on_assigned(kind, tp.clone()),
+        ListenerAction::new().on_assigned(ListenerTrigger::OnceWhenContains(tp.clone()), steps),
     )
     .await
     .unwrap_or_else(|e| panic!("{backend} backend: subscribe: {e}"));
-    let entries = poll_until_entry(consumer, log, KIND_LISTENER_ACTION, |_| true, Duration::from_secs(90)).await;
-    first_entry(&entries, KIND_LISTENER_ACTION, |_| true)
-        .cloned()
-        .unwrap_or_else(|| panic!("{backend} backend: Timed out before expected rebalance callback ran: {entries:?}"))
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let entries = log.entries().await.expect("read consumer callback log");
+        let actions = action_entries(&entries);
+        if actions.len() >= want {
+            return actions;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{backend} backend: Timed out before expected rebalance callback ran: {entries:?}"
+        );
+        consumer
+            .poll(Duration::from_millis(500))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll: {e}"));
+    }
 }
 
 /// Java's `triggerOnPartitionsRevoked(tp, protocol, execute)`: subscribe a
-/// listener that runs `kind` from inside `onPartitionsRevoked` once `tp`
+/// listener that runs `steps` from inside `onPartitionsRevoked` once `tp`
 /// is revoked. Poll until assigned, then `unsubscribe()` to force the
-/// revocation, then assert the action ran. Returns the action's log entry.
+/// revocation, then assert the steps ran. Returns their log entries, in order.
 async fn trigger_on_partitions_revoked(
     consumer: &mut BytesConsumer,
     log: &ConsumerCallbackLog,
     backend: &str,
     topic: &str,
     tp: &TopicPartition,
-    kind: ListenerActionKind,
-) -> CallbackLogEntry {
+    steps: Vec<ListenerStep>,
+) -> Vec<CallbackLogEntry> {
+    let want = steps.len();
     log.subscribe_with_logging_listener_action(
         consumer,
         vec![topic.to_string()],
-        ListenerAction::on_revoked(kind, tp.clone()),
+        ListenerAction::new().on_revoked(ListenerTrigger::OnceWhenContains(tp.clone()), steps),
     )
     .await
     .unwrap_or_else(|e| panic!("{backend} backend: subscribe: {e}"));
@@ -303,8 +323,9 @@ async fn trigger_on_partitions_revoked(
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let entries = log.entries().await.expect("read consumer callback log");
-        if let Some(entry) = first_entry(&entries, KIND_LISTENER_ACTION, |_| true) {
-            return entry.clone();
+        let actions = action_entries(&entries);
+        if actions.len() >= want {
+            return actions;
         }
         assert!(
             Instant::now() < deadline,
@@ -328,7 +349,9 @@ async fn rebalance_listener_assignment_on_partitions_assigned<F: ConsumerBackend
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
     let entry =
-        trigger_on_partitions_assigned(&mut consumer, &log, backend, &topic, &tp, ListenerActionKind::Assignment).await;
+        trigger_on_partitions_assigned(&mut consumer, &log, backend, &topic, &tp, vec![ListenerStep::Assignment])
+            .await
+            .remove(0);
 
     assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
     assert!(
@@ -360,9 +383,16 @@ async fn rebalance_listener_beginning_offsets_on_partitions_assigned<F: Consumer
     ensure_topic(ctx, &topic).await;
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
-    let entry =
-        trigger_on_partitions_assigned(&mut consumer, &log, backend, &topic, &tp, ListenerActionKind::BeginningOffsets)
-            .await;
+    let entry = trigger_on_partitions_assigned(
+        &mut consumer,
+        &log,
+        backend,
+        &topic,
+        &tp,
+        vec![ListenerStep::BeginningOffsets(vec![tp.clone()])],
+    )
+    .await
+    .remove(0);
 
     assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
     assert!(
@@ -393,7 +423,9 @@ async fn rebalance_listener_assignment_on_partitions_revoked<F: ConsumerBackendF
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
     let entry =
-        trigger_on_partitions_revoked(&mut consumer, &log, backend, &topic, &tp, ListenerActionKind::Assignment).await;
+        trigger_on_partitions_revoked(&mut consumer, &log, backend, &topic, &tp, vec![ListenerStep::Assignment])
+            .await
+            .remove(0);
 
     assert_eq!(entry.method, KIND_REVOKED, "{backend} backend: {entry:?}");
     assert!(
@@ -425,9 +457,16 @@ async fn rebalance_listener_beginning_offsets_on_partitions_revoked<F: ConsumerB
     ensure_topic(ctx, &topic).await;
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
-    let entry =
-        trigger_on_partitions_revoked(&mut consumer, &log, backend, &topic, &tp, ListenerActionKind::BeginningOffsets)
-            .await;
+    let entry = trigger_on_partitions_revoked(
+        &mut consumer,
+        &log,
+        backend,
+        &topic,
+        &tp,
+        vec![ListenerStep::BeginningOffsets(vec![tp.clone()])],
+    )
+    .await
+    .remove(0);
 
     assert_eq!(entry.method, KIND_REVOKED, "{backend} backend: {entry:?}");
     assert!(
@@ -457,8 +496,16 @@ async fn get_position_of_newly_assigned_partition_on_partitions_assigned_callbac
     ensure_topic(ctx, &topic).await;
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
-    let entry =
-        trigger_on_partitions_assigned(&mut consumer, &log, backend, &topic, &tp, ListenerActionKind::Position).await;
+    let entry = trigger_on_partitions_assigned(
+        &mut consumer,
+        &log,
+        backend,
+        &topic,
+        &tp,
+        vec![ListenerStep::Position(tp.clone())],
+    )
+    .await
+    .remove(0);
 
     assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
     assert!(
@@ -498,22 +545,29 @@ async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned
     produce(ctx, &topic, &record_refs).await;
 
     let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
-    let entry = trigger_on_partitions_assigned(
+    let entries = trigger_on_partitions_assigned(
         &mut consumer,
         &log,
         backend,
         &topic,
         &tp,
-        ListenerActionKind::SeekAndPause(starting_offset),
+        vec![
+            ListenerStep::Seek(tp.clone(), starting_offset),
+            ListenerStep::Pause(vec![tp.clone()]),
+        ],
     )
     .await;
 
-    assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
-    assert!(
-        entry.error.is_empty(),
-        "{backend} backend: seek+pause inside callback must succeed, got {}",
-        entry.error
-    );
+    let steps: Vec<&str> = entries.iter().map(|e| e.step.as_str()).collect();
+    assert_eq!(steps, ["SEEK", "PAUSE"], "{backend} backend: {entries:?}");
+    for entry in &entries {
+        assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
+        assert!(
+            entry.error.is_empty(),
+            "{backend} backend: seek+pause inside callback must succeed, got {}",
+            entry.error
+        );
+    }
 
     // Java: `assertTrue(consumer.paused().contains(tp))`.
     assert!(

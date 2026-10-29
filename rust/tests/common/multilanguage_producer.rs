@@ -58,6 +58,7 @@ use confluent_kafka::common::header::Header;
 use confluent_kafka::common::metrics::{KafkaMetric, Metrics, MetricsView, gauge};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
+use confluent_kafka::consumer::ConsumerNoOffsetForPartitionError;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::Callback;
@@ -486,6 +487,23 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
         BOOTSTRAP_RESOLUTION => Error::BootstrapResolution(BootstrapResolutionError::new(p.message)),
+        // Its public constructor builds the message from the partitions, so the
+        // class is rebuilt only when that reproduces the server's message
+        // exactly; otherwise it falls back to UNKNOWN_SERVER_ERROR with the
+        // server's text, as for the other payload classes below, so a
+        // difference shows instead of being papered over.
+        CONSUMER_NO_OFFSET_FOR_PARTITION if !p.partitions.is_empty() => {
+            let rebuilt = Error::ConsumerNoOffsetForPartition(ConsumerNoOffsetForPartitionError::with_partitions(
+                p.partitions
+                    .iter()
+                    .map(|tp| TopicPartition::new(tp.topic.clone(), tp.partition)),
+            ));
+            if rebuilt.message() == p.message {
+                rebuilt
+            } else {
+                error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class")
+            }
+        },
 
         // Everything else is a class that owns its protocol code, which is
         // exactly what the generated `error_with_message` table (a copy of
@@ -495,15 +513,15 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         // used to guess at from the message text.
         //
         // A code the table has no class for falls back to `UNKNOWN_SERVER_ERROR`,
-        // as `Errors.forCode` does in Java. Six negatives land there,
+        // as `Errors.forCode` does in Java. Five negatives land there,
         // deliberately, carrying the message. They are exactly the client-side
         // classes that hold structured payload the proto does not transport —
         // `CorrelationIdMismatch`'s two correlation ids, `QuotaViolation`'s
         // metric and bounds, `RecordDeserialization`'s partition and offset, and
-        // `ConsumerLogTruncation` / `ConsumerNoOffsetForPartition` /
-        // `ConsumerOffsetOutOfRange`'s partition maps — so an arm above could
-        // only reconstruct the class by fabricating that payload. Widening the
-        // proto is the fix if a test ever needs to assert on one of them.
+        // `ConsumerLogTruncation` / `ConsumerOffsetOutOfRange`'s partition maps
+        // — so an arm above could only reconstruct the class by fabricating that
+        // payload. Widening the proto is the fix if a test ever needs to assert
+        // on one of them, as `ConsumerNoOffsetForPartition`'s partitions were.
         code => match error_with_message(code, p.message.clone()) {
             Some(error) => error,
             None => error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class"),
