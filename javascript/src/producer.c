@@ -23,8 +23,10 @@
 // time that vector goes from empty to non-empty, and only calls
 // napi_call_threadsafe_function; the threadsafe function's call_js then runs
 // on the JS main thread and drains the vector with __execute_callbacks while it
-// returns > 0. So every completion runs on the JS thread, the one drainer, and
-// builds its JS values there. A send's hand-over completion may also fire
+// returns > 0. send() also runs that drain itself (pump) every so many sends
+// taken at once, which never let the event loop reach call_js; drains never
+// nest. So every completion runs on the JS thread and builds its JS values
+// there. A send's hand-over completion may also fire
 // inside send_with_callback_cb itself, on the JS thread (the record taken or
 // refused at once), so a send's whole state is in place before that call.
 //
@@ -70,6 +72,7 @@ typedef struct {
     int destroy_requested;                     // close completed: destroy after the drain
     int destroying;                            // KafkaProducer_destroy_err began
     int finalizing;                            // the handle object is being finalized: no JS
+    int draining;                              // a drain loop is running (call_js or pump)
     napi_ref close_done;                       // close's JS completion
     kafka_common_Error_t* close_error;         // close's owned error, until reported
     SendCtx* orphans;                          // contexts of sends that failed at hand-over
@@ -616,19 +619,47 @@ static void producer_callbacks_notify(void* opaque) {
     pthread_mutex_unlock(&p->notify_mtx);
 }
 
-// The tsfn's call_js, on the JS thread: the one drainer.
-static void producer_call_js(napi_env env, napi_value js_cb, void* context, void* data) {
-    (void)js_cb;
-    (void)data;
-    Producer* p = (Producer*)context;
-    if (env == NULL || p->kp == NULL || p->destroying || p->finalizing) return;
+// The drain, on the JS thread: runs the queued callbacks while
+// __execute_callbacks returns > 0, then the destroy a close completion
+// requested (outside the loop). A drain never nests: a callback that calls
+// back into the producer (a send from a delivery callback pumps) finds
+// `draining` set and returns, and so does a drain once destroy began.
+static void producer_drain(napi_env env, Producer* p) {
+    if (p->kp == NULL || p->destroying || p->finalizing || p->draining) return;
     kafka_common_Error_t* ffi_err = NULL;
+    p->draining = 1;
     while (p->kp != NULL) {
         int32_t ran = kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err);
         error_discard(ffi_take(&ffi_err));
         if (ran <= 0) break;
     }
+    p->draining = 0;
     if (p->destroy_requested && !p->destroying) producer_finish_close(env, p);
+}
+
+// The tsfn's call_js, on the JS thread: the drain the notify hook asked for.
+static void producer_call_js(napi_env env, napi_value js_cb, void* context, void* data) {
+    (void)js_cb;
+    (void)data;
+    if (env == NULL) return;
+    producer_drain(env, (Producer*)context);
+}
+
+// pump(handle): the same drain, run by send() on entry every so many sends the
+// producer took at once in a row (javascript/CLAUDE.md, rule 3): such sends
+// never return to the event loop, so call_js could not run between them. A
+// no-op inside a drain, during destroy, or on a destroyed handle.
+static napi_value js_pump(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    void* data = NULL;
+    if (argc != 1 || napi_unwrap(env, argv[0], &data) != napi_ok || data == NULL) {
+        napi_throw_type_error(env, NULL, "pump(handle)");
+        return NULL;
+    }
+    producer_drain(env, (Producer*)data);
+    return NULL;
 }
 
 static void producer_tsfn_finalize(napi_env env, void* data, void* hint) {
@@ -789,6 +820,7 @@ napi_value producer_init(napi_env env, napi_value exports) {
         {"producerSend", NULL, js_send, NULL, NULL, NULL, napi_default, NULL},
         {"producerFlush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
         {"producerClose", NULL, js_close, NULL, NULL, NULL, napi_default, NULL},
+        {"producerPump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
     return exports;
