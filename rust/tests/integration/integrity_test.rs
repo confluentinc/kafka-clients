@@ -17,7 +17,8 @@
 //! allows, in order per partition and writer, and never when its transaction
 //! was aborted (see `tests/common/integrity`).
 //!
-//! Each test runs one short workload against a pooled broker. The long-running
+//! Each test runs one short workload against a pooled broker
+//! (`detects_tampering` drives its clients by hand). The long-running
 //! form of the same workloads is the `integrity` target
 //! (`cargo xtask integrity-test`).
 //!
@@ -30,8 +31,8 @@
 //! (`TransactionalMessageCopier`), and offsets committed and read back around
 //! consumer restarts (`OffsetValidationTest`).
 //!
-//! `self_tests` checks the checker itself, without a broker: each failure it
-//! must report is produced on purpose.
+//! `self_tests` checks the checker itself, without a broker: failures are
+//! produced on purpose and must be reported.
 //!
 //! A failing run prints its seed; `INTEGRITY_SEED=<seed>` replays the same
 //! records.
@@ -286,8 +287,9 @@ async fn test_integrity_consumer_restart_hard() {
     assert_pass(&run(spec, base).await);
 }
 
-/// Writers replace their producer every few hundred records or every second
-/// (a new producer id, and for the transactional one a fenced predecessor).
+/// Writers replace their producer every few hundred records or every second:
+/// a new producer id each time, and for the transactional one a new epoch of
+/// the same transactional id.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_integrity_producer_restart() {
     let (mut ctx, base) = context().await;
@@ -383,7 +385,7 @@ async fn test_integrity_detects_tampering() {
     }
     consumer.close().await.expect("close");
 
-    let verdict = ledger.verdict(false, true, true, &Requirements::default());
+    let verdict = ledger.verdict(false, true, &Requirements::default());
     eprintln!("{verdict}");
     assert!(!verdict.passed(), "a corrupting deserializer passed:\n{verdict}");
     assert_eq!(verdict.counts.corrupt, 200, "{verdict}");
@@ -395,8 +397,8 @@ async fn test_integrity_detects_tampering() {
     );
 }
 
-/// The checker itself, without a broker: each failure is produced on purpose
-/// and must be reported, and an untouched run must pass.
+/// The checker itself, without a broker: failures are produced on purpose and
+/// must be reported, and an untouched run must pass.
 mod self_tests {
     use std::collections::HashMap;
 
@@ -439,13 +441,24 @@ mod self_tests {
         offset: i64,
         change: impl FnOnce(&mut Option<Vec<u8>>, &mut Option<Vec<u8>>, &mut Vec<RecordHeader>, &mut i64),
     ) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
+        consumed_on(TOPIC, record, partition, offset, change)
+    }
+
+    /// [`consumed`], read from `topic`.
+    fn consumed_on(
+        topic: &str,
+        record: &ProducerRecord<Vec<u8>, Vec<u8>>,
+        partition: i32,
+        offset: i64,
+        change: impl FnOnce(&mut Option<Vec<u8>>, &mut Option<Vec<u8>>, &mut Vec<RecordHeader>, &mut i64),
+    ) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
         let mut key = record.key().cloned();
         let mut value = record.value().cloned();
         let mut headers = record.headers().to_array().to_vec();
         let mut timestamp = record.timestamp().expect("timestamp");
         change(&mut key, &mut value, &mut headers, &mut timestamp);
         let options = ConsumerRecordOptionsBuilder::new()
-            .set_topic(TOPIC)
+            .set_topic(topic)
             .set_partition(partition)
             .set_offset(offset)
             .set_timestamp(timestamp)
@@ -616,12 +629,7 @@ mod self_tests {
             ledger.live_record(&unchanged(record, 0, offset as i64));
             ledger.final_record(&unchanged(record, 0, offset as i64));
         }
-        let verdict = ledger.verdict(
-            true,
-            true,
-            true,
-            &Requirements { min_records_per_stream: 50, ..Default::default() },
-        );
+        let verdict = ledger.verdict(true, true, &Requirements { min_records_per_stream: 50, ..Default::default() });
         assert!(verdict.passed(), "{verdict}");
         let report = verdict.to_json();
         assert_eq!(report["verdict"], "PASS");
@@ -639,11 +647,12 @@ mod self_tests {
             ledger.final_record(&unchanged(record, 0, offset as i64));
         }
         ledger.final_record(&unchanged(&records[7], 0, 7));
-        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        let verdict = ledger.verdict(true, true, &Requirements::default());
         assert!(!verdict.passed());
         assert_eq!(failure_count(&verdict, "lost (live readers)"), 1);
         assert_eq!(failure_count(&verdict, "lost (final read-back)"), 1);
         assert_eq!(failure_count(&verdict, "duplicated (final read-back)"), 1);
+        assert_eq!(failure_count(&verdict, "order violations"), 0, "{verdict}");
         assert!(verdict.samples["lost (final read-back)"][0].contains("seq 4..=4"), "{verdict}");
     }
 
@@ -657,8 +666,11 @@ mod self_tests {
         // seq 2, then seq 2 again at a later offset: written twice.
         ledger.live_record(&unchanged(&records[2], 0, 2));
         ledger.live_record(&unchanged(&records[2], 0, 3));
-        let verdict = ledger.verdict(true, false, true, &Requirements::default());
-        assert_eq!(failure_count(&verdict, "order violations"), 1, "{verdict}");
+        // The final read-back sees seq 1 before seq 0 too.
+        ledger.final_record(&unchanged(&records[1], 0, 0));
+        ledger.final_record(&unchanged(&records[0], 0, 1));
+        let verdict = ledger.verdict(true, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "order violations"), 2, "{verdict}");
         assert_eq!(failure_count(&verdict, "double writes"), 1, "{verdict}");
         // Offsets 0 and 1 were acknowledged for seq 0 and 1, read the other way round.
         assert_eq!(failure_count(&verdict, "placement mismatches"), 2, "{verdict}");
@@ -674,7 +686,7 @@ mod self_tests {
         let error = confluent_kafka::common::Error::local_unsupported_operation("rejected");
         ledger.send_rejected(TOPIC, 0, rejected, &error);
         ledger.final_record(&unchanged(&produced(rejected, TxnIntent::None), 0, 1));
-        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        let verdict = ledger.verdict(true, true, &Requirements::default());
         assert_eq!(failure_count(&verdict, "aborted records visible"), 1, "{verdict}");
         assert_eq!(failure_count(&verdict, "rejected or aborted records visible"), 2, "{verdict}");
     }
@@ -695,7 +707,7 @@ mod self_tests {
         ledger.delivered(TOPIC, 0, rejected, &Err(Error::local_unsupported_operation("too large")));
         let ambiguous = ledger.next_seq(TOPIC, 0);
         ledger.delivered(TOPIC, 0, ambiguous, &Err(Error::timeout("expired")));
-        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        let verdict = ledger.verdict(true, true, &Requirements::default());
         assert!(verdict.passed(), "{verdict}");
         assert_eq!(
             (verdict.counts.send_rejected, verdict.counts.send_ambiguous),
@@ -725,7 +737,7 @@ mod self_tests {
         let record = unchanged(&produced(ok, TxnIntent::Commit), 0, 0);
         ledger.live_record(&record);
         ledger.final_record(&record);
-        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        let verdict = ledger.verdict(true, true, &Requirements::default());
         assert_eq!(
             failure_count(&verdict, "failed records in committed transactions"),
             1,
@@ -738,11 +750,15 @@ mod self_tests {
         use confluent_kafka::common::Error;
         let ledger = ledger();
         // Its delivery timed out, but the final read-back finds it: it was
-        // written, so the live group had to read it too.
+        // written. A group that stopped before reaching it did not skip it...
         let seq = ledger.next_seq(TOPIC, 0);
         ledger.delivered(TOPIC, 0, seq, &Err(Error::timeout("expired")));
         ledger.final_record(&unchanged(&produced(seq, TxnIntent::None), 0, 0));
-        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        assert!(ledger.verdict(true, true, &Requirements::default()).passed());
+        // ...one that committed past it did.
+        let tp = TopicPartition::new(TOPIC.to_string(), 0);
+        ledger.live_committed(&HashMap::from([(tp, OffsetAndMetadata::new(1).unwrap())]));
+        let verdict = ledger.verdict(true, true, &Requirements::default());
         assert_eq!(failure_count(&verdict, "lost (live readers)"), 1, "{verdict}");
         // Read live as well, it passes.
         let ledger = self::ledger();
@@ -751,13 +767,13 @@ mod self_tests {
         let record = unchanged(&produced(seq, TxnIntent::None), 0, 0);
         ledger.live_record(&record);
         ledger.final_record(&record);
-        assert!(ledger.verdict(true, true, true, &Requirements::default()).passed());
+        assert!(ledger.verdict(true, true, &Requirements::default()).passed());
         // Read live but gone from the final read-back: lost.
         let ledger = self::ledger();
         let seq = ledger.next_seq(TOPIC, 0);
         ledger.delivered(TOPIC, 0, seq, &Err(Error::timeout("expired")));
         ledger.live_record(&unchanged(&produced(seq, TxnIntent::None), 0, 0));
-        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        let verdict = ledger.verdict(true, true, &Requirements::default());
         assert_eq!(failure_count(&verdict, "lost (final read-back)"), 1, "{verdict}");
     }
 
@@ -771,12 +787,15 @@ mod self_tests {
         let tp = TopicPartition::new(TOPIC.to_string(), 0);
         let ours = HashMap::from([(tp.clone(), OffsetAndMetadata::new(4).unwrap())]);
         ledger.live_committed(&ours);
-        // Read back lower than what was committed.
-        ledger.readback(&ours, &HashMap::from([(tp, OffsetAndMetadata::new(2).unwrap())]));
+        // Read back lower than what was committed, then past what was read.
+        ledger.readback(&ours, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(2).unwrap())]));
+        ledger.readback(&ours, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(9).unwrap())]));
+        // Within reach: neither.
+        ledger.readback(&ours, &HashMap::from([(tp, OffsetAndMetadata::new(4).unwrap())]));
         // A new owner re-reads from offset 1, below the committed 4.
         ledger.live_record(&unchanged(&records[1], 0, 1));
-        let verdict = ledger.verdict(true, false, true, &Requirements::default());
-        assert_eq!(failure_count(&verdict, "committed offset read-back violations"), 1, "{verdict}");
+        let verdict = ledger.verdict(true, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "committed offset read-back violations"), 2, "{verdict}");
         assert_eq!(failure_count(&verdict, "re-reads below the committed offset"), 1, "{verdict}");
     }
 
@@ -786,7 +805,6 @@ mod self_tests {
         ledger.next_seq(TOPIC, 0);
         let verdict = ledger.verdict(
             false,
-            true,
             false,
             &Requirements {
                 min_records_per_stream: 1,
@@ -798,5 +816,127 @@ mod self_tests {
         assert!(!verdict.passed());
         assert_eq!(failure_count(&verdict, "unresolved sends"), 1, "{verdict}");
         assert_eq!(verdict.unmet.len(), 4, "{verdict}");
+    }
+
+    #[test]
+    fn test_ledger_reports_a_record_read_twice_in_one_poll() {
+        let ledger = ledger();
+        let records = deliver(&ledger, 2);
+        ledger.live_batch(&[
+            unchanged(&records[0], 0, 0),
+            unchanged(&records[1], 0, 1),
+            unchanged(&records[0], 0, 0),
+        ]);
+        let verdict = ledger.verdict(true, false, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "order violations"), 1, "{verdict}");
+    }
+
+    #[test]
+    fn test_ledger_checks_a_mirror_against_its_source() {
+        let ledger = ledger();
+        ledger.register_topic("m", 1, StreamKind::Mirror(TOPIC.to_string()));
+        let records = deliver(&ledger, 3);
+        for (offset, record) in records.iter().enumerate() {
+            ledger.live_record(&unchanged(record, 0, offset as i64));
+            ledger.final_record(&unchanged(record, 0, offset as i64));
+        }
+        // Copies of seq 0 and 1, not of seq 2, and a copy of a record its
+        // source never had.
+        for (offset, record) in records[..2].iter().enumerate() {
+            let copy = consumed_on("m", record, 0, offset as i64, |_, _, _, _| {});
+            ledger.live_record(&copy);
+            ledger.final_record(&copy);
+        }
+        let stray = consumed_on("m", &produced(7, TxnIntent::None), 0, 2, |_, _, _, _| {});
+        ledger.final_record(&stray);
+        let verdict = ledger.verdict(true, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "lost (live readers)"), 1, "{verdict}");
+        assert_eq!(failure_count(&verdict, "lost (final read-back)"), 1, "{verdict}");
+        assert_eq!(failure_count(&verdict, "rejected or aborted records visible"), 1, "{verdict}");
+        assert!(
+            verdict.samples["lost (final read-back)"][0].starts_with("m writer 0: seq 2..=2"),
+            "{verdict}"
+        );
+    }
+
+    #[test]
+    fn test_ledger_takes_a_copy_as_proof_its_ambiguous_source_was_written() {
+        use confluent_kafka::common::Error;
+        let ledger = ledger();
+        ledger.register_topic("m", 1, StreamKind::Mirror(TOPIC.to_string()));
+        let seq = ledger.next_seq(TOPIC, 0);
+        ledger.delivered(TOPIC, 0, seq, &Err(Error::timeout("expired")));
+        // Copied, so it was written, but gone from its source.
+        ledger.final_record(&consumed_on("m", &produced(seq, TxnIntent::None), 0, 0, |_, _, _, _| {}));
+        let verdict = ledger.verdict(true, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "lost (final read-back)"), 1, "{verdict}");
+        assert!(
+            verdict.samples["lost (final read-back)"][0].starts_with("t writer 0"),
+            "{verdict}"
+        );
+    }
+
+    #[test]
+    fn test_ledger_reports_a_partially_visible_transaction() {
+        let ledger = ledger();
+        let seqs: Vec<u64> = (0..2).map(|_| ledger.next_seq(TOPIC, 0)).collect();
+        let results: Vec<_> = seqs.iter().map(|&seq| (seq, Ok(metadata(seq as i64)))).collect();
+        ledger.resolve_txn(TOPIC, 0, &results, TxnOutcome::Unknown);
+        ledger.final_record(&unchanged(&produced(seqs[0], TxnIntent::Commit), 0, 0));
+        let verdict = ledger.verdict(true, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "partially visible transactions"), 1, "{verdict}");
+        // All of it visible: committed after all.
+        ledger.final_record(&unchanged(&produced(seqs[1], TxnIntent::Commit), 0, 1));
+        assert!(ledger.verdict(true, true, &Requirements::default()).passed());
+    }
+
+    #[test]
+    fn test_ledger_checks_the_copier_offsets() {
+        use confluent_kafka::common::Error;
+        let ledger = ledger();
+        let tp = TopicPartition::new(TOPIC.to_string(), 0);
+        let expected = HashMap::from([(tp.clone(), 4)]);
+        ledger.copier_readback(&expected, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(4).unwrap())]));
+        ledger.copier_readback(&expected, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(5).unwrap())]));
+        // A partition it never committed holds its seeded 0.
+        let other = TopicPartition::new(TOPIC.to_string(), 1);
+        ledger.copier_readback(&expected, &HashMap::from([(other, OffsetAndMetadata::new(0).unwrap())]));
+        ledger.copier_failed_in_committed_txn("m", "t-0@3", &Error::timeout("expired"));
+        let verdict = ledger.verdict(false, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "committed offset read-back violations"), 1, "{verdict}");
+        assert_eq!(
+            failure_count(&verdict, "failed records in committed transactions"),
+            1,
+            "{verdict}"
+        );
+        assert!(verdict.samples["failed records in committed transactions"][0].contains("t-0@3"));
+    }
+
+    #[test]
+    fn test_ledger_requires_planned_aborts_and_few_failures() {
+        use confluent_kafka::common::Error;
+        let ledger = ledger();
+        // Aborted after a failure: never visible, but no planned abort.
+        let seq = ledger.next_seq(TOPIC, 0);
+        ledger.resolve_txn(TOPIC, 0, &[(seq, Ok(metadata(0)))], TxnOutcome::Failed);
+        for _ in 0..3 {
+            let seq = ledger.next_seq(TOPIC, 0);
+            ledger.delivered(TOPIC, 0, seq, &Err(Error::timeout("expired")));
+        }
+        let requirements = Requirements { min_txns_aborted: 1, max_failed_percent: Some(50.0), ..Default::default() };
+        let verdict = ledger.verdict(false, true, &requirements);
+        assert_eq!(verdict.counts.txns_failed, 1, "{verdict}");
+        assert!(verdict.unmet.iter().any(|u| u.contains("0 aborted transactions")), "{verdict}");
+        assert!(
+            verdict.unmet.iter().any(|u| u.starts_with("3 of 4 sends failed or ambiguous")),
+            "{verdict}"
+        );
+        assert!(
+            verdict
+                .unmet
+                .iter()
+                .any(|u| u.starts_with("1 of 1 transactions failed or unknown")),
+            "{verdict}"
+        );
     }
 }

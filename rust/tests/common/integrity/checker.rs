@@ -21,7 +21,10 @@
 //! - **once**: acknowledged (and, in a transaction, committed). It must be read
 //!   exactly once by the final read-back, and at least once by the live group.
 //! - **at most once**: the outcome is unknown (a retriable error such as a
-//!   delivery timeout, or a commit that failed). It may be read, but not twice.
+//!   delivery timeout, or a commit that failed and could not be aborted). It
+//!   may be missing, but once a reader finds it (or a copy of it in a mirror)
+//!   it was written and is due once like the rest; the records of a transaction
+//!   of unknown outcome are all visible or none is.
 //! - **never**: rejected, or in an aborted transaction. It must not be read.
 //!
 //! State is one byte per record (its bucket plus what the readers saw), so a
@@ -97,8 +100,13 @@ pub enum StreamKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxnOutcome {
     Committed,
+    /// A planned abort that reached the broker: its records were flushed and
+    /// `abort_transaction` succeeded.
     Aborted,
-    /// `commit_transaction` failed: it may or may not have committed.
+    /// Aborted or abandoned after something failed (a send, the flush, the
+    /// commit or the abort itself): never committed, and not a planned abort.
+    Failed,
+    /// The commit failed and so did the abort: it may or may not have committed.
     Unknown,
 }
 
@@ -136,12 +144,14 @@ pub struct Counts {
     pub send_ambiguous: u64,
     pub txns_committed: u64,
     pub txns_aborted: u64,
+    pub txns_failed: u64,
     pub txns_unknown: u64,
     pub producer_restarts: u64,
     pub producer_errors: u64,
     /// Transactions of the consume-transform-produce copiers.
     pub copier_commits: u64,
     pub copier_aborts: u64,
+    pub copier_failed: u64,
 
     pub live_consumed: u64,
     pub redelivered: u64,
@@ -169,11 +179,14 @@ pub struct Counts {
     /// Records whose delivery failed in a transaction that then committed: a
     /// commit must fail when any of its sends did.
     pub failed_in_committed_txn: u64,
+    /// Transactions of unknown outcome of which some records are visible and
+    /// others not.
+    pub partial_txns: u64,
 }
 
 impl Counts {
     /// Every failure counter with its label; each must be zero for a pass.
-    pub fn failures(&self) -> [(&'static str, u64); 13] {
+    pub fn failures(&self) -> [(&'static str, u64); 14] {
         [
             ("corrupt records", self.corrupt),
             ("aborted records visible", self.aborted_visible),
@@ -188,6 +201,7 @@ impl Counts {
             ("rejected or aborted records visible", self.unexpected_visible),
             ("unresolved sends", self.unresolved),
             ("failed records in committed transactions", self.failed_in_committed_txn),
+            ("partially visible transactions", self.partial_txns),
         ]
     }
 
@@ -215,6 +229,10 @@ pub struct Requirements {
     pub min_producer_restarts: u64,
     pub min_copier_aborts: u64,
     pub every_partition_read: bool,
+    /// At most this percentage of the sends may fail or be ambiguous, and of
+    /// the transactions (the writers' and the copiers') fail or end unknown: a
+    /// client that drops most of its records must not pass on the rest.
+    pub max_failed_percent: Option<f64>,
 }
 
 struct Stream {
@@ -271,6 +289,11 @@ struct State {
     live: LiveState,
     final_last_seq: HashMap<(usize, i32, u32), u64>,
     final_read: HashMap<usize, std::collections::BTreeSet<i32>>,
+    /// Where the final read-back found an ambiguous record the live group did
+    /// not read.
+    final_at: HashMap<(usize, RecordId), (i32, i64)>,
+    /// The sequence numbers of each transaction of unknown outcome.
+    unknown_txns: Vec<(usize, u32, Vec<u64>)>,
     counts: Counts,
     samples: BTreeMap<&'static str, Vec<String>>,
     progress: u64,
@@ -289,6 +312,14 @@ impl State {
             .topic_index
             .get(topic)
             .unwrap_or_else(|| panic!("topic {topic} is not registered with the ledger"))
+    }
+
+    /// The stream whose writers decide what stream `t` must hold.
+    fn source_of(&self, t: usize) -> usize {
+        match &self.streams[t].kind {
+            StreamKind::Source => t,
+            StreamKind::Mirror(source) => self.stream(source),
+        }
     }
 
     /// The delivery report of `id` arrived: compare it with where the record
@@ -439,8 +470,13 @@ impl Ledger {
                 st.counts.txns_aborted += 1;
                 Expectation::Never
             },
+            TxnOutcome::Failed => {
+                st.counts.txns_failed += 1;
+                Expectation::Never
+            },
             TxnOutcome::Unknown => {
                 st.counts.txns_unknown += 1;
+                st.unknown_txns.push((t, writer, results.iter().map(|(seq, _)| *seq).collect()));
                 Expectation::AtMostOnce
             },
         };
@@ -455,6 +491,26 @@ impl Ledger {
                 );
             }
             st.resolve(t, RecordId { writer, seq: *seq }, result, ok);
+        }
+    }
+
+    /// The records of one poll of the live group: within it, each partition's
+    /// offsets only increase.
+    pub fn live_batch(&self, records: &[ConsumerRecord<Vec<u8>, Vec<u8>>]) {
+        let mut last: HashMap<(&str, i32), i64> = HashMap::new();
+        for record in records {
+            let (topic, p, offset) = (record.topic(), record.partition(), record.offset());
+            if let Some(previous) = last.insert((topic, p), offset)
+                && offset <= previous
+            {
+                let mut st = self.lock();
+                st.counts.order_violations += 1;
+                st.sample(
+                    "order violations",
+                    format!("live {topic}-{p}: offset {offset} after {previous} in one poll"),
+                );
+            }
+            self.live_record(record);
         }
     }
 
@@ -549,7 +605,8 @@ impl Ledger {
 
     /// The committed offsets read back right after a successful commit of
     /// `ours`, with no poll in between. Another member may have committed
-    /// further since (a rebalance), never less.
+    /// further since (a rebalance), never less, and never past what the group
+    /// read.
     pub fn readback(
         &self,
         ours: &HashMap<TopicPartition, OffsetAndMetadata>,
@@ -558,12 +615,39 @@ impl Ledger {
         let mut st = self.lock();
         st.counts.readbacks_checked += 1;
         for (tp, offset) in ours {
+            let t = st.stream(tp.topic());
+            let read_up_to = st.live.max_offset.get(&(t, tp.partition())).map_or(0, |max| max + 1);
             let read = theirs.get(tp).map(OffsetAndMetadata::offset);
-            if read.is_none_or(|read| read < offset.offset()) {
+            if read.is_none_or(|read| read < offset.offset() || read > read_up_to) {
                 st.counts.readback_violations += 1;
                 st.sample(
                     "committed offset read-back violations",
-                    format!("{tp}: committed {}, read back {read:?}", offset.offset()),
+                    format!(
+                        "{tp}: committed {}, read back {read:?}, read up to {read_up_to}",
+                        offset.offset()
+                    ),
+                );
+            }
+        }
+    }
+
+    /// A copier's committed offsets, read back: the copier is its group's only
+    /// member, so they must be exactly what it last committed (`expected`; a
+    /// partition it never committed holds its seeded 0).
+    pub fn copier_readback(
+        &self,
+        expected: &HashMap<TopicPartition, i64>,
+        read: &HashMap<TopicPartition, OffsetAndMetadata>,
+    ) {
+        let mut st = self.lock();
+        st.counts.readbacks_checked += 1;
+        for (tp, offset) in read {
+            let expected = expected.get(tp).copied().unwrap_or(0);
+            if offset.offset() != expected {
+                st.counts.readback_violations += 1;
+                st.sample(
+                    "committed offset read-back violations",
+                    format!("copier {tp}: committed {expected}, read back {}", offset.offset()),
                 );
             }
         }
@@ -602,7 +686,10 @@ impl Ledger {
                 format!("final {}-{p}@{offset}: {id:?}", record.topic()),
             );
         }
-        if let Some(&last) = st.final_last_seq.get(&(t, p, id.writer))
+        let flags = st.streams[t].flags(id);
+        // A record read before is a duplicate, counted as one in the verdict.
+        if final_count(flags) == 0
+            && let Some(&last) = st.final_last_seq.get(&(t, p, id.writer))
             && id.seq <= last
         {
             st.counts.order_violations += 1;
@@ -623,6 +710,10 @@ impl Ledger {
         {
             st.check_placement(t, id, acked, (p, offset));
         }
+        let source = st.source_of(t);
+        if flags & SEEN_LIVE == 0 && expectation(st.streams[source].flags(id)) == Expectation::AtMostOnce {
+            st.final_at.insert((t, id), (p, offset));
+        }
         let flags = st.streams[t].flags_mut(id);
         let count = final_count(*flags);
         if count < 2 {
@@ -639,23 +730,24 @@ impl Ledger {
         }
     }
 
-    /// A delivery failed in a copier transaction that then committed.
-    pub fn copier_failed_in_committed_txn(&self, topic: &str, error: &Error) {
+    /// The copy into `topic` of the record at `source` failed in a copier
+    /// transaction that then committed.
+    pub fn copier_failed_in_committed_txn(&self, topic: &str, source: &str, error: &Error) {
         let mut st = self.lock();
         st.counts.failed_in_committed_txn += 1;
         st.sample(
             "failed records in committed transactions",
-            format!("copier to {topic}: {error}"),
+            format!("copier to {topic}, copy of {source}: {error}"),
         );
     }
 
-    /// A copier committed (`true`) or aborted a transaction.
-    pub fn copier_txn(&self, committed: bool) {
+    /// A copier transaction ended.
+    pub fn copier_txn(&self, outcome: TxnOutcome) {
         let mut st = self.lock();
-        if committed {
-            st.counts.copier_commits += 1;
-        } else {
-            st.counts.copier_aborts += 1;
+        match outcome {
+            TxnOutcome::Committed => st.counts.copier_commits += 1,
+            TxnOutcome::Aborted => st.counts.copier_aborts += 1,
+            TxnOutcome::Failed | TxnOutcome::Unknown => st.counts.copier_failed += 1,
         }
     }
 
@@ -674,15 +766,14 @@ impl Ledger {
     pub fn live_outstanding(&self) -> u64 {
         let st = self.lock();
         let mut outstanding = 0;
-        for stream in &st.streams {
-            let source = match &stream.kind {
-                StreamKind::Source => stream,
-                StreamKind::Mirror(source) => &st.streams[st.stream(source)],
-            };
+        for (t, stream) in st.streams.iter().enumerate() {
+            let source = &st.streams[st.source_of(t)];
             for (writer, records) in &source.writers {
+                // Tens of millions of records under the lock: one lookup per
+                // writer, not per record.
+                let seen = stream.writers.get(writer).map_or(&[][..], Vec::as_slice);
                 for (seq, flags) in records.iter().enumerate() {
-                    let id = RecordId { writer: *writer, seq: seq as u64 };
-                    if expectation(*flags) == Expectation::Once && stream.flags(id) & SEEN_LIVE == 0 {
+                    if expectation(*flags) == Expectation::Once && seen.get(seq).is_none_or(|f| f & SEEN_LIVE == 0) {
                         outstanding += 1;
                     }
                 }
@@ -691,21 +782,35 @@ impl Ledger {
         outstanding
     }
 
-    /// Scores the run. `live` and `final_pass` say which readers ran;
+    /// Scores the run. `live` says whether the live group ran;
     /// `final_complete` whether the final read-back reached the end of every
     /// partition.
-    pub fn verdict(&self, live: bool, final_pass: bool, final_complete: bool, requirements: &Requirements) -> Verdict {
+    pub fn verdict(&self, live: bool, final_complete: bool, requirements: &Requirements) -> Verdict {
         let mut guard = self.lock();
         let st = &mut *guard;
         let mut counts = st.counts.clone();
         let mut lost: Vec<(&'static str, String)> = Vec::new();
         let mut unmet = Vec::new();
         let mut unreached = 0u64;
-        for stream in &st.streams {
-            let source = match &stream.kind {
-                StreamKind::Source => stream,
-                StreamKind::Mirror(source) => &st.streams[st.topic_index[source.as_str()]],
-            };
+        let mut mirrors: HashMap<usize, Vec<usize>> = HashMap::new();
+        for t in 0..st.streams.len() {
+            let source = st.source_of(t);
+            if source != t {
+                mirrors.entry(source).or_default().push(t);
+            }
+        }
+        // Whether a reader found a record of source `s`, there or in a mirror.
+        let found = |s: usize, id: RecordId| {
+            std::iter::once(s)
+                .chain(mirrors.get(&s).into_iter().flatten().copied())
+                .any(|t| {
+                    let flags = st.streams[t].flags(id);
+                    flags & SEEN_LIVE != 0 || final_count(flags) > 0
+                })
+        };
+        for (t, stream) in st.streams.iter().enumerate() {
+            let s = st.source_of(t);
+            let source = &st.streams[s];
             let mut due_once = 0u64;
             for (writer, records) in &source.writers {
                 // Consecutive lost sequence numbers are reported as one range.
@@ -719,15 +824,17 @@ impl Ledger {
                     let read = final_count(flags);
                     let mut live_lost = false;
                     let mut final_lost = false;
-                    // An ambiguous send that either reader found in its source
-                    // was written: it is due once there and in a mirror.
-                    let written = final_pass
-                        && final_complete
-                        && expectation(*source_flags) == Expectation::AtMostOnce
-                        && (final_count(*source_flags) > 0 || *source_flags & SEEN_LIVE != 0);
                     match expectation(*source_flags) {
-                        Expectation::AtMostOnce if written => {
-                            live_lost = live && !seen_live;
+                        // An ambiguous send that a reader found was written: it
+                        // is due once in its source and in every mirror.
+                        Expectation::AtMostOnce if final_complete && found(s, id) => {
+                            // Only a group that committed past it skipped it; one
+                            // that stopped before reaching it did not.
+                            live_lost = live
+                                && !seen_live
+                                && st.final_at.get(&(t, id)).is_some_and(|&(p, offset)| {
+                                    st.live.committed.get(&(t, p)).is_some_and(|&c| c > offset)
+                                });
                             final_lost = read == 0;
                             if read > 1 {
                                 counts.duplicated_final += 1;
@@ -738,14 +845,14 @@ impl Ledger {
                             live_lost = live && !seen_live;
                             // Unread records of an unfinished read-back are not
                             // lost: the unmet requirement below reports them.
-                            final_lost = final_pass && read == 0 && final_complete;
-                            unreached += u64::from(final_pass && read == 0 && !final_complete);
-                            if final_pass && read > 1 {
+                            final_lost = read == 0 && final_complete;
+                            unreached += u64::from(read == 0 && !final_complete);
+                            if read > 1 {
                                 counts.duplicated_final += 1;
                             }
                         },
                         Expectation::Pending | Expectation::AtMostOnce => {
-                            if final_pass && read > 1 {
+                            if read > 1 {
                                 counts.duplicated_final += 1;
                             }
                             if expectation(*source_flags) == Expectation::Pending
@@ -777,7 +884,7 @@ impl Ledger {
                 }
             }
             // A mirror holds only copies of its source's records.
-            if matches!(stream.kind, StreamKind::Mirror(_)) {
+            if s != t {
                 for (writer, records) in &stream.writers {
                     let known = source.writers.get(writer).map_or(0, Vec::len);
                     for (seq, flags) in records.iter().enumerate().skip(known) {
@@ -798,14 +905,33 @@ impl Ledger {
                 ));
             }
             if requirements.every_partition_read {
-                let t = st.topic_index[stream.name.as_str()];
                 let read: usize = if live {
-                    st.live.max_offset.keys().filter(|(s, _)| *s == t).count()
+                    st.live.max_offset.keys().filter(|(stream, _)| *stream == t).count()
                 } else {
                     st.final_read.get(&t).map_or(0, |p| p.len())
                 };
                 if read < stream.partitions as usize {
                     unmet.push(format!("{}: {read} of {} partition(s) read", stream.name, stream.partitions));
+                }
+            }
+        }
+        // A transaction commits or aborts as a whole, even when the writer
+        // could not tell which.
+        if final_complete {
+            for (s, writer, seqs) in &st.unknown_txns {
+                let visible = seqs.iter().filter(|&&seq| found(*s, RecordId { writer: *writer, seq })).count();
+                if visible > 0 && visible < seqs.len() {
+                    counts.partial_txns += 1;
+                    lost.push((
+                        "partially visible transactions",
+                        format!(
+                            "{} writer {writer}: {visible} of the {} records of seq {}..={} visible",
+                            st.streams[*s].name,
+                            seqs.len(),
+                            seqs.first().copied().unwrap_or(0),
+                            seqs.last().copied().unwrap_or(0)
+                        ),
+                    ));
                 }
             }
         }
@@ -833,7 +959,35 @@ impl Ledger {
                 unmet.push(format!("{got} {what}, expected at least {min}"));
             }
         }
-        if final_pass && !final_complete {
+        if let Some(max) = requirements.max_failed_percent {
+            let c = &counts;
+            let txns = c.txns_committed
+                + c.txns_aborted
+                + c.txns_failed
+                + c.txns_unknown
+                + c.copier_commits
+                + c.copier_aborts
+                + c.copier_failed;
+            let shares = [
+                ("sends failed or ambiguous", c.send_rejected + c.send_ambiguous, c.sent),
+                (
+                    "transactions failed or unknown",
+                    c.txns_failed + c.txns_unknown + c.copier_failed,
+                    txns,
+                ),
+            ];
+            for (what, part, whole) in shares {
+                let percent = if whole == 0 {
+                    0.0
+                } else {
+                    part as f64 * 100.0 / whole as f64
+                };
+                if percent > max {
+                    unmet.push(format!("{part} of {whole} {what} ({percent:.2}%), expected at most {max}%"));
+                }
+            }
+        }
+        if !final_complete {
             unmet.push(format!(
                 "the final read-back did not reach the end of every partition ({unreached} record(s) due once not read)"
             ));
@@ -889,9 +1043,10 @@ impl Verdict {
             "failures": failures,
             "writers": {
                 "sent": c.sent, "acked": c.acked, "rejected": c.send_rejected, "ambiguous": c.send_ambiguous,
-                "txns_committed": c.txns_committed, "txns_aborted": c.txns_aborted, "txns_unknown": c.txns_unknown,
+                "txns_committed": c.txns_committed, "txns_aborted": c.txns_aborted, "txns_failed": c.txns_failed,
+                "txns_unknown": c.txns_unknown,
                 "producer_restarts": c.producer_restarts, "producer_errors": c.producer_errors,
-                "copier_commits": c.copier_commits, "copier_aborts": c.copier_aborts,
+                "copier_commits": c.copier_commits, "copier_aborts": c.copier_aborts, "copier_failed": c.copier_failed,
             },
             "live_readers": {
                 "consumed": c.live_consumed, "redelivered": c.redelivered, "commits": c.commits,
@@ -915,8 +1070,8 @@ impl fmt::Display for Verdict {
         writeln!(f, "  rejected / ambiguous     : {} / {}", c.send_rejected, c.send_ambiguous)?;
         writeln!(
             f,
-            "  transactions             : {} committed, {} aborted, {} unknown",
-            c.txns_committed, c.txns_aborted, c.txns_unknown
+            "  transactions             : {} committed, {} aborted, {} failed, {} unknown",
+            c.txns_committed, c.txns_aborted, c.txns_failed, c.txns_unknown
         )?;
         writeln!(
             f,
@@ -925,8 +1080,8 @@ impl fmt::Display for Verdict {
         )?;
         writeln!(
             f,
-            "  copier transactions      : {} committed, {} aborted",
-            c.copier_commits, c.copier_aborts
+            "  copier transactions      : {} committed, {} aborted, {} failed",
+            c.copier_commits, c.copier_aborts, c.copier_failed
         )?;
         writeln!(
             f,
