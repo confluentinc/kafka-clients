@@ -16,8 +16,10 @@
 
 use std::io::{self, BufRead, Write};
 
-use super::{CompressingWriter, DecompressingReader, XerialSnappyReader, XerialSnappyWriter};
+use super::{CompressingWriter, DecompressingReader};
 use super::{GzipCompression, Lz4Compression, ZstdCompression};
+#[cfg(feature = "snappy")]
+use super::{XerialSnappyReader, XerialSnappyWriter};
 use super::{gzip_compression, lz4_compression, zstd_compression};
 use crate::common::Error;
 use crate::common::record::internal::CompressionType;
@@ -220,6 +222,33 @@ impl Compression {
         }
     }
 
+    /// Whether the codec of `compression_type` is compiled in: `none` always
+    /// is, each other codec only with its Cargo feature (`gzip`, `snappy`,
+    /// `lz4`, `zstd`).
+    pub(crate) fn is_enabled(compression_type: CompressionType) -> bool {
+        match compression_type {
+            CompressionType::None => true,
+            CompressionType::Gzip => cfg!(feature = "gzip"),
+            CompressionType::Snappy => cfg!(feature = "snappy"),
+            CompressionType::Lz4 => cfg!(feature = "lz4"),
+            CompressionType::Zstd => cfg!(feature = "zstd"),
+        }
+    }
+
+    /// The message of the error a codec left out of the build fails with:
+    /// its Cargo feature has the compression type's name.
+    pub(crate) fn disabled_message(compression_type: CompressionType) -> String {
+        let name = compression_type.name();
+        format!("Compression type {name} is not available: the client was built without the `{name}` feature")
+    }
+
+    /// The error [`Self::wrap_for_output`] and [`Self::wrap_for_input`] return
+    /// for a codec left out of the build.
+    #[cfg(not(all(feature = "gzip", feature = "snappy", feature = "lz4", feature = "zstd")))]
+    fn disabled_error(&self) -> io::Error {
+        io::Error::new(io::ErrorKind::Unsupported, Self::disabled_message(self.compression_type()))
+    }
+
     /// Wrap a writer with a compressing output stream.
     ///
     /// The returned writer compresses data written to it. Call `finish()` on the
@@ -238,6 +267,7 @@ impl Compression {
     pub fn wrap_for_output<W: Write>(&self, writer: W, _message_version: i8) -> io::Result<CompressingWriter<W>> {
         match self {
             Self::None => Ok(CompressingWriter::None(writer)),
+            #[cfg(feature = "gzip")]
             Self::Gzip(gzip) => {
                 let flate2_level = if gzip.level() == -1 {
                     flate2::Compression::default()
@@ -246,10 +276,12 @@ impl Compression {
                 };
                 Ok(CompressingWriter::Gzip(flate2::write::GzEncoder::new(writer, flate2_level)))
             },
+            #[cfg(feature = "snappy")]
             Self::Snappy => {
                 let encoder = XerialSnappyWriter::new(writer);
                 Ok(CompressingWriter::Snappy(Box::new(encoder)))
             },
+            #[cfg(feature = "lz4")]
             Self::Lz4(_) => {
                 // Note: lz4_flex is a pure-Rust LZ4 implementation that does not support
                 // compression levels. The Java client uses net.jpountz.lz4.LZ4Compressor
@@ -261,10 +293,13 @@ impl Compression {
                 let encoder = lz4_flex::frame::FrameEncoder::new(writer);
                 Ok(CompressingWriter::Lz4(encoder))
             },
+            #[cfg(feature = "zstd")]
             Self::Zstd(zstd_cfg) => {
                 let encoder = zstd::Encoder::new(writer, zstd_cfg.level())?;
                 Ok(CompressingWriter::Zstd(encoder))
             },
+            #[cfg(not(all(feature = "gzip", feature = "snappy", feature = "lz4", feature = "zstd")))]
+            _ => Err(self.disabled_error()),
         }
     }
 
@@ -289,22 +324,28 @@ impl Compression {
     pub fn wrap_for_input<R: BufRead>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),
+            #[cfg(feature = "gzip")]
             Self::Gzip(_) => {
                 let decoder = flate2::bufread::GzDecoder::new(reader);
                 Ok(DecompressingReader::Gzip(decoder))
             },
+            #[cfg(feature = "snappy")]
             Self::Snappy => {
                 let decoder = XerialSnappyReader::new(reader);
                 Ok(DecompressingReader::Snappy(decoder))
             },
+            #[cfg(feature = "lz4")]
             Self::Lz4(_) => {
                 let decoder = lz4_flex::frame::FrameDecoder::new(reader);
                 Ok(DecompressingReader::Lz4(decoder))
             },
+            #[cfg(feature = "zstd")]
             Self::Zstd(_) => {
                 let decoder = zstd::Decoder::with_buffer(reader)?;
                 Ok(DecompressingReader::Zstd(decoder))
             },
+            #[cfg(not(all(feature = "gzip", feature = "snappy", feature = "lz4", feature = "zstd")))]
+            _ => Err(self.disabled_error()),
         }
     }
 }

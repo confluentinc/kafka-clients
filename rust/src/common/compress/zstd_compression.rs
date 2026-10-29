@@ -30,6 +30,7 @@ pub struct ZstdCompression {
 
 impl ZstdCompression {
     /// The configured compression level, read when wrapping an output stream.
+    #[cfg(feature = "zstd")]
     pub(super) fn level(&self) -> i32 {
         self.level
     }

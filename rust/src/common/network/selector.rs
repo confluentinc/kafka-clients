@@ -2253,6 +2253,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rustls")]
     fn create_ssl_selector(ssl_factory: crate::common::security::ssl::SslFactory) -> Selector {
         let channel_builder = Box::new(crate::common::network::SslChannelBuilder::new(ssl_factory, None));
         Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder)
@@ -2261,6 +2262,7 @@ mod tests {
     /// Verifies that `poll()` drives the non-blocking SSL handshake to
     /// completion using socket readiness alone, after which the channel is
     /// ready and reported in `connected()`.
+    #[cfg(feature = "rustls")]
     #[tokio::test]
     async fn test_ssl_handshake_completes_through_poll() {
         let (client_factory, server_config) =
@@ -2302,6 +2304,7 @@ mod tests {
     /// enforce the connection setup timeout and the consumer can shut down.
     /// Previously the handshake awaited the peer inside `poll()`, which caused
     /// `KafkaConsumer::close()` to hang over SSL.
+    #[cfg(feature = "rustls")]
     #[tokio::test]
     async fn test_ssl_poll_does_not_block_on_silent_peer() {
         use std::time::{Duration, Instant};
