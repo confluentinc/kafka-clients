@@ -1041,7 +1041,8 @@ def _admin_timeout(request):
 def _admin_close_timeout(request):
     """`optional int64 timeout_ms` -> the `timeout` the admin facade's close() takes.
 
-    Absent is Java's no-argument `close()`. Shared by both servers' Close
+    Absent is Java's no-argument `close()`: `None` here, which the admin
+    facades' close() turns into a call without the argument. Shared by both servers' Close
     handlers, which previously each divided by 1000.0 inline and inherited the
     same 1 ms truncation as `_admin_timeout`."""
     return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
@@ -2108,10 +2109,14 @@ def _admin_scram_alterations(protos):
         else:
             info = ka.ScramCredentialInfo(
                 mechanism=ka.ScramMechanism.from_type(type=p.mechanism), iterations=p.iterations)
-            out.append(ka.UserScramCredentialUpsertion(
-                user=p.user, credential_info=info,
-                password=p.password if p.HasField("password") else b"",
-                salt=p.salt if p.HasField("salt") else None))
+            # An absent salt is Java's three-argument constructor (a random
+            # salt): leave the keyword out, since an explicit salt=None is
+            # Java's null salt and raises TypeError.
+            fields = dict(user=p.user, credential_info=info,
+                          password=p.password if p.HasField("password") else b"")
+            if p.HasField("salt"):
+                fields["salt"] = p.salt
+            out.append(ka.UserScramCredentialUpsertion(**fields))
     return out
 
 
@@ -3009,7 +3014,13 @@ class SyncAdminFacade:
         return call
 
     def close(self, timeout=None):
-        self._admin.close(timeout=timeout)
+        """Java's ``close()`` when ``timeout`` is ``None`` (the request had no
+        ``timeout_ms``), else ``close(Duration)``: the binding reads an explicit
+        ``timeout=None`` as a null ``Duration`` and raises ``TypeError``."""
+        if timeout is None:
+            self._admin.close()
+        else:
+            self._admin.close(timeout=timeout)
 
 
 class AsyncAdminFacade:
@@ -3029,7 +3040,11 @@ class AsyncAdminFacade:
         return call
 
     async def close(self, timeout=None):
-        await self._admin.close(timeout=timeout)
+        """As :meth:`SyncAdminFacade.close`."""
+        if timeout is None:
+            await self._admin.close()
+        else:
+            await self._admin.close(timeout=timeout)
 
 
 def _admin_mock_brokers(num_brokers):
