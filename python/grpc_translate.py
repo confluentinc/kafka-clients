@@ -552,6 +552,8 @@ def _record_to_proto(r):
         value=value,
         headers=headers,
         leader_epoch=leader_epoch if leader_epoch is not None else None,
+        serialized_key_size=r.serialized_key_size(),
+        serialized_value_size=r.serialized_value_size(),
     )
 
 

@@ -264,6 +264,12 @@ message ConsumerRecord {
   optional bytes value = 7;
   repeated Header headers = 8;
   optional int32 leader_epoch = 9;
+  // The binding's serializedKeySize() / serializedValueSize(): the size of the
+  // key / value as fetched, Java's ConsumerRecord.NULL_SIZE (-1) for a null
+  // one. Optional so that a server that does not fill them is caught rather
+  // than read as 0.
+  optional int32 serialized_key_size = 10;
+  optional int32 serialized_value_size = 11;
 }
 
 message ConsumerRecordList {

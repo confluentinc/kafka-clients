@@ -1025,8 +1025,14 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
     let headers =
         RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
-    let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
-    let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
+    // The binding's own sizes, as it reports them: computing them here from the
+    // key and value would make every size assertion pass on the gRPC arms.
+    let serialized_key_size = r
+        .serialized_key_size
+        .expect("the gRPC server sent a ConsumerRecord without serialized_key_size (a stale image?)");
+    let serialized_value_size = r
+        .serialized_value_size
+        .expect("the gRPC server sent a ConsumerRecord without serialized_value_size (a stale image?)");
     let options = ConsumerRecordOptionsBuilder::new()
         .set_topic(r.topic)
         .set_partition(r.partition)
