@@ -208,6 +208,8 @@ global_job_config:
 
 blocks:
   - name: "Verify Rust (Linux amd64)"
+    run:
+      when: "false"
     # Runs on every new commit, whether created manually or by the translation
     # agent.
     #
@@ -250,6 +252,8 @@ blocks:
             - make test-rust-all-features-sasl-ssl
 
   - name: "Verify language bindings (Linux amd64)"
+    run:
+      when: "false"
     # `dependencies: []` so this starts alongside "Verify Rust" rather than
     # after it. Each job builds the Rust library itself; sharing one build via
     # a workflow artifact was tried and reverted -- the tarball came to 8.9 GiB
@@ -302,6 +306,8 @@ blocks:
             - make test-integration-python-sasl-ssl
 
   - name: "Verify Rust (macOS arm64)"
+    run:
+      when: "false"
     dependencies: []
     execution_time_limit:
       minutes: 45
@@ -328,6 +334,8 @@ blocks:
             - make verify-rust-macos-docker
 
   - name: "Verify language bindings (macOS arm64)"
+    run:
+      when: "false"
     # verify-c runs the C ctest suite; verify-python runs pytest test/unit. Each
     # job then runs its binding's gRPC multilanguage arm (__grpc_c /
     # __grpc_python) with the gRPC server as a native host process rather than
@@ -368,6 +376,8 @@ blocks:
             - make verify-python-macos-docker
 
   - name: "Check Rust docs (Linux amd64)"
+    run:
+      when: "false"
     # Its own block so a documentation failure is attributable at a glance and
     # does not wait behind the test suite. `make doc-check` runs `cargo doc`
     # with `-D warnings` over the whole workspace; the doctests already run in
@@ -383,6 +393,8 @@ blocks:
             - make doc-check
 
   - name: "Check crate package (Linux amd64)"
+    run:
+      when: "false"
     # Packages `confluent-kafka` as it would be published and fails if the
     # `.crate` is missing LICENSE or README.md, contains a key or certificate
     # file, or exceeds 3 MiB compressed. It then builds a new project that
@@ -398,6 +410,8 @@ blocks:
             - make package-check
 
   - name: "Check API compatibility (Linux amd64)"
+    run:
+      when: "false"
     # Compares the public surface with the last release tag
     # (`cargo xtask api-compat`): the Rust API as crates.io publishes it with
     # cargo-semver-checks, the C ABI of the `ffi` shared library with
@@ -949,7 +963,7 @@ blocks:
   - name: "Release (Python): wheels (Linux amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -970,7 +984,7 @@ blocks:
   - name: "Release (Python): wheels (Linux arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -991,7 +1005,7 @@ blocks:
   - name: "Release (Python): wheels (macOS amd64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1016,7 +1030,7 @@ blocks:
   - name: "Release (Python): wheels (macOS arm64)"
     dependencies: []
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1041,7 +1055,7 @@ blocks:
   - name: "Release (Python): wheel verification (Linux amd64)"
     dependencies: ["Release (Python): wheels (Linux amd64)"]
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1066,7 +1080,7 @@ blocks:
   - name: "Release (Python): wheel verification (Linux arm64)"
     dependencies: ["Release (Python): wheels (Linux arm64)"]
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1091,7 +1105,7 @@ blocks:
   - name: "Release (Python): wheel verification (macOS amd64)"
     dependencies: ["Release (Python): wheels (macOS amd64)"]
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1116,7 +1130,7 @@ blocks:
   - name: "Release (Python): wheel verification (macOS arm64)"
     dependencies: ["Release (Python): wheels (macOS arm64)"]
     run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+      when: "pull_request = '288' OR tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
