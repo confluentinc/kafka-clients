@@ -30,7 +30,7 @@
 //! every container-backed arm across the producer, consumer and admin suites
 //! with a single `--skip __grpc`.
 //!
-//! Unlike `multilanguage_test!` and `multilanguage_consumer_test!`, the five
+//! As in `multilanguage_test!` and `multilanguage_consumer_test!`, the five
 //! container-backed arms are individually `#[cfg(feature =
 //! "multilanguage-tests")]` and the macro itself is available with only
 //! `integration-tests`. That is what lets the committed admin integration tests
@@ -38,9 +38,7 @@
 //! `integration-tests` alone (`make test-integration`, `verify-commit`) an
 //! invocation still expands to the `__rust` arm, which drives the same
 //! production `Admin` trait against the same broker as the single-backend test
-//! it replaced — so converting costs no coverage at any feature level. The
-//! producer suite took the other route (`mod producer_test` is gated whole), and
-//! its scenarios do not run under `make test-integration` as a result.
+//! it replaced — so converting costs no coverage at any feature level.
 //!
 //! Multi-thread flavor matches the other two macros. The native admin client
 //! spawns its own background task and the gRPC backends block a tonic worker,
@@ -50,13 +48,22 @@
 /// backend (rust / grpc_python / grpc_python_async / grpc_c / grpc_dotnet /
 /// grpc_dotnet_async). Two forms, mirroring `multilanguage_test!`: with or without
 /// an explicit `ClusterConfig`.
+///
+/// Leading outer attributes (`#[ignore = "<reason>"]`) are applied to every
+/// arm: the form for a scenario that exposes a defect in the shared Rust core,
+/// which every backend reaches.
 #[macro_export]
 macro_rules! multilanguage_admin_test {
-    ($name:ident, $body:ident) => {
-        $crate::multilanguage_admin_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
+    ($(#[$attr:meta])* $name:ident, $body:ident) => {
+        $crate::multilanguage_admin_test!(
+            $(#[$attr])* $name,
+            $body,
+            $crate::common::cluster_config::ClusterConfig::default()
+        );
     };
-    ($name:ident, $body:ident, $cluster_config:expr) => {
+    ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
@@ -65,6 +72,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
@@ -80,6 +88,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
@@ -95,6 +104,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
@@ -110,6 +120,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
@@ -125,6 +136,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
