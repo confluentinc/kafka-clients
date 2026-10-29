@@ -56,9 +56,9 @@ class ExpireDelegationTokenOptions(AbstractOptions):
         Without: the current value.
 
         :param expiry_time_period_ms: the time period until we should expire this token.
-        ``expiryTimePeriodMs`` >= 0: the token will update the expiration timestamp to
-        min(now + expiryTimePeriodMs, maxTimestamp) ``expiryTimePeriodMs`` < 0: token
-        will be expired immediately.
+            ``expiryTimePeriodMs`` >= 0: the token will update the expiration timestamp
+            to min(now + expiryTimePeriodMs, maxTimestamp) ``expiryTimePeriodMs`` < 0:
+            token will be expired immediately.
         """
         if expiry_time_period_ms is MISSING:
             return self._expiry_time_period_ms

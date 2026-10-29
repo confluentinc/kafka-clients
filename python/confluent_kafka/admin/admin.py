@@ -1131,8 +1131,7 @@ class Admin(_AdminState):
 
         ``hmac``: HMAC of the Delegation token; ``options``: the options to use when
         renewing delegation token (Java's ``renewDelegationToken(hmac)`` passes ``new
-        RenewDelegationTokenOptions()``). Returns the ``RenewDelegationTokenResult``,
-.
+        RenewDelegationTokenOptions()``). Returns the ``RenewDelegationTokenResult``.
         """
         self._check_not_closed()
         options = _conversions.options_or_new(options, RenewDelegationTokenOptions)
@@ -1174,8 +1173,7 @@ class Admin(_AdminState):
 
         ``hmac``: HMAC of the Delegation token; ``options``: the options to use when
         expiring delegation token (Java's ``expireDelegationToken(hmac)`` passes ``new
-        ExpireDelegationTokenOptions()``). Returns the ``ExpireDelegationTokenResult``,
-.
+        ExpireDelegationTokenOptions()``). Returns the ``ExpireDelegationTokenResult``.
         """
         self._check_not_closed()
         options = _conversions.options_or_new(options, ExpireDelegationTokenOptions)
