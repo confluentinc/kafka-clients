@@ -104,7 +104,7 @@ ffi-macros = { path = "ffi-macros", optional = true }
 flate2 = { version = "1", optional = true }
 snap = { version = "1", optional = true }
 lz4_flex = { version = "0.11", optional = true }
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14.3", optional = true }
 crc32c = "0.6"
 # IEEE 802.3 / zlib CRC-32 (poly 0x04C11DB7, reflected). Used as the default
 # producer key partitioner hash (`KeyHasher::Crc32`), matching librdkafka's
