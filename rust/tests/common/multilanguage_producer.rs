@@ -433,8 +433,35 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
-/// Rebuilds an [`Error`] from its wire form.
-pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
+/// Rebuilds an [`Error`] from its wire form, with its cause.
+///
+/// The cause (the proto's `cause`, one level deep) is rebuilt from its code and
+/// message and attached where the error's class takes one: a bare
+/// `KafkaException`, as Java's `KafkaException(String, Throwable)`, so
+/// [`Error::source`] answers as the native error's does. For any other class
+/// the cause is not attached, so a test asserting on `source()` there sees
+/// `None` and fails, rather than passing on a rebuilt guess.
+pub(crate) fn kafka_error_from_proto(mut p: proto::KafkaError) -> Error {
+    use crate::common::error_code::UNKNOWN_SERVER_ERROR;
+
+    let cause = p.cause.take().map(|cause| {
+        kafka_error_without_cause(proto::KafkaError {
+            code: cause.code,
+            message: cause.message,
+            bare_kafka_error: cause.bare_kafka_error,
+            ..Default::default()
+        })
+    });
+    match cause {
+        Some(cause) if p.code == UNKNOWN_SERVER_ERROR && p.bare_kafka_error => {
+            Error::kafka_message_source(p.message, cause)
+        },
+        _ => kafka_error_without_cause(p),
+    }
+}
+
+/// [`kafka_error_from_proto`] for the error itself, its cause left aside.
+fn kafka_error_without_cause(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 
     // `code` is the discriminator. It is the FFI error code
@@ -558,4 +585,60 @@ pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static st
         status.code(),
         status.message()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::error_code::INVALID_PRODUCER_ID_MAPPING;
+    use crate::common::error_code::LOCAL_ILLEGAL_STATE;
+    use crate::common::error_code::UNKNOWN_SERVER_ERROR;
+
+    fn cause(code: i32, message: &str) -> Option<proto::KafkaErrorCause> {
+        Some(proto::KafkaErrorCause { code, message: message.to_string(), bare_kafka_error: false })
+    }
+
+    /// A bare `KafkaException` with a cause rebuilds with that cause, of its class.
+    #[test]
+    fn bare_kafka_error_keeps_its_cause() {
+        let error = kafka_error_from_proto(proto::KafkaError {
+            code: UNKNOWN_SERVER_ERROR,
+            message: "in an error state".to_string(),
+            bare_kafka_error: true,
+            cause: cause(INVALID_PRODUCER_ID_MAPPING, "bad mapping"),
+            ..Default::default()
+        });
+        assert!(matches!(error, Error::KafkaError(_)), "got {error:?}");
+        assert_eq!(error.message(), "in an error state");
+        let source = error.source().expect("a cause");
+        assert!(matches!(source, Error::InvalidPidMapping(_)), "got {source:?}");
+        assert_eq!(source.message(), "bad mapping");
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    /// Any other class is rebuilt without the cause, so `source()` is `None`.
+    #[test]
+    fn other_class_drops_the_cause() {
+        let error = kafka_error_from_proto(proto::KafkaError {
+            code: LOCAL_ILLEGAL_STATE,
+            message: "state".to_string(),
+            cause: cause(INVALID_PRODUCER_ID_MAPPING, "bad mapping"),
+            ..Default::default()
+        });
+        assert!(error.is_local_illegal_state_error(), "got {error:?}");
+        assert!(error.source().is_none());
+    }
+
+    /// No cause: a bare error stays bare, with no source.
+    #[test]
+    fn no_cause() {
+        let error = kafka_error_from_proto(proto::KafkaError {
+            code: UNKNOWN_SERVER_ERROR,
+            message: "plain".to_string(),
+            bare_kafka_error: true,
+            ..Default::default()
+        });
+        assert!(matches!(error, Error::KafkaError(_)), "got {error:?}");
+        assert!(error.source().is_none());
+    }
 }

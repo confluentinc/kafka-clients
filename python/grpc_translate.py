@@ -195,6 +195,13 @@ def _fill_error_payload(proto, err):
             pb.PartitionOffset(partition=_callback_log_partition(tp), offset=offset)
             for tp, offset in err.offset_out_of_range_partitions().items())
     proto.bare_kafka_error = proto.code == UnknownServerError._ffi_id and not isinstance(err, ApiError)
+    # The cause, one level deep (Java's getCause()), when it is a client error.
+    cause = err.__cause__
+    if isinstance(cause, KafkaError) or hasattr(type(cause), "_ffi_id"):
+        code = _error_code_of(cause)
+        proto.cause.code = code
+        proto.cause.message = str(cause) or ""
+        proto.cause.bare_kafka_error = code == UnknownServerError._ffi_id and not isinstance(cause, ApiError)
 
 
 def _kafka_error_to_proto(err):
