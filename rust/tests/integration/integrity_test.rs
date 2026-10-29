@@ -752,6 +752,13 @@ mod self_tests {
         ledger.live_record(&record);
         ledger.final_record(&record);
         assert!(ledger.verdict(true, true, true, &Requirements::default()).passed());
+        // Read live but gone from the final read-back: lost.
+        let ledger = self::ledger();
+        let seq = ledger.next_seq(TOPIC, 0);
+        ledger.delivered(TOPIC, 0, seq, &Err(Error::timeout("expired")));
+        ledger.live_record(&unchanged(&produced(seq, TxnIntent::None), 0, 0));
+        let verdict = ledger.verdict(true, true, true, &Requirements::default());
+        assert_eq!(failure_count(&verdict, "lost (final read-back)"), 1, "{verdict}");
     }
 
     #[test]

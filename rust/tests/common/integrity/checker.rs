@@ -639,6 +639,16 @@ impl Ledger {
         }
     }
 
+    /// A delivery failed in a copier transaction that then committed.
+    pub fn copier_failed_in_committed_txn(&self, topic: &str, error: &Error) {
+        let mut st = self.lock();
+        st.counts.failed_in_committed_txn += 1;
+        st.sample(
+            "failed records in committed transactions",
+            format!("copier to {topic}: {error}"),
+        );
+    }
+
     /// A copier committed (`true`) or aborted a transaction.
     pub fn copier_txn(&self, committed: bool) {
         let mut st = self.lock();
@@ -709,12 +719,12 @@ impl Ledger {
                     let read = final_count(flags);
                     let mut live_lost = false;
                     let mut final_lost = false;
-                    // An ambiguous send that the final read-back found in its
-                    // source was written: it is due once there and in a mirror.
+                    // An ambiguous send that either reader found in its source
+                    // was written: it is due once there and in a mirror.
                     let written = final_pass
                         && final_complete
                         && expectation(*source_flags) == Expectation::AtMostOnce
-                        && final_count(*source_flags) > 0;
+                        && (final_count(*source_flags) > 0 || *source_flags & SEEN_LIVE != 0);
                     match expectation(*source_flags) {
                         Expectation::AtMostOnce if written => {
                             live_lost = live && !seen_live;
@@ -764,6 +774,21 @@ impl Ledger {
                 }
                 if let Some((from, to)) = final_run {
                     lost.push(("lost (final read-back)", describe_lost(&stream.name, *writer, from, to)));
+                }
+            }
+            // A mirror holds only copies of its source's records.
+            if matches!(stream.kind, StreamKind::Mirror(_)) {
+                for (writer, records) in &stream.writers {
+                    let known = source.writers.get(writer).map_or(0, Vec::len);
+                    for (seq, flags) in records.iter().enumerate().skip(known) {
+                        if flags & SEEN_LIVE != 0 || final_count(*flags) > 0 {
+                            counts.unexpected_visible += 1;
+                            lost.push((
+                                "rejected or aborted records visible",
+                                format!("{}: writer {writer} seq {seq} was never written to its source", stream.name),
+                            ));
+                        }
+                    }
                 }
             }
             if due_once < requirements.min_records_per_stream {

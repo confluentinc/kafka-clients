@@ -388,37 +388,34 @@ async fn seed_group_offsets(base: &Props, group_id: &str, topics: &[&TopicSpec])
     consumer.close().await.expect("close the seed consumer");
 }
 
-/// Holds a writer to `rate_per_sec` by releasing records in small bursts.
+/// Holds a writer to `rate_per_sec`: by the end of each 10 ms tick it may have
+/// sent `ticks * rate_per_sec / 100` records, so any rate is kept exactly.
 struct Pacer {
     interval: Option<tokio::time::Interval>,
-    per_tick: u32,
-    left: u32,
+    rate_per_sec: u64,
+    ticks: u64,
+    sent: u64,
 }
 
 impl Pacer {
     fn new(rate_per_sec: u32) -> Self {
-        if rate_per_sec == 0 {
-            return Self { interval: None, per_tick: 0, left: 0 };
-        }
-        let (period, per_tick) = if rate_per_sec >= 100 {
-            (Duration::from_millis(10), rate_per_sec / 100)
-        } else {
-            (Duration::from_millis(1000 / u64::from(rate_per_sec)), 1)
-        };
-        let mut interval = tokio::time::interval(period);
-        // After a stall (a restart, a slow broker), carry on at the rate
-        // rather than sending the missed records in one burst.
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        Self { interval: Some(interval), per_tick, left: 0 }
+        let interval = (rate_per_sec > 0).then(|| {
+            let mut interval = tokio::time::interval(Duration::from_millis(10));
+            // After a stall (a restart, a slow broker), carry on at the rate
+            // rather than sending the missed records in one burst.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval
+        });
+        Self { interval, rate_per_sec: u64::from(rate_per_sec), ticks: 0, sent: 0 }
     }
 
     async fn wait(&mut self) {
         if let Some(interval) = &mut self.interval {
-            if self.left == 0 {
+            while self.sent >= self.ticks * self.rate_per_sec / 100 {
                 interval.tick().await;
-                self.left = self.per_tick;
+                self.ticks += 1;
             }
-            self.left -= 1;
+            self.sent += 1;
         }
     }
 }
@@ -977,8 +974,16 @@ async fn run_copier(
                         failed = Some(e);
                     }
                 }
+                let planned_abort = failed.is_none() && aborts.next_aborts();
+                if planned_abort {
+                    // Send the copies first, so the broker aborts them and
+                    // read_committed readers must skip them.
+                    if let Err(e) = active.flush().await {
+                        ledger.event(Event::ProducerError, format!("copier flush: {e}"));
+                    }
+                }
                 let committed = failed.is_none()
-                    && !aborts.next_aborts()
+                    && !planned_abort
                     && match commit_transaction(active, "copier", &ledger).await {
                         Ok(()) => true,
                         Err(e) => {
@@ -1004,7 +1009,11 @@ async fn run_copier(
             },
         };
         for future in futures {
-            let _ = settle(future).await;
+            if let Err(e) = settle(future).await
+                && committed
+            {
+                ledger.copier_failed_in_committed_txn(&spec.output, &e);
+            }
         }
         if !healthy {
             if let Some(old) = producer.take()
