@@ -3064,6 +3064,7 @@ async fn test_borrowed_send_delivers_the_record_headers() {
 /// `Error::Serialization`. The Producer trait wraps the serializer
 /// in `Box<dyn Serializer>` — that surface only exists in the native
 /// Rust path, hence rust-only.
+// MULTILANGUAGE: Rust-only API (the serializer is the subject; the gRPC producers are bytes in, bytes out).
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wrong_serializer_errors_send() {
