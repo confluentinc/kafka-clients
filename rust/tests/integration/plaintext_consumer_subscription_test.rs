@@ -21,6 +21,13 @@
 //! group-protocol rebalance flow against a real 3-broker Kafka 4.2.0
 //! cluster.
 //!
+//! They run as multilanguage scenarios: each one runs against the native
+//! Rust consumer and, through the gRPC backends, the Python (sync and
+//! asyncio) and C consumers ([`multilanguage_consumer_test!`]); each name
+//! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
+//! are native fixtures; only the consumer is under test.
+//!
 //! # Methods classification
 //!
 //! The Java suite contains 14 CONSUMER-arm `@ClusterTest` methods.
@@ -97,26 +104,24 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
-use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::KafkaConsumer;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::SubscriptionPattern;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
 use crate::common::test_utils::wait_for_partition_leaders;
+use crate::multilanguage_consumer_test;
 
-// Type alias matching the bytes-typed `Consumer` trait object returned
-// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
-// the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
+// The bytes-typed consumer trait object every backend factory returns. Used in
+// helper signatures; the tests pass `&mut *consumer` (a reborrow through the
+// `Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config ────────────────────────────────────────────────────
 
@@ -141,31 +146,28 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
     kip848_3_broker(2)
 }
 
-// ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
-
-/// Local byte-array deserializer for these tests. The crate exports
-/// `ByteArraySerializer` but no symmetric `ByteArrayDeserializer`; this
-/// inline impl is identical to what such a struct would do.
-struct ByteArrayDeserializer;
-
-impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(data.to_vec())
-    }
-}
-
 // ── Consumer config builder ───────────────────────────────────────────
 
-/// Build a `ConsumerConfig` matching what Java's
+/// Build the consumer properties matching what Java's
 /// `clusterInstance.consumer(Map.of(GROUP_PROTOCOL_CONFIG, "consumer", ...))`
-/// produces. Caller-supplied overrides win over defaults.
+/// produces, on the bootstrap the backend under test reaches.
+/// Caller-supplied overrides win over defaults.
 ///
 /// `auto.offset.reset=earliest` and `enable.auto.commit=false` so the
 /// tests' explicit `seek` / `commit_sync` / `commit_async` calls (where
 /// applicable) are the only offset-state transitions.
-fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_consumer_props<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+    overrides: &[(&str, &str)],
+) -> HashMap<String, String> {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -176,7 +178,20 @@ fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&
         props.insert((*k).to_string(), (*v).to_string());
     }
     ctx.apply_security(&mut props);
-    ConsumerConfig::new(&props).expect("invalid test config")
+    props
+}
+
+/// Create the consumer under test through `factory`.
+async fn create_consumer<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+    overrides: &[(&str, &str)],
+) -> Box<BytesConsumer> {
+    factory
+        .create(make_consumer_props(ctx, factory, group_id, overrides))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -287,6 +302,7 @@ async fn create_test_topic(ctx: &TestContext, topic: &str, num_partitions: i32) 
 /// transition (Phase 12.5 observed up to ~15s).
 async fn await_assignment_with_deadline(
     consumer: &mut BytesConsumer,
+    backend: &str,
     expected: &HashSet<TopicPartition>,
     deadline_duration: Duration,
 ) {
@@ -295,13 +311,13 @@ async fn await_assignment_with_deadline(
         let _ = consumer
             .poll(Duration::from_millis(100))
             .await
-            .expect("poll should succeed in await_assignment");
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed in await_assignment: {e}"));
         if &consumer.assignment() == expected {
             return;
         }
     }
     panic!(
-        "Timed out while awaiting expected assignment of {} partitions. \
+        "{backend} backend: Timed out while awaiting expected assignment of {} partitions. \
          Current assignment is {} partitions: {:?}.",
         expected.len(),
         consumer.assignment().len(),
@@ -320,6 +336,7 @@ async fn await_assignment_with_deadline(
 /// `offset`, key/value bytes, and the serialized-size accessors.
 async fn consume_and_verify_records_bytes(
     consumer: &mut BytesConsumer,
+    backend: &str,
     tp: &TopicPartition,
     num_records: usize,
     starting_offset: i64,
@@ -329,10 +346,9 @@ async fn consume_and_verify_records_bytes(
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut next_index: usize = 0;
     while next_index < num_records && Instant::now() < deadline {
-        let records = consumer
-            .poll(Duration::from_millis(100))
-            .await
-            .expect("poll should succeed in consume_and_verify_records_bytes");
+        let records = consumer.poll(Duration::from_millis(100)).await.unwrap_or_else(|e| {
+            panic!("{backend} backend: poll should succeed in consume_and_verify_records_bytes: {e}")
+        });
         for record in records {
             // Skip records from other partitions (the consumer may be
             // assigned to multiple partitions when called from the
@@ -352,16 +368,20 @@ async fn consume_and_verify_records_bytes(
             let i = next_index;
             let offset = starting_offset + i as i64;
 
-            assert_eq!(record.topic(), tp.topic());
-            assert_eq!(record.partition(), tp.partition());
+            assert_eq!(record.topic(), tp.topic(), "topic ({backend} backend)");
+            assert_eq!(record.partition(), tp.partition(), "partition ({backend} backend)");
             assert_eq!(
                 record.timestamp_type(),
                 TimestampType::CreateTime,
-                "record timestamp_type should be CreateTime (broker default)"
+                "record timestamp_type should be CreateTime (broker default) ({backend} backend)"
             );
             let expected_ts = starting_timestamp + i as i64;
-            assert_eq!(record.timestamp(), expected_ts, "record timestamp should be {expected_ts}");
-            assert_eq!(record.offset(), offset, "record offset should be {offset}");
+            assert_eq!(
+                record.timestamp(),
+                expected_ts,
+                "record timestamp should be {expected_ts} ({backend} backend)"
+            );
+            assert_eq!(record.offset(), offset, "record offset should be {offset} ({backend} backend)");
 
             let key_and_value_index = starting_key_and_value_index + i;
             let expected_key = format!("key {key_and_value_index}").into_bytes();
@@ -369,22 +389,30 @@ async fn consume_and_verify_records_bytes(
             assert_eq!(
                 record.key().expect("record key should be present"),
                 &expected_key,
-                "key at index {i} mismatched"
+                "key at index {i} mismatched ({backend} backend)"
             );
             assert_eq!(
                 record.value().expect("record value should be present"),
                 &expected_value,
-                "value at index {i} mismatched"
+                "value at index {i} mismatched ({backend} backend)"
             );
-            assert_eq!(record.serialized_key_size() as usize, expected_key.len());
-            assert_eq!(record.serialized_value_size() as usize, expected_value.len());
+            assert_eq!(
+                record.serialized_key_size() as usize,
+                expected_key.len(),
+                "serialized_key_size ({backend} backend)"
+            );
+            assert_eq!(
+                record.serialized_value_size() as usize,
+                expected_value.len(),
+                "serialized_value_size ({backend} backend)"
+            );
 
             next_index += 1;
         }
     }
     assert_eq!(
         next_index, num_records,
-        "Timed out before consuming expected {num_records} records (got {next_index})"
+        "Timed out before consuming expected {num_records} records (got {next_index}) ({backend} backend)"
     );
 }
 
@@ -394,31 +422,29 @@ async fn consume_and_verify_records_bytes(
 /// Subscribes using a Re2J server-side pattern and verifies
 /// assignment. Then unsubscribes and re-subscribes with a different
 /// pattern to verify subscription replacement.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_re2j_pattern_subscription() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_re2j_pattern_subscription<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let topic1 = ctx.topic("tblablac"); // matches "t.*c"
     let topic2 = ctx.topic("tblablak"); // does not match "t.*c"
     let topic3 = ctx.topic("tblab1"); // does not match "t.*c"
     let group_id = ctx.group_id("g_re2j_pattern_subscription");
 
-    let producer = build_producer_bytes(&ctx);
+    let producer = build_producer_bytes(ctx);
     // Java `@BeforeEach`: createTopic("topic", 2, ...).
-    create_test_topic(&ctx, &topic, 2).await;
-    create_test_topic(&ctx, &topic1, 2).await;
-    create_test_topic(&ctx, &topic2, 2).await;
-    create_test_topic(&ctx, &topic3, 2).await;
+    create_test_topic(ctx, &topic, 2).await;
+    create_test_topic(ctx, &topic1, 2).await;
+    create_test_topic(ctx, &topic2, 2).await;
+    create_test_topic(ctx, &topic3, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    assert_eq!(consumer.assignment().len(), 0, "initial assignment should be empty");
+    assert_eq!(
+        consumer.assignment().len(),
+        0,
+        "initial assignment should be empty ({backend} backend)"
+    );
     // Java uses literal "t.*c". We use the per-test prefix so the
     // pattern matches only this test's topics. The pattern is
     // `<prefix>_t.*c`, which still picks up `<prefix>_topic` and
@@ -428,17 +454,24 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     consumer
         .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe_with_pattern should succeed: {e}"));
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic.clone(), 0));
     expected.insert(TopicPartition::new(topic.clone(), 1));
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &expected, Duration::from_secs(90)).await;
 
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
-    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty after unsubscribe");
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed: {e}"));
+    assert_eq!(
+        consumer.assignment().len(),
+        0,
+        "assignment should be empty after unsubscribe ({backend} backend)"
+    );
 
     // Subscribe to a different pattern to match topic2 (that did not
     // match before).
@@ -446,51 +479,54 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     consumer
         .subscribe_with_pattern(pattern2)
         .await
-        .expect("second subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: second subscribe_with_pattern should succeed: {e}"));
 
     let mut expected2: HashSet<TopicPartition> = HashSet::new();
     expected2.insert(TopicPartition::new(topic2.clone(), 0));
     expected2.insert(TopicPartition::new(topic2.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &expected2, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &expected2, Duration::from_secs(90)).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_re2j_pattern_subscription,
+    async_consumer_re2j_pattern_subscription,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncConsumerRe2JPatternSubscriptionFetch`.
 /// Subscribes via Re2J pattern, awaits assignment,
 /// produces records to one partition, and verifies they are consumed.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_re2j_pattern_subscription_fetch() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_re2j_pattern_subscription_fetch<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let topic1 = ctx.topic("topic1");
     let group_id = ctx.group_id("g_re2j_pattern_subscription_fetch");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic, 2).await;
-    create_test_topic(&ctx, &topic1, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic, 2).await;
+    create_test_topic(ctx, &topic1, 2).await;
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    assert_eq!(consumer.assignment().len(), 0);
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
 
     let pattern = SubscriptionPattern::new(format!("{}.*", ctx_prefix(&topic, "topic")));
     consumer
         .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe_with_pattern should succeed: {e}"));
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic.clone(), 0));
     expected.insert(TopicPartition::new(topic.clone(), 1));
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &expected, Duration::from_secs(90)).await;
 
     let tp = TopicPartition::new(topic1.clone(), 0);
 
@@ -499,47 +535,56 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
     producer.close().await.expect("producer close should succeed");
 
-    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut *consumer, backend, &tp, total_records, 0, 0, starting_timestamp).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_re2j_pattern_subscription_fetch,
+    async_consumer_re2j_pattern_subscription_fetch,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncConsumerRe2JPatternExpandSubscription`.
 /// Subscribes to a pattern that matches one topic, then
 /// re-subscribes to a broader pattern that expands the assignment.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_re2j_pattern_expand_subscription() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_re2j_pattern_expand_subscription<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic1 = ctx.topic("topic1");
     let topic2 = ctx.topic("topic2");
     let group_id = ctx.group_id("g_re2j_pattern_expand");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic1, 2).await;
-    create_test_topic(&ctx, &topic2, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic1, 2).await;
+    create_test_topic(ctx, &topic2, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    assert_eq!(consumer.assignment().len(), 0);
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
     consumer
         .subscribe_with_pattern(pattern)
         .await
-        .expect("first subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: first subscribe_with_pattern should succeed: {e}"));
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &expected, Duration::from_secs(90)).await;
 
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
-    assert_eq!(consumer.assignment().len(), 0);
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed: {e}"));
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
 
     // Subscribe to a different pattern that should match the same
     // topics the member already had plus new ones.
@@ -547,169 +592,199 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     consumer
         .subscribe_with_pattern(pattern2)
         .await
-        .expect("second subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: second subscribe_with_pattern should succeed: {e}"));
 
     let mut expanded: HashSet<TopicPartition> = expected.clone();
     expanded.insert(TopicPartition::new(topic2.clone(), 0));
     expanded.insert(TopicPartition::new(topic2.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &expanded, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &expanded, Duration::from_secs(90)).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_re2j_pattern_expand_subscription,
+    async_consumer_re2j_pattern_expand_subscription,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testTopicIdSubscriptionWithRe2JRegexAndOffsetsFetch`.
 /// Subscribes via Re2J pattern, verifies assignment, produces and
 /// consumes records, calls `end_offsets` for known + unknown partitions,
 /// then produces and consumes another batch.
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn topic_id_subscription_with_re2j_regex_and_offsets_fetch<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let topic1 = ctx.topic("topic1");
     let topic2 = ctx.topic("newTopic2");
     let group_id = ctx.group_id("g_topic_id_re2j_offsets");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic, 2).await;
-    create_test_topic(&ctx, &topic1, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic, 2).await;
+    create_test_topic(ctx, &topic1, 2).await;
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    assert_eq!(consumer.assignment().len(), 0);
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
 
     let pattern = SubscriptionPattern::new(format!("{}.*", ctx_prefix(&topic, "topic")));
     consumer
         .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe_with_pattern should succeed: {e}"));
 
     let mut expected: HashSet<TopicPartition> = HashSet::new();
     expected.insert(TopicPartition::new(topic.clone(), 0));
     expected.insert(TopicPartition::new(topic.clone(), 1));
     expected.insert(TopicPartition::new(topic1.clone(), 0));
     expected.insert(TopicPartition::new(topic1.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &expected, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &expected, Duration::from_secs(90)).await;
 
     let tp = TopicPartition::new(topic1.clone(), 0);
 
     let total_records: usize = 10;
     let starting_timestamp = current_time_ms();
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
-    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, 0, 0, starting_timestamp).await;
+    consume_and_verify_records_bytes(&mut *consumer, backend, &tp, total_records, 0, 0, starting_timestamp).await;
 
     // Provision topic2 (unassigned — does not match the `<prefix>_topic.*`
     // pattern because the per-test prefix is `<prefix>_newTopic2`).
-    create_test_topic(&ctx, &topic2, 2).await;
+    create_test_topic(ctx, &topic2, 2).await;
     let unassigned_partition = TopicPartition::new(topic2.clone(), 0);
     let parts = vec![unassigned_partition.clone(), tp.clone()];
-    let offsets = consumer.end_offsets(&parts).await.expect("end_offsets should succeed");
+    let offsets = consumer
+        .end_offsets(&parts)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: end_offsets should succeed: {e}"));
 
     let expected_offsets = HashMap::from([(unassigned_partition, 0i64), (tp.clone(), total_records as i64)]);
-    assert_eq!(offsets, expected_offsets);
+    assert_eq!(offsets, expected_offsets, "end_offsets ({backend} backend)");
 
     // Fetch records again with the regex subscription.
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp).await;
-    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, total_records as i64, 0, starting_timestamp)
-        .await;
+    consume_and_verify_records_bytes(
+        &mut *consumer,
+        backend,
+        &tp,
+        total_records,
+        total_records as i64,
+        0,
+        starting_timestamp,
+    )
+    .await;
 
     producer.close().await.expect("producer close should succeed");
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_topic_id_subscription_with_re2j_regex_and_offsets_fetch,
+    topic_id_subscription_with_re2j_regex_and_offsets_fetch,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testRe2JPatternSubscriptionAndTopicSubscription`.
 /// Subscribes via pattern, unsubscribes, subscribes via
 /// topic list, unsubscribes, then subscribes via pattern again.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_re2j_pattern_subscription_and_topic_subscription() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn re2j_pattern_subscription_and_topic_subscription<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic1 = ctx.topic("topic1");
     let topic11 = ctx.topic("topic11");
     let topic2 = ctx.topic("topic2");
     let group_id = ctx.group_id("g_pattern_and_topic");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic1, 2).await;
-    create_test_topic(&ctx, &topic11, 2).await;
-    create_test_topic(&ctx, &topic2, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic1, 2).await;
+    create_test_topic(ctx, &topic11, 2).await;
+    create_test_topic(ctx, &topic2, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    assert_eq!(consumer.assignment().len(), 0);
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
 
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
     consumer
         .subscribe_with_pattern(pattern.clone())
         .await
-        .expect("subscribe_with_pattern should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe_with_pattern should succeed: {e}"));
 
     let mut pattern_assignment: HashSet<TopicPartition> = HashSet::new();
     pattern_assignment.insert(TopicPartition::new(topic1.clone(), 0));
     pattern_assignment.insert(TopicPartition::new(topic1.clone(), 1));
     pattern_assignment.insert(TopicPartition::new(topic11.clone(), 0));
     pattern_assignment.insert(TopicPartition::new(topic11.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &pattern_assignment, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &pattern_assignment, Duration::from_secs(90)).await;
 
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
-    assert_eq!(consumer.assignment().len(), 0);
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed: {e}"));
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
 
     // Subscribe to explicit topic names.
     consumer
         .subscribe_with_topics(vec![topic2.clone()])
         .await
-        .expect("subscribe (topic list) should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe (topic list) should succeed: {e}"));
 
     let mut topic_assignment: HashSet<TopicPartition> = HashSet::new();
     topic_assignment.insert(TopicPartition::new(topic2.clone(), 0));
     topic_assignment.insert(TopicPartition::new(topic2.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &topic_assignment, Duration::from_secs(90)).await;
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
+    await_assignment_with_deadline(&mut *consumer, backend, &topic_assignment, Duration::from_secs(90)).await;
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed: {e}"));
 
     // Subscribe to pattern again.
     consumer
         .subscribe_with_pattern(pattern)
         .await
-        .expect("subscribe_with_pattern (second time) should succeed");
-    await_assignment_with_deadline(&mut consumer, &pattern_assignment, Duration::from_secs(90)).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe_with_pattern (second time) should succeed: {e}"));
+    await_assignment_with_deadline(&mut *consumer, backend, &pattern_assignment, Duration::from_secs(90)).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_re2j_pattern_subscription_and_topic_subscription,
+    re2j_pattern_subscription_and_topic_subscription,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testRe2JPatternSubscriptionInvalidRegex`.
 /// Subscribes with an invalid regex; the next `poll()`
 /// should surface an `InvalidRegularExpression` error from the broker.
 /// The consumer should still be able to `unsubscribe()` afterward.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_re2j_pattern_subscription_invalid_regex() {
-    let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn re2j_pattern_subscription_invalid_regex<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let group_id = ctx.group_id("g_invalid_regex");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    assert_eq!(consumer.assignment().len(), 0);
+    assert_eq!(consumer.assignment().len(), 0, "assignment should be empty ({backend} backend)");
 
     let pattern = SubscriptionPattern::new("(t.*c");
-    consumer
-        .subscribe_with_pattern(pattern)
-        .await
-        .expect("subscribe_with_pattern should succeed (validation is broker-side)");
+    consumer.subscribe_with_pattern(pattern).await.unwrap_or_else(|e| {
+        panic!("{backend} backend: subscribe_with_pattern should succeed (validation is broker-side): {e}")
+    });
 
     // Drive `poll()` until it surfaces an `InvalidRegularExpression`
     // error or the deadline elapses. Java's
@@ -733,41 +808,42 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
             Err(other) => last_other_err = Some(other),
         }
     }
-    let err = invalid_regex_err
-        .unwrap_or_else(|| panic!("Continuous poll not fail (last non-matching error: {last_other_err:?})"));
+    let err = invalid_regex_err.unwrap_or_else(|| {
+        panic!("{backend} backend: Continuous poll not fail (last non-matching error: {last_other_err:?})")
+    });
     assert!(
         matches!(err, Error::InvalidRegularExpression(_)),
-        "expected Error::InvalidRegularExpression, got: {err:?}"
+        "expected Error::InvalidRegularExpression, got: {err:?} ({backend} backend)"
     );
 
     // Java asserts `assertDoesNotThrow(consumer::unsubscribe)`.
     consumer
         .unsubscribe()
         .await
-        .expect("unsubscribe should succeed after invalid regex");
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed after invalid regex: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_re2j_pattern_subscription_invalid_regex,
+    re2j_pattern_subscription_invalid_regex,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncConsumerExpandingTopicSubscriptions`.
 /// Subscribes to a single topic, awaits assignment, then
 /// subscribes to a list including a new topic; assignment expands.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_expanding_topic_subscriptions() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_expanding_topic_subscriptions<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let other_topic = ctx.topic("other");
     let group_id = ctx.group_id("g_expanding");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic, 2).await;
     // Note: Java creates the `other` topic AFTER the first
     // `awaitAssignment` call. We mirror that ordering below.
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
     let mut initial_assignment: HashSet<TopicPartition> = HashSet::new();
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
@@ -776,11 +852,11 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     consumer
         .subscribe_with_topics(vec![topic.clone()])
         .await
-        .expect("subscribe should succeed");
-    await_assignment_with_deadline(&mut consumer, &initial_assignment, Duration::from_secs(90)).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    await_assignment_with_deadline(&mut *consumer, backend, &initial_assignment, Duration::from_secs(90)).await;
 
     // Create the other topic now (Java: `cluster.createTopic(otherTopic, 2, BROKER_COUNT)`).
-    create_test_topic(&ctx, &other_topic, 2).await;
+    create_test_topic(ctx, &other_topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
     let mut expanded_assignment: HashSet<TopicPartition> = initial_assignment.clone();
@@ -790,33 +866,36 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     consumer
         .subscribe_with_topics(vec![topic.clone(), other_topic.clone()])
         .await
-        .expect("second subscribe should succeed");
-    await_assignment_with_deadline(&mut consumer, &expanded_assignment, Duration::from_secs(90)).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: second subscribe should succeed: {e}"));
+    await_assignment_with_deadline(&mut *consumer, backend, &expanded_assignment, Duration::from_secs(90)).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_expanding_topic_subscriptions,
+    async_consumer_expanding_topic_subscriptions,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncConsumerShrinkingTopicSubscriptions`.
 /// Subscribes to two topics, awaits assignment, then
 /// subscribes to only one; assignment shrinks.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_shrinking_topic_subscriptions() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_shrinking_topic_subscriptions<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let other_topic = ctx.topic("other");
     let group_id = ctx.group_id("g_shrinking");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic, 2).await;
-    create_test_topic(&ctx, &other_topic, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic, 2).await;
+    create_test_topic(ctx, &other_topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
     let mut initial_assignment: HashSet<TopicPartition> = HashSet::new();
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
@@ -827,8 +906,8 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     consumer
         .subscribe_with_topics(vec![topic.clone(), other_topic.clone()])
         .await
-        .expect("subscribe should succeed");
-    await_assignment_with_deadline(&mut consumer, &initial_assignment, Duration::from_secs(90)).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    await_assignment_with_deadline(&mut *consumer, backend, &initial_assignment, Duration::from_secs(90)).await;
 
     let mut shrunken_assignment: HashSet<TopicPartition> = HashSet::new();
     shrunken_assignment.insert(TopicPartition::new(topic.clone(), 0));
@@ -837,11 +916,20 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     consumer
         .subscribe_with_topics(vec![topic.clone()])
         .await
-        .expect("second subscribe should succeed");
-    await_assignment_with_deadline(&mut consumer, &shrunken_assignment, Duration::from_secs(90)).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: second subscribe should succeed: {e}"));
+    await_assignment_with_deadline(&mut *consumer, backend, &shrunken_assignment, Duration::from_secs(90)).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_shrinking_topic_subscriptions,
+    async_consumer_shrinking_topic_subscriptions,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncConsumerUnsubscribeTopic`.
 /// Subscribes to a topic with a listener, awaits the listener callback
@@ -853,27 +941,21 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
 /// substitutes a simpler "wait until the assignment is non-empty",
 /// which observes the same end-state. The listener call itself is
 /// covered by `consumer-threading.md` §31 unit tests.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_unsubscribe_topic() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_unsubscribe_topic<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_unsubscribe_topic");
 
-    let producer = build_producer_bytes(&ctx);
-    create_test_topic(&ctx, &topic, 2).await;
+    let producer = build_producer_bytes(ctx);
+    create_test_topic(ctx, &topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
     consumer
         .subscribe_with_topics(vec![topic.clone()])
         .await
-        .expect("subscribe should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
 
     // Java's `awaitRebalance` blocks until the rebalance listener has
     // been invoked. We mirror by waiting until `assignment()` is
@@ -882,13 +964,13 @@ async fn test_async_consumer_unsubscribe_topic() {
     let mut initial: HashSet<TopicPartition> = HashSet::new();
     initial.insert(TopicPartition::new(topic.clone(), 0));
     initial.insert(TopicPartition::new(topic.clone(), 1));
-    await_assignment_with_deadline(&mut consumer, &initial, Duration::from_secs(90)).await;
+    await_assignment_with_deadline(&mut *consumer, backend, &initial, Duration::from_secs(90)).await;
 
     // Subscribe to empty list (== unsubscribe).
     consumer
         .subscribe_with_topics(vec![])
         .await
-        .expect("subscribe(empty) should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe(empty) should succeed: {e}"));
     // After unsubscribe the assignment should drop to empty. The Java
     // test asserts immediately because Java's `subscribe(emptyList)`
     // path inside the classic protocol completes synchronously; in
@@ -904,67 +986,90 @@ async fn test_async_consumer_unsubscribe_topic() {
     assert_eq!(
         consumer.assignment().len(),
         0,
-        "assignment should be empty after subscribe(empty)"
+        "assignment should be empty after subscribe(empty) ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_unsubscribe_topic,
+    async_consumer_unsubscribe_topic,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe`.
 /// Subscribes to an invalid topic name; `poll()` should surface an
 /// `InvalidTopicException`. After that, `unsubscribe()` must not panic.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_subscribe_invalid_topic_can_unsubscribe() {
-    let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_subscribe_invalid_topic_can_unsubscribe<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let group_id = ctx.group_id("g_invalid_topic_unsubscribe");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    setup_subscribe_invalid_topic(&mut consumer).await;
+    setup_subscribe_invalid_topic(&mut *consumer, backend).await;
     consumer
         .unsubscribe()
         .await
-        .expect("unsubscribe should succeed after invalid topic");
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed after invalid topic: {e}"));
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_subscribe_invalid_topic_can_unsubscribe,
+    async_consumer_subscribe_invalid_topic_can_unsubscribe,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerSubscribeInvalidTopicCanClose`.
 /// Subscribes to an invalid topic name; `poll()` should surface an
 /// `InvalidTopicException`. After that, `close()` must not panic.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_subscribe_invalid_topic_can_close() {
-    let ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_subscribe_invalid_topic_can_close<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let group_id = ctx.group_id("g_invalid_topic_close");
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
 
-    setup_subscribe_invalid_topic(&mut consumer).await;
-    consumer.close().await.expect("close should succeed after invalid topic");
+    setup_subscribe_invalid_topic(&mut *consumer, backend).await;
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close should succeed after invalid topic: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_subscribe_invalid_topic_can_close,
+    async_consumer_subscribe_invalid_topic_can_close,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's private `setupSubscribeInvalidTopic(consumer)`.
 /// Subscribes to a topic with a space in its name and
 /// drives `poll()` until it surfaces `InvalidTopicException` or the
 /// 5s deadline elapses.
-async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
+async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer, backend: &str) {
     let invalid_topic_name = "topic abc";
     consumer
         .subscribe_with_topics(vec![invalid_topic_name.to_string()])
         .await
-        .expect("subscribe should accept the topic at API level (broker-side validation)");
+        .unwrap_or_else(|e| {
+            panic!("{backend} backend: subscribe should accept the topic at API level (broker-side validation): {e}")
+        });
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut invalid_topic_err = None;
@@ -987,13 +1092,21 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
         }
     }
     let e = invalid_topic_err.unwrap_or_else(|| match last_other_err {
-        Some(other) => panic!("An InvalidTopicException should be thrown. But {other:?} is thrown"),
-        None => panic!("An InvalidTopicException should be thrown."),
+        Some(other) => panic!("{backend} backend: An InvalidTopicException should be thrown. But {other:?} is thrown"),
+        None => panic!("{backend} backend: An InvalidTopicException should be thrown."),
     });
     // org.apache.kafka.clients.consumer.PlaintextConsumerSubscriptionTest#setupSubscribeInvalidTopic:
     // `assertEquals("Invalid topics: [" + invalidTopicName + "]", ...)`.
-    assert_eq!(e.kafka_error().message(), format!("Invalid topics: [{invalid_topic_name}]"));
-    assert_eq!(e.invalid_topics(), &HashSet::from([invalid_topic_name.to_string()]));
+    assert_eq!(
+        e.kafka_error().message(),
+        format!("Invalid topics: [{invalid_topic_name}]"),
+        "message ({backend} backend)"
+    );
+    assert_eq!(
+        e.invalid_topics(),
+        &HashSet::from([invalid_topic_name.to_string()]),
+        "invalid_topics ({backend} backend)"
+    );
 }
 
 // ── Local utilities ────────────────────────────────────────────────────
