@@ -25,22 +25,18 @@
 //! anything but a re-authentication, so a client that does not re-authenticate
 //! loses the requests it has in flight once per session lifetime.
 //!
-//! The SASL_SSL test is a multilanguage scenario ([`multilanguage_test!`]): the
+//! Both tests are multilanguage scenarios ([`multilanguage_test!`]): the
 //! producer also runs on the Python (sync, asyncio) and C backends, over the
-//! SASL_SSL listener its backend reaches (the CONTAINER SASL_SSL listener for a
-//! containerized backend), and its name gains the backend suffix (`__rust`,
-//! `__grpc_python`, `__grpc_python_async`, `__grpc_c`). The SASL_PLAINTEXT
-//! test stays on the native producer only: the broker has no SASL_PLAINTEXT
-//! listener a backend container can reach.
+//! SASL_PLAINTEXT or SASL_SSL listener its backend reaches (the CONTAINER
+//! listener of that protocol for a containerized backend), and each name gains
+//! the backend suffix (`__rust`, `__grpc_python`, `__grpc_python_async`,
+//! `__grpc_c`).
 
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
-use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::backend_factory::ProducerBackendFactory;
@@ -125,21 +121,32 @@ async fn produce_across_session_lifetimes<P: Producer<Vec<u8>, Vec<u8>>>(
 
 /// A producer over SASL_PLAINTEXT keeps its connection to the partition leader
 /// across several session lifetimes by re-authenticating it, as Java's does.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sasl_plain_producer_reauthenticates_before_its_session_expires() {
-    let mut ctx = TestContext::new(cluster_config()).await;
-    let props = with_producer_props(sasl_plain_props(ctx.sasl_plaintext_bootstrap_servers(), "SASL_PLAINTEXT"));
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
-        ProducerConfig::new(&props).expect("valid producer config"),
-        ByteArraySerializer::default(),
-        ByteArraySerializer::default(),
-    )
-    .expect("producer constructs");
-    produce_across_session_lifetimes(&mut ctx, producer, "rust").await;
+async fn sasl_plain_producer_reauthenticates_before_its_session_expires<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
+    let bootstrap = if factory.needs_container_bootstrap() {
+        ctx.container_sasl_plaintext_bootstrap_servers()
+    } else {
+        ctx.sasl_plaintext_bootstrap_servers()
+    };
+    let props = with_producer_props(sasl_plain_props(bootstrap, "SASL_PLAINTEXT"));
+    let producer = factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: producer constructs: {e}"));
+    produce_across_session_lifetimes(ctx, producer, backend).await;
     ctx.cleanup().await;
 }
 
-/// As [`test_sasl_plain_producer_reauthenticates_before_its_session_expires`],
+multilanguage_test!(
+    test_sasl_plain_producer_reauthenticates_before_its_session_expires,
+    sasl_plain_producer_reauthenticates_before_its_session_expires,
+    cluster_config()
+);
+
+/// As [`sasl_plain_producer_reauthenticates_before_its_session_expires`],
 /// over SASL_SSL: the re-authentication's handshake and token, and the
 /// responses that arrive during it, go through TLS, which can hold several
 /// decrypted frames at once.
