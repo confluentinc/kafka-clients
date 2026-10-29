@@ -30,6 +30,21 @@ const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed'
 // Java's KafkaProducer.close(Duration) message for a negative timeout.
 const NEGATIVE_TIMEOUT_MESSAGE = 'The timeout cannot be negative.';
 
+// A send() the producer takes at once settles its Promise inside the call, so
+// awaiting it runs only microtasks: a loop that awaits such sends never returns
+// to the event loop, where timers, I/O and the threadsafe function's callback
+// drain run, and every record's delivery state piles up until it ends. After
+// this many such sends in a row, the next one's Promise settles from
+// setImmediate, giving the event loop one turn (Python's
+// AsyncProducer._FAST_PATH_YIELD_EVERY). Its record is handed over at once all
+// the same: only the resolution waits.
+const FAST_PATH_YIELD_EVERY = 1000;
+// Between those turns, every this many such sends in a row (and on the first
+// after a queued hand-over) send() runs the callback drain itself on entry, so
+// delivery callbacks run and their state is released in batches of at most
+// this many records (Python's AsyncProducer._PUMP_EVERY).
+const PUMP_EVERY = 64;
+
 /**
  * A Kafka client that publishes records to the Kafka cluster.
  *
@@ -46,6 +61,8 @@ class KafkaProducer {
   // The native producer was destroyed by a completed close.
   #destroyed = false;
   #closing = null;
+  // Sends in a row whose hand-over completed inside the call.
+  #fastPathSends = 0;
 
   /**
    * A producer is instantiated by providing a set of key-value pairs as
@@ -87,6 +104,12 @@ class KafkaProducer {
    * threads: there is no order between them, and a `flush()` or `close()`
    * started before they resolved does not wait for them.
    *
+   * A loop awaiting sends the producer takes at once still lets the event loop
+   * run: after 1000 such sends in a row, the next one resolves only after one
+   * event-loop turn (its record is handed over at once all the same), and
+   * every 64 `send()` runs the delivery callbacks already due before handing
+   * its record over.
+   *
    * A Buffer or Uint8Array key or value is borrowed, not copied, until the
    * returned Promise settles: it must not be modified or detached (transferred)
    * before then, and may be reused after. A string key or value is encoded
@@ -104,6 +127,14 @@ class KafkaProducer {
     if (!(record instanceof ProducerRecord)) throw new TypeError('record must be a ProducerRecord');
     const userCallback = checkCallback(callback);
     if (this.#closed) throw illegalState(CLOSED_MESSAGE);
+    if (this.#fastPathSends % PUMP_EVERY === 0) {
+      // A no-op inside a drain (a send from a delivery callback).
+      native.producerPump(this.#handle);
+      // A callback it ran may have closed the producer.
+      if (this.#closed) throw illegalState(CLOSED_MESSAGE);
+    }
+    const yieldTurn = this.#fastPathSends >= FAST_PATH_YIELD_EVERY;
+    if (yieldTurn) this.#fastPathSends = 0;
     const args = record._toNative();
     const future = KafkaFuture._create();
     let resolve;
@@ -115,9 +146,22 @@ class KafkaProducer {
     // The hand-over, inside producerSend for a record taken or refused at once,
     // later otherwise: an error is the one Java's send() would throw. Never
     // marked handled, so an un-awaited send that fails surfaces.
-    const onHandover = (error) => {
+    let inCall = true;
+    const settle = (error) => {
       if (error !== null) reject(error);
       else resolve(future);
+    };
+    const onHandover = (error) => {
+      if (!inCall) {
+        // Queued: the caller's await already gave the event loop its turns.
+        this.#fastPathSends = 0;
+        settle(error);
+      } else if (yieldTurn) {
+        setImmediate(settle, error);
+      } else {
+        this.#fastPathSends++;
+        settle(error);
+      }
     };
     // The record's delivery callback: the user callback first, then the
     // future; a message returned is what the callback threw, for the core to log.
@@ -133,7 +177,11 @@ class KafkaProducer {
       future._complete(metadata, error);
       return failure;
     };
-    native.producerSend(this.#handle, ...args, onHandover, onComplete);
+    try {
+      native.producerSend(this.#handle, ...args, onHandover, onComplete);
+    } finally {
+      inCall = false;
+    }
     return handedOver;
   }
 

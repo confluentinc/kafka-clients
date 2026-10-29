@@ -41,10 +41,24 @@ These decide every question, in this order:
    threadsafe function is released or once it is finalized; no hook call can
    then reach a deleted threadsafe function.
 3. **One drainer per client.** `kafka_producer_Producer__execute_callbacks_err`
-   runs only on the JS main thread, in the threadsafe function's `call_js`,
-   looped while it returns > 0. The binding never calls `_destroy` from inside
-   a drain: a close completion only marks the producer for destruction, and
-   `call_js` destroys it after its drain loop.
+   runs only on the JS main thread, in one drain loop (looped while it returns
+   > 0) run from the threadsafe function's `call_js` or from `send()`'s pump
+   (below), and drains never nest: a drain started inside a drain (a `send()`
+   from a delivery callback) or once destroy began is a no-op. The binding
+   never calls `_destroy` from inside a drain: a close completion only marks
+   the producer for destruction, and the drain destroys it after its loop.
+
+   **Cooperative scheduling** (Python's `AsyncProducer`
+   `_FAST_PATH_YIELD_EVERY` / `_PUMP_EVERY`): a `send()` the producer takes at
+   once settles its Promise inside the call, and awaiting a settled Promise
+   runs only microtasks, so a loop awaiting such sends would never return to
+   the event loop: no timer, no I/O, no `call_js`, and every record's delivery
+   state would pile up until the loop ended. So `send()` counts the sends in a
+   row whose hand-over completed inside the call (reset by a queued hand-over):
+   every 64th (and the first after a queued one) runs the drain on entry,
+   before its record is handed over, and after 1000 the next one's Promise
+   settles from `setImmediate`, one event-loop turn later. The record itself
+   is handed over at once in every case (rule 7): only the resolution waits.
 4. **Waiting calls use the `_cb` twin.** `send_with_callback_cb`, `flush_cb`,
    `close_cb`, `close_with_timeout_cb`. The blocking forms would block the
    event loop and run callbacks on the caller's thread.

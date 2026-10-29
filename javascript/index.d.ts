@@ -157,7 +157,9 @@ export class KafkaProducer {
    * Ordering is the caller's: records from code that awaits each `send()` before the next reach
    * the producer in that order and are covered by a following `flush()` / `close()`. Sends not
    * awaited one by one (e.g. under `Promise.all`) are concurrent, like Java `send()` calls on
-   * several threads, with no order between them.
+   * several threads, with no order between them. A loop awaiting sends taken at once still lets
+   * the event loop run: every 1000th such send resolves after one event-loop turn (its record is
+   * handed over at once all the same), and every 64th runs the delivery callbacks already due.
    *
    * A `Buffer` / `Uint8Array` key or value is borrowed, not copied, until the returned Promise
    * settles: do not modify or detach it before then; it may be reused after. A string key or

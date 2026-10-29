@@ -222,3 +222,55 @@ test('a Buffer reused after each awaited send keeps every record value', { skip:
     await producer.close();
   }
 });
+
+test('a loop awaiting sends taken at once lets the event loop and the callbacks run', { skip: SKIP, timeout: 300000 }, async () => {
+  const topic = freshTopic('yield');
+  const producer = new KafkaProducer({ 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 5 });
+  try {
+    // Warmed: the topic's metadata is cached, so the producer takes every
+    // record at once and no send() suspends on its own.
+    await (await producer.send(new ProducerRecord({ topic, partition: 0, value: 'warm' }))).get();
+    const SENDS = 200000;
+    const value = Buffer.alloc(100, 0x78);
+    let ticks = 0;
+    let maxGap = 0;
+    let last = Date.now();
+    const timer = setInterval(() => {
+      const now = Date.now();
+      maxGap = Math.max(maxGap, now - last);
+      last = now;
+      ticks++;
+    }, 10);
+    let callbacks = 0;
+    let nested = null;
+    const rssBefore = process.memoryUsage().rss;
+    let rssPeak = rssBefore;
+    for (let i = 0; i < SENDS; i++) {
+      await producer.send(new ProducerRecord({ topic, partition: 0, value }), (m, error) => {
+        assert.equal(error, null);
+        callbacks++;
+        // A send from inside a delivery callback (inside a drain, maybe the
+        // one send() runs on entry): its own pump does not nest.
+        if (nested === null) nested = producer.send(new ProducerRecord({ topic, partition: 0, value: 'nested' }));
+      });
+      if (i % 10000 === 0) rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
+    }
+    const callbacksDuringLoop = callbacks;
+    const ticksDuringLoop = ticks;
+    const gapDuringLoop = Math.max(maxGap, Date.now() - last);
+    clearInterval(timer);
+    // The timer kept firing and the delivery callbacks ran while the loop sent:
+    // their backlog stays bounded instead of growing with the run.
+    assert.ok(ticksDuringLoop > 0, 'the timer never fired during the loop');
+    assert.ok(gapDuringLoop < 200, `the timer was starved for ${gapDuringLoop} ms`);
+    assert.ok(callbacksDuringLoop > SENDS / 2, `only ${callbacksDuringLoop} of ${SENDS} callbacks ran during the loop`);
+    assert.ok(rssPeak - rssBefore < 300e6, `RSS grew by ${Math.round((rssPeak - rssBefore) / 1e6)} MB`);
+    assert.ok(nested !== null);
+    const nestedMetadata = await (await nested).get();
+    assert.equal(nestedMetadata.topic, topic);
+    await producer.flush();
+    assert.equal(callbacks, SENDS);
+  } finally {
+    await producer.close();
+  }
+});
