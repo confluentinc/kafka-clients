@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import random
 import signal
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -234,6 +235,13 @@ def test_an_interrupt_in_a_sync_mock_call_leaves_the_monitor_free(
 STRESS_S = 3.0
 
 
+# CPython 3.14 checks for signals after a `with` statement's `__enter__` returns
+# and before its block starts, so a KeyboardInterrupt there skips `__exit__` and
+# leaves the lock held (https://github.com/python/cpython/issues/148874, fixed
+# in 3.15). These signals land there often enough to fail; a run that misses
+# that point passes.
+@pytest.mark.xfail(sys.version_info[:2] == (3, 14), strict=False,
+                   reason="CPython gh-148874: on 3.14 a signal right after __enter__ skips __exit__")
 @pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs signal.pthread_kill")
 @pytest.mark.parametrize("method", ["assignment", "paused"])
 def test_real_sigint_leaves_the_sync_mock_monitor_free(method: str) -> None:
