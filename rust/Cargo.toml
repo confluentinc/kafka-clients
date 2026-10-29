@@ -160,6 +160,9 @@ indexmap = "2"
 tonic = "0.12"
 prost = "0.13"
 tokio-stream = "0.1"
+# The test macros (`multilanguage_test!` and its consumer and admin twins, and
+# `consumer_scenario`) name their per-backend arms with it; their `__rust` arms
+# build under `integration-tests` alone.
 paste = "1"
 multilanguage-test-server = { path = "multilanguage-test-server" }
 
