@@ -98,6 +98,8 @@ test-all-features: build-all-features
 # `performance` cargo test target (tests/performance/main.rs), so `--test
 # integration` cannot schedule them alongside the functional suite.
 test-integration: build-integration-tests
+	# admin_examples_test runs the example binaries, which `--test` does not build.
+	cargo build --examples
 	cargo test --features integration-tests --test integration
 	# The integration tests that drive crate internals live in the lib test
 	# binary (src/integration_tests), since those types are not public API.
@@ -123,12 +125,15 @@ test-integration: build-integration-tests
 # `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4 make test-integration` runs the suite
 # against a newer broker. It combines with INTEGRATION_TEST_PROTOCOL.
 test-integration-plaintext: build-integration-tests
+	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
 	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --lib -- integration_tests::
 test-integration-ssl: build-integration-tests
+	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
 	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --lib -- integration_tests::
 test-integration-sasl-ssl: build-integration-tests
+	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --lib -- integration_tests::
 

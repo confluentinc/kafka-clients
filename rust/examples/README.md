@@ -76,3 +76,60 @@ by default. Set `SCHEMA_REGISTRY_URL` to use another one:
 ```
 SCHEMA_REGISTRY_URL=http://registry:8081 cargo run --example avro_producer
 ```
+
+## Admin examples
+
+`examples/admin` has one example per `Admin` RPC. Each takes its input on the
+command line and prints the outcome of each item it asked for. It exits with
+code 0 when everything succeeded, 1 when an operation failed (the failures go
+to stderr, after the successes are printed), and 2 on a usage error, which also
+prints the example's usage line.
+
+```
+cargo run --example admin_create_topics -- orders:3:1 payments
+cargo run --example admin_describe_topics -- orders
+```
+
+`-X key=value` sets any admin client property, as librdkafka's tools do; it
+also overrides `KAFKA_BOOTSTRAP_SERVERS`:
+
+```
+cargo run --example admin_list_topics -- \
+    -X bootstrap.servers=broker:9093 -X security.protocol=SASL_SSL \
+    -X sasl.mechanism=PLAIN \
+    -X 'sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="u" password="p";'
+```
+
+Run an example with `--help` to see its usage line. The shared argument
+parsing and client setup are in `examples/admin/common/mod.rs`.
+
+| Area | Examples |
+|---|---|
+| Topics | `admin_create_topics`, `admin_list_topics`, `admin_describe_topics`, `admin_delete_topics`, `admin_create_partitions` |
+| Records and offsets | `admin_delete_records`, `admin_list_offsets` |
+| Cluster and configs | `admin_describe_cluster`, `admin_describe_configs`, `admin_incremental_alter_configs`, `admin_list_config_resources`, `admin_describe_features`, `admin_update_features`, `admin_unregister_controller` |
+| Replicas | `admin_describe_log_dirs`, `admin_describe_replica_log_dirs`, `admin_alter_replica_log_dirs`, `admin_alter_partition_reassignments`, `admin_list_partition_reassignments`, `admin_elect_leaders` |
+| Groups | `admin_list_groups`, `admin_describe_consumer_groups`, `admin_describe_classic_groups`, `admin_list_consumer_group_offsets`, `admin_alter_consumer_group_offsets`, `admin_delete_consumer_group_offsets`, `admin_delete_consumer_groups`, `admin_remove_members_from_consumer_group` |
+| ACLs | `admin_create_acls`, `admin_describe_acls`, `admin_delete_acls` |
+| Quotas and SCRAM | `admin_describe_client_quotas`, `admin_alter_client_quotas`, `admin_describe_user_scram_credentials`, `admin_alter_user_scram_credentials` |
+| Delegation tokens | `admin_create_delegation_token`, `admin_describe_delegation_token`, `admin_renew_delegation_token`, `admin_expire_delegation_token` |
+| Transactions | `admin_list_transactions`, `admin_describe_transactions`, `admin_describe_producers`, `admin_abort_transaction`, `admin_fence_producers`, `admin_force_terminate_transaction` |
+
+The broker started above runs most of them. Some need more:
+
+- ACLs: an authorizer, `KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer`,
+  with the client's principal in `KAFKA_SUPER_USERS` (`User:ANONYMOUS` over
+  PLAINTEXT).
+- Delegation tokens: `KAFKA_DELEGATION_TOKEN_SECRET_KEY` on the broker, and a
+  client authenticated over SASL or two-way TLS. The broker refuses token
+  requests on PLAINTEXT and one-way TLS connections.
+- Reassignments and preferred elections: several brokers, so a partition can
+  have more than one replica.
+- Replica moves between log directories: a broker with several, for example
+  `KAFKA_LOG_DIRS=/tmp/kafka-logs-0,/tmp/kafka-logs-1`.
+- Transactions: a running transactional producer. On a single broker set
+  `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1` and
+  `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`.
+
+`rust/tests/integration/admin_examples_test.rs` runs every example against
+such clusters.
