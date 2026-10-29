@@ -150,6 +150,13 @@ impl SslConfigs {
 #[derive(Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslConfigs")]
+#[cfg_attr(
+    all(not(feature = "rustls"), not(test)),
+    expect(
+        dead_code,
+        reason = "the values are parsed and kept, but only the TLS transport reads them"
+    )
+)]
 pub struct SslConfigs {
     /// Path to the trust store file (CA certificates).
     /// Corresponds to `ssl.truststore.location`.

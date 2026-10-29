@@ -3,7 +3,7 @@ members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test
 
 [package]
 name = "confluent-kafka"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -36,7 +36,31 @@ include = [
 
 
 [features]
-integration-tests = []
+# Every optional dependency of the client is a default feature, so the default
+# build supports every compression type, TLS and SCRAM credential salting.
+# `default-features = false` drops them; a disabled one fails with an explicit
+# error where it is needed (see the "Cargo features" section of README.md).
+default = ["gzip", "snappy", "lz4", "zstd", "aws-lc-rs", "rustls", "webpki-roots"]
+# The compression codecs of `compression.type` and of fetched record batches.
+gzip = ["dep:flate2"]
+snappy = ["dep:snap"]
+lz4 = ["dep:lz4_flex"]
+zstd = ["dep:zstd"]
+# PBKDF2-HMAC for the admin client's SCRAM credential upsertions, and the
+# crypto provider of `rustls`, which therefore enables it.
+aws-lc-rs = ["dep:aws-lc-rs"]
+# TLS: `security.protocol` SSL and SASL_SSL. It needs a default trust store,
+# so it is enabled through `webpki-roots` below.
+rustls = ["dep:rustls", "dep:tokio-rustls", "aws-lc-rs"]
+# Without `ssl.truststore.location` or `ssl.truststore.certificates` the broker
+# certificate is verified against Mozilla's root certificates, compiled in by
+# `webpki-roots`. It is a default feature so that another default trust store
+# can be added later as a feature of its own: `default-features = false` then
+# selects that one, without the Mozilla bundle.
+webpki-roots = ["rustls", "dep:webpki-roots"]
+# The integration tests run every security protocol and compression type
+# against a real broker, so they need all of the features above.
+integration-tests = ["gzip", "snappy", "lz4", "zstd", "webpki-roots"]
 # Run the producer integration tests against multiple language backends
 # (native Rust, Python via gRPC, C via gRPC). See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md for details.
@@ -51,19 +75,17 @@ crate-type = ["lib", "staticlib", "cdylib"]
 bytes = "1"
 ambassador = "0.5"
 regex = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
 tokio-util = "0.7"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", optional = true }
 # At least 0.23.46: earlier releases print TLS session secrets in the `Debug`
 # output of their client session values (RUSTSEC-2026-0346).
-rustls = { version = "0.23.46", features = ["logging", "std", "tls12"] }
+rustls = { version = "0.23.46", features = ["logging", "std", "tls12"], optional = true }
 # At least 1.0.10: earlier releases trust the leaked emSign intermediate CAs
 # (RUSTSEC-2026-0381).
-webpki-roots = "1.0.10"
+webpki-roots = { version = "1.0.10", optional = true }
 indexmap = "2"
 # Fast, non-cryptographic hasher (FxHash) for the Selector's internal per-poll
 # channel-id maps/sets. The keys are internal connection ids, not attacker-
@@ -79,26 +101,26 @@ env_logger = { version = "0.11", optional = true }
 # package-check` and the crates.io release blocks in `.semaphore/semaphore.yml`
 # both make that edit.
 ffi-macros = { path = "ffi-macros", optional = true }
-flate2 = "1"
-snap = "1"
-lz4_flex = "0.11"
-zstd = "0.13"
+flate2 = { version = "1", optional = true }
+snap = { version = "1", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+zstd = { version = "0.14.3", optional = true }
 crc32c = "0.6"
 # IEEE 802.3 / zlib CRC-32 (poly 0x04C11DB7, reflected). Used as the default
 # producer key partitioner hash (`KeyHasher::Crc32`), matching librdkafka's
 # `consistent_random` partitioner and Python `zlib.crc32`. This is a DIFFERENT
 # polynomial from `crc32c` above (CRC-32C/Castagnoli, used for record-batch
-# CRCs) — do NOT conflate the two. Already present transitively via `flate2`,
-# so this adds no new compiled crate.
+# CRCs) — do NOT conflate the two. Present transitively via `flate2` too,
+# when the `gzip` feature is on.
 crc32fast = "1"
 # FIPS-capable crypto backend (already the project's chosen rustls provider, see
 # `security/ssl/ssl_factory.rs` installing `rustls::crypto::aws_lc_rs`). Used for
-# PBKDF2-HMAC in `ScramFormatter::hi` (SCRAM credential salting, KIP-554). Already
-# present transitively via rustls, so this adds no new compiled crate.
+# PBKDF2-HMAC in `ScramFormatter::hi` (SCRAM credential salting, KIP-554). With the
+# `rustls` feature it is present transitively via rustls too.
 # `default-features = false` mirrors rustls's own feature selection: it drops the
 # `ring-io`/`ring-sig-verify` compat shims (which would pull an extra `untrusted`
 # crate we don't need for PBKDF2), keeping the dependency graph unchanged.
-aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"], optional = true }
 # Reverse DNS (`getnameinfo` with `NI_NAMEREQD`) for Java's
 # `InetAddress.getCanonicalHostName()` in
 # `client.dns.lookup=resolve_canonical_bootstrap_servers_only`
@@ -111,6 +133,10 @@ futures-util = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+# The Schema Registry examples and the performance tests; the library does not
+# use them (the build script has its own entries, for the message generator).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
@@ -121,11 +147,14 @@ tokio = { version = "1", features = ["signal"] }
 # Used by the multilanguage consumer client (impl Consumer is #[async_trait])
 # and to build ConsumerRecords.
 async-trait = "0.1"
-# The Schema Registry examples (`avro_producer`, `avro_consumer`): Robert
-# Yokota's client and the Avro crate it serializes with. The library itself
-# does not depend on either.
+# The Schema Registry examples (`avro_*`, `protobuf_*`, `json_schema_*`):
+# Robert Yokota's client, the Avro crate it serializes with, and
+# `prost-reflect` (with the `prost_types` it re-exports) for the Protobuf
+# message descriptor, the version the client uses. The library itself depends
+# on none of them.
 schema-registry-client = "0.4"
 apache-avro = "0.21"
+prost-reflect = "0.15"
 indexmap = "2"
 # Used only when --features multilanguage-tests is enabled.
 tonic = "0.12"
@@ -133,6 +162,214 @@ prost = "0.13"
 tokio-stream = "0.1"
 paste = "1"
 multilanguage-test-server = { path = "multilanguage-test-server" }
+
+# Admin examples: one file per `Admin` RPC under `examples/admin/`, which Cargo
+# does not discover on its own. The `admin_` prefix keeps the names unique.
+[[example]]
+name = "admin_abort_transaction"
+path = "examples/admin/abort_transaction.rs"
+
+[[example]]
+name = "admin_alter_client_quotas"
+path = "examples/admin/alter_client_quotas.rs"
+
+[[example]]
+name = "admin_alter_consumer_group_offsets"
+path = "examples/admin/alter_consumer_group_offsets.rs"
+
+[[example]]
+name = "admin_alter_partition_reassignments"
+path = "examples/admin/alter_partition_reassignments.rs"
+
+[[example]]
+name = "admin_alter_replica_log_dirs"
+path = "examples/admin/alter_replica_log_dirs.rs"
+
+[[example]]
+name = "admin_alter_user_scram_credentials"
+path = "examples/admin/alter_user_scram_credentials.rs"
+
+[[example]]
+name = "admin_create_acls"
+path = "examples/admin/create_acls.rs"
+
+[[example]]
+name = "admin_create_delegation_token"
+path = "examples/admin/create_delegation_token.rs"
+
+[[example]]
+name = "admin_create_partitions"
+path = "examples/admin/create_partitions.rs"
+
+[[example]]
+name = "admin_create_topics"
+path = "examples/admin/create_topics.rs"
+
+[[example]]
+name = "admin_delete_acls"
+path = "examples/admin/delete_acls.rs"
+
+[[example]]
+name = "admin_delete_consumer_group_offsets"
+path = "examples/admin/delete_consumer_group_offsets.rs"
+
+[[example]]
+name = "admin_delete_consumer_groups"
+path = "examples/admin/delete_consumer_groups.rs"
+
+[[example]]
+name = "admin_delete_records"
+path = "examples/admin/delete_records.rs"
+
+[[example]]
+name = "admin_delete_topics"
+path = "examples/admin/delete_topics.rs"
+
+[[example]]
+name = "admin_describe_acls"
+path = "examples/admin/describe_acls.rs"
+
+[[example]]
+name = "admin_describe_classic_groups"
+path = "examples/admin/describe_classic_groups.rs"
+
+[[example]]
+name = "admin_describe_client_quotas"
+path = "examples/admin/describe_client_quotas.rs"
+
+[[example]]
+name = "admin_describe_cluster"
+path = "examples/admin/describe_cluster.rs"
+
+[[example]]
+name = "admin_describe_configs"
+path = "examples/admin/describe_configs.rs"
+
+[[example]]
+name = "admin_describe_consumer_groups"
+path = "examples/admin/describe_consumer_groups.rs"
+
+[[example]]
+name = "admin_describe_delegation_token"
+path = "examples/admin/describe_delegation_token.rs"
+
+[[example]]
+name = "admin_describe_features"
+path = "examples/admin/describe_features.rs"
+
+[[example]]
+name = "admin_describe_log_dirs"
+path = "examples/admin/describe_log_dirs.rs"
+
+[[example]]
+name = "admin_describe_producers"
+path = "examples/admin/describe_producers.rs"
+
+[[example]]
+name = "admin_describe_replica_log_dirs"
+path = "examples/admin/describe_replica_log_dirs.rs"
+
+[[example]]
+name = "admin_describe_topics"
+path = "examples/admin/describe_topics.rs"
+
+[[example]]
+name = "admin_describe_transactions"
+path = "examples/admin/describe_transactions.rs"
+
+[[example]]
+name = "admin_describe_user_scram_credentials"
+path = "examples/admin/describe_user_scram_credentials.rs"
+
+[[example]]
+name = "admin_elect_leaders"
+path = "examples/admin/elect_leaders.rs"
+
+[[example]]
+name = "admin_expire_delegation_token"
+path = "examples/admin/expire_delegation_token.rs"
+
+[[example]]
+name = "admin_fence_producers"
+path = "examples/admin/fence_producers.rs"
+
+[[example]]
+name = "admin_force_terminate_transaction"
+path = "examples/admin/force_terminate_transaction.rs"
+
+[[example]]
+name = "admin_incremental_alter_configs"
+path = "examples/admin/incremental_alter_configs.rs"
+
+[[example]]
+name = "admin_list_config_resources"
+path = "examples/admin/list_config_resources.rs"
+
+[[example]]
+name = "admin_list_consumer_group_offsets"
+path = "examples/admin/list_consumer_group_offsets.rs"
+
+[[example]]
+name = "admin_list_groups"
+path = "examples/admin/list_groups.rs"
+
+[[example]]
+name = "admin_list_offsets"
+path = "examples/admin/list_offsets.rs"
+
+[[example]]
+name = "admin_list_partition_reassignments"
+path = "examples/admin/list_partition_reassignments.rs"
+
+[[example]]
+name = "admin_list_topics"
+path = "examples/admin/list_topics.rs"
+
+[[example]]
+name = "admin_list_transactions"
+path = "examples/admin/list_transactions.rs"
+
+[[example]]
+name = "admin_remove_members_from_consumer_group"
+path = "examples/admin/remove_members_from_consumer_group.rs"
+
+[[example]]
+name = "admin_renew_delegation_token"
+path = "examples/admin/renew_delegation_token.rs"
+
+[[example]]
+name = "admin_unregister_controller"
+path = "examples/admin/unregister_controller.rs"
+
+[[example]]
+name = "admin_update_features"
+path = "examples/admin/update_features.rs"
+
+# Schema Registry examples: one producer and one consumer per schema format
+# under `examples/schemaregistry/`, which Cargo does not discover on its own.
+[[example]]
+name = "avro_producer"
+path = "examples/schemaregistry/avro_producer.rs"
+
+[[example]]
+name = "avro_consumer"
+path = "examples/schemaregistry/avro_consumer.rs"
+
+[[example]]
+name = "protobuf_producer"
+path = "examples/schemaregistry/protobuf_producer.rs"
+
+[[example]]
+name = "protobuf_consumer"
+path = "examples/schemaregistry/protobuf_consumer.rs"
+
+[[example]]
+name = "json_schema_producer"
+path = "examples/schemaregistry/json_schema_producer.rs"
+
+[[example]]
+name = "json_schema_consumer"
+path = "examples/schemaregistry/json_schema_consumer.rs"
 
 [[test]]
 name = "producer"

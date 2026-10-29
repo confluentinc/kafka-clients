@@ -107,6 +107,11 @@ impl MemoryRecordsBuilder {
     /// at the start for the header, then append records after that.
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder(ByteBufferOutputStream, ...)`.
+    ///
+    /// # Panics
+    ///
+    /// When `compression` is a codec whose Cargo feature is off: the callers
+    /// pass only the codecs the build enables.
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn new(
@@ -143,7 +148,7 @@ impl MemoryRecordsBuilder {
             write_limit,
             delete_horizon_ms,
         )
-        .expect("a single-buffer stream never fails to position")
+        .expect("a single-buffer stream never fails to position, and the codec is enabled")
     }
 
     /// Create a builder over an existing output stream, starting at the stream's current
@@ -267,9 +272,11 @@ impl MemoryRecordsBuilder {
             AppendState::Direct
         } else {
             let append_buf = Vec::new();
+            // Fails for a codec left out of the build, which the producer's
+            // config already refuses.
             let writer = compression
                 .wrap_for_output(append_buf, magic)
-                .expect("Failed to create compression writer");
+                .map_err(|e| Error::kafka_message(format!("Failed to create compression writer: {e}")))?;
             AppendState::Compressed(writer)
         };
 
@@ -1260,15 +1267,19 @@ mod tests {
     use super::*;
     use crate::common::record::internal::Record;
 
-    /// All compression types to test with, each only for magic v2.
+    /// All compression types to test with, each only for magic v2: those the
+    /// build enables.
     fn all_compressions() -> Vec<Compression> {
-        vec![
+        [
             Compression::none().build(),
             Compression::gzip().build(),
             Compression::snappy().build(),
             Compression::lz4().build(),
             Compression::zstd().build(),
         ]
+        .into_iter()
+        .filter(|compression| Compression::is_enabled(compression.compression_type()))
+        .collect()
     }
 
     /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteEmptyRecordSet`.
@@ -2296,6 +2307,7 @@ mod chunked_stream_tests {
 
     /// `estimated_bytes_written_after` (Java's `estimatedBytesWrittenAfter`): the current estimate
     /// plus the record's upper-bound size, ratio-adjusted when compressed.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_estimated_bytes_written_after() {
         let key = [1u8; 7];

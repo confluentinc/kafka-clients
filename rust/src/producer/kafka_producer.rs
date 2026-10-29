@@ -9398,6 +9398,7 @@ mod tests {
     /// fails construction with Java's `ConfigException` (`KafkaProducer#KafkaProducer`), wrapped
     /// like every other construction failure. Below one chunk the strategy falls back to the full
     /// one first, so compression is allowed there, as in Java.
+    #[cfg(feature = "gzip")]
     #[tokio::test]
     async fn test_incremental_allocation_strategy_rejects_compression() {
         let config = ProducerConfig::new(&guard_props(&[
@@ -9432,6 +9433,7 @@ mod tests {
     /// KAFKA-2121 for the KIP-1332 check: the compression `ConfigException` is raised inside
     /// `build_accumulator`, after a custom partitioner is configured, so the failed construction
     /// closes it (`KafkaProducer#KafkaProducer` -> `KafkaProducer`).
+    #[cfg(feature = "lz4")]
     #[test]
     fn test_partitioner_closed_when_incremental_compression_is_rejected() {
         let _guard = MockPartitioner::lock_counters();

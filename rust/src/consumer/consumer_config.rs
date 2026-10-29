@@ -2141,7 +2141,13 @@ mod tests {
             Err(e) => e,
         };
         let msg = format!("{}", err);
-        assert!(msg.contains("ssl_config"), "error should mention ssl_config, got: {msg}");
+        // Without TLS in the build, SASL_SSL fails before its configs are read.
+        let expected = if cfg!(feature = "rustls") {
+            "ssl_config"
+        } else {
+            "the client was built without the `rustls` feature"
+        };
+        assert!(msg.contains(expected), "error should mention {expected}, got: {msg}");
     }
 
     /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays

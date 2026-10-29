@@ -44,7 +44,9 @@ name: build-test-release
 #   7. "Check API compatibility (Linux amd64)" -- compares the Rust API and the
 #      C ABI with the last release tag; a breaking change fails unless the
 #      Cargo.toml version allows it.
-#   8. The "Release (Rust):" and "Release (Python):" blocks, which run only on
+#   8. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
+#      against the RustSec advisory database; a vulnerable dependency fails.
+#   9. The "Release (Rust):" and "Release (Python):" blocks, which run only on
 #      a release tag of their package (see the comments above them).
 #
 # Each verify block sets execution_time_limit to about twice its typical job
@@ -429,6 +431,33 @@ blocks:
           commands:
             - make check-api-compat
 
+  - name: "Audit Rust dependencies (Linux amd64)"
+    # Checks rust/Cargo.lock, which covers every crate of the workspace and so
+    # every Rust crate the library, the C library and the wheels link, against
+    # the RustSec advisory database (`make audit`, cargo-audit). A vulnerable
+    # dependency fails the job and with it the pipeline; an unmaintained,
+    # unsound or yanked crate is only reported. cargo-audit fetches the
+    # database on each run, so a newly published advisory turns the job red
+    # without any change in this repository: update the dependency, or, when
+    # it does not affect this client, ignore the advisory by id in
+    # rust/.cargo/audit.toml with the reason.
+    dependencies: []
+    execution_time_limit:
+      minutes: 15
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+          # The prebuilt release, pinned by version and checksum.
+          - curl -sSfL -o /tmp/cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
+          - echo "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/cargo-audit.tgz" | sha256sum -c -
+          - mkdir -p "$HOME/.cargo/bin" && tar -xzf /tmp/cargo-audit.tgz -C "$HOME/.cargo/bin" --strip-components=1 cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit
+          - export PATH="$HOME/.cargo/bin:$PATH"
+      jobs:
+        - name: "audit (Linux amd64)"
+          commands:
+            - make audit
+
   # Rust release blocks. They run only on the build of a Rust release tag,
   # rust/v<version> with an optional -alpha.N, -beta.N, -rc.N or -dev.N suffix,
   # and are skipped on every other build. A dev tag runs the two pre-publish
@@ -461,6 +490,7 @@ blocks:
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
+      - "Audit Rust dependencies (Linux amd64)"
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -1152,6 +1182,7 @@ blocks:
       - "Verify language bindings (Linux amd64)"
       - "Verify Rust (macOS arm64)"
       - "Verify language bindings (macOS arm64)"
+      - "Audit Rust dependencies (Linux amd64)"
       - "Release (Python): wheel verification (Linux amd64)"
       - "Release (Python): wheel verification (Linux arm64)"
       - "Release (Python): wheel verification (macOS amd64)"
