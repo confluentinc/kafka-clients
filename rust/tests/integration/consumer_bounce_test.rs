@@ -62,7 +62,11 @@
 //! restart brokers through `KafkaCluster::shutdown_broker` / `start_broker`:
 //!
 //! - `testAsyncConsumerConsumptionWithBrokerFailures`
-//!   → `test_async_consumer_consumption_with_broker_failures`
+//!   → `test_async_consumer_consumption_with_broker_failures`, a multilanguage
+//!   scenario ([`multilanguage_consumer_test!`]): the consumer under test also
+//!   runs on the Python (sync, asyncio) and C backends, while the broker bounces
+//!   and every fixture stay native. Its name gains the backend suffix
+//!   (`__rust`, `__grpc_python`, `__grpc_python_async`, `__grpc_c`).
 //! - `testAsyncConsumerSeekAndCommitWithBrokerFailures`
 //!   → `test_async_consumer_seek_and_commit_with_broker_failures`
 //! - `testAsyncSubscribeWhenTopicUnavailable`
@@ -110,6 +114,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::seq::IndexedRandom;
 
+use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::consumer_assignment_poller::ConsumerAssignmentPoller;
@@ -117,6 +122,7 @@ use crate::common::kafka_cluster;
 use crate::common::kafka_cluster::KafkaCluster;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
+use crate::multilanguage_consumer_test;
 
 /// Java's `BROKER_COUNT`.
 const BROKER_COUNT: u16 = 3;
@@ -177,15 +183,7 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
 /// `group_<random>` group id unless overridden, on the KIP-848 protocol this
 /// suite translates.
 fn create_consumer(ctx: &TestContext, configs: &HashMap<String, String>) -> BytesConsumer {
-    static NEXT_DEFAULT_GROUP: AtomicUsize = AtomicUsize::new(0);
-    let default_group = ctx.group_id(&format!("group_{}", NEXT_DEFAULT_GROUP.fetch_add(1, Ordering::SeqCst)));
-    let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
-        ("group.protocol".to_string(), "consumer".to_string()),
-        ("auto.offset.reset".to_string(), "earliest".to_string()),
-        ("group.id".to_string(), default_group),
-    ]);
-    props.extend(configs.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let props = consumer_props(ctx, ctx.bootstrap_servers(), configs);
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("valid consumer config"),
@@ -194,6 +192,39 @@ fn create_consumer(ctx: &TestContext, configs: &HashMap<String, String>) -> Byte
         )
         .expect("KafkaConsumer::new should succeed"),
     )
+}
+
+/// The properties of [`create_consumer`], over `bootstrap`.
+fn consumer_props(ctx: &TestContext, bootstrap: &str, configs: &HashMap<String, String>) -> HashMap<String, String> {
+    static NEXT_DEFAULT_GROUP: AtomicUsize = AtomicUsize::new(0);
+    let default_group = ctx.group_id(&format!("group_{}", NEXT_DEFAULT_GROUP.fetch_add(1, Ordering::SeqCst)));
+    let mut props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("group.id".to_string(), default_group),
+    ]);
+    props.extend(configs.iter().map(|(k, v)| (k.clone(), v.clone())));
+    props
+}
+
+/// [`create_consumer`] for the backend under test of a multilanguage scenario:
+/// the same properties over the PLAINTEXT bootstrap the backend reaches (the
+/// CONTAINER listener for a containerized backend, host loopback otherwise).
+async fn create_consumer_for<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    configs: &HashMap<String, String>,
+) -> BytesConsumer {
+    let bootstrap = if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers()
+    } else {
+        ctx.bootstrap_servers()
+    };
+    factory
+        .create(consumer_props(ctx, bootstrap, configs))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
 /// `clusterInstance.producer()`: byte-array serializers, producer defaults.
@@ -643,47 +674,60 @@ async fn restart_dead_brokers(cluster: &KafkaCluster) {
 /// Java's `consumeWithBrokerFailures(numIters, CONSUMER)`:
 /// produce 1000 records, then consume them while brokers are killed and
 /// restarted at random, committing after every non-empty poll and checking
-/// that the position and the committed offset agree.
-async fn consume_with_broker_failures(num_iters: usize) {
-    let mut ctx = TestContext::new(bounce_cluster_config()).await;
-    let topic = set_up(&mut ctx).await;
+/// that the position and the committed offset agree. The consumer is the
+/// backend's under test; the producer and the admin are native fixtures.
+async fn consume_with_broker_failures<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F, num_iters: usize) {
+    let backend = factory.name();
+    let topic = set_up(ctx).await;
     let topic_partition = TopicPartition::new(topic.clone(), 0);
     let num_records: usize = 1000;
-    send_records(&ctx, &topic_partition, num_records).await;
+    send_records(ctx, &topic_partition, num_records).await;
 
-    let mut consumer = create_consumer(&ctx, &HashMap::new());
+    let mut consumer = create_consumer_for(ctx, factory, &HashMap::new()).await;
     consumer
         .subscribe_with_topics(vec![topic.clone()])
         .await
-        .expect("subscribe should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
 
     let scheduler = BounceBrokerScheduler::new(num_iters);
     let consume = async {
         let mut consumed: i64 = 0;
         while scheduler.is_running() {
-            let records = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+            let records = consumer
+                .poll(Duration::from_millis(100))
+                .await
+                .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
 
             for record in &records {
-                assert_eq!(consumed, record.offset());
+                assert_eq!(consumed, record.offset(), "{backend} backend");
                 consumed += 1;
             }
 
             if !records.is_empty() {
-                consumer.commit_sync().await.expect("commitSync should succeed");
+                consumer
+                    .commit_sync()
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: commitSync should succeed: {e}"));
 
-                let current_position = consumer.position(&topic_partition).await.expect("position");
+                let current_position = consumer
+                    .position(&topic_partition)
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: position: {e}"));
                 let committed_offset = consumer
                     .committed(std::slice::from_ref(&topic_partition))
                     .await
-                    .expect("committed")
+                    .unwrap_or_else(|e| panic!("{backend} backend: committed: {e}"))
                     .get(&topic_partition)
                     .and_then(Option::as_ref)
-                    .expect("a committed offset for the partition")
+                    .unwrap_or_else(|| panic!("{backend} backend: a committed offset for the partition"))
                     .offset();
-                assert_eq!(current_position, committed_offset);
+                assert_eq!(current_position, committed_offset, "{backend} backend");
 
                 if current_position == num_records as i64 {
-                    consumer.seek_to_beginning(&[]).await.expect("seekToBeginning");
+                    consumer
+                        .seek_to_beginning(&[])
+                        .await
+                        .unwrap_or_else(|e| panic!("{backend} backend: seekToBeginning: {e}"));
                     consumed = 0;
                 }
             }
@@ -695,10 +739,18 @@ async fn consume_with_broker_failures(num_iters: usize) {
 }
 
 /// Translates `ConsumerBounceTest#testAsyncConsumerConsumptionWithBrokerFailures`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_consumption_with_broker_failures() {
-    consume_with_broker_failures(10).await;
+async fn async_consumer_consumption_with_broker_failures<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    consume_with_broker_failures(ctx, factory, 10).await;
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_consumption_with_broker_failures,
+    async_consumer_consumption_with_broker_failures,
+    bounce_cluster_config()
+);
 
 /// The wait in Java's `seekAndCommitWithBrokerFailures` until every broker's local
 /// log of `tp` has a high watermark of `num_records`, within 30 s.
