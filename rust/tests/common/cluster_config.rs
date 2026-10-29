@@ -280,6 +280,29 @@ pub fn with_assignment_interval(mut cfg: ClusterConfig, interval_ms: u32) -> Clu
     cfg
 }
 
+/// Report that `test` (on `backend`) skipped itself for `reason`, with the
+/// broker release of this run. Written to [`std::io::stderr`], not with
+/// `eprintln!`, so that libtest does not capture it and it shows in a CI log
+/// for a passing test too, beside the arm's `ArmTimer` line.
+pub fn log_assignment_interval_skip(test: &str, backend: &str, reason: &str) {
+    use std::io::Write;
+
+    // The arm label the test name's suffix and `ArmTimer`'s line use:
+    // `factory.name()` of a gRPC backend is `python` / `python_async` / `c` /
+    // `dotnet` / `dotnet_async`, its arm the same name after `grpc_`; `rust` is
+    // both.
+    let backend = match backend {
+        "rust" => backend.to_string(),
+        grpc => format!("grpc_{grpc}"),
+    };
+    let (major, minor) = super::kafka_cluster::broker_release();
+    // Best effort, as `ArmTimer`'s line: a closed stderr must not panic the test.
+    let _ = writeln!(
+        std::io::stderr(),
+        "[multilanguage] {test} backend={backend} skipped: {reason} (broker {major}.{minor})"
+    );
+}
+
 /// The cluster of an `_assignment_interval_<interval_ms>` arm:
 /// [`with_assignment_interval`] on a broker that has the config, `cfg`
 /// unchanged on an older one, where the arm skips itself, so that a skipped
