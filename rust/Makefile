@@ -19,6 +19,11 @@ endif
 # macOS perf p99 budget (ms), used by test-integration-perf-macos.
 MACOS_P99_LIMIT_MS ?= 150
 
+# The tag of the gRPC images the multilanguage arms run; tests/common/backend_pool.rs
+# reads it from the environment (see the root Makefile).
+MULTILANG_IMAGE_TAG ?= dev
+export MULTILANG_IMAGE_TAG
+
 .PHONY: build build-integration-tests build-all-features \
 	devel-build devel-build-integration-tests devel-build-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \

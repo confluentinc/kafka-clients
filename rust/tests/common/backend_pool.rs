@@ -404,11 +404,22 @@ pub async fn get_or_start(kind: BackendKind, broker_network: &str) -> Arc<Backen
     .clone()
 }
 
+/// The tag of the gRPC images, `MULTILANG_IMAGE_TAG`, `dev` when unset: the
+/// tag `make build-grpc-images` built them under (see the root Makefile), so
+/// each worktree can run its own images.
+fn image_tag() -> String {
+    std::env::var("MULTILANG_IMAGE_TAG")
+        .ok()
+        .filter(|tag| !tag.is_empty())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
 async fn start_container(kind: BackendKind, broker_network: String) -> BackendHandle {
     let internal_port: u16 = kind.internal_port();
     let internal: ContainerPort = internal_port.tcp();
 
-    let image = GenericImage::new(kind.image_repository(), "dev")
+    let tag = image_tag();
+    let image = GenericImage::new(kind.image_repository(), tag.as_str())
         .with_exposed_port(internal)
         .with_wait_for(WaitFor::message_on_stderr("listening"))
         // Join the broker's user-defined bridge network so the gRPC
@@ -418,8 +429,8 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
 
     let container = image.start().await.unwrap_or_else(|e| {
         panic!(
-            "failed to start {} gRPC backend container (image {}:dev) on network {}: {e}\n\
-             Build it with `make build-grpc-images`.",
+            "failed to start {} gRPC backend container (image {}:{tag}) on network {}: {e}\n\
+             Build it with `MULTILANG_IMAGE_TAG={tag} make build-grpc-images`.",
             kind.label(),
             kind.image_repository(),
             broker_network,

@@ -263,7 +263,7 @@ mod grpc_backends {
 
     /// Backend that drives python/producer.py through a gRPC
     /// server running in the
-    /// `confluent-kafka-rust/python-grpc-server:dev` Docker image.
+    /// `confluent-kafka-rust/python-grpc-server:<MULTILANG_IMAGE_TAG>` Docker image.
     pub struct PythonGrpcFactory {
         channel: Channel,
     }
@@ -347,7 +347,7 @@ mod grpc_backends {
 
     /// Backend that drives the *asyncio-native* python client
     /// (`AsyncKafkaProducer` / `AsyncKafkaConsumer`) through a gRPC server
-    /// running in the `confluent-kafka-rust/python-async-grpc-server:dev`
+    /// running in the `confluent-kafka-rust/python-async-grpc-server:<MULTILANG_IMAGE_TAG>`
     /// Docker image. Identical wiring to [`PythonGrpcFactory`] — only the
     /// backend label (used in logs) differs.
     pub struct PythonAsyncGrpcFactory {
@@ -430,7 +430,7 @@ mod grpc_backends {
     }
 
     /// Backend that drives the public C FFI through a gRPC server running
-    /// in the `confluent-kafka-rust/c-grpc-server:dev` Docker image (a
+    /// in the `confluent-kafka-rust/c-grpc-server:<MULTILANG_IMAGE_TAG>` Docker image (a
     /// thin grpc++ wrapper that calls `kafka_producer_*`).
     pub struct CGrpcFactory {
         channel: Channel,
