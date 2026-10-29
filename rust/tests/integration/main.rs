@@ -65,8 +65,9 @@ mod producer_send_while_deletion_test;
 // `test_wrong_serializer_errors_send`) whose own attributes are
 // `#[cfg(feature = "integration-tests")]`. Under the narrower gate the module
 // never compiled in a plain integration run, so those attributes were dead and
-// `make test-integration` ran zero producer tests. The gRPC-backed tests inside
-// carry their own per-item `multilanguage-tests` gates.
+// `make test-integration` ran zero producer tests. Its scenarios need no gate
+// of their own: `multilanguage_test!` gates each gRPC arm on
+// `multilanguage-tests`, so without that feature only the `__rust` arms build.
 #[cfg(feature = "integration-tests")]
 mod producer_test;
 mod producer_transactions_test;
