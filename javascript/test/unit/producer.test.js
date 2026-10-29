@@ -199,24 +199,39 @@ test("close checks its timeout as Java's close(Duration) does, whatever the stat
   await producer.close({ timeoutMs: 0 });
 });
 
-test('a negative close timeout is rejected by the core and closes nothing', async () => {
-  const producer = new KafkaProducer(UNREACHABLE);
-  await assert.rejects(producer.close({ timeoutMs: -1 }), (e) => {
+test('a negative close timeout on an open producer is rejected first and changes nothing', async () => {
+  const negative = (e) => {
     assert.ok(e instanceof KafkaError);
     assert.equal(e.name, 'LOCAL_ILLEGAL_ARGUMENT');
+    assert.equal(e.code, -3);
     assert.equal(e.message, 'The timeout cannot be negative.');
     return true;
-  });
-  // Still open: the record is handed over (it fails only for the missing
-  // metadata, as any record to this broker does).
-  const future = await producer.send(new ProducerRecord({ topic: 'unit-n', value: 'v' }));
-  await producer.close({ timeoutMs: 0 });
+  };
+  // Java's close(Duration) throws before touching the producer: a send() in
+  // the same turn is still accepted.
+  const producer = new KafkaProducer(UNREACHABLE);
+  const rejected = producer.close({ timeoutMs: -1 });
+  const sent = producer.send(new ProducerRecord({ topic: 'unit-n', value: 'v' }));
+  await assert.rejects(rejected, negative);
+  // The record is handed over (it fails only for the missing metadata, as any
+  // record to this broker does).
+  const future = await sent;
+  await producer.close();
   await assert.rejects(future.get(), (e) => {
     assert.ok(e instanceof KafkaError);
     assert.equal(e.name, 'REQUEST_TIMED_OUT');
     assert.equal(e.message, TIMEOUT_MESSAGE('unit-n'));
     return true;
   });
+  assert.throws(() => producer.send(new ProducerRecord({ topic: 'unit-n', value: 'v' })), { message: CLOSED_MESSAGE });
+
+  // A close() in the same turn is a close of its own, not the rejected one.
+  const other = new KafkaProducer(UNREACHABLE);
+  const rejectedToo = other.close({ timeoutMs: -1 });
+  const closed = other.close();
+  await assert.rejects(rejectedToo, negative);
+  await closed;
+  assert.throws(() => other.send(new ProducerRecord({ topic: 'unit-n', value: 'v' })), { message: CLOSED_MESSAGE });
 });
 
 test('argument errors throw synchronously', async () => {

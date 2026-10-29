@@ -26,6 +26,12 @@ These decide every question, in this order:
    behaviour or silently misread at the ABI (a missing topic, wrong argument
    types, a negative partition or timestamp, which the C record constructors
    read as Java's `null`) and whether the producer is already closed.
+   One exception: `close({timeoutMs})` rejects a negative timeout itself,
+   before touching any state and in every state, although the core checks it
+   too. Java's `close(Duration)` checks it before anything else, but the
+   core's verdict is queued and reaches JS only at the next drain, after
+   `close()` has marked the producer closed; checked only there, a `send()` or
+   `close()` in between would see a producer closing that then stays open.
 2. **The notify hook only signals.** `producer_callbacks_notify` calls
    `napi_call_threadsafe_function(..., napi_tsfn_nonblocking)` and nothing
    else, under the producer's `notify_mtx` and only while `notify_open`. It
@@ -136,13 +142,12 @@ These decide every question, in this order:
 - After a completed `close()`, `send` throws `LOCAL_ILLEGAL_STATE` with Java's
   `throwIfProducerClosed` message, and `flush()` resolves at once: Java's
   `flush()` has no closed check and returns immediately on the empty
-  accumulator a completed close leaves. A `close({timeoutMs})` the core
-  rejects (a negative timeout, Java's `IllegalArgumentException`) closes
-  nothing, and the producer stays usable. While a close is in progress or
-  after it completed, the native producer no longer checks the timeout, so
-  the binding rejects a negative one itself, with `LOCAL_ILLEGAL_ARGUMENT` and
-  Java's message "The timeout cannot be negative.", as Java's `close(Duration)`
-  checks it before anything else.
+  accumulator a completed close leaves. A negative `timeoutMs` is rejected
+  by the binding first, in every state (rule 1's exception), with
+  `LOCAL_ILLEGAL_ARGUMENT` and Java's message "The timeout cannot be
+  negative.", as Java's `close(Duration)` throws `IllegalArgumentException`
+  before anything else: such a close changes nothing, and an open producer
+  stays usable.
 - Configuration is a plain object (or a `Map`) of Java's config keys; values
   are stringified (`true` → `"true"`, numbers and bigints by `String`, arrays
   joined with `,`), `null` / `undefined` dropped. The core validates them.

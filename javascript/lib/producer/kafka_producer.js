@@ -165,8 +165,9 @@ class KafkaProducer {
    * close(Duration)), then releases the native client. The records waited
    * for are those whose `send()` had resolved before `close()` was called.
    * Calling it again returns the close in progress, or resolves once the
-   * producer is closed; a negative `timeoutMs` is rejected whatever the
-   * producer's state, as Java's close(Duration) checks it first.
+   * producer is closed. A negative `timeoutMs` is rejected whatever the
+   * producer's state and changes nothing, as Java's close(Duration) checks it
+   * first.
    *
    * @param {{timeoutMs?: number}} [options] `timeoutMs`: the maximum time to wait for the
    *   producer to complete any pending requests. A timeout of zero means do not wait.
@@ -184,10 +185,12 @@ class KafkaProducer {
         timeoutMs = options.timeoutMs;
       }
     }
+    // Java's close(Duration) rejects a negative timeout before anything else,
+    // whatever the state. The core checks it too, but its verdict arrives at
+    // the next drain, after this call marked the producer closed: checked here,
+    // a rejected close changes nothing (javascript/CLAUDE.md, rule 1).
+    if (timeoutMs !== null && timeoutMs < 0) return Promise.reject(illegalArgument(NEGATIVE_TIMEOUT_MESSAGE));
     if (this.#closing !== null || this.#destroyed) {
-      // The native producer, closing or gone, no longer checks the timeout:
-      // Java's close(Duration) rejects a negative one first, whatever the state.
-      if (timeoutMs !== null && timeoutMs < 0) return Promise.reject(illegalArgument(NEGATIVE_TIMEOUT_MESSAGE));
       return this.#closing !== null ? this.#closing : Promise.resolve();
     }
     this.#closed = true;
