@@ -51,8 +51,8 @@ The binding-agnostic rules below come from root `CLAUDE.md` "Python Binding Conv
    3. call `__set_callback_result(view, id, NULL, err)` exactly once.
 
    No reports are sent once destroy has begun.
-7. **No binding-side send queue, cap or lock.** The core serialises sends itself.
-8. **Zero extra copies of key and value.** The binding keeps a `napi_ref` on each Buffer until the hand-over callback fires (the bytes are borrowed until then, see `rust/src/ffi/producer/mod.rs`). Headers are copied by the core.
+7. **No binding-side send queue, buffer, cap or lock** (reaffirmed 2026-10-29, D8). The core's contract (`rust/src/ffi/producer/mod.rs`, module docs on `send_cb`) puts ordering on the caller: a caller that wants its records in sending order, and in the next `flush`/`close`, waits for each record's hand-over before its next send. The binding meets this the way Python async and .NET async do: `send()` resolves at hand-over (D8), so the caller's `await` is the wait. The binding never holds records back itself.
+8. **Zero extra copies of key and value.** The binding keeps a `napi_ref` on each Buffer until the hand-over callback fires (the bytes are borrowed until then, see `rust/src/ffi/producer/mod.rs`). Headers are copied by the core. Because `send()` resolves at hand-over (D8), the documented contract is: a caller's `Buffer`/`Uint8Array` key or value must not be modified or detached until `send()` resolves, after which it may be reused (D9; .NET pins until hand-over likewise).
 9. **Ownership follows the signature.**
    - Errors from `out_err` and from `_cb` completions are owned; the binding copies them into a JS object and then destroys them.
    - The error and the metadata passed to a delivery callback are borrowed.
@@ -133,9 +133,10 @@ Every file carries the Apache 2.0 header with Confluent Inc. as copyright holder
 const { KafkaProducer, ProducerRecord } = require('<package>');
 
 const producer = new KafkaProducer({ 'bootstrap.servers': 'localhost:9092' });
-const metadata = await producer.send(
+const future = await producer.send(                    // resolves at hand-over
   new ProducerRecord({ topic: 'demo', key: 'k1', value: 'hello' }),
   (metadata, error) => { /* optional Java Callback */ });
+const metadata = await future.get();                   // resolves at delivery
 console.log(metadata.topic, metadata.partition, metadata.offset, metadata.timestamp);
 await producer.flush();
 await producer.close();          // or close({ timeoutMs })
@@ -151,8 +152,10 @@ await producer.close();          // or close({ timeoutMs })
 - `headers` is an array of `{key, value}`.
 
 **`send`:**
-- `send(record, callback?)` returns a `Promise<RecordMetadata>`, the JS idiom for Java's `Future<RecordMetadata>`.
-- A hand-over error rejects the Promise, and so does a delivery error. The optional `callback(metadata, error)` runs first, mirroring Java's callback-then-future order.
+- **Two-step send (D8).** `send(record, callback?)` returns a `Promise<KafkaFuture<RecordMetadata>>`. The Promise resolves at **hand-over**, the point where Java's blocking `send()` returns, with a `KafkaFuture` whose `get()` returns a `Promise<RecordMetadata>` that settles at **delivery**. This is the shape Python's `AsyncProducer.send` and .NET's `AsyncKafkaProducer.Send` use, and Java's `send()` itself returns a `Future`.
+- A **hand-over** error (what Java's `doSend` rethrows, e.g. a closed producer or a bootstrap resolution failure) rejects the `send()` Promise and never reaches the callback, as in Java.
+- A **delivery** error reaches the optional `callback(metadata, error)` first, then fails the future, mirroring Java's callback-then-future order. A future whose `get()` is never called raises no unhandled rejection (Java ignores an unread failed `Future` too).
+- **Ordering is the caller's.** Records from code that awaits each `send()` before the next reach the producer in order and are covered by a following `flush()`/`close()`. Sends that are not awaited one by one (e.g. `Promise.all`) are concurrent, like Java `send()` calls on several threads, with no order between them. This is documented on `send`, in `index.d.ts` and in the README.
 - Argument errors (no topic, wrong type) and "producer is closed" throw synchronously before any FFI call, as Java's `send` does.
 
 **`flush` and `close`:**
@@ -260,3 +263,5 @@ The phase is done when the consumer prints `k1` / `hello-from-node` at the parti
 | D5 | Where the JS rules live | **`javascript/CLAUDE.md`**, picked up automatically inside `javascript/`, like `dotnet/CLAUDE.md`. Root `CLAUDE.md` is not edited (it is closed to automatic agents). | `.claude/rules/javascript-binding.md` |
 | D6 | Package name | **`"private": true` with a working name `confluent-kafka-javascript-rust`**; the real name is settled before any publish, since `@confluentinc/kafka-javascript` is taken by the existing client. | Choose the final name now. |
 | D7 | Consumer for the end-to-end check | **Python `verifiable_consumer.py`**, falling back to the Rust verifiable consumer. | Rust only, which avoids the Python build and its pip index issue. |
+| D8 | Ordering after Critic 100 items 1–2 (added 2026-10-29) | **Approved: two-step send.** `send()` resolves at hand-over with a `KafkaFuture`; `future.get()` resolves at delivery. No binding-side buffering. | A binding FIFO (rejected: no binding-side buffering); a blocking send on the JS thread (rejected: freezes the event loop up to `max.block.ms`); an ordered mode in the Rust core (possible later; changes the C API). |
+| D9 | Caller's Buffer (Critic 100 item 4) | **Approved with D8:** borrowed until `send()` resolves, documented; no copy. | Copy every caller Buffer at `send()`. |
