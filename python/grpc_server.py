@@ -453,8 +453,13 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             else:
                 consumer = KafkaConsumer(configs=config)
         except Exception as e:  # noqa: BLE001
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
             LOG.exception("CreateConsumer failed")
-            return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(e))
+            return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(error))
         with self._lock:
             consumer_id = self._next_id
             self._next_id += 1
@@ -697,7 +702,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             tps = consumer.assignment()
         except Exception as e:  # noqa: BLE001
-            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(error))
         return cpb.TopicPartitionListResponse(
             partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
 
@@ -710,7 +720,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             topics = consumer.subscription()
         except Exception as e:  # noqa: BLE001
-            return cpb.SubscriptionResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.SubscriptionResponse(error=_kafka_error_to_proto(error))
         return cpb.SubscriptionResponse(topics=cpb.StringList(values=list(topics)))
 
     def Metrics(self, request, context):
@@ -724,7 +739,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             snapshot = consumer.metrics()
         except Exception as e:  # noqa: BLE001
-            return pb.MetricsResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return pb.MetricsResponse(error=_kafka_error_to_proto(error))
         return pb.MetricsResponse(metrics=pb.MetricList(
             metrics=[_metric_to_proto(m) for m in snapshot.values()]))
 
@@ -737,7 +757,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             tps = consumer.paused()
         except Exception as e:  # noqa: BLE001
-            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(error))
         return cpb.TopicPartitionListResponse(
             partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
 
@@ -751,7 +776,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             group_metadata = consumer.group_metadata()
         except Exception as e:  # noqa: BLE001
-            return cpb.GroupMetadataResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.GroupMetadataResponse(error=_kafka_error_to_proto(error))
         return cpb.GroupMetadataResponse(
             group_metadata_id=self._group_metadata.add(group_metadata),
             group_metadata=_group_metadata_to_proto(group_metadata))
@@ -790,7 +820,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             lag = consumer.current_lag(topic_partition=_tp(request.partition))
         except Exception as e:  # noqa: BLE001
-            return cpb.CurrentLagResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.CurrentLagResponse(error=_kafka_error_to_proto(error))
         return _current_lag_response(lag)
 
     def GetCallbackLog(self, request, context):
@@ -810,7 +845,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except KafkaError as e:
             return self._status_err(e)
         except Exception as e:  # noqa: BLE001
-            return self._status_err(e)
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return self._status_err(error)
         with self._lock:
             if action is None:
                 self._listener_actions.pop(request.consumer_id, None)
