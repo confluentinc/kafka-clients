@@ -405,6 +405,15 @@ void fill_proto_error_borrowed(KafkaError* dst, const kafka_common_Error_t* err)
   }
   dst->set_bare_kafka_error(dst->code() == kafka_common_Error_UNKNOWN_SERVER_ERROR &&
                             kafka_common_Error_is_api_error(err) == 0);
+  // The cause, one level deep; borrowed from `err`, so not freed here.
+  if (const kafka_common_Error_t* cause = kafka_common_Error_source(err)) {
+    const char* cause_msg = kafka_common_Error_message(cause);
+    auto* dst_cause = dst->mutable_cause();
+    dst_cause->set_code(kafka_common_Error__enum(cause));
+    dst_cause->set_message(cause_msg ? std::string(cause_msg) : std::string());
+    dst_cause->set_bare_kafka_error(dst_cause->code() == kafka_common_Error_UNKNOWN_SERVER_ERROR &&
+                                    kafka_common_Error_is_api_error(cause) == 0);
+  }
 }
 
 // Build a proto KafkaError from a C FFI error handle. Takes ownership

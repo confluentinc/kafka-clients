@@ -406,6 +406,20 @@ message KafkaError {
   // True for the bare `KafkaException` (Python: not an `ApiError`; C:
   // `kafka_common_Error_is_api_error` is 0), false otherwise.
   bool bare_kafka_error = 11;
+  // The error's cause, Java's `getCause()`, one level deep: the Python
+  // servers read it from `__cause__`, the C server from
+  // `kafka_common_Error_source`. Absent when the error has none.
+  optional KafkaErrorCause cause = 12;
+}
+
+// The class and message of a KafkaError's cause. The cause's own cause and
+// payload are not carried.
+message KafkaErrorCause {
+  // As KafkaError.code.
+  int32 code = 1;
+  string message = 2;
+  // As KafkaError.bare_kafka_error.
+  bool bare_kafka_error = 3;
 }
 
 // A (topic, partition) and an offset inside a KafkaError payload.
