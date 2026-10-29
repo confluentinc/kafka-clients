@@ -284,23 +284,25 @@ def _proto_to_producer_record(proto_record):
     ``timestamp`` are ``None`` when unset (Java's null), not the old ``-1``
     sentinel.
 
-    The producer send path DOES carry ProducerRecord headers end-to-end now (the
-    native record + FFI struct + Rust send preserve them — B1), but the gRPC
-    *producer* proto ``ProducerRecord`` has no ``headers`` field, so this
-    translation cannot forward them; they default to empty on this arm. Adding a
-    headers field to the producer proto is a separate gRPC-contract change. (The
-    consumer arm's proto DOES carry headers — see ``_consumer_record_to_proto``.)"""
+    The proto's ``headers`` become the record's headers, in order, as
+    ``(key, value)`` pairs the ``ProducerRecord`` turns into ``Header``s. As the
+    C server does, a record without headers takes Java's headerless
+    constructor; a header value is always bytes, since the proto has no null
+    header value."""
     value = proto_record.value if proto_record.HasField("value") else None
     key = proto_record.key if proto_record.HasField("key") else None
     partition = proto_record.partition if proto_record.HasField("partition") else None
     timestamp = proto_record.timestamp if proto_record.HasField("timestamp") else None
-    return ProducerRecord(
+    fields = dict(
         topic=proto_record.topic,
         value=value,
         key=key,
         partition=partition,
         timestamp=timestamp,
     )
+    if proto_record.headers:
+        fields["headers"] = [(h.key, bytes(h.value)) for h in proto_record.headers]
+    return ProducerRecord(**fields)
 
 
 def _member(obj, name):
