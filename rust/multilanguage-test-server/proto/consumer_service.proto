@@ -124,17 +124,19 @@ service ConsumerService {
   rpc GetCallbackLog(CallbackLogRequest) returns (CallbackLogResponse);
 
   // Give the logging listener that the consumer's NEXT Subscribe with
-  // with_listener = true registers an action: a call back into the consumer
-  // that the listener makes from inside one of its methods, the in-callback
-  // reentrancy Java's listeners rely on (consumer-threading.md §31). The
-  // listener runs it once, the first time `method`'s partitions contain
-  // `partition`, through its binding's own reentrancy path (Python: the
-  // consumer object, called from inside the listener; C: the
-  // kafka_consumer_ConsumerHandle_* entry points of kafka_consumer_Consumer_handle),
-  // and logs the result as a "listener_action" entry (see CallbackLogEntry in
-  // producer_service.proto). The action belongs to that one registration: a
-  // later Subscribe with a listener and no new SetListenerAction registers a
-  // plain logging listener again. LISTENER_ACTION_NONE clears a pending action.
+  // with_listener = true registers a script per method: the calls back into
+  // the consumer (and the sleeps and failures) Java's test listeners make from
+  // inside on_partitions_assigned / on_partitions_revoked / on_partitions_lost,
+  // the in-callback reentrancy of consumer-threading.md §31. On an invocation
+  // its trigger selects, the listener first logs the invocation as usual
+  // ("assigned" / "revoked" / "lost"), then runs the steps in order through
+  // its binding's own reentrancy path (Python: the consumer object, called
+  // from inside the listener; C: the kafka_consumer_ConsumerHandle_* entry
+  // points of kafka_consumer_Consumer_handle), logging each step as its own
+  // "listener_action" entry (see CallbackLogEntry in producer_service.proto).
+  // The scripts belong to that one registration: a later Subscribe with a
+  // listener and no new SetListenerAction registers a plain logging listener
+  // again. A request with no script clears a pending one.
   rpc SetListenerAction(ListenerActionRequest) returns (StatusResponse);
 }
 
@@ -481,34 +483,81 @@ message CallbackLogRequest {
   uint64 consumer_id = 1;
 }
 
-// The consumer call a logging listener makes from inside a rebalance callback
-// (SetListenerAction).
-enum ListenerAction {
-  // No action: the listener only logs.
-  LISTENER_ACTION_NONE = 0;
-  // Java's `consumer.assignment()`.
-  LISTENER_ACTION_ASSIGNMENT = 1;
-  // Java's `consumer.beginningOffsets(List.of(partition))`.
-  LISTENER_ACTION_BEGINNING_OFFSETS = 2;
-  // Java's `consumer.position(partition)`.
-  LISTENER_ACTION_POSITION = 3;
-  // Java's `consumer.seek(partition, offset)` followed by
-  // `consumer.pause(List.of(partition))`; the pause is skipped when the seek
-  // fails.
-  LISTENER_ACTION_SEEK_AND_PAUSE = 4;
+// One step of a listener script (SetListenerAction). Each step is logged as
+// one "listener_action" entry whose `step` is the kind's name without the
+// LISTENER_STEP_ prefix ("POSITION", ...). A step whose call fails is logged
+// with the error and ends the script (the later steps do not run), as a
+// throwing call ends Java's listener body; the listener itself still returns
+// normally unless the failed step is FAIL.
+enum ListenerStepKind {
+  // Never sent; rejected with LOCAL_ILLEGAL_ARGUMENT.
+  LISTENER_STEP_UNSPECIFIED = 0;
+  // Java's `consumer.assignment()`; logged in `result_partitions`.
+  LISTENER_STEP_ASSIGNMENT = 1;
+  // Java's `consumer.beginningOffsets(partitions)`; logged in `offsets`.
+  LISTENER_STEP_BEGINNING_OFFSETS = 2;
+  // Java's `consumer.position(partition)`; logged as {"<partition>": position}.
+  LISTENER_STEP_POSITION = 3;
+  // Java's `consumer.seek(partition, value)`.
+  LISTENER_STEP_SEEK = 4;
+  // Java's `consumer.pause(partitions)`.
+  LISTENER_STEP_PAUSE = 5;
+  // Java's `Thread.sleep(value)` (milliseconds) inside the listener.
+  LISTENER_STEP_SLEEP = 6;
+  // Java's `consumer.commitSync(Map.of(partition, new
+  // OffsetAndMetadata(position)))` with the position the latest POSITION step
+  // of this invocation read for `partition`; logged as {"<partition>":
+  // committed offset}. Fails with LOCAL_ILLEGAL_STATE when no such POSITION
+  // step ran.
+  LISTENER_STEP_COMMIT_SYNC_POSITION = 7;
+  // The listener method fails with `message`: it raises / returns a
+  // LocalIllegalState error, the class the Rust tests return (Java's tests
+  // throw `IllegalArgumentException`). Logged first, with that error. How the
+  // failure then surfaces from poll() is the binding's own (no rewrapping).
+  LISTENER_STEP_FAIL = 8;
+}
+
+message ListenerStep {
+  ListenerStepKind kind = 1;
+  // POSITION, SEEK, COMMIT_SYNC_POSITION: the partition acted on.
+  TopicPartition partition = 2;
+  // BEGINNING_OFFSETS, PAUSE: the partitions acted on.
+  repeated TopicPartition partitions = 3;
+  // SEEK: the offset. SLEEP: the milliseconds.
+  int64 value = 4;
+  // FAIL: the error message.
+  string message = 5;
+}
+
+// Which invocations of a listener method run its script.
+enum ListenerTriggerKind {
+  // Never sent; rejected with LOCAL_ILLEGAL_ARGUMENT.
+  LISTENER_TRIGGER_UNSPECIFIED = 0;
+  // Every invocation.
+  LISTENER_TRIGGER_ALWAYS = 1;
+  // The first `first_n_calls` invocations of the method (counting every
+  // invocation, whatever its partitions).
+  LISTENER_TRIGGER_FIRST_N_CALLS = 2;
+  // Every invocation whose partitions contain `partition` (Java's
+  // `if (!partitions.isEmpty() && partitions.contains(tp))`).
+  LISTENER_TRIGGER_WHEN_CONTAINS = 3;
+  // The first invocation whose partitions contain `partition`, once.
+  LISTENER_TRIGGER_ONCE_WHEN_CONTAINS = 4;
+}
+
+message ListenerScript {
+  ListenerTriggerKind trigger = 1;
+  int32 first_n_calls = 2;
+  TopicPartition partition = 3;
+  repeated ListenerStep steps = 4;
 }
 
 message ListenerActionRequest {
   uint64 consumer_id = 1;
-  ListenerAction action = 2;
-  // The listener method that runs the action: "assigned"
-  // (on_partitions_assigned) or "revoked" (on_partitions_revoked). Any other
-  // value is rejected with a LOCAL_ILLEGAL_ARGUMENT error, unless `action` is
-  // LISTENER_ACTION_NONE.
-  string method = 3;
-  // The action runs the first time the method is invoked with partitions
-  // containing this one, and it is the partition the action acts on.
-  TopicPartition partition = 4;
-  // LISTENER_ACTION_SEEK_AND_PAUSE only: the offset to seek to.
-  int64 offset = 5;
+  // An earlier, single-action shape; never released.
+  reserved 2 to 5;
+  // The script of each listener method; absent runs nothing there.
+  ListenerScript on_assigned = 6;
+  ListenerScript on_revoked = 7;
+  ListenerScript on_lost = 8;
 }
