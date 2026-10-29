@@ -130,10 +130,10 @@ use rand::seq::IndexedRandom;
 use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::cluster_config::broker_has_assignment_interval;
+use crate::common::cluster_config::log_assignment_interval_skip;
 use crate::common::cluster_config::with_assignment_interval;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::consumer_assignment_poller::ConsumerAssignmentPoller;
-use crate::common::kafka_cluster;
 use crate::common::kafka_cluster::KafkaCluster;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
@@ -481,9 +481,10 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size() {
     if broker_has_assignment_interval() {
-        eprintln!(
-            "skipped: the broker {:?} has group.consumer.assignment.interval.ms; the two Java arms run instead",
-            kafka_cluster::broker_release()
+        log_assignment_interval_skip(
+            "test_async_consumer_receives_fatal_exception_when_group_passes_max_size",
+            "rust",
+            "the broker has group.consumer.assignment.interval.ms; the two Java arms run instead",
         );
         return;
     }
@@ -497,9 +498,10 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_0() {
     if !broker_has_assignment_interval() {
-        eprintln!(
-            "skipped: group.consumer.assignment.interval.ms is a 4.3 broker config; the broker is {:?}",
-            kafka_cluster::broker_release()
+        log_assignment_interval_skip(
+            "test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_0",
+            "rust",
+            "group.consumer.assignment.interval.ms is a 4.3 broker config",
         );
         return;
     }
@@ -514,9 +516,10 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000() {
     if !broker_has_assignment_interval() {
-        eprintln!(
-            "skipped: group.consumer.assignment.interval.ms is a 4.3 broker config; the broker is {:?}",
-            kafka_cluster::broker_release()
+        log_assignment_interval_skip(
+            "test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000",
+            "rust",
+            "group.consumer.assignment.interval.ms is a 4.3 broker config",
         );
         return;
     }
