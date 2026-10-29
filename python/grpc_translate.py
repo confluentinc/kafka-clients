@@ -744,7 +744,7 @@ class ListenerAction:
     Each step is logged as one ``KIND_LISTENER_ACTION`` entry, encoded as
     producer_service.proto's CallbackLogEntry says. A failing step is logged
     with its error and ends the script; the listener still returns normally,
-    except for a FAIL step, which raises ``IllegalStateError`` with its message
+    except for a FAIL step, which raises ``IllegalArgumentError`` with its message
     once logged. The C server and the Rust native backend run the same scripts
     through their consumer handles.
     """
@@ -795,7 +795,7 @@ class ListenerAction:
                     consumer.commit(offsets=offsets)
                     fields["offsets"] = _committed_by_key(offsets)
                 else:  # LISTENER_STEP_FAIL
-                    raise IllegalStateError(message=step.message)
+                    raise IllegalArgumentError(message=step.message)
             except Exception as e:  # noqa: BLE001  (logged; only FAIL fails the listener)
                 self._log_step(log, client_id, method, partitions, step, exception=e)
                 if step.kind == cpb.LISTENER_STEP_FAIL:
@@ -832,7 +832,7 @@ class ListenerAction:
                     await consumer.commit(offsets=offsets)
                     fields["offsets"] = _committed_by_key(offsets)
                 else:  # LISTENER_STEP_FAIL
-                    raise IllegalStateError(message=step.message)
+                    raise IllegalArgumentError(message=step.message)
             except Exception as e:  # noqa: BLE001  (logged; only FAIL fails the listener)
                 self._log_step(log, client_id, method, partitions, step, exception=e)
                 if step.kind == cpb.LISTENER_STEP_FAIL:

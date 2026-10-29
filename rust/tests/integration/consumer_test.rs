@@ -526,8 +526,8 @@ async fn seek_to_beginning_re_reads_records<F: ConsumerBackendFactory>(ctx: &mut
 // `consumer-threading.md` §20. These listeners throw from
 // `on_partitions_assigned` and need NO consumer reentrancy. The listener is
 // the backend's logging listener given a `Fail` step: the method fails with a
-// LocalIllegalState error, the class the Rust tests have always returned
-// (Java's listeners throw `IllegalArgumentException`).
+// LocalIllegalArgument error, the `IllegalArgumentException` Java's listeners
+// throw.
 
 /// Translates Java's
 /// `testFetchPartitionsAfterFailedListenerWithGroupProtocolConsumer`.

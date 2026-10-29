@@ -169,9 +169,9 @@ pub enum ListenerStep {
     /// with the position the latest [`Self::Position`] step of this invocation
     /// read for `tp`; logged as `{tp: committed offset}`.
     CommitSyncPosition(TopicPartition),
-    /// The listener method fails with a `LocalIllegalState` error carrying this
-    /// message (the class the Rust tests return; Java's tests throw
-    /// `IllegalArgumentException`). Logged first, with that error.
+    /// The listener method fails with a `LocalIllegalArgument` error carrying
+    /// this message, Java's tests' `IllegalArgumentException`. Logged first,
+    /// with that error.
     Fail(String),
 }
 
@@ -412,7 +412,7 @@ impl NativeListenerAction {
                     .insert(CallbackLogEntry::offset_key(tp.topic(), tp.partition()), position);
                 Ok(())
             },
-            ListenerStep::Fail(message) => Err(Error::local_illegal_state(message.clone())),
+            ListenerStep::Fail(message) => Err(Error::local_illegal_argument(message.clone())),
         }
     }
 }
