@@ -81,6 +81,8 @@ from grpc_translate import (  # noqa: E402
     admin_create_sync,
     CallbackLog,
     GroupMetadataStore,
+    ActionLoggingRebalanceListener,
+    ListenerAction,
     LoggingRebalanceListener,
     _consumer_close_options,
     _consumer_subscribe_kwargs,
@@ -429,6 +431,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         # delivers them, not the one that serves GetCallbackLog — hence
         # CallbackLog's lock.
         self._callback_log = CallbackLog()
+        # SetListenerAction's pending actions, keyed by consumer_id, each taken
+        # by the consumer's next Subscribe with with_listener.
+        self._listener_actions = {}
 
     def _get(self, consumer_id):
         with self._lock:
@@ -473,9 +478,19 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         # with_listener => subscribe with a real ConsumerRebalanceListener built
         # by consumer.py, whose invocations land in the callback log. Registration
         # is per-subscribe: a listener-less Subscribe releases it.
+        # A pending SetListenerAction belongs to this registration: the
+        # listener calls back into the consumer from inside the method it
+        # targets, on this thread, inside the consumer call running it.
         listener = None
         if request.with_listener:
-            listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
+            with self._lock:
+                action = self._listener_actions.pop(request.consumer_id, None)
+                consumer = self._consumers.get(request.consumer_id)
+            if action is None:
+                listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
+            else:
+                listener = ActionLoggingRebalanceListener(
+                    self._callback_log, request.consumer_id, consumer, action)
         return self._run_status(
             request.consumer_id,
             lambda c: c.subscribe(**_consumer_subscribe_kwargs(request, listener)))
@@ -775,6 +790,26 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         # Readable after Close on purpose: close() drains pending commit
         # callbacks and fires on_partitions_lost, so those entries land last.
         return self._callback_log.response(request.consumer_id)
+
+    def SetListenerAction(self, request, context):
+        # Kept for the consumer's next Subscribe with with_listener, whose
+        # listener runs it (see Subscribe); NONE clears a pending one.
+        if self._get(request.consumer_id) is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                code=_LOCAL_ILLEGAL_STATE,
+                message=f"unknown consumer_id {request.consumer_id}"))
+        try:
+            action = ListenerAction.from_request(request)
+        except KafkaError as e:
+            return self._status_err(e)
+        except Exception as e:  # noqa: BLE001
+            return self._status_err(e)
+        with self._lock:
+            if action is None:
+                self._listener_actions.pop(request.consumer_id, None)
+            else:
+                self._listener_actions[request.consumer_id] = action
+        return pb.StatusResponse()
 
 
 # ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ from confluent_kafka.common import KafkaError  # noqa: E402
 # ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
 from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
+    AsyncConsumerRebalanceListener,
     CloseOptions,
     ConsumerRebalanceListener,
     OffsetAndMetadata,
@@ -529,6 +530,7 @@ KIND_REVOKED = "revoked"
 KIND_LOST = "lost"
 KIND_COMMIT = "commit"
 KIND_DELIVERY = "delivery"
+KIND_LISTENER_ACTION = "listener_action"
 
 
 def _offset_key(topic, partition):
@@ -550,7 +552,8 @@ class CallbackLog:
         self._entries = {}
         self._lock = threading.Lock()
 
-    def append(self, client_id, kind, partitions=(), offsets=None, error=""):
+    def append(self, client_id, kind, partitions=(), offsets=None, error="",
+               method="", result_partitions=()):
         """Record one invocation.
 
         Args:
@@ -559,12 +562,18 @@ class CallbackLog:
             partitions: iterable of ``TopicPartition`` (or ``(topic, partition)``).
             offsets: optional ``{"<topic>-<partition>": offset}`` mapping.
             error: error message, or "" when the callback saw no error.
+            method: ``KIND_LISTENER_ACTION`` only, the listener method the
+                action ran in (``KIND_ASSIGNED`` / ``KIND_REVOKED``).
+            result_partitions: ``KIND_LISTENER_ACTION`` only, the partitions
+                the ASSIGNMENT action read.
         """
         entry = pb.CallbackLogEntry(
             kind=kind,
             partitions=[_callback_log_partition(p) for p in partitions],
             offsets=dict(offsets or {}),
             error=error or "",
+            method=method,
+            result_partitions=[_callback_log_partition(p) for p in result_partitions],
         )
         with self._lock:
             self._entries.setdefault(client_id, []).append(entry)
@@ -619,6 +628,152 @@ class LoggingRebalanceListener(ConsumerRebalanceListener):
         self._log.append(self._client_id, KIND_REVOKED, partitions)
 
     def on_partitions_lost(self, partitions):
+        self._log.append(self._client_id, KIND_LOST, partitions)
+
+
+class ListenerAction:
+    """A ``ListenerActionRequest``: the consumer call a logging listener makes
+    from inside ``method`` (``KIND_ASSIGNED`` / ``KIND_REVOKED``), once, the
+    first time that method's partitions contain ``partition``.
+
+    Its result is logged as a ``KIND_LISTENER_ACTION`` entry, encoded as
+    producer_service.proto's CallbackLogEntry says. The C server and the Rust
+    native backend run the same action through their consumer handles.
+    """
+
+    _METHODS = (KIND_ASSIGNED, KIND_REVOKED)
+
+    def __init__(self, request):
+        self.action = request.action
+        self.method = request.method
+        self.partition = _tp(request.partition)
+        self.offset = request.offset
+        self._done = False
+
+    @staticmethod
+    def from_request(request):
+        """The request's action, ``None`` for ``LISTENER_ACTION_NONE``; raises
+        ``IllegalArgumentError`` for a method other than "assigned" or
+        "revoked"."""
+        if request.action == cpb.LISTENER_ACTION_NONE:
+            return None
+        if request.method not in ListenerAction._METHODS:
+            raise IllegalArgumentError(
+                message=f"listener action method must be 'assigned' or 'revoked', got {request.method!r}")
+        return ListenerAction(request)
+
+    def triggered(self, method, partitions):
+        """Whether this invocation runs the action; marks it run."""
+        if self._done or method != self.method or self.partition not in partitions:
+            return False
+        self._done = True
+        return True
+
+    def entry_fields(self, partitions):
+        """The fields every ``KIND_LISTENER_ACTION`` entry of this action has."""
+        return {"partitions": partitions, "method": self.method}
+
+    def log_result(self, log, client_id, partitions, *, assignment=(), offsets=None, error=""):
+        log.append(client_id, KIND_LISTENER_ACTION, offsets=offsets, error=error,
+                   result_partitions=sorted(assignment, key=lambda p: (p.topic(), p.partition())),
+                   **self.entry_fields(partitions))
+
+    def run_sync(self, consumer, log, client_id, partitions):
+        """Run the action on a sync consumer, from inside its listener."""
+        tp = self.partition
+        try:
+            if self.action == cpb.LISTENER_ACTION_ASSIGNMENT:
+                self.log_result(log, client_id, partitions, assignment=consumer.assignment())
+            elif self.action == cpb.LISTENER_ACTION_BEGINNING_OFFSETS:
+                offsets = consumer.beginning_offsets(partitions=[tp])
+                self.log_result(log, client_id, partitions, offsets=_offsets_by_key(offsets))
+            elif self.action == cpb.LISTENER_ACTION_POSITION:
+                position = consumer.position(partition=tp)
+                self.log_result(log, client_id, partitions,
+                                offsets={_offset_key(tp.topic(), tp.partition()): position})
+            elif self.action == cpb.LISTENER_ACTION_SEEK_AND_PAUSE:
+                consumer.seek(partition=tp, offset=self.offset)
+                consumer.pause(partitions=[tp])
+                self.log_result(log, client_id, partitions)
+            else:
+                self.log_result(log, client_id, partitions, error=f"unknown listener action {self.action}")
+        except Exception as e:  # noqa: BLE001  (logged, as the listener must not fail the rebalance)
+            self.log_result(log, client_id, partitions, error=str(e))
+
+    async def run_async(self, consumer, log, client_id, partitions):
+        """Run the action on an asyncio consumer, from inside its listener:
+        ``run_sync`` with the consumer's coroutines awaited."""
+        tp = self.partition
+        try:
+            if self.action == cpb.LISTENER_ACTION_ASSIGNMENT:
+                self.log_result(log, client_id, partitions, assignment=consumer.assignment())
+            elif self.action == cpb.LISTENER_ACTION_BEGINNING_OFFSETS:
+                offsets = await consumer.beginning_offsets(partitions=[tp])
+                self.log_result(log, client_id, partitions, offsets=_offsets_by_key(offsets))
+            elif self.action == cpb.LISTENER_ACTION_POSITION:
+                position = await consumer.position(partition=tp)
+                self.log_result(log, client_id, partitions,
+                                offsets={_offset_key(tp.topic(), tp.partition()): position})
+            elif self.action == cpb.LISTENER_ACTION_SEEK_AND_PAUSE:
+                await consumer.seek(partition=tp, offset=self.offset)
+                await consumer.pause(partitions=[tp])
+                self.log_result(log, client_id, partitions)
+            else:
+                self.log_result(log, client_id, partitions, error=f"unknown listener action {self.action}")
+        except Exception as e:  # noqa: BLE001  (logged, as the listener must not fail the rebalance)
+            self.log_result(log, client_id, partitions, error=str(e))
+
+
+def _offsets_by_key(offsets):
+    """``{TopicPartition: int}`` -> the CallbackLogEntry.offsets mapping."""
+    return {_offset_key(tp.topic(), tp.partition()): offset for tp, offset in offsets.items()}
+
+
+class ActionLoggingRebalanceListener(LoggingRebalanceListener):
+    """A ``LoggingRebalanceListener`` that also runs a ``ListenerAction`` on
+    its consumer from inside the targeted method, after logging the
+    invocation, as Java's listener calls back into the consumer it captured
+    (consumer-threading §31). For the sync consumers."""
+
+    def __init__(self, log, client_id, consumer, action):
+        super().__init__(log, client_id)
+        self._consumer = consumer
+        self._action = action
+
+    def on_partitions_assigned(self, partitions):
+        super().on_partitions_assigned(partitions)
+        if self._action.triggered(KIND_ASSIGNED, partitions):
+            self._action.run_sync(self._consumer, self._log, self._client_id, partitions)
+
+    def on_partitions_revoked(self, partitions):
+        super().on_partitions_revoked(partitions)
+        if self._action.triggered(KIND_REVOKED, partitions):
+            self._action.run_sync(self._consumer, self._log, self._client_id, partitions)
+
+
+class AsyncActionLoggingRebalanceListener(AsyncConsumerRebalanceListener):
+    """The asyncio twin of ``ActionLoggingRebalanceListener``: its methods are
+    ``async def``, so the asyncio consumer awaits them on the event loop and
+    the action awaits the consumer's coroutines. It logs the plain kinds
+    exactly as ``LoggingRebalanceListener`` does, ``lost`` included."""
+
+    def __init__(self, log, client_id, consumer, action):
+        self._log = log
+        self._client_id = client_id
+        self._consumer = consumer
+        self._action = action
+
+    async def on_partitions_assigned(self, partitions):
+        self._log.append(self._client_id, KIND_ASSIGNED, partitions)
+        if self._action.triggered(KIND_ASSIGNED, partitions):
+            await self._action.run_async(self._consumer, self._log, self._client_id, partitions)
+
+    async def on_partitions_revoked(self, partitions):
+        self._log.append(self._client_id, KIND_REVOKED, partitions)
+        if self._action.triggered(KIND_REVOKED, partitions):
+            await self._action.run_async(self._consumer, self._log, self._client_id, partitions)
+
+    async def on_partitions_lost(self, partitions):
         self._log.append(self._client_id, KIND_LOST, partitions)
 
 
