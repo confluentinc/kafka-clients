@@ -240,11 +240,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             callback = make_logging_delivery_callback(self._callback_log, request.producer_id)
         try:
             future = producer.send(record=record, callback=callback)
-        except KafkaError as e:
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("send raised")
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
+            # Raised by send() itself, Java's send throwing, as opposed to the
+            # future failing below: raised_by_send tells the harness which.
+            if not isinstance(e, KafkaError):
+                LOG.exception("send raised")
+            return pb.SendResponse(error=_kafka_error_to_proto(e), raised_by_send=True)
 
         # Block this gRPC worker thread until the producer future fires.
         # KafkaProducer's futures are KafkaFutures completed on the C extension's

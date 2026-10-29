@@ -288,7 +288,11 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
+        // The send call itself failed (Java's `send` throwing): the native
+        // producer returns `Err` without firing the callback, and so does this.
+        let raised_by_send = response.raised_by_send;
         let result = match response.result {
+            Some(proto::send_response::Result::Error(e)) if raised_by_send => return Err(kafka_error_from_proto(e)),
             Some(proto::send_response::Result::Metadata(m)) => Ok(record_metadata_from_proto(m)),
             Some(proto::send_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
             None => Err(Error::local_illegal_state(format!(
