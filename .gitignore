@@ -39,3 +39,9 @@ tools/java-perf-test/bin/
 !/rust/tools/verifiable-clients/src/bin/
 !/rust/tools/verifiable-clients/src/bin/*.rs
 
+
+# The Node.js client's build outputs; its package.json is tracked despite the
+# `*.json` rule above.
+/javascript/build/
+/javascript/node_modules/
+!/javascript/package.json
