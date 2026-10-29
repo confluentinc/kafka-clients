@@ -25,21 +25,24 @@
 //!
 //! The subscribe-mode (`ConsumerAssignmentPoller(Consumer, List<String>)`) and
 //! assign-mode (`ConsumerAssignmentPoller(Consumer, Set<TopicPartition>)`)
-//! constructors are translated; the user-listener chaining and
-//! `subscribe(List)` have no caller among the translated tests yet.
+//! constructors are translated, as [`ConsumerAssignmentPoller::start_with_log`]
+//! and [`ConsumerAssignmentPoller::start_with_partitions_to_assign`]; the
+//! user-listener chaining and `subscribe(List)` have no caller among the
+//! translated tests yet.
 //!
 //! Java's poller only borrows its consumer: the test keeps using it after
 //! `shutdown()` (e.g. to close it, or to start a second poller on it) and
 //! closes it in `tearDown`. The task owns the consumer here, so
 //! [`ConsumerAssignmentPoller::shutdown`] hands it back instead.
 //!
-//! A multilanguage scenario cannot pass a Rust listener to a gRPC consumer, so
-//! [`ConsumerAssignmentPoller::start_with_log`] subscribes through a
-//! [`ConsumerCallbackLog`]'s logging listener instead, which records every
-//! listener call on any backend, and the task replays the new `assigned`,
-//! `revoked` and `lost` entries into the same assignment view after each
-//! `poll`, where Java's listener updates it inside that `poll`. A `lost` entry
-//! removes, as Java's tracking listener, which does not override
+//! Java's subscribe mode tracks the assignment with an anonymous
+//! `ConsumerRebalanceListener`. A multilanguage scenario cannot pass a Rust
+//! listener to a gRPC consumer, so [`ConsumerAssignmentPoller::start_with_log`]
+//! subscribes through a [`ConsumerCallbackLog`]'s logging listener instead,
+//! which records every listener call on any backend, and the task replays the
+//! new `assigned`, `revoked` and `lost` entries into the same assignment view
+//! after each `poll`, where Java's listener updates it inside that `poll`. A
+//! `lost` entry removes, as Java's tracking listener, which does not override
 //! `onPartitionsLost`, gets `onPartitionsRevoked` through the default method.
 
 use std::collections::HashSet;
@@ -50,10 +53,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::DynConsumer;
 use tokio::task::JoinHandle;
 
@@ -70,32 +71,9 @@ pub type BytesConsumer = Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>;
 /// wedged consumer from hanging the test run instead.
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The anonymous `ConsumerRebalanceListener` Java builds in the poller's
-/// constructor: it mirrors every assignment change into `partitionAssignment`.
-struct AssignmentTrackingListener {
-    partition_assignment: Arc<Mutex<HashSet<TopicPartition>>>,
-}
-
-#[async_trait]
-impl ConsumerRebalanceListener for AssignmentTrackingListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        let mut assignment = self.partition_assignment.lock().expect("assignment mutex poisoned");
-        for tp in partitions {
-            assignment.remove(tp);
-        }
-        Ok(())
-    }
-
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.partition_assignment
-            .lock()
-            .expect("assignment mutex poisoned")
-            .extend(partitions.iter().cloned());
-        Ok(())
-    }
-}
-
-/// The log-backed form of [`AssignmentTrackingListener`], for
+/// The log-backed form of the anonymous `ConsumerRebalanceListener` Java
+/// builds in the poller's constructor, which mirrors every assignment change
+/// into `partitionAssignment`, for
 /// [`ConsumerAssignmentPoller::start_with_log`]: the log the subscribed
 /// logging listener writes to, and how many of its entries were already
 /// applied (or predate the poller).
@@ -106,8 +84,8 @@ struct AssignmentTrackingLog {
 
 impl AssignmentTrackingLog {
     /// Applies the entries the listener logged since the last call to
-    /// `partition_assignment`, as [`AssignmentTrackingListener`] applies its
-    /// calls: `assigned` adds, `revoked` and `lost` remove.
+    /// `partition_assignment`, as Java's tracking listener applies its calls:
+    /// `assigned` adds, `revoked` and `lost` remove.
     async fn apply_new_entries(&mut self, partition_assignment: &Mutex<HashSet<TopicPartition>>) -> Result<(), Error> {
         let entries = self.log.entries().await?;
         let mut assignment = partition_assignment.lock().expect("assignment mutex poisoned");
@@ -142,22 +120,11 @@ pub struct ConsumerAssignmentPoller {
 
 impl ConsumerAssignmentPoller {
     /// Java's `ConsumerAssignmentPoller(consumer, topicsToSubscribe)` followed
-    /// by `start()`: subscribes with the tracking listener, then spawns the
-    /// polling task, which owns the consumer until [`Self::shutdown`].
-    pub async fn start(mut consumer: BytesConsumer, topics_to_subscribe: Vec<String>) -> Self {
-        let partition_assignment = Arc::new(Mutex::new(HashSet::new()));
-        let listener = Arc::new(AssignmentTrackingListener { partition_assignment: Arc::clone(&partition_assignment) });
-        consumer
-            .subscribe_with_topics_listener(topics_to_subscribe, listener)
-            .await
-            .expect("subscribe should succeed");
-        Self::spawn(consumer, partition_assignment, None)
-    }
-
-    /// [`Self::start`] for a consumer of any backend: subscribes through `log`'s
+    /// by `start()`, for a consumer of any backend: subscribes through `log`'s
     /// logging listener (the consumer's own log, from
     /// `create_with_callback_log`) instead of a Rust listener, which a gRPC
-    /// consumer cannot take, and tracks the assignment from the `assigned`,
+    /// consumer cannot take, then spawns the polling task, which owns the
+    /// consumer until [`Self::shutdown`]. It tracks the assignment from the `assigned`,
     /// `revoked` and `lost` entries the listener logs after the poller starts.
     /// The task applies them after each `poll`, so
     /// [`Self::consumer_assignment`] sees a `poll`'s callbacks once it returns.
