@@ -83,6 +83,12 @@ pub struct MultilanguageProducer {
     producer_id: u64,
     /// Cloned per RPC; tonic clients share their underlying connection.
     client: ProducerServiceClient<Channel>,
+    /// The same server over a channel without the 30 s per-request timeout,
+    /// for the blocking RPCs, each of which sets its own deadline: see
+    /// [`blocking_deadline`].
+    blocking_client: ProducerServiceClient<Channel>,
+    /// [`blocking_deadline`] of this producer's config.
+    blocking_deadline: Duration,
     /// Backend label (e.g. "python", "c") used in panic messages and logs.
     backend: &'static str,
 }
@@ -92,7 +98,15 @@ impl MultilanguageProducer {
     /// producer with the given `config`. The `config` map is forwarded
     /// verbatim to the server, which uses it to construct a `KafkaProducer`
     /// (or, if empty, a `MockProducer` for client-side smoke testing).
-    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
+    /// `untimed_channel` reaches the same server with no per-request timeout;
+    /// the blocking RPCs go over it.
+    pub async fn new(
+        channel: Channel,
+        untimed_channel: Channel,
+        config: HashMap<String, String>,
+        backend: &'static str,
+    ) -> Result<Self, Error> {
+        let blocking_deadline = blocking_deadline(&config);
         let mut client = ProducerServiceClient::new(channel);
         let response = client
             .create_producer(CreateProducerRequest { config })
@@ -102,7 +116,21 @@ impl MultilanguageProducer {
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
-        Ok(Self { producer_id: response.producer_id, client, backend })
+        Ok(Self {
+            producer_id: response.producer_id,
+            client,
+            blocking_client: ProducerServiceClient::new(untimed_channel),
+            blocking_deadline,
+            backend,
+        })
+    }
+
+    /// `message` as a request that may run for `deadline`, for the
+    /// blocking client.
+    fn blocking_request<T>(message: T, deadline: Duration) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        request.set_timeout(deadline);
+        request
     }
 
     /// Map a `StatusResponse` (the reply shared by the flush/close/transaction
@@ -134,9 +162,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// producer's `init_transactions` future and returns the resolved
     /// `StatusResponse` (empty on success, an `Error` on failure).
     async fn init_transactions(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .init_transactions(TransactionRequest { producer_id: self.producer_id })
+            .init_transactions(Self::blocking_request(
+                TransactionRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -148,12 +179,13 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// trip, so we drive the async call to completion with [`Self::block`] —
     /// mirroring `MultilanguageConsumer`'s sync state-read methods.
     fn begin_transaction(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let producer_id = self.producer_id;
         let backend = self.backend;
+        let deadline = self.blocking_deadline;
         self.block(async move {
             let response = client
-                .begin_transaction(TransactionRequest { producer_id })
+                .begin_transaction(Self::blocking_request(TransactionRequest { producer_id }, deadline))
                 .await
                 .map_err(|status| status_to_kafka_error(&status, backend))?
                 .into_inner();
@@ -178,7 +210,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
         let group_metadata_id = remote_group_metadata_id(group_metadata, self.backend)?;
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         // The offsets reach the wire, so impose a deterministic order before
         // encoding (producer-transactions.md §10): a `HashMap` iterates
         // nondeterministically, so sort by topic then partition to keep the
@@ -199,7 +231,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         let request =
             SendOffsetsToTransactionRequest { producer_id: self.producer_id, offsets: entries, group_metadata_id };
         let response = client
-            .send_offsets_to_transaction(request)
+            .send_offsets_to_transaction(Self::blocking_request(request, self.blocking_deadline))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -209,9 +241,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// Java `commitTransaction()` tunneled over gRPC — see
     /// [`Self::init_transactions`] for the response convention.
     async fn commit_transaction(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .commit_transaction(TransactionRequest { producer_id: self.producer_id })
+            .commit_transaction(Self::blocking_request(
+                TransactionRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -221,9 +256,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// Java `abortTransaction()` tunneled over gRPC — see
     /// [`Self::init_transactions`] for the response convention.
     async fn abort_transaction(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .abort_transaction(TransactionRequest { producer_id: self.producer_id })
+            .abort_transaction(Self::blocking_request(
+                TransactionRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -239,14 +277,14 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
         callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let request = SendRequest {
             producer_id: self.producer_id,
             record: Some(producer_record_to_proto(&record)),
             with_callback: callback.is_some(),
         };
         let response = client
-            .send(request)
+            .send(Self::blocking_request(request, self.blocking_deadline))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -270,9 +308,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .flush(FlushRequest { producer_id: self.producer_id })
+            .flush(Self::blocking_request(
+                FlushRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -326,9 +367,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn close(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .close(CloseRequest { producer_id: self.producer_id })
+            .close(Self::blocking_request(
+                CloseRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -339,14 +383,22 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+        // The call's own timeout plus the margin, but no longer than an
+        // untimed `close()` may take, and no shorter than the default.
+        let deadline = timeout
+            .saturating_add(BLOCKING_DEADLINE_MARGIN)
+            .clamp(DEFAULT_RPC_DEADLINE, self.blocking_deadline);
         // `close_timeout` here is the tonic-generated client method for
         // `rpc CloseTimeout`, NOT the `Producer` trait method above — the
         // proto RPC name is the wire contract and does not follow §2's
         // `_with_` rule, so the two spellings differ deliberately.
         let response = client
-            .close_timeout(CloseTimeoutRequest { producer_id: self.producer_id, timeout_ms })
+            .close_timeout(Self::blocking_request(
+                CloseTimeoutRequest { producer_id: self.producer_id, timeout_ms },
+                deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -431,6 +483,34 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
         Some(rack) => Node::with_rack(n.id, n.host, n.port, Some(rack)),
         None => Node::new(n.id, n.host, n.port),
     }
+}
+
+/// The per-request timeout of [`BackendHandle::channel`](crate::common::backend_pool::BackendHandle::channel),
+/// which every other RPC keeps.
+const DEFAULT_RPC_DEADLINE: Duration = Duration::from_secs(30);
+
+/// What a blocking RPC's deadline adds to the longest wait its call may
+/// legitimately make, for the server's own work and the round trip.
+const BLOCKING_DEADLINE_MARGIN: Duration = Duration::from_secs(30);
+
+/// The deadline of the producer's blocking RPCs (`send`, `flush`, the
+/// transaction calls, `close`): the longest wait the native call may
+/// legitimately make under `config`, plus [`BLOCKING_DEADLINE_MARGIN`], and
+/// never less than [`DEFAULT_RPC_DEADLINE`].
+///
+/// The longest wait is the largest of `max.block.ms` (the metadata wait of
+/// `send` and the transaction calls), `request.timeout.ms` (an in-flight
+/// request `close()` waits out, as for a fenced producer) and
+/// `delivery.timeout.ms` (a record `flush()` waits on), each at Java's
+/// default (60 s, 30 s, 120 s) when the config does not set it.
+fn blocking_deadline(config: &HashMap<String, String>) -> Duration {
+    let ms = |key: &str, default: u64| config.get(key).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default);
+    let longest = ms("max.block.ms", 60_000)
+        .max(ms("request.timeout.ms", 30_000))
+        .max(ms("delivery.timeout.ms", 120_000));
+    Duration::from_millis(longest)
+        .saturating_add(BLOCKING_DEADLINE_MARGIN)
+        .max(DEFAULT_RPC_DEADLINE)
 }
 
 /// Rebuilds an [`Error`] from its wire form, with its cause.
@@ -627,6 +707,25 @@ mod tests {
         });
         assert!(error.is_local_illegal_state_error(), "got {error:?}");
         assert!(error.source().is_none());
+    }
+
+    /// The blocking deadline is the longest configured wait plus the margin,
+    /// at Java's defaults when unset.
+    #[test]
+    fn blocking_deadline_from_config() {
+        assert_eq!(blocking_deadline(&HashMap::new()), Duration::from_secs(150));
+        let config = HashMap::from([
+            ("max.block.ms".to_string(), "5000".to_string()),
+            ("request.timeout.ms".to_string(), "200000".to_string()),
+            ("delivery.timeout.ms".to_string(), "1000".to_string()),
+        ]);
+        assert_eq!(blocking_deadline(&config), Duration::from_secs(230));
+        let small = HashMap::from([
+            ("max.block.ms".to_string(), "0".to_string()),
+            ("request.timeout.ms".to_string(), "0".to_string()),
+            ("delivery.timeout.ms".to_string(), "0".to_string()),
+        ]);
+        assert_eq!(blocking_deadline(&small), Duration::from_secs(30));
     }
 
     /// No cause: a bare error stays bare, with no source.

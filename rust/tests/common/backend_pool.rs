@@ -266,12 +266,15 @@ impl BackendHandle {
         self.connect(Some(Duration::from_secs(30))).await
     }
 
-    /// Like [`Self::channel`], but with no per-request timeout, for the
-    /// long-lived server-streaming calls of the chaos harness's
-    /// `ChaosWorkloadService`: a workload's stream stays open for the whole
-    /// run, and may go quiet for longer than 30 s while the brokers are down
-    /// (a server sends the response headers only with its first event).
-    pub async fn streaming_channel(&self) -> Channel {
+    /// Like [`Self::channel`], but with no per-request timeout, for calls that
+    /// may legitimately outlast 30 s:
+    /// - the long-lived server-streaming calls of the chaos harness's
+    ///   `ChaosWorkloadService`: a workload's stream stays open for the whole
+    ///   run, and may go quiet for longer than 30 s while the brokers are down
+    ///   (a server sends the response headers only with its first event);
+    /// - the producer's blocking RPCs (`MultilanguageProducer`), which set a
+    ///   deadline of their own, derived from the producer's config.
+    pub async fn untimed_channel(&self) -> Channel {
         self.connect(None).await
     }
 

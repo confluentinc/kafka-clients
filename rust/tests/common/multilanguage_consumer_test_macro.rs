@@ -83,7 +83,7 @@ macro_rules! multilanguage_consumer_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
                 timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
@@ -101,7 +101,7 @@ macro_rules! multilanguage_consumer_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
                 timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
@@ -119,7 +119,7 @@ macro_rules! multilanguage_consumer_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
                 timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
