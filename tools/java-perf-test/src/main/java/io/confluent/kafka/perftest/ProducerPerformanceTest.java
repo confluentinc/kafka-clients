@@ -50,8 +50,10 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -72,7 +74,10 @@ import java.util.concurrent.atomic.AtomicLong;
  *   VALUE_SIZE              value size in bytes (default 2048)
  *   BATCH_SIZE              batch.size in KiB (default 1024)
  *   MAX_REQUEST_SIZE        max.request.size in KiB (default 64 * BATCH_SIZE), capped at 8 MiB
- *   BUFFER_MEMORY           buffer.memory in MB (default unset)
+ *   BUFFER_MEMORY           buffer.memory in MiB (default unset)
+ *   BUFFER_MEMORY_ALLOCATION_STRATEGY
+ *                           buffer.memory.allocation.strategy: full / incremental
+ *                           (default unset)
  *   LINGER_MS               linger.ms (default 5)
  *   COMPRESSION_TYPE        none / gzip / snappy / lz4 / zstd (default none)
  *   ENABLE_IDEMPOTENCE      true / false (default false)
@@ -97,6 +102,12 @@ public class ProducerPerformanceTest {
 
     // --- Mutable state mirroring the Python module-level globals -------------
     private static volatile boolean terminating = false;
+    // Counted down by exit(): releases the shutdown hook, which on SIGINT /
+    // SIGTERM waits for main to write results.json (see installSignalHandler).
+    private static final CountDownLatch MAIN_DONE = new CountDownLatch(1);
+    // How long that hook waits: under the 30 s `cargo xtask perf-cloud` leaves
+    // between its SIGINT and SIGKILL.
+    private static final int SHUTDOWN_WAIT_SECONDS = 25;
     private static long warmupSent = 0;
     private static long measuredSent = 0;
     private static long completedMessages = 0;
@@ -213,7 +224,7 @@ public class ProducerPerformanceTest {
                     } catch (Exception e) {
                         System.out.println("Warmup failed due to message verification error: " + e.getMessage());
                         // An early exit before the summary is a failed run.
-                        System.exit(1);
+                        exit(1);
                     }
                     warmupSent++;
                     Thread.sleep(100);
@@ -325,6 +336,7 @@ public class ProducerPerformanceTest {
             measuredSent = messagesSent;
 
             long afterMs = System.currentTimeMillis();
+            long elapsedNs = System.nanoTime() - firstMessageNs;
             metrics.measurementEndMs = afterMs;
 
             // A count mismatch fails the run (unless it was interrupted), but
@@ -344,7 +356,9 @@ public class ProducerPerformanceTest {
                 }
             }
 
-            double durationS = (afterMs - beforeMs) / 1000.0;
+            // Elapsed time from the monotonic clock; the wall-clock stamps only
+            // mark the measured windows in metrics.jsonl.
+            double durationS = elapsedNs / 1e9;
             double rate = completedMessages / durationS;
             double mibRate = (completedMessages * (double) MESSAGE_SIZE) / (1024.0 * 1024.0) / durationS;
             // Exact avg / min / max from the ns totals (never bucket indices).
@@ -354,12 +368,11 @@ public class ProducerPerformanceTest {
             long p99Ms = percentileFromHist(latencyHist, 0.99);
 
             // CPU/RSS averaged over the measured interval only (collector-side).
-            int samples = metrics.totalExternalMetrics;
-            double avgCpu = samples > 0 ? metrics.totalCpu / samples : 0.0;
-            double avgRssKib = samples > 0 ? metrics.totalRss / samples / 1024.0 : 0.0;
+            double avgCpu = metrics.getAverageCpu();
+            double avgRssKib = metrics.getAverageRss() / 1024.0;
 
             System.out.println();
-            System.out.println("Duration: " + (afterMs - beforeMs) + " ms");
+            System.out.println("Duration: " + (elapsedNs / 1_000_000L) + " ms");
             System.out.println("Average CPU: " + String.format("%.2f %%", avgCpu));
             System.out.println("Average RSS: " + String.format("%.2f KiB", avgRssKib));
             System.out.println("CPU efficiency: " + String.format("%.2f msg/(s * 1%% CPU)",
@@ -471,7 +484,7 @@ public class ProducerPerformanceTest {
             System.out.println("Consumer verification skipped (baseline capture failed)");
         }
 
-        System.exit(exitCode);
+        exit(exitCode);
     }
 
     // === Configuration =======================================================
@@ -522,6 +535,10 @@ public class ProducerPerformanceTest {
             if (System.getenv("BUFFER_MEMORY") != null) {
                 conf.put(ProducerConfig.BUFFER_MEMORY_CONFIG,
                     Long.toString(envLong("BUFFER_MEMORY", 32) * 1024L * 1024L));
+            }
+            if (System.getenv("BUFFER_MEMORY_ALLOCATION_STRATEGY") != null) {
+                conf.put(ProducerConfig.BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG,
+                    System.getenv("BUFFER_MEMORY_ALLOCATION_STRATEGY"));
             }
             // linger.ms: default 5 (matches the C and Rust perf tests).
             conf.put(ProducerConfig.LINGER_MS_CONFIG, envOr("LINGER_MS", "5"));
@@ -897,23 +914,56 @@ public class ProducerPerformanceTest {
         return hist.length - 1;
     }
 
+    /**
+     * On SIGINT / SIGTERM the JVM runs its shutdown hooks and halts as soon as
+     * they return, so the hook sets {@code terminating} and then waits (at most
+     * {@link #SHUTDOWN_WAIT_SECONDS}) for the main thread to stop sending and
+     * write results.json, as the Python harness's signal handler lets it. The
+     * JVM still exits with the signal's status.
+     */
     private static void installSignalHandler() {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> terminating = true));
+        Thread main = Thread.currentThread();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            terminating = true;
+            long deadlineNs = System.nanoTime() + SHUTDOWN_WAIT_SECONDS * 1_000_000_000L;
+            try {
+                while (!MAIN_DONE.await(100, TimeUnit.MILLISECONDS)
+                        && main.isAlive() && System.nanoTime() < deadlineNs) {
+                    // main is finishing the run (not alive: it died of an exception)
+                }
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }, "shutdown-wait"));
+    }
+
+    /**
+     * {@link System#exit}, first releasing a shutdown hook that waits for main:
+     * exit() blocks while hooks run, so the hook must not wait for it.
+     */
+    private static void exit(int status) {
+        MAIN_DONE.countDown();
+        System.exit(status);
     }
 
     private static String envOr(String key, String defaultValue) {
         String v = System.getenv(key);
         return v == null ? defaultValue : v;
     }
+    // A value that does not parse fails the run naming the variable, rather
+    // than silently running with the default (LIMIT_RPS=10k is not unlimited).
     private static int envInt(String key, int defaultValue) {
         String v = System.getenv(key);
         if (v == null) return defaultValue;
-        try { return Integer.parseInt(v); } catch (NumberFormatException e) { return defaultValue; }
+        try { return Integer.parseInt(v.trim()); } catch (NumberFormatException e) { throw invalidEnv(key, v, "an integer"); }
     }
     private static long envLong(String key, long defaultValue) {
         String v = System.getenv(key);
         if (v == null) return defaultValue;
-        try { return Long.parseLong(v); } catch (NumberFormatException e) { return defaultValue; }
+        try { return Long.parseLong(v.trim()); } catch (NumberFormatException e) { throw invalidEnv(key, v, "an integer"); }
+    }
+    private static IllegalArgumentException invalidEnv(String key, String value, String expected) {
+        return new IllegalArgumentException("Invalid " + key + "='" + value + "': expected " + expected);
     }
     private static boolean envBool(String key, boolean defaultValue) {
         String v = System.getenv(key);

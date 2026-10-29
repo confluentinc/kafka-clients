@@ -44,6 +44,7 @@
 //! | `BATCH_SIZE`           | `1024` (1 MiB)     | `batch.size` in **KiB** (×1024)            |
 //! | `MAX_REQUEST_SIZE`     | (`batch×64`, ≤8MiB)| `max.request.size` in **KiB** (×1024), capped 8 MiB |
 //! | `BUFFER_MEMORY`        | (client default)   | `buffer.memory` in **MiB** (×1024×1024)    |
+//! | `BUFFER_MEMORY_ALLOCATION_STRATEGY` | (client default) | `buffer.memory.allocation.strategy`: `full`/`incremental` |
 //! | `LINGER_MS`            | `5`                | `linger.ms`                                |
 //! | `MAX_IN_FLIGHT`        | (client default)   | `max.in.flight.requests.per.connection`    |
 //! | `COMPRESSION_TYPE`     | `none`             | Compression: none/gzip/snappy/lz4/zstd     |
@@ -117,6 +118,15 @@ const POST_TEST_AWAIT_SECONDS: u64 = 10;
 /// the target rate ends with its real numbers instead of running unbounded.
 const COUNTED_RUN_CAP_SLACK: Duration = Duration::from_secs(10);
 
+/// A send the producer rejects synchronously (`send()` returns an error) is not
+/// counted and the same record is retried. A persistent rejection (e.g. a
+/// record larger than `max.request.size`) would make that retry spin until the
+/// duration ends, so this many rejections in a row, with no successful send in
+/// between, stop the send loop and fail the run (the summary and `results.json`
+/// are still written). Isolated rejections are logged and do not fail the run.
+/// Same rule as the C harness.
+const MAX_CONSECUTIVE_SEND_REJECTIONS: u64 = 1000;
+
 /// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
 /// utime/stime into CPU seconds. Effectively always 100 on Linux.
 const USER_HZ: f64 = 100.0;
@@ -135,6 +145,7 @@ struct PerfTestConfig {
     batch_size: i64,
     max_request_size: i64,
     buffer_memory: Option<i64>,
+    buffer_memory_allocation_strategy: Option<String>,
     linger_ms: Option<String>,
     max_in_flight: Option<String>,
     compression_type: String,
@@ -157,23 +168,14 @@ struct PerfTestConfig {
 impl PerfTestConfig {
     fn from_env() -> Self {
         // `batch.size`: default 1 MiB (1024 KiB); env value is in KiB.
-        let batch_size = match env_opt("BATCH_SIZE") {
-            Some(kib) => kib.parse::<i64>().unwrap_or(1024) * 1024,
-            None => 1024 * 1024,
-        };
+        let batch_size = env_parse::<i64>("BATCH_SIZE", 1024) * 1024;
         // `max.request.size`: default batch×64, capped at 8 MiB; env value is
         // in KiB.
-        let max_request_size = {
-            let requested = match env_opt("MAX_REQUEST_SIZE") {
-                Some(kib) => kib.parse::<i64>().unwrap_or(0) * 1024,
-                None => batch_size * 64,
-            };
-            requested.min(8 * 1024 * 1024)
-        };
+        let max_request_size = env_parse_opt::<i64>("MAX_REQUEST_SIZE")
+            .map_or(batch_size * 64, |kib| kib * 1024)
+            .min(8 * 1024 * 1024);
         // `buffer.memory`: only set when present; env value is in MiB.
-        let buffer_memory = env_opt("BUFFER_MEMORY")
-            .and_then(|mib| mib.parse::<i64>().ok())
-            .map(|mib| mib * 1024 * 1024);
+        let buffer_memory = env_parse_opt::<i64>("BUFFER_MEMORY").map(|mib| mib * 1024 * 1024);
 
         // Full defaults match the other producer performance tests (600 s,
         // unlimited rate). The in-suite integration run overrides these in
@@ -196,6 +198,7 @@ impl PerfTestConfig {
             batch_size,
             max_request_size,
             buffer_memory,
+            buffer_memory_allocation_strategy: env_opt("BUFFER_MEMORY_ALLOCATION_STRATEGY"),
             linger_ms: Some(env_or("LINGER_MS", "5")),
             max_in_flight: env_opt("MAX_IN_FLIGHT"),
             compression_type: env_or("COMPRESSION_TYPE", "none"),
@@ -244,6 +247,9 @@ impl PerfTestConfig {
             if let Some(v) = &self.buffer_memory {
                 props.insert("buffer.memory".to_string(), v.to_string());
             }
+            if let Some(v) = &self.buffer_memory_allocation_strategy {
+                props.insert("buffer.memory.allocation.strategy".to_string(), v.clone());
+            }
             if let Some(v) = &self.linger_ms {
                 props.insert("linger.ms".to_string(), v.clone());
             }
@@ -280,8 +286,21 @@ fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+/// A numeric variable, `None` when unset or empty. A value that does not parse
+/// fails the run, naming the variable, rather than running with the default
+/// (`LIMIT_RPS=10k` would otherwise run unlimited).
+fn env_parse_opt<T: std::str::FromStr>(key: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    env_opt(key).map(|v| v.parse().unwrap_or_else(|e| panic!("invalid {key}={v:?}: {e}")))
+}
+
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T
+where
+    T::Err: std::fmt::Display,
+{
+    env_parse_opt(key).unwrap_or(default)
 }
 
 fn now_ms() -> u128 {
@@ -713,6 +732,9 @@ async fn producer_perf_test() {
         if let Some(v) = config.buffer_memory {
             println!("buffer.memory: {v} B");
         }
+        if let Some(v) = &config.buffer_memory_allocation_strategy {
+            println!("buffer.memory.allocation.strategy: {v}");
+        }
         if let Some(v) = &config.linger_ms {
             println!("linger.ms: {v}");
         }
@@ -914,8 +936,10 @@ async fn producer_perf_test() {
         // whose per-poll cost grows with the set size and collapses throughput
         // at max rate. This keeps pace with the producer, so the unbounded
         // channel never deeply fills.
+        // No timeout of our own, as in warmup: the producer's
+        // delivery.timeout.ms bounds the wait.
         while let Some(produce_call) = produce_calls_rx.recv().await {
-            let result = produce_call.get_with_timeout(Duration::from_secs(60)).await;
+            let result = produce_call.get().await;
             record_completed_calls(result);
         }
         // The channel is closed and drained: the response for the last message
@@ -927,6 +951,10 @@ async fn producer_perf_test() {
     // measured interval stops anyway (see `COUNTED_RUN_CAP_SLACK`).
     let count_cap = test_duration + COUNTED_RUN_CAP_SLACK;
     let mut capped = false;
+    // Synchronous send rejections: in total, and in a row since the last
+    // successful send (see `MAX_CONSECUTIVE_SEND_REJECTIONS`).
+    let mut send_rejections: u64 = 0;
+    let mut consecutive_rejections: u64 = 0;
 
     loop {
         // A counted run is bounded by `num_messages`, or by the time cap if that
@@ -959,10 +987,12 @@ async fn producer_perf_test() {
         let start_time = Instant::now();
         let metrics_cb = Arc::clone(&metrics);
         let latency_cb = Arc::clone(&latency);
-        let callback: Box<dyn Callback> = Box::new(callback::new(move |md, _err| {
-            // On success `md` is Some; on failure it is None (err is Some) and no
-            // latency is recorded, matching the completion task's Ok-only path.
-            if md.is_some() {
+        let callback: Box<dyn Callback> = Box::new(callback::new(move |_md, err| {
+            // Success is `err` being None: on failure the client still passes
+            // metadata (every field -1) along with the error. A failed record
+            // adds no latency or throughput, matching the completion task's
+            // Ok-only path, which counts it as completed but not verified.
+            if err.is_none() {
                 let latency_us = start_time.elapsed().as_micros() as u64;
                 metrics_cb.record_success(latency_us, message_size);
                 latency_cb.record(latency_us);
@@ -970,12 +1000,22 @@ async fn producer_perf_test() {
         }));
         match producer.send(record, Some(callback)).await {
             Ok(produce_call) => {
+                consecutive_rejections = 0;
                 messages_sent.fetch_add(1, Ordering::Relaxed);
                 in_flight.fetch_add(1, Ordering::Relaxed);
                 let _ = produce_calls_tx.send(produce_call);
             },
             Err(e) => {
                 eprintln!("Send error: {e:?}");
+                send_rejections += 1;
+                consecutive_rejections += 1;
+                if consecutive_rejections >= MAX_CONSECUTIVE_SEND_REJECTIONS {
+                    eprintln!(
+                        "{consecutive_rejections} consecutive sends rejected with no successful send in \
+                         between; stopping the run as failed"
+                    );
+                    break;
+                }
             },
         }
 
@@ -1003,11 +1043,13 @@ async fn producer_perf_test() {
 
     // === COOLDOWN ===
     println!("Stopping after {sent_messages} messages sent, waiting for in-flight ...");
+    // Closing the channel ends the completion task once it has resolved every
+    // queued future, so awaiting it waits for all in-flight records.
     drop(produce_calls_tx);
-    while in_flight.load(Ordering::Relaxed) > 0 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
     let _ = record_completed_calls_loop.await;
+    if send_rejections > 0 {
+        eprintln!("Send rejections: {send_rejections}");
+    }
     // Measured time spans the send loop + drain, captured before the cooldown.
     // (`meas_end` was set inside the completion task on the last response.)
     let measured_secs = test_start.elapsed().as_secs_f64();
@@ -1159,6 +1201,10 @@ async fn producer_perf_test() {
     // === PERFORMANCE TARGET ASSERTIONS ===
     // verified == completed, completed == produced target, and the p99 latency
     // budget for the rate-limited in-suite run.
+    assert!(
+        consecutive_rejections < MAX_CONSECUTIVE_SEND_REJECTIONS,
+        "{consecutive_rejections} consecutive sends were rejected; the run stopped early (see above)"
+    );
     assert!(completed_messages > 0, "Should have completed at least one message");
     assert_eq!(
         verified, completed_messages,

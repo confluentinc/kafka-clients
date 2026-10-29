@@ -17,7 +17,8 @@ java {
 
 dependencies {
     // Apache Kafka Java client. Matches the version the Rust translation
-    implementation 'org.apache.kafka:kafka-clients:4.2.0'
+    // targets (4.4), which adds buffer.memory.allocation.strategy (KIP-1332).
+    implementation 'org.apache.kafka:kafka-clients:4.4.0'
 
     // JSON output for metrics.jsonl
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.0'

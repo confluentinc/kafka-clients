@@ -76,7 +76,7 @@ fn now_millis() -> i64 {
 ///
 /// The buckets are allocated once, zeroed, so only the pages of the buckets
 /// actually written become resident: the reported RSS is the client's, not
-/// this 4.8 MB array's. `reset()` clears in place and only the bucket range
+/// this 4.8 MB array's. `reset()` zeroes, in place, only the bucket range
 /// written since the last reset, so it neither reallocates nor touches the
 /// rest of the array.
 struct LatencyHistogram {
@@ -478,14 +478,14 @@ impl Args {
                 "--bootstrap" | "-b" => a.bootstrap = next()?,
                 "--topic" | "-t" => a.topic = next()?,
                 "--group-id" | "-g" => a.group_id = next()?,
-                "--throughput" | "-r" => a.throughput = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--duration" | "-d" => a.duration_s = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--message-size" => a.message_size = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--partitions" => a.partitions = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--warmup-messages" | "-w" => a.warmup_messages = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--interval" => a.interval_s = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--poll-timeout-ms" => a.poll_timeout_ms = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--join-timeout" => a.join_timeout_s = next()?.parse().map_err(|e| format!("{e}"))?,
+                "--throughput" | "-r" => a.throughput = parse_value(&arg, next()?)?,
+                "--duration" | "-d" => a.duration_s = parse_value(&arg, next()?)?,
+                "--message-size" => a.message_size = parse_value(&arg, next()?)?,
+                "--partitions" => a.partitions = parse_value(&arg, next()?)?,
+                "--warmup-messages" | "-w" => a.warmup_messages = parse_value(&arg, next()?)?,
+                "--interval" => a.interval_s = parse_value(&arg, next()?)?,
+                "--poll-timeout-ms" => a.poll_timeout_ms = parse_value(&arg, next()?)?,
+                "--join-timeout" => a.join_timeout_s = parse_value(&arg, next()?)?,
                 "--offset-reset" => a.offset_reset = next()?,
                 "--kafka-bin" => a.kafka_bin = next()?,
                 "--results-dir" => a.results_dir = next()?,
@@ -493,15 +493,13 @@ impl Args {
                 "--no-create-topic" => a.create_topic = false,
                 "--verbose" | "-v" => a.verbose = true,
                 "--peak" => a.peak = true,
-                "--retention-ms" => a.retention_ms = next()?.parse().map_err(|e| format!("{e}"))?,
-                "--num-records" => a.num_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
-                "--fetch-min-bytes" => a.fetch_min_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
-                "--fetch-max-wait-ms" => a.fetch_max_wait_ms = Some(next()?.parse().map_err(|e| format!("{e}"))?),
-                "--max-partition-fetch-bytes" => {
-                    a.max_partition_fetch_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?)
-                },
-                "--fetch-max-bytes" => a.fetch_max_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
-                "--max-poll-records" => a.max_poll_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
+                "--retention-ms" => a.retention_ms = parse_value(&arg, next()?)?,
+                "--num-records" => a.num_records = Some(parse_value(&arg, next()?)?),
+                "--fetch-min-bytes" => a.fetch_min_bytes = Some(parse_value(&arg, next()?)?),
+                "--fetch-max-wait-ms" => a.fetch_max_wait_ms = Some(parse_value(&arg, next()?)?),
+                "--max-partition-fetch-bytes" => a.max_partition_fetch_bytes = Some(parse_value(&arg, next()?)?),
+                "--fetch-max-bytes" => a.fetch_max_bytes = Some(parse_value(&arg, next()?)?),
+                "--max-poll-records" => a.max_poll_records = Some(parse_value(&arg, next()?)?),
                 "--client-config" => a.client_config = Some(next()?),
                 "--compression-type" => {
                     let codec = next()?;
@@ -520,6 +518,14 @@ impl Args {
         }
         Ok(a)
     }
+}
+
+/// Parses a numeric flag's value; the error names the flag and the value.
+fn parse_value<T: std::str::FromStr>(flag: &str, value: String) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    value.parse().map_err(|e| format!("invalid value '{value}' for {flag}: {e}"))
 }
 
 fn print_usage() {
@@ -545,7 +551,7 @@ fn print_usage() {
                --no-create-topic         Don't create/verify the topic\n  \
                --peak                    Run the producer unbounded (--throughput -1); saturates the consumer\n  \
                --retention-ms <MS>       Topic retention.ms at create time (default: 3600000; lower bounds disk under peak)\n  \
-               --num-records <N>         Override producer --num-records (default: throughput×(duration+30))\n  \
+               --num-records <N>         Override producer --num-records (default: throughput×(duration+30)+warmup)\n  \
                --fetch-min-bytes <N>     fetch.min.bytes (client default 1)\n  \
                --fetch-max-wait-ms <N>   fetch.max.wait.ms (client default 500)\n  \
                --max-partition-fetch-bytes <N>  max.partition.fetch.bytes (client default 1MB)\n  \
@@ -717,10 +723,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-commit on: this is a throughput/latency probe, commit cost is part
     // of a realistic consumer; offsets don't matter (fresh group each run).
     println!("Offset reset: {}", args.offset_reset);
-    // Build the base config from a properties map seeded with bootstrap + any
-    // fetch-knob overrides (so the fetcher actually picks them up), THEN chain
-    // the existing builders. When no fetch flags are passed the map carries only
-    // bootstrap and the client defaults apply — identical to prior behavior.
+    // The config is built from one properties map: bootstrap, the fetch flags
+    // given (a fetch setting left unset keeps the client default), the
+    // --client-config file, then the fixed keys below.
     let mut props: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     props.insert("bootstrap.servers".to_string(), args.bootstrap.clone());
     if let Some(v) = args.fetch_min_bytes {

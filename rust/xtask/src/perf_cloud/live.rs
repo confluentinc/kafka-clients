@@ -222,6 +222,7 @@ fn from_interval_lines(log: &str, record_bytes: f64) -> Option<SoFar> {
 }
 
 /// Where a running client's numbers so far are.
+#[derive(Clone, PartialEq)]
 enum Source {
     /// A `metrics.jsonl` of windows.
     Windows(PathBuf),
@@ -230,6 +231,7 @@ enum Source {
 }
 
 /// The client running now.
+#[derive(Clone, PartialEq)]
 pub(super) struct RunningArm {
     arm: Arm,
     source: Source,
@@ -288,15 +290,20 @@ impl Progress {
         self.running = None;
     }
 
-    /// The report so far; `None` when no test is running.
-    fn live_markdown(&self) -> Option<String> {
+    /// The report so far, with the running client's numbers from `read` when
+    /// they were read for it; `None` when no test is running.
+    fn live_markdown(&self, read: Option<(RunningArm, Option<SoFar>)>) -> Option<String> {
         if !self.in_progress {
             return None;
         }
-        let running = self
-            .running
-            .as_ref()
-            .map(|r| report::Running { arm: r.arm, so_far: r.so_far() });
+        let running = self.running.as_ref().map(|r| report::Running {
+            arm: r.arm,
+            so_far: match read {
+                Some((read_for, so_far)) if read_for == *r => so_far,
+                // A client that started since it was read.
+                _ => r.so_far(),
+            },
+        });
         let live = report::Live { updated: now_utc(), running };
         Some(report::markdown(&self.info, &self.results, Some(&live)))
     }
@@ -324,8 +331,9 @@ fn report_sink(results_dir: PathBuf, push: bool) -> Sink {
 /// The run's [`Progress`], and the thread that writes the report from it
 /// while a test runs.
 ///
-/// The thread renders a report under the progress lock and takes the
-/// publishing lock before it lets the progress go, then writes and pushes.
+/// The thread reads the running client's files, renders a report under the
+/// progress lock and takes the publishing lock before it lets the progress
+/// go, then writes and pushes.
 /// The run changes the progress through [`LiveReport::update`], which never
 /// waits for a push, and writes each test's full report through
 /// [`LiveReport::publish_full`], which takes both locks in the same order: a
@@ -430,8 +438,15 @@ fn publish_until_stopped(
         if crate::signals::count() > signals_baseline {
             continue;
         }
+        // The running client's files, read without the progress lock, which
+        // the run waits for.
+        let running = lock(progress).running.clone();
+        let read = running.map(|r| {
+            let so_far = r.so_far();
+            (r, so_far)
+        });
         let progress = lock(progress);
-        let Some(markdown) = progress.live_markdown() else {
+        let Some(markdown) = progress.live_markdown(read) else {
             continue;
         };
         let _publishing = lock(publishing);
@@ -586,12 +601,21 @@ warmup complete (100 msgs); measuring 600s now
             in_progress: false,
             running: None,
         };
-        assert_eq!(progress.live_markdown(), None);
+        assert_eq!(progress.live_markdown(None), None);
         progress.begin_test(test.clone());
-        progress.begin_arm(RunningArm::new(&test, Arm::Rust, &dir));
-        let md = progress.live_markdown().unwrap();
+        let rust = RunningArm::new(&test, Arm::Rust, &dir);
+        progress.begin_arm(rust.clone());
+        let md = progress.live_markdown(None).unwrap();
         assert!(md.contains("| Throughput (msg/s) | 100 | – |"), "{md}");
         assert!(md.contains("| Status | running | waiting |"), "{md}");
+        // What was read for the running client is what it shows...
+        let read = SoFar { messages: 300.0, ..rust.so_far().unwrap() };
+        let md = progress.live_markdown(Some((rust.clone(), Some(read.clone())))).unwrap();
+        assert!(md.contains("| Throughput (msg/s) | 300 | – |"), "{md}");
+        // ... unless they were read for another client.
+        let other = RunningArm::new(&test, Arm::Librdkafka, &dir);
+        let md = progress.live_markdown(Some((other, Some(read)))).unwrap();
+        assert!(md.contains("| Throughput (msg/s) | 100 | – |"), "{md}");
         progress.end_arm(ArmResult {
             arm: Arm::Rust,
             outcome: Outcome::Failed("interrupted".to_string()),
@@ -600,7 +624,7 @@ warmup complete (100 msgs); measuring 600s now
             elapsed: Duration::from_secs(1),
         });
         progress.end_test();
-        assert_eq!(progress.live_markdown(), None);
+        assert_eq!(progress.live_markdown(Some((rust.clone(), rust.so_far()))), None);
         assert_eq!(progress.results.len(), 1);
         assert_eq!(progress.results[0].arms.len(), 1);
         fs::remove_dir_all(&dir).unwrap();

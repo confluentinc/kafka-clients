@@ -12,9 +12,12 @@
 #             COMPRESSION_TYPE (none|gzip|snappy|lz4|zstd)
 #           producer and transactional:
 #             KEY_SIZE (B)  BATCH_SIZE (KiB)  LINGER_MS  MAX_IN_FLIGHT
-#             BUFFER_MEMORY (MiB)  MAX_REQUEST_SIZE (KiB)
+#             BUFFER_MEMORY (MiB)  MAX_REQUEST_SIZE (KiB, at most 8192)
 #           producer only (transactional tests always use idempotence and acks=all):
 #             ACKS (all|-1|1|0)  ENABLE_IDEMPOTENCE (true|false)
+#             BUFFER_MEMORY_ALLOCATION_STRATEGY (full|incremental): read by
+#               the Rust and Java clients only (--clients rust,java);
+#               incremental needs COMPRESSION_TYPE=none and BATCH_SIZE >= 16
 #           transactional only:
 #             RECORDS_PER_TRANSACTION  ABORT_RATE (0 to 1, e.g. 0.5)
 #             NUM_TRANSACTIONAL_PRODUCERS  TXN_MODE (produce|eos; eos needs LIMIT_RPS > 0)
@@ -29,9 +32,12 @@
 #                              batches of N (consume_batch); unset, batches of
 #                              MAX_POLL_RECORDS (500 by default)
 #           Unset settings take each harness's own default (these differ, e.g.
-#           MAX_IN_FLIGHT); set them to pin them. With the librdkafka (C)
-#           client, BATCH_SIZE must be at least 1024: below it the C harnesses
-#           use 1 MiB batches.
+#           MAX_IN_FLIGHT), except BUFFER_MEMORY: every producing client gets
+#           32 MiB unless the test sets it (the Rust and Java default;
+#           librdkafka's queue defaults to 1 GiB). Set them to pin them. With
+#           the librdkafka (C) client, BATCH_SIZE must be at least 1024: below
+#           it the C harnesses use 1 MiB batches. Unset, MAX_REQUEST_SIZE is
+#           64 × BATCH_SIZE, at most 8 MiB, and must fit KEY_SIZE + VALUE_SIZE.
 #
 # `cargo xtask perf-cloud check --group G --tests ID,ID` validates a list and
 # prints its time estimate. batches.txt names lists of these tests.
@@ -62,6 +68,20 @@ producer-max-1kb-36p-lz4  rust,python  PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0
 # Unbounded 1 KiB values with 100 B keys: the keyed partitioning path.
 producer-max-1kb-200p-key100b  rust,python  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024
 
+# The keyed test with buffer.memory.allocation.strategy=incremental (KIP-1332):
+# batches take 16 KiB chunks as records arrive instead of reserving the whole
+# 1 MiB batch.size, so the default 32 MiB buffer.memory no longer caps the
+# open batches at 32 across the 200 partitions. Only Rust and Java read it, so
+# it runs with --clients rust,java (check refuses the other clients). The
+# report's Δ is against librdkafka, so it gives none here: compare each
+# client with its own run of producer-max-1kb-200p-key100b (the same test,
+# full strategy) and of producer-max-1kb-200p-key100b-bufmem256.
+producer-max-1kb-200p-key100b-incremental  rust  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024 BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental
+
+# The keyed test with the full strategy and 256 MiB of buffer.memory, room for
+# a full batch on every partition: the control for the incremental run.
+producer-max-1kb-200p-key100b-bufmem256  rust,python  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024 BUFFER_MEMORY=256
+
 # 250k msg/s of 1 KiB values (~256 MB/s) read as they are produced, the
 # librdkafka clients polling one record at a time: end-to-end latency at a
 # high load. Python only, for the Python consumer batch.
@@ -78,15 +98,15 @@ consumer-fixed-500-10kb-200p-librdkafka-poll  rust,python  WORKLOAD=consumer PAR
 consumer-fixed-250k-1kb-200p-fetch-tuned  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=250000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
 
 # ---------------------------------------------------------------------------
-# The Rust GA and Python Preview performance test plan (Confluence: "Rust GA
-# & Python Preview — Performance Test Plan"). Tests above that match a plan
-# scenario are reused: producer-fixed-100k-1kb-200p, producer-max-1kb-200p,
-# producer-max-1kb-200p-key100b, consumer-fixed-500-10kb-200p-librdkafka-poll.
+# The Rust GA and Python Preview performance test plan. Tests above that
+# match a plan scenario are reused: producer-fixed-100k-1kb-200p,
+# producer-max-1kb-200p, producer-max-1kb-200p-key100b.
 # A rate given in MB/s is X k msg/s of 1 KiB values (X/10 k of 10 KiB),
 # about X × 1.024 MB/s. Unset producer settings keep the harnesses' defaults,
 # which are the plan's: linger.ms 5, batch.size 1 MiB, max.request.size
-# 8 MiB, max.in.flight 1000 for librdkafka and the client default (5) for
-# Rust and Java.
+# 8 MiB, max.in.flight 1000 for the librdkafka (C) client, librdkafka's own
+# (1,000,000) for the Python librdkafka clients and the client default (5)
+# for Rust and Java; buffer.memory is 32 MiB for every client.
 
 # Producer, fixed throughput: 500k msg/s of 1 KiB values (~512 MB/s).
 producer-fixed-500k-1kb-200p  rust  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=500000 BATCH_SIZE=1024
@@ -120,35 +140,40 @@ producer-max-100kb-200p  rust,python  PARTITIONS=200 VALUE_SIZE=102400 LIMIT_RPS
 
 # Rust GA consumer, read as produced with the client defaults: 300 MB/s and
 # 5 MB/s of 1 KiB values into 36 and 200 partitions, 100 KiB values at 250
-# msg/s (~25 MB/s), and 300 MB/s of 10 KiB values per codec.
+# msg/s (~25 MB/s), and 300 MB/s of 10 KiB values per codec. The 5 MB/s
+# tests are the Python Preview's too.
 consumer-fixed-300k-1kb-36p         rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=300000
 consumer-fixed-300k-1kb-200p        rust  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000
-consumer-fixed-5k-1kb-36p           rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=5000
-consumer-fixed-5k-1kb-200p          rust  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=5000
+consumer-fixed-5k-1kb-36p           rust,python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=5000
+consumer-fixed-5k-1kb-200p          rust,python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=5000
 consumer-fixed-250-100kb-36p        rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=102400 LIMIT_RPS=250
 consumer-fixed-30k-10kb-36p-gzip    rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=30000 COMPRESSION_TYPE=gzip
 consumer-fixed-30k-10kb-36p-lz4     rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=30000 COMPRESSION_TYPE=lz4
 consumer-fixed-30k-10kb-36p-zstd    rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=30000 COMPRESSION_TYPE=zstd
 consumer-fixed-30k-10kb-36p-snappy  rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=30000 COMPRESSION_TYPE=snappy
 
-# Python Preview consumer, the librdkafka clients polling one record at a
-# time (poll()): anchors at 150 MB/s and 5 MB/s of 1 KiB values into 36 and
-# 200 partitions, 10 KiB values at 5 MB/s into 36 partitions (200 is
-# consumer-fixed-500-10kb-200p-librdkafka-poll above), and 150 MB/s of 10 KiB
-# values per codec. The plan's 100 B rows run at 150k msg/s (~15 MB/s), not
-# its 150 MB/s: that is 1.5M msg/s, above the driver's 1M msg/s limit and ~7
-# times the ~212k msg/s Python sync (Rust) consumed on m8i.4xlarge.
-consumer-fixed-150k-1kb-36p-librdkafka-poll          python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
-consumer-fixed-150k-1kb-200p-librdkafka-poll         python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
-consumer-fixed-5k-1kb-36p-librdkafka-poll            python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=5000 LIBRDKAFKA_BATCH=0
-consumer-fixed-5k-1kb-200p-librdkafka-poll           python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=5000 LIBRDKAFKA_BATCH=0
-consumer-fixed-500-10kb-36p-librdkafka-poll          python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=500 LIBRDKAFKA_BATCH=0
-consumer-fixed-150k-100b-36p-librdkafka-poll         python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
-consumer-fixed-150k-100b-200p-librdkafka-poll        python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
-consumer-fixed-15k-10kb-36p-gzip-librdkafka-poll     python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=gzip LIBRDKAFKA_BATCH=0
-consumer-fixed-15k-10kb-36p-lz4-librdkafka-poll      python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=lz4 LIBRDKAFKA_BATCH=0
-consumer-fixed-15k-10kb-36p-zstd-librdkafka-poll     python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=zstd LIBRDKAFKA_BATCH=0
-consumer-fixed-15k-10kb-36p-snappy-librdkafka-poll   python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=snappy LIBRDKAFKA_BATCH=0
+# Python Preview consumer, the librdkafka clients consuming batches of 500
+# (consume()), as the Rust-backed clients poll up to their default
+# max.poll.records of 500: anchors at 150 MB/s and 5 MB/s of 1 KiB values
+# into 36 and 200 partitions (5 MB/s is consumer-fixed-5k-1kb-36p and -200p
+# above), 10 KiB values at 5 MB/s into 36 and 200 partitions, and 150 MB/s of
+# 10 KiB values per codec. The plan's 100 B rows run at 150k msg/s (~15 MB/s),
+# not its 150 MB/s: that is 1.5M msg/s, above the driver's 1M msg/s limit and
+# ~7 times the ~212k msg/s Python sync (Rust) consumed on m8i.4xlarge.
+consumer-fixed-150k-1kb-36p         python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000
+consumer-fixed-150k-1kb-200p        python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=150000
+consumer-fixed-500-10kb-36p         python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=500
+consumer-fixed-500-10kb-200p        python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=10240 LIMIT_RPS=500
+consumer-fixed-150k-100b-36p        python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=150000
+consumer-fixed-150k-100b-200p       python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=150000
+consumer-fixed-15k-10kb-36p-gzip    python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=gzip
+consumer-fixed-15k-10kb-36p-lz4     python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=lz4
+consumer-fixed-15k-10kb-36p-zstd    python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=zstd
+consumer-fixed-15k-10kb-36p-snappy  python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=snappy
+
+# The 150 MB/s, 36-partition anchor with the librdkafka clients polling one
+# record at a time (poll()), as applications that read record by record do.
+consumer-fixed-150k-1kb-36p-librdkafka-poll  python  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
 
 # Python Preview consumer, fetches tuned for throughput (as
 # consumer-fixed-250k-1kb-200p-fetch-tuned) at 150 MB/s of 1 KiB values.

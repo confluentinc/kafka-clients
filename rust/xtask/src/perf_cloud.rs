@@ -56,9 +56,15 @@
 //!   the running client's numbers so far (see [`live`]).
 //!
 //! The arms are the existing (transactional) producer and consumer
-//! harnesses, driven by the same environment variables (or, for the Rust, C
-//! and Java consumers, options) `tools/deploy_and_run_perf/deploy_and_run_perf.py`
-//! sets on EC2. Topics are created here, never by a harness
+//! harnesses, driven by the environment variables (or, for the Rust, C and
+//! Java consumers, the options) `tools/deploy_and_run_perf/deploy_and_run_perf.py`
+//! sets on EC2, with some differences: the harnesses are built for a generic
+//! CPU, not the machine's (see [`build`]); every producing client gets
+//! [`PLAN_BUFFER_MEMORY_MIB`] of `buffer.memory` unless the test sets
+//! `BUFFER_MEMORY`; the consumer harnesses read a load this driver produces;
+//! and the Java consumer keeps the client's `max.poll.records` unless the
+//! test sets `MAX_POLL_RECORDS`, where the EC2 runs give it 2500. Topics are
+//! created here, never by a harness
 //! (`CREATE_TOPIC=False`): the Rust harnesses cannot create topics, and one
 //! creation path gives every arm the same topic. An `eos` test also gets a
 //! source topic, which its harness fills with Kafka's
@@ -148,10 +154,15 @@ const SEED_MB_S: f64 = 50.0;
 /// allows.
 const IDEMPOTENT_MAX_IN_FLIGHT: u64 = 5;
 
-/// Every environment variable a harness reads, its A/B debugging knobs
-/// included. Each arm starts from the job's environment with all of them
-/// removed, so a stray value in the job cannot change one arm and not the
-/// others.
+/// The plan's buffer.memory for every producing client, in MiB: the Rust and
+/// Java default, where librdkafka's queue defaults to 1 GiB.
+const PLAN_BUFFER_MEMORY_MIB: u64 = 32;
+
+/// Every environment variable a harness reads, its A/B debugging knobs and
+/// the Rust client's `RUST_LOG` included, and every test setting (see
+/// [`SETTINGS`]; `LIBRDKAFKA_BATCH` is the driver's own). Each arm starts from
+/// the job's environment with all of them removed, so a stray value in the
+/// job cannot change one arm and not the others.
 const HARNESS_VARS: &[&str] = &[
     "ABORT_RATE",
     "ACKS",
@@ -159,6 +170,7 @@ const HARNESS_VARS: &[&str] = &[
     "BATCH_SIZE",
     "BOOTSTRAP_SERVERS",
     "BUFFER_MEMORY",
+    "BUFFER_MEMORY_ALLOCATION_STRATEGY",
     "CLIENT_VERSION",
     "COMPRESSION_TYPE",
     "CONSUMER_BATCH_SIZE",
@@ -181,7 +193,7 @@ const HARNESS_VARS: &[&str] = &[
     "MAX_POLL_RECORDS",
     "MAX_REQUEST_SIZE",
     "METRICS_FILE",
-    "NO_MSG_F_BLOCK",
+    "MSG_F_BLOCK",
     "NUM_MESSAGES",
     "NUM_TRANSACTIONAL_PRODUCERS",
     "P99_LIMIT_MS",
@@ -196,6 +208,9 @@ const HARNESS_VARS: &[&str] = &[
     "READINESS_TIMEOUT_SECONDS",
     "RECORDS_PER_TRANSACTION",
     "RESULTS_FILE",
+    // The log filter of the Rust harnesses and the Rust client's C library
+    // (env_logger): `debug` would slow the Rust-backed clients alone.
+    "RUST_LOG",
     "SASL_MECHANISM",
     "SASL_PASSWORD",
     "SASL_USERNAME",
@@ -220,11 +235,20 @@ const HARNESS_VARS: &[&str] = &[
 
 pub fn run(raw: &[String]) -> anyhow::Result<()> {
     let Some((sub, rest)) = raw.split_first() else {
-        println!("{HELP}");
+        println!("{}", help(None));
         return Ok(());
     };
+    if USAGES.iter().any(|(name, _)| name == sub) && rest.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", help(Some(sub)));
+        return Ok(());
+    }
     match sub.as_str() {
-        "list" => list(),
+        "list" => {
+            if let Some(arg) = rest.first() {
+                bail!("unexpected argument `{arg}`\n\n{}", help(Some("list")));
+            }
+            list()
+        },
         "check" => {
             let options = RunOptions::parse(rest, false)?;
             check(&options)
@@ -238,35 +262,60 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
             run_tests(&options)
         },
         "help" | "--help" | "-h" => {
-            println!("{HELP}");
+            println!("{}", help(None));
             Ok(())
         },
-        other => bail!("unknown perf-cloud subcommand `{other}`\n\n{HELP}"),
+        other => bail!("unknown perf-cloud subcommand `{other}`\n\n{}", help(None)),
     }
 }
 
-const HELP: &str = "cargo xtask perf-cloud <subcommand>
+/// The usage of `subcommand` (`<subcommand> --help`), or of them all.
+fn help(subcommand: Option<&str>) -> String {
+    let usages: Vec<&str> = USAGES
+        .iter()
+        .filter(|(name, _)| subcommand.is_none_or(|s| s == *name))
+        .map(|(_, usage)| *usage)
+        .collect();
+    format!(
+        "cargo xtask perf-cloud {}\n\n{}\n\n{HELP_NOTES}",
+        subcommand.unwrap_or("<subcommand>"),
+        usages.join("\n")
+    )
+}
 
-  list                     Print the tests that can be run (tools/perf-cloud/tests.txt)
-                           and the batches of them (tools/perf-cloud/batches.txt)
-  check  --group G [--clients C,C] (--tests ID,ID | --batch B | --scenario S)
+/// Each subcommand and its usage.
+const USAGES: &[(&str, &str)] = &[
+    (
+        "list",
+        "  list                     Print the tests that can be run (tools/perf-cloud/tests.txt)
+                           and the batches of them (tools/perf-cloud/batches.txt)",
+    ),
+    (
+        "check",
+        "  check  --group G [--clients C,C] (--tests ID,ID | --batch B | --scenario S)
          [--duration-min N] [--warmup-min N] [--budget-min N] [--ingress-mb-s N]
                            Validate a run and print its time estimate; fail when
                            it exceeds --budget-min, warn about fixed-rate tests
-                           near the cluster's --ingress-mb-s
-  build  --group G         Build the group's harnesses
-  run    --group G [--clients C,C] (--tests ID,ID | --batch B | --scenario S)
+                           near the cluster's --ingress-mb-s",
+    ),
+    ("build", "  build  --group G         Build the group's harnesses"),
+    (
+        "run",
+        "  run    --group G [--clients C,C] (--tests ID,ID | --batch B | --scenario S)
          [--duration-min N] [--warmup-min N]
          --bootstrap HOST:PORT --kafka-bin DIR --results-dir DIR
          [--topic-prefix P] [--push-artifacts]
                            Run the tests (credentials from PERF_API_KEY / PERF_API_SECRET);
                            --topic-prefix defaults to perf-local-<Unix time>, new for each
                            run, and its topics must not exist yet;
-                           --push-artifacts pushes each finished test's results with
-                           Semaphore's `artifact` CLI, report.md also as the workflow report,
-                           which also gets the report so far every 5 min while a test runs
+                           --push-artifacts (or =true / =false) pushes each finished test's
+                           results with Semaphore's `artifact` CLI, report.md also as the
+                           workflow report, which also gets the report so far every 5 min
+                           while a test runs",
+    ),
+];
 
-  G is `rust` (Rust, librdkafka, Java) or `python` (Rust- and librdkafka-backed
+const HELP_NOTES: &str = "  G is `rust` (Rust, librdkafka, Java) or `python` (Rust- and librdkafka-backed
   Python clients, sync and async). C is `all` (the default) or the group's
   clients to run: rust, librdkafka, java / python-sync-rust,
   python-sync-librdkafka, python-async-rust, python-async-librdkafka.
@@ -620,6 +669,8 @@ enum Kind {
     /// A decimal number from 0 to 1.
     Fraction,
     TxnMode,
+    /// `buffer.memory.allocation.strategy` (KIP-1332): `full` or `incremental`.
+    AllocationStrategy,
 }
 
 /// A harness setting a test may set.
@@ -653,9 +704,13 @@ const PRODUCING: &[Workload] = &[Workload::Producer, Workload::Transactional];
 /// [`MIN_LIBRDKAFKA_BATCH_KIB`]). A setting a test leaves out takes each
 /// harness's own default, and those differ (`MAX_IN_FLIGHT`: 1000 in the C
 /// producer harness, the client default of 5 in Rust and Java), as in the EC2
-/// runs; set it in the test to pin it. Units: `BATCH_SIZE` /
-/// `MAX_REQUEST_SIZE` in KiB, `BUFFER_MEMORY` in MiB. The transactional
-/// harnesses always use idempotence and `acks=all`.
+/// runs; set it in the test to pin it. The exceptions are the settings the
+/// driver derives ([`PerfTest::env_for`]): every producing client gets
+/// `BUFFER_MEMORY` [`PLAN_BUFFER_MEMORY_MIB`] (the harnesses leave
+/// `buffer.memory` at the client default, 1 GiB of queue for librdkafka), an
+/// idempotent C producer `MAX_IN_FLIGHT` 5, and an `ACKS=0` test no delivery
+/// check. Units: `BATCH_SIZE` / `MAX_REQUEST_SIZE` in KiB, `BUFFER_MEMORY` in
+/// MiB. The transactional harnesses always use idempotence and `acks=all`.
 ///
 /// Each number has a maximum: the harnesses read most of them as 32-bit
 /// integers (the C harnesses with `atoi`, Java with `Integer.parseInt`, which
@@ -678,8 +733,9 @@ const SETTINGS: &[Setting] = &[
     // Bytes; see also MAX_RECORD_BYTES.
     number_setting("VALUE_SIZE", Kind::Positive, MAX_RECORD_BYTES, ALL),
     number_setting("KEY_SIZE", Kind::Count, MAX_RECORD_BYTES, PRODUCING),
-    // Records per second: with the longest warmup and measurement, the record
-    // counts derived from it stay 32-bit.
+    // Records per second. The record counts derived from it (× the warmup or
+    // measured seconds, up to 5.4 billion at the longest) exceed 32 bits; the
+    // harnesses and the load generator count them in 64.
     number_setting("LIMIT_RPS", Kind::Count, 1_000_000, ALL),
     // KiB: 64 MiB.
     number_setting("BATCH_SIZE", Kind::Positive, 65_536, PRODUCING),
@@ -688,8 +744,16 @@ const SETTINGS: &[Setting] = &[
     number_setting("MAX_IN_FLIGHT", Kind::Positive, 1_000_000, PRODUCING),
     // MiB: 16 GiB.
     number_setting("BUFFER_MEMORY", Kind::Positive, 16_384, PRODUCING),
-    // KiB: 100 MiB.
-    number_setting("MAX_REQUEST_SIZE", Kind::Positive, 102_400, PRODUCING),
+    // Read by the Rust and Java producer harnesses only (Kafka 4.4; see
+    // `check_allocation_strategy` and `PerfTest::check_arms`); librdkafka has
+    // no such setting and runs at its own queue.
+    setting(
+        "BUFFER_MEMORY_ALLOCATION_STRATEGY",
+        Kind::AllocationStrategy,
+        &[Workload::Producer],
+    ),
+    // KiB: 8 MiB, where the harnesses cap max.request.size.
+    number_setting("MAX_REQUEST_SIZE", Kind::Positive, MAX_REQUEST_KIB, PRODUCING),
     setting("COMPRESSION_TYPE", Kind::Compression, ALL),
     setting("ACKS", Kind::Acks, &[Workload::Producer]),
     setting("ENABLE_IDEMPOTENCE", Kind::Bool, &[Workload::Producer]),
@@ -745,8 +809,21 @@ impl LibrdkafkaRead {
 const MAX_RECORD_BYTES: u64 = 1_000_000;
 
 /// The bytes a request needs on top of its one record (batch and record
-/// headers), when `MAX_REQUEST_SIZE` bounds the record.
+/// headers), when the request size bounds the record.
 const REQUEST_OVERHEAD_BYTES: u64 = 512;
+
+/// The producer harnesses' `max.request.size` (librdkafka's
+/// `message.max.bytes`): `MAX_REQUEST_SIZE` when the test sets it, else
+/// [`REQUEST_BATCHES`] × `BATCH_SIZE` ([`DEFAULT_BATCH_KIB`] when unset), at
+/// most [`MAX_REQUEST_KIB`]. All in KiB.
+const REQUEST_BATCHES: u64 = 64;
+const DEFAULT_BATCH_KIB: u64 = 1024;
+const MAX_REQUEST_KIB: u64 = 8 * 1024;
+
+/// The smallest `BATCH_SIZE` (KiB) with which the Rust and Java producers use
+/// `buffer.memory.allocation.strategy=incremental`: a batch must fill one
+/// 16 KiB chunk, and below it both fall back to `full` with only a warning.
+const MIN_INCREMENTAL_BATCH_KIB: u64 = 16;
 
 /// Set by every test, so no arm falls back to a harness default the others
 /// might not share. `LIMIT_RPS=0` is an unbounded test.
@@ -830,6 +907,17 @@ impl PerfTest {
                 self.id
             );
         }
+        // The report would show the strategy for clients that ran without it.
+        if self.setting("BUFFER_MEMORY_ALLOCATION_STRATEGY").is_some() {
+            if let Some(arm) = arms.iter().find(|a| !matches!(a, Arm::Rust | Arm::Java)) {
+                bail!(
+                    "test `{}`: only the Rust and Java clients read BUFFER_MEMORY_ALLOCATION_STRATEGY, and the {} \
+                     client does not; run the rust group with --clients rust,java",
+                    self.id,
+                    arm.id()
+                );
+            }
+        }
         // Their harnesses count the warmup in records, LIMIT_RPS × the warmup
         // seconds (`consumer_args`), which an unbounded load does not give.
         if self.workload == Workload::Consumer && self.number("LIMIT_RPS") == 0 {
@@ -876,6 +964,11 @@ impl PerfTest {
             && self.setting("MAX_IN_FLIGHT").is_none()
         {
             env.push(("MAX_IN_FLIGHT".to_string(), IDEMPOTENT_MAX_IN_FLIGHT.to_string()));
+        }
+        // Every producing client queues at most the plan's buffer.memory unless
+        // the test says otherwise; the harnesses leave it unset by default.
+        if PRODUCING.contains(&self.workload) && self.setting("BUFFER_MEMORY").is_none() {
+            env.push(("BUFFER_MEMORY".to_string(), PLAN_BUFFER_MEMORY_MIB.to_string()));
         }
         // The Python harness's librdkafka backend reads MAX_POLL_RECORDS as
         // its consume() batch only (librdkafka has no max.poll.records), and
@@ -981,7 +1074,12 @@ fn parse_settings<'a>(
         }
         match (workload, only) {
             (Workload::Transactional, [Workload::Producer]) => {
-                bail!("{what}: {key} does not apply to transactional tests (they always use idempotence and acks=all)")
+                let why = if key == "BUFFER_MEMORY_ALLOCATION_STRATEGY" {
+                    "the transactional harnesses do not read it"
+                } else {
+                    "they always use idempotence and acks=all"
+                };
+                bail!("{what}: {key} does not apply to transactional tests ({why})")
             },
             (_, [Workload::Transactional]) => {
                 bail!("{what}: {key} applies to transactional tests only (WORKLOAD=transactional)")
@@ -1008,14 +1106,30 @@ fn parse_settings<'a>(
              clients' default 1 MiB request size"
         );
     }
-    if let Some(kib) = number("MAX_REQUEST_SIZE") {
-        if record + REQUEST_OVERHEAD_BYTES > kib * 1024 {
-            bail!(
+    // A consumer test's load keeps kafka-producer-perf-test.sh's 1 MiB, which
+    // MAX_RECORD_BYTES fits.
+    if PRODUCING.contains(&workload) {
+        let fits = |kib: u64| record + REQUEST_OVERHEAD_BYTES <= kib * 1024;
+        match number("MAX_REQUEST_SIZE") {
+            Some(kib) if !fits(kib) => bail!(
                 "{what}: KEY_SIZE + VALUE_SIZE is {record} bytes, which with {REQUEST_OVERHEAD_BYTES} bytes of headers \
                  does not fit MAX_REQUEST_SIZE={kib} KiB"
-            );
+            ),
+            Some(_) => {},
+            None => {
+                let batch_kib = number("BATCH_SIZE").unwrap_or(DEFAULT_BATCH_KIB);
+                let kib = (batch_kib * REQUEST_BATCHES).min(MAX_REQUEST_KIB);
+                if !fits(kib) {
+                    bail!(
+                        "{what}: KEY_SIZE + VALUE_SIZE is {record} bytes, which with {REQUEST_OVERHEAD_BYTES} bytes of \
+                         headers does not fit the harnesses' max.request.size of {kib} KiB ({REQUEST_BATCHES} × \
+                         BATCH_SIZE={batch_kib} KiB); set a larger BATCH_SIZE or MAX_REQUEST_SIZE"
+                    );
+                }
+            },
         }
     }
+    check_allocation_strategy(what, &settings)?;
     if get("ENABLE_IDEMPOTENCE") == Some("true") {
         if let Some(acks) = get("ACKS").filter(|a| !matches!(*a, "all" | "-1")) {
             bail!("{what}: ACKS={acks} with ENABLE_IDEMPOTENCE=true: an idempotent producer needs ACKS=all");
@@ -1035,6 +1149,32 @@ fn parse_settings<'a>(
         );
     }
     Ok((workload, settings))
+}
+
+/// `BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental` as the Rust and Java
+/// producers take it: they refuse it with compression when they are created,
+/// after the cluster is paid for, and below [`MIN_INCREMENTAL_BATCH_KIB`]
+/// they run `full` instead. The harnesses' default `BATCH_SIZE`,
+/// [`DEFAULT_BATCH_KIB`], is above it.
+fn check_allocation_strategy(what: &str, settings: &[(String, String)]) -> anyhow::Result<()> {
+    if lookup(settings, "BUFFER_MEMORY_ALLOCATION_STRATEGY") != Some("incremental") {
+        return Ok(());
+    }
+    if let Some(codec) = lookup(settings, "COMPRESSION_TYPE").filter(|c| *c != "none") {
+        bail!(
+            "{what}: BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental with COMPRESSION_TYPE={codec}: the clients refuse \
+             it (\"The incremental buffer.memory.allocation.strategy does not support compression yet. \
+             compression.type must be set to none.\")"
+        );
+    }
+    if let Some(kib) = lookup_number(settings, "BATCH_SIZE").filter(|kib| *kib < MIN_INCREMENTAL_BATCH_KIB) {
+        bail!(
+            "{what}: BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental with BATCH_SIZE={kib}: below \
+             {MIN_INCREMENTAL_BATCH_KIB} KiB a batch cannot fill one chunk, and the clients fall back to the full \
+             strategy"
+        );
+    }
+    Ok(())
 }
 
 /// The name of a `--scenario`: its workload, rate, value size and partitions,
@@ -1086,6 +1226,10 @@ fn scenario_id(workload: Workload, settings: &[(String, String)]) -> String {
     }
     if let Some(mib) = number("BUFFER_MEMORY") {
         parts.push(format!("buffer{}", size_label(mib * 1024 * 1024)));
+    }
+    // `full` is the clients' default.
+    if get("BUFFER_MEMORY_ALLOCATION_STRATEGY") == Some("incremental") {
+        parts.push("incremental".to_string());
     }
     if let Some(kib) = number("MAX_REQUEST_SIZE") {
         parts.push(format!("maxrequest{}", size_label(kib * 1024)));
@@ -1176,6 +1320,7 @@ fn validate_setting(key: &str, value: &str, kind: Kind, max: u64) -> anyhow::Res
             well_formed && value.parse::<f64>().is_ok_and(|v| (0.0..=1.0).contains(&v))
         },
         Kind::TxnMode => matches!(value, "produce" | "eos"),
+        Kind::AllocationStrategy => matches!(value, "full" | "incremental"),
     };
     if !ok {
         let expected = match kind {
@@ -1186,6 +1331,7 @@ fn validate_setting(key: &str, value: &str, kind: Kind, max: u64) -> anyhow::Res
             Kind::Acks => "one of all, -1, 1, 0".to_string(),
             Kind::Fraction => "a decimal number from 0 to 1, such as 0.5".to_string(),
             Kind::TxnMode => "`produce` or `eos`".to_string(),
+            Kind::AllocationStrategy => "`full` or `incremental`".to_string(),
         };
         bail!("{key}={value}: expected {expected}");
     }
@@ -1438,28 +1584,43 @@ impl RunOptions {
 }
 
 /// `--flag value` / `--flag=value` options and value-less switches. A switch
-/// maps to an empty string.
+/// that is on (`--switch`, `--switch=true`) maps to an empty string; one that
+/// is off (`--switch=false`) is left out.
 fn parse_flags(raw: &[String], allowed: &[&str], switches: &[&str]) -> anyhow::Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
+    let mut seen: Vec<String> = Vec::new();
     let mut args = raw.iter();
     while let Some(arg) = args.next() {
         if !arg.starts_with("--") {
             bail!("unexpected argument `{arg}`");
         }
-        let (flag, value) = if switches.contains(&arg.as_str()) {
-            (arg.clone(), String::new())
-        } else if let Some((flag, value)) = arg.split_once('=') {
-            (flag.to_string(), value.to_string())
-        } else {
-            let value = args.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"))?;
-            (arg.clone(), value.clone())
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
         };
-        if !allowed.contains(&flag.as_str()) && !switches.contains(&flag.as_str()) {
-            bail!("unknown option `{flag}`\n\n{HELP}");
+        let switch = switches.contains(&flag.as_str());
+        if !allowed.contains(&flag.as_str()) && !switch {
+            bail!("unknown option `{flag}`\n\n{}", help(None));
         }
-        if out.insert(flag.clone(), value).is_some() {
+        if seen.contains(&flag) {
             bail!("{flag} is given twice");
         }
+        seen.push(flag.clone());
+        if switch {
+            match inline.as_deref() {
+                None | Some("true") => {
+                    out.insert(flag, String::new());
+                },
+                Some("false") => {},
+                Some(other) => bail!("{flag}={other}: a switch takes no value, or `true` / `false`"),
+            }
+            continue;
+        }
+        let value = match inline {
+            Some(value) => value,
+            None => args.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"))?.clone(),
+        };
+        out.insert(flag, value);
     }
     Ok(out)
 }
@@ -1614,9 +1775,12 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Build the group's harnesses, as `deploy_and_run_perf.py`'s bootstrap
-/// does. The system packages must already be installed: for `rust`
-/// librdkafka-dev (pkg-config `rdkafka`), cmake, a C compiler (`cc`), a JDK
-/// 17+ and Gradle (`$GRADLE` or `gradle`); for `python` python3-venv and
+/// does, but for a generic CPU, as users install the clients (no
+/// `-march=native` / `target-cpu=native`, which the EC2 bootstrap uses): the
+/// baselines are a distribution's librdkafka and a PyPI wheel, neither built
+/// for the machine. The system packages must already be installed: for
+/// `rust` librdkafka-dev (pkg-config `rdkafka`), cmake, a C compiler (`cc`), a
+/// JDK 17+ and Gradle (`$GRADLE` or `gradle`); for `python` python3-venv and
 /// python3-dev (`$PERF_PYTHON` or `python3`).
 fn build(group: Group) -> anyhow::Result<()> {
     let repo = repo_root();
@@ -1625,11 +1789,10 @@ fn build(group: Group) -> anyhow::Result<()> {
         Group::Rust => {
             // The C harness links the Rust client's C library statically and
             // needs its header, so the FFI build comes first. Only its
-            // librdkafka backend (CLIENT_VERSION=2) runs here, so the library
-            // is built without native CPU flags. It is not wholly unused:
-            // the library bundles its own zstd, whose global `ZSTD_*` symbols
-            // the executable exports, so librdkafka's zstd calls can bind to
-            // that copy instead of the system libzstd.
+            // librdkafka backend (CLIENT_VERSION=2) runs here. The library is
+            // not wholly unused: it bundles its own zstd, whose global
+            // `ZSTD_*` symbols the executable exports, so librdkafka's zstd
+            // calls can bind to that copy instead of the system libzstd.
             step(
                 "Rust client C library (FFI)",
                 Command::new(cargo())
@@ -1648,7 +1811,7 @@ fn build(group: Group) -> anyhow::Result<()> {
                     .arg("-B")
                     .arg(repo.join("c/build"))
                     .arg(format!("-DRUST_PROJECT_ROOT={}", rust.display()))
-                    .arg("-DCMAKE_C_FLAGS=-O2 -march=native"),
+                    .arg("-DCMAKE_C_FLAGS=-O2"),
             )?;
             step(
                 "C (transactional) producer harnesses: build",
@@ -1673,7 +1836,7 @@ fn build(group: Group) -> anyhow::Result<()> {
             step(
                 "librdkafka (C) consumer harness",
                 Command::new("cc")
-                    .args(["-O2", "-march=native", "-o"])
+                    .args(["-O2", "-o"])
                     .arg(&consumer_c)
                     .arg(consumer_compare_dir(repo).join("librdkafka_e2e.c"))
                     .args(String::from_utf8_lossy(&rdkafka_flags.stdout).split_whitespace())
@@ -1696,8 +1859,8 @@ fn build(group: Group) -> anyhow::Result<()> {
                     ])
                     .current_dir(&rust),
             )?;
-            // Built like the producer harnesses above, without native CPU
-            // flags (a different RUSTFLAGS would rebuild the whole workspace).
+            // With the producer harnesses' flags (other RUSTFLAGS would
+            // rebuild the whole workspace).
             step(
                 "Rust consumer harness",
                 Command::new(cargo())
@@ -1723,13 +1886,11 @@ fn build(group: Group) -> anyhow::Result<()> {
             )?;
         },
         Group::Python => {
-            // As the EC2 bootstrap: the Rust library and the extension are
-            // built for the machine's CPU.
+            // For a generic CPU, as the librdkafka-backed client's PyPI wheel.
             step(
                 "Rust client C library (FFI)",
                 Command::new(cargo())
                     .args(["build", "--features", "ffi", "--release"])
-                    .env("RUSTFLAGS", "-C target-cpu=native")
                     .current_dir(&rust),
             )?;
             let python = std::env::var("PERF_PYTHON").unwrap_or_else(|_| "python3".to_string());
@@ -1747,7 +1908,7 @@ fn build(group: Group) -> anyhow::Result<()> {
                 Command::new(&venv)
                     .args(["-m", "pip", "install", "-e", "."])
                     .env("CONFLUENT_KAFKA_LIB_DIR", rust.join("target/release"))
-                    .env("CFLAGS", "-O2 -march=native")
+                    .env("CFLAGS", "-O2")
                     .current_dir(repo.join("python")),
             )?;
             // pytest: the performance package's conftest imports it.
@@ -1778,11 +1939,81 @@ fn build(group: Group) -> anyhow::Result<()> {
                 if !path.exists() {
                     bail!("the build did not produce {} ({})", path.display(), arm.label());
                 }
+                // Gradle leaves a jar whose inputs' contents did not change
+                // as it was, older than a source merely touched since, which
+                // `run` would take for stale however often this runs.
+                if !artifact_sources(repo, &path).is_empty() {
+                    File::options()
+                        .write(true)
+                        .open(&path)
+                        .and_then(|f| f.set_modified(std::time::SystemTime::now()))
+                        .with_context(|| format!("marking {} as built", path.display()))?;
+                }
             }
         }
     }
     println!("✅ Built the {} harnesses", group.name());
     Ok(())
+}
+
+/// The sources `build` makes `artifact` (one of [`Arm::prerequisites`]) from,
+/// for `run` to tell a stale one: a jar built against an older kafka-clients
+/// would silently ignore a setting it does not know. Empty for the venvs,
+/// whose interpreter is the system's.
+fn artifact_sources(repo: &Path, artifact: &Path) -> Vec<PathBuf> {
+    let java = repo.join("tools/java-perf-test");
+    let compare = consumer_compare_dir(repo);
+    let table = [
+        (java_jar(repo), vec![java.join("build.gradle"), java.join("src")]),
+        (
+            java_consumer_classes(repo).join("JavaE2E.class"),
+            vec![compare.join("JavaE2E.java")],
+        ),
+        (
+            c_harness(repo, Workload::Producer),
+            vec![repo.join("c/tests/producer_perf_test.c")],
+        ),
+        (
+            c_harness(repo, Workload::Transactional),
+            vec![repo.join("c/tests/transactional_producer_perf_test.c")],
+        ),
+        (c_harness(repo, Workload::Consumer), vec![compare.join("librdkafka_e2e.c")]),
+        (
+            rust_consumer_harness(repo),
+            vec![
+                repo.join("rust/consumer-perf/src"),
+                repo.join("rust/consumer-perf/Cargo.toml"),
+                repo.join("rust/src"),
+            ],
+        ),
+    ];
+    table
+        .into_iter()
+        .find(|(built, _)| built == artifact)
+        .map(|(_, sources)| sources)
+        .unwrap_or_default()
+}
+
+/// A file among `sources` (directories searched through) changed after
+/// `artifact` was built, if any.
+fn changed_since_built(artifact: &Path, sources: &[PathBuf]) -> anyhow::Result<Option<PathBuf>> {
+    let modified = |path: &Path| {
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .with_context(|| format!("reading the time of {}", path.display()))
+    };
+    let built = modified(artifact)?;
+    let mut pending: Vec<PathBuf> = sources.to_vec();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in fs::read_dir(&path).with_context(|| format!("reading {}", path.display()))? {
+                pending.push(entry?.path());
+            }
+        } else if path.exists() && modified(&path)? > built {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn step(what: &str, command: &mut Command) -> anyhow::Result<()> {
@@ -2008,6 +2239,15 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
                         options.group.name()
                     );
                 }
+                if let Some(source) = changed_since_built(&path, &artifact_sources(repo, &path))? {
+                    bail!(
+                        "{} ({}) is older than {}; rebuild with `cargo xtask perf-cloud build --group {}`",
+                        path.display(),
+                        arm.label(),
+                        source.display(),
+                        options.group.name()
+                    );
+                }
             }
         }
     }
@@ -2078,7 +2318,9 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
                     return Err(e);
                 },
             };
-            interrupted = matches!(&result.outcome, Outcome::Failed(r) if r == INTERRUPTED);
+            // By the signals, not the arm's outcome: one can arrive after its
+            // harness exited (while its load stops), leaving it passed.
+            interrupted = crate::signals::count() > signals_baseline;
             live.update(|p| p.end_arm(result));
             if interrupted {
                 break;
@@ -2105,7 +2347,13 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     }
     let results = live.finish();
     println!("\nReport: {}", results_dir.join("report.md").display());
+    // Also a signal after the last arm, e.g. while the report was pushed.
+    verdict(&results, crate::signals::count() > signals_baseline)
+}
 
+/// How the run ended: interrupted when a signal arrived during it, whatever
+/// its arms recorded; else failed when an arm failed.
+fn verdict(results: &[TestResult], interrupted: bool) -> anyhow::Result<()> {
     if interrupted {
         bail!("interrupted by {}", crate::signals::last_name());
     }
@@ -2242,12 +2490,16 @@ fn cluster_zones(
             .arg(client_properties)
             .stdin(Stdio::null())
             .stdout(File::create(&output)?)
-            .stderr(Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().with_context(|| format!("starting {}", tool.display()))?;
-        let pgid = child.id();
-        let exit = wait_group(&mut child, pgid, BROKERS_COMMAND_TIMEOUT, signals_baseline, &mut || Ok(false))?;
-        reap_group(&mut child, pgid)?;
+            .stderr(Stdio::null());
+        let mut group = ChildGroup::spawn(&mut command).with_context(|| format!("starting {}", tool.display()))?;
+        let exit = wait_group(
+            &mut group.child,
+            group.pgid,
+            BROKERS_COMMAND_TIMEOUT,
+            signals_baseline,
+            &mut || Ok(false),
+        )?;
+        group.reap()?;
         Ok(match exit {
             Exit::Status(status) => Some(status),
             _ => None,
@@ -2315,10 +2567,18 @@ fn end_test(
         p.end_test();
         write_reports(results_dir, &p.info, &p.results)?;
         if options.push_artifacts {
+            // A signal during these pushes (a second one, after an interrupt)
+            // stops them all.
+            let signals_baseline = crate::signals::count();
             if push_dir {
-                push_artifact("job", &results_dir.join(&test.id), &format!("perf-results/{}", test.id));
+                push_artifact_since(
+                    "job",
+                    &results_dir.join(&test.id),
+                    &format!("perf-results/{}", test.id),
+                    signals_baseline,
+                );
             }
-            push_reports(results_dir);
+            push_reports(results_dir, signals_baseline);
         }
         Ok(())
     })
@@ -2336,19 +2596,28 @@ fn write_reports(results_dir: &Path, info: &RunInfo, results: &[TestResult]) -> 
 /// a signal arrives, is stopped. A failed push is only logged: the epilogue
 /// pushes everything again.
 fn push_artifact(level: &str, path: &Path, destination: &str) {
+    // An interrupted run still pushes its report: only a signal during the
+    // push stops it.
+    push_artifact_since(level, path, destination, crate::signals::count());
+}
+
+/// [`push_artifact`], stopped, or not started, once a signal has arrived
+/// since `signals_baseline`.
+fn push_artifact_since(level: &str, path: &Path, destination: &str, signals_baseline: u32) {
+    if crate::signals::count() > signals_baseline {
+        println!("WARNING: not pushing {} as a {level} artifact: interrupted", path.display());
+        return;
+    }
     let pushed = (|| -> anyhow::Result<bool> {
-        let mut child = Command::new("artifact")
+        let mut command = Command::new("artifact");
+        command
             .args(["push", level])
             .arg(path)
             .args(["--destination", destination, "--force"])
-            .stdin(Stdio::null())
-            .process_group(0)
-            .spawn()?;
-        let pgid = child.id();
-        // An interrupted run still pushes its report: only a signal during
-        // the push stops it.
-        let exit = wait_group(&mut child, pgid, PUSH_TIMEOUT, crate::signals::count(), &mut || Ok(false))?;
-        reap_group(&mut child, pgid)?;
+            .stdin(Stdio::null());
+        let mut group = ChildGroup::spawn(&mut command)?;
+        let exit = wait_group(&mut group.child, group.pgid, PUSH_TIMEOUT, signals_baseline, &mut || Ok(false))?;
+        group.reap()?;
         Ok(matches!(exit, Exit::Status(status) if status.success()))
     })();
     if !pushed.unwrap_or(false) {
@@ -2358,12 +2627,17 @@ fn push_artifact(level: &str, path: &Path, destination: &str) {
 
 /// The report and the JUnit file as job artifacts, and the report as the
 /// workflow's report too (Semaphore shows `.semaphore/REPORT.md` of the
-/// workflow artifacts in its Report tab).
-fn push_reports(results_dir: &Path) {
+/// workflow artifacts in its Report tab); see [`push_artifact_since`].
+fn push_reports(results_dir: &Path, signals_baseline: u32) {
     let report = results_dir.join("report.md");
-    push_artifact("job", &report, "perf-results/report.md");
-    push_artifact("job", &results_dir.join("junit.xml"), "perf-results/junit.xml");
-    push_artifact("workflow", &report, ".semaphore/REPORT.md");
+    push_artifact_since("job", &report, "perf-results/report.md", signals_baseline);
+    push_artifact_since(
+        "job",
+        &results_dir.join("junit.xml"),
+        "perf-results/junit.xml",
+        signals_baseline,
+    );
+    push_artifact_since("workflow", &report, ".semaphore/REPORT.md", signals_baseline);
 }
 
 /// The Java-form properties `kafka-topics.sh` reads (`--command-config`). The
@@ -2599,8 +2873,9 @@ fn run_harness(ctx: &ArmContext<'_>, log: &ArmLog) -> anyhow::Result<(Outcome, O
         }
         let load_path = ctx.dir.join("load.log");
         let load_log = ArmLog::create(&load_path, Arc::clone(&ctx.redactions), ctx.signals_baseline)?;
+        let load = LoadGenerator::start(ctx, timeout.as_secs(), &load_log, load_path)?;
         log.line("==> load generator started, output in load.log");
-        Some(LoadGenerator::start(ctx, timeout.as_secs(), &load_log, load_path)?)
+        Some(load)
     } else {
         None
     };
@@ -2824,8 +3099,7 @@ fn load_records_and_throughput(rate: u64, seconds: u64) -> (String, String) {
 /// machine, so the records' CreateTime and the consumer's clock agree: a
 /// consumer's latency is end to end. Its output goes to the arm's `load.log`.
 struct LoadGenerator {
-    child: Child,
-    pgid: u32,
+    group: ChildGroup,
     pumps: Vec<JoinHandle<()>>,
     /// Its `load.log`, read for the rate it reached.
     log_path: PathBuf,
@@ -2855,37 +3129,32 @@ impl LoadGenerator {
         if let Some(codec) = test.setting("COMPRESSION_TYPE") {
             command.arg(format!("compression.type={codec}"));
         }
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         log.line(&format!("==> {}", describe(&command)));
-        let mut child = command.spawn().with_context(|| format!("starting {}", describe(&command)))?;
-        let pgid = child.id();
+        let mut group = ChildGroup::spawn(&mut command).with_context(|| format!("starting {}", describe(&command)))?;
         let pumps = [
-            pump(child.stdout.take(), log, None),
-            pump(child.stderr.take(), log, None),
+            pump(group.child.stdout.take(), log, None),
+            pump(group.child.stderr.take(), log, None),
         ]
         .into_iter()
         .flatten()
         .collect();
-        Ok(LoadGenerator { child, pgid, pumps, log_path })
+        Ok(LoadGenerator { group, pumps, log_path })
     }
 
     /// Whether it has stopped by itself.
     fn has_stopped(&mut self) -> anyhow::Result<bool> {
-        Ok(self.child.try_wait()?.is_some())
+        Ok(self.group.child.try_wait()?.is_some())
     }
 
     /// Stop it. The reason when it had already stopped by itself, so part
     /// of the run had no load, and the rate it reached ([`load_rate`]).
     fn stop(mut self) -> anyhow::Result<(Option<String>, Option<f64>)> {
-        let stopped = self.child.try_wait()?;
+        let stopped = self.group.child.try_wait()?;
         if stopped.is_none() {
-            stop_group(&mut self.child, self.pgid, STOP_GRACE)?;
+            stop_group(&mut self.group.child, self.group.pgid, STOP_GRACE)?;
         }
-        reap_group(&mut self.child, self.pgid)?;
+        self.group.reap()?;
         for p in self.pumps {
             let _ = p.join();
         }
@@ -2975,7 +3244,7 @@ fn topic_described(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::R
 fn delete_topic(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Result<()> {
     log.line(&format!("==> deleting topic {topic}"));
     let mut delete = topics_command(ctx);
-    delete.args(["--delete", "--if-exists", "--topic", topic]);
+    delete.args(["--delete", "--if-exists", "--topic", &topic_regex(topic)]);
     match run_logged(&mut delete, log, TOPIC_COMMAND_TIMEOUT)? {
         Exit::Status(s) if s.success() => {},
         _ => log.line(&format!(
@@ -2983,6 +3252,14 @@ fn delete_topic(ctx: &ArmContext<'_>, topic: &str, log: &ArmLog) -> anyhow::Resu
         )),
     }
     Ok(())
+}
+
+/// `topic` as `kafka-topics.sh --delete --topic` reads it: a regular
+/// expression, in which a `.` (the only one of a topic's characters that is
+/// special there) would match any character, and so another topic on a
+/// shared cluster.
+fn topic_regex(topic: &str) -> String {
+    topic.replace('.', "\\.")
 }
 
 /// Sleep for `duration`; `true` if the run is (or gets) interrupted.
@@ -3085,25 +3362,20 @@ fn run_capturing(
     capture: bool,
     stop_if: &mut dyn FnMut() -> anyhow::Result<bool>,
 ) -> anyhow::Result<(Exit, String)> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if log.interrupted() {
         return Ok((Exit::Interrupted, String::new()));
     }
-    let mut child = command.spawn().with_context(|| format!("starting {}", describe(command)))?;
-    let pgid = child.id();
+    let mut group = ChildGroup::spawn(command).with_context(|| format!("starting {}", describe(command)))?;
     let captured = Arc::new(Mutex::new(String::new()));
     let pumps = [
-        pump(child.stdout.take(), log, capture.then(|| Arc::clone(&captured))),
-        pump(child.stderr.take(), log, None),
+        pump(group.child.stdout.take(), log, capture.then(|| Arc::clone(&captured))),
+        pump(group.child.stderr.take(), log, None),
     ];
-    let exit = wait_group(&mut child, pgid, timeout, log.signals_baseline, stop_if)?;
+    let exit = wait_group(&mut group.child, group.pgid, timeout, log.signals_baseline, stop_if)?;
     // A process the command started can outlive it and keep the pipes open;
     // give the group a moment, then stop it so the pumps reach end of file.
-    reap_group(&mut child, pgid)?;
+    group.reap()?;
     for p in pumps.into_iter().flatten() {
         let _ = p.join();
     }
@@ -3139,6 +3411,41 @@ fn wait_group(
     };
     stop_group(child, pgid, STOP_GRACE)?;
     Ok(exit)
+}
+
+/// A child process started as the leader of its own process group, so the
+/// whole group can be stopped. `Child` leaves its process running when it is
+/// dropped; this kills the group when dropped before [`ChildGroup::reap`]
+/// succeeded, so an early return leaves no harness or load generator running
+/// into the next arm.
+struct ChildGroup {
+    child: Child,
+    pgid: u32,
+    reaped: bool,
+}
+
+impl ChildGroup {
+    fn spawn(command: &mut Command) -> std::io::Result<ChildGroup> {
+        let child = command.process_group(0).spawn()?;
+        let pgid = child.id();
+        Ok(ChildGroup { child, pgid, reaped: false })
+    }
+
+    /// [`reap_group`]: the group is gone once this returns `Ok`.
+    fn reap(&mut self) -> anyhow::Result<()> {
+        reap_group(&mut self.child, self.pgid)?;
+        self.reaped = true;
+        Ok(())
+    }
+}
+
+impl Drop for ChildGroup {
+    fn drop(&mut self) {
+        if !self.reaped {
+            signal_group(self.pgid, "KILL");
+            let _ = self.child.wait();
+        }
+    }
 }
 
 fn reap_group(child: &mut Child, pgid: u32) -> anyhow::Result<()> {
@@ -3260,6 +3567,20 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 "KEY_SIZE + VALUE_SIZE is 1024 bytes, which with 512 bytes of headers does not fit MAX_REQUEST_SIZE=1 KiB",
             ),
             (
+                "t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 MAX_REQUEST_SIZE=8193",
+                "MAX_REQUEST_SIZE=8193: expected a whole number from 1 to 8192",
+            ),
+            // Unset, the harnesses' max.request.size is 64 batches.
+            (
+                "t rust PARTITIONS=1 VALUE_SIZE=999000 KEY_SIZE=1000 LIMIT_RPS=0 BATCH_SIZE=15",
+                "KEY_SIZE + VALUE_SIZE is 1000000 bytes, which with 512 bytes of headers does not fit the harnesses' \
+                 max.request.size of 960 KiB (64 × BATCH_SIZE=15 KiB); set a larger BATCH_SIZE or MAX_REQUEST_SIZE",
+            ),
+            (
+                "t rust WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1000000 LIMIT_RPS=0 BATCH_SIZE=15",
+                "does not fit the harnesses' max.request.size of 960 KiB",
+            ),
+            (
                 "t rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1 FETCH_MIN_BYTES=100000001",
                 "FETCH_MIN_BYTES=100000001: expected a whole number from 1 to 100000000",
             ),
@@ -3295,6 +3616,16 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             .unwrap_err()
             .to_string()
             .contains("defines no tests"));
+        // The largest record fits 64 batches of 16 KiB, the default batches,
+        // and a consumer test's load.
+        for ok in [
+            "t rust PARTITIONS=1 VALUE_SIZE=1000000 LIMIT_RPS=0 BATCH_SIZE=16",
+            "t rust PARTITIONS=1 VALUE_SIZE=1000000 LIMIT_RPS=0",
+            "t rust PARTITIONS=1 VALUE_SIZE=1000000 LIMIT_RPS=0 BATCH_SIZE=1 MAX_REQUEST_SIZE=8192",
+            "t rust WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1000000 LIMIT_RPS=1",
+        ] {
+            parse_tests(ok).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
     }
 
     #[test]
@@ -3451,6 +3782,51 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert_eq!(err, "--group is given twice");
         let err = parse_flags(&strings(&["rust"]), &["--group"], &[]).unwrap_err().to_string();
         assert_eq!(err, "unexpected argument `rust`");
+
+        // A switch may say whether it is on.
+        let switch = |args: &[&str]| parse_flags(&strings(args), &["--group"], &["--push-artifacts"]);
+        assert!(switch(&["--push-artifacts=true"]).unwrap().contains_key("--push-artifacts"));
+        assert!(!switch(&["--push-artifacts=false"]).unwrap().contains_key("--push-artifacts"));
+        assert_eq!(
+            switch(&["--push-artifacts=yes"]).unwrap_err().to_string(),
+            "--push-artifacts=yes: a switch takes no value, or `true` / `false`"
+        );
+        assert_eq!(
+            switch(&["--push-artifacts=false", "--push-artifacts"]).unwrap_err().to_string(),
+            "--push-artifacts is given twice"
+        );
+        // It never takes the next argument as its value.
+        assert_eq!(
+            switch(&["--push-artifacts", "false"]).unwrap_err().to_string(),
+            "unexpected argument `false`"
+        );
+    }
+
+    #[test]
+    fn prints_each_subcommands_usage() {
+        let check = help(Some("check"));
+        assert!(
+            check.starts_with("cargo xtask perf-cloud check\n\n  check  --group G"),
+            "{check}"
+        );
+        assert!(
+            !check.contains("  build  --group G") && check.contains("G is `rust`"),
+            "{check}"
+        );
+        let all = help(None);
+        for (name, usage) in USAGES {
+            assert!(all.contains(usage), "{name}");
+        }
+        for sub in ["list", "check", "build", "run"] {
+            for flag in ["--help", "-h"] {
+                run(&strings(&[sub, "--group", "rust", flag])).unwrap();
+            }
+        }
+        let err = run(&strings(&["list", "rust"])).unwrap_err().to_string();
+        assert!(
+            err.starts_with("unexpected argument `rust`\n\ncargo xtask perf-cloud list"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3595,6 +3971,17 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             id("PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=1500 ACKS=1 COMPRESSION_TYPE=lz4 BATCH_SIZE=64 LINGER_MS=0"),
             "producer-fixed-1500-100b-36p-acks1-lz4-batch64kb-linger0ms"
         );
+        // The incremental strategy is its own test; `full` is the default.
+        let keyed = "PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024";
+        assert_eq!(id(keyed), "producer-max-1kb-200p-key100b");
+        assert_eq!(
+            id(&format!("{keyed} BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental")),
+            "producer-max-1kb-200p-key100b-incremental"
+        );
+        assert_eq!(
+            id(&format!("{keyed} BUFFER_MEMORY_ALLOCATION_STRATEGY=full")),
+            "producer-max-1kb-200p-key100b"
+        );
         assert_eq!(
             id("WORKLOAD=transactional PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000"),
             "txn-fixed-10k-1kb-200p-100-per-txn"
@@ -3729,6 +4116,26 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
                 "WORKLOAD=consumer LIBRDKAFKA_BATCH=1000001",
                 "LIBRDKAFKA_BATCH=1000001: expected a whole number up to 1000000",
             ),
+            (
+                "WORKLOAD=transactional BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental",
+                "--scenario: BUFFER_MEMORY_ALLOCATION_STRATEGY does not apply to transactional tests (the \
+                 transactional harnesses do not read it)",
+            ),
+            (
+                "BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental COMPRESSION_TYPE=lz4",
+                "--scenario: BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental with COMPRESSION_TYPE=lz4: the clients \
+                 refuse it (\"The incremental buffer.memory.allocation.strategy does not support compression yet. \
+                 compression.type must be set to none.\")",
+            ),
+            (
+                "BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental BATCH_SIZE=15",
+                "--scenario: BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental with BATCH_SIZE=15: below 16 KiB a batch \
+                 cannot fill one chunk, and the clients fall back to the full strategy",
+            ),
+            (
+                "BUFFER_MEMORY_ALLOCATION_STRATEGY=Incremental",
+                "BUFFER_MEMORY_ALLOCATION_STRATEGY=Incremental: expected `full` or `incremental`",
+            ),
         ] {
             let e = err(&format!("{base} {extra}"));
             assert!(e.contains(message), "{extra}: {e}");
@@ -3747,6 +4154,10 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
              MAX_PARTITION_FETCH_BYTES=1048576 MAX_POLL_RECORDS=500",
             "WORKLOAD=consumer LIBRDKAFKA_BATCH=0",
             "WORKLOAD=consumer MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000",
+            // The strategy with the harnesses' default batches, or 16 KiB.
+            "BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental COMPRESSION_TYPE=none",
+            "BUFFER_MEMORY_ALLOCATION_STRATEGY=incremental BATCH_SIZE=16",
+            "BUFFER_MEMORY_ALLOCATION_STRATEGY=full COMPRESSION_TYPE=lz4 BATCH_SIZE=1",
         ] {
             parse_scenario(&format!("{base} {ok}"), Group::Rust).unwrap();
         }
@@ -3766,6 +4177,50 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         );
         test.check_arms(&[Arm::Rust, Arm::Java]).unwrap();
         test.check_arms(Group::Python.arms()).unwrap();
+    }
+
+    #[test]
+    fn the_allocation_strategy_runs_only_the_clients_that_read_it() {
+        for strategy in ["incremental", "full"] {
+            let test = parse_scenario(
+                &format!("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 BUFFER_MEMORY_ALLOCATION_STRATEGY={strategy}"),
+                Group::Rust,
+            )
+            .unwrap();
+            test.check_arms(&[Arm::Rust, Arm::Java]).unwrap();
+            test.check_arms(&[Arm::Java]).unwrap();
+            for (arms, arm) in [
+                (Group::Rust.arms(), "librdkafka"),
+                (Group::Python.arms(), "python-sync-rust"),
+                (&[Arm::PythonAsyncLibrdkafka][..], "python-async-librdkafka"),
+            ] {
+                assert_eq!(
+                    test.check_arms(arms).unwrap_err().to_string(),
+                    format!(
+                        "test `{}`: only the Rust and Java clients read BUFFER_MEMORY_ALLOCATION_STRATEGY, and the \
+                         {arm} client does not; run the rust group with --clients rust,java",
+                        test.id
+                    )
+                );
+            }
+        }
+        // As `check` takes the checked-in test.
+        let parse = |clients: &str| {
+            RunOptions::parse(
+                &strings(&[
+                    "--group",
+                    "rust",
+                    "--clients",
+                    clients,
+                    "--tests",
+                    "producer-max-1kb-200p-key100b-incremental",
+                ]),
+                false,
+            )
+        };
+        assert!(parse("all").is_err());
+        assert!(parse("rust,librdkafka").is_err());
+        check(&parse("rust,java").unwrap()).unwrap();
     }
 
     #[test]
@@ -3827,6 +4282,34 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         // `WORKLOAD` picks the harness; it is not one of their settings.
         let txn = env("WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", Arm::Librdkafka);
         assert!(!txn.contains_key("WORKLOAD") && !txn.contains_key("MAX_IN_FLIGHT"), "{txn:?}");
+        // Every producing client gets the plan's buffer.memory unless the test
+        // sets one; a consumer test's harnesses do not produce.
+        let buffers = |text: &str, arm: Arm| -> Vec<String> {
+            parse_scenario(text, Group::Rust)
+                .unwrap()
+                .env_for(arm)
+                .into_iter()
+                .filter(|(k, _)| k == "BUFFER_MEMORY")
+                .map(|(_, v)| v)
+                .collect()
+        };
+        for arm in Group::Rust.arms().iter().chain(Group::Python.arms()) {
+            assert_eq!(buffers("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", *arm), ["32"], "{arm:?}");
+            assert_eq!(
+                buffers("WORKLOAD=transactional PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0", *arm),
+                ["32"],
+                "{arm:?}"
+            );
+            assert_eq!(
+                buffers("PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0 BUFFER_MEMORY=256", *arm),
+                ["256"],
+                "{arm:?}"
+            );
+            assert!(
+                buffers("WORKLOAD=consumer PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=1", *arm).is_empty(),
+                "{arm:?}"
+            );
+        }
     }
 
     #[test]
@@ -4420,6 +4903,96 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             Arm::PythonAsyncLibrdkafka.id()
         ));
         assert!(longest.len() <= 249);
+        // `--delete --topic` takes a regular expression.
+        assert_eq!(topic_regex("perf.1-t-rust"), "perf\\.1-t-rust");
+        assert_eq!(topic_regex("perf-1_t-rust"), "perf-1_t-rust");
+    }
+
+    #[test]
+    fn a_signal_fails_the_run_whatever_its_arms_recorded() {
+        let test = parse_tests("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0").unwrap().remove(0);
+        let arm = |outcome: Outcome| ArmResult {
+            arm: Arm::Rust,
+            outcome,
+            metrics: None,
+            load_msg_s: None,
+            elapsed: Duration::ZERO,
+        };
+        let passed = [TestResult { test: test.clone(), arms: vec![arm(Outcome::Passed)] }];
+        verdict(&passed, false).unwrap();
+        let err = verdict(&passed, true).unwrap_err().to_string();
+        assert!(err.starts_with("interrupted by "), "{err}");
+        let failed = [TestResult { test, arms: vec![arm(Outcome::Failed("boom".to_string()))] }];
+        assert_eq!(
+            verdict(&failed, false).unwrap_err().to_string(),
+            "1 arm(s) failed:\n  t / Rust: boom"
+        );
+    }
+
+    #[test]
+    fn a_dropped_child_group_is_killed() {
+        let alive = |pgid: u32| {
+            Command::new("kill")
+                .args(["-0", "--", &format!("-{pgid}")])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        // A background process too, which outlives a leader killed alone.
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60 & sleep 60"]);
+        let group = ChildGroup::spawn(&mut command).unwrap();
+        let pgid = group.pgid;
+        assert!(alive(pgid));
+        drop(group);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while alive(pgid) {
+            assert!(Instant::now() < deadline, "process group {pgid} still running");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Reaped: nothing left to kill.
+        let mut group = ChildGroup::spawn(&mut Command::new("true")).unwrap();
+        group.reap().unwrap();
+        assert!(group.reaped);
+    }
+
+    #[test]
+    fn tells_an_artifact_built_before_its_sources() {
+        let dir = std::env::temp_dir().join(format!("perf-cloud-stale-{}", std::process::id()));
+        let src = dir.join("src/nested");
+        fs::create_dir_all(&src).unwrap();
+        let at = |path: &Path, secs: u64| {
+            fs::write(path, "x").unwrap();
+            let time = std::time::UNIX_EPOCH + Duration::from_secs(secs);
+            File::options().write(true).open(path).unwrap().set_modified(time).unwrap();
+        };
+        let artifact = dir.join("harness");
+        at(&artifact, 2_000_000_000);
+        at(&dir.join("build.gradle"), 1_000_000_000);
+        at(&src.join("A.java"), 1_000_000_000);
+        let sources = [dir.join("build.gradle"), dir.join("src"), dir.join("missing")];
+        assert_eq!(changed_since_built(&artifact, &sources).unwrap(), None);
+        at(&src.join("B.java"), 2_000_000_001);
+        assert_eq!(changed_since_built(&artifact, &sources).unwrap(), Some(src.join("B.java")));
+        fs::remove_dir_all(&dir).unwrap();
+
+        // The jar `run` checks, and nothing for a venv.
+        let repo = Path::new("/repo");
+        assert_eq!(
+            artifact_sources(repo, &java_jar(repo)),
+            [
+                PathBuf::from("/repo/tools/java-perf-test/build.gradle"),
+                PathBuf::from("/repo/tools/java-perf-test/src")
+            ]
+        );
+        for arm in Group::Rust.arms() {
+            for workload in [Workload::Producer, Workload::Transactional, Workload::Consumer] {
+                for path in arm.prerequisites(repo, workload) {
+                    assert!(!artifact_sources(repo, &path).is_empty(), "{}", path.display());
+                }
+            }
+        }
+        assert!(artifact_sources(repo, &venv_python(repo, "venv")).is_empty());
     }
 
     #[test]

@@ -32,7 +32,9 @@
 // exit non-zero. A counted run (LIMIT_RPS / NUM_MESSAGES) also stops after
 // TEST_DURATION_SECONDS + 10 s of measured time, printing a `capped:` line
 // (not a failure). Persistent synchronous send rejections fail the run (see
-// send_rejections). Needs a reachable broker; opt-in (not run under ctest).
+// send_rejections). A numeric variable that is not a whole number in its range,
+// or a librdkafka property it rejects, fails the run before it produces. Needs a
+// reachable broker; opt-in (not run under ctest).
 
 #include <confluent_kafka.h>
 #include <librdkafka/rdkafka.h>
@@ -42,6 +44,7 @@
 #include <time.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <errno.h>
 #include <sys/time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -88,7 +91,12 @@ static int BATCH_SIZE_KB = 1024;
 static int MAX_REQUEST_SIZE_KB = -1;
 static const char *MAX_IN_FLIGHT = "1000";
 static int BUFFER_MEMORY_MB = -1;
+// librdkafka's largest queue.buffering.max.kbytes, in MiB.
+#define MAX_BUFFER_MEMORY_MB (INT_MAX / 1024)
 static int PERF_DEBUG_TIMING = 0;
+// v2 producev flags: 0 (retried on QUEUE_FULL), or RD_KAFKA_MSG_F_BLOCK when
+// MSG_F_BLOCK is true / 1. Read once in main.
+static int V2_MSG_FLAGS = 0;
 static const char *COMPRESSION_TYPE = "none";
 static const char *LINGER_MS = "5";
 // When true, omit every performance-tuning knob and let the client run at its
@@ -254,6 +262,32 @@ static long current_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
+}
+
+// The integer value of environment variable `name`. A value that is not a
+// whole number in [min, max] exits the run with an error rather than fall back
+// to a default (LIMIT_RPS=10k would otherwise run unlimited).
+static long parse_env_long(const char *name, const char *value, long min, long max) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || v < min || v > max) {
+        fprintf(stderr, "Invalid %s=%s: expected a whole number from %ld to %ld\n",
+                name, value, min, max);
+        exit(2);
+    }
+    return v;
+}
+
+// rd_kafka_conf_set, logging a failure (unknown property or invalid value).
+// Returns false on failure so the caller does not run with the default.
+static bool conf_set(rd_kafka_conf_t *conf, const char *name, const char *value) {
+    char errstr[512];
+    if (rd_kafka_conf_set(conf, name, value, errstr, sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+        fprintf(stderr, "Invalid librdkafka configuration %s: %s\n", name, errstr);
+        return false;
+    }
+    return true;
 }
 
 // Logs a synchronous send rejection (see send_rejections), rate-limited to the
@@ -553,12 +587,17 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
             // Wait a bit before retrying
             usleep(1000);
         }
+        // No RD_KAFKA_MSG_F_COPY: the payloads are the harness's pre-generated
+        // buffers, which outlive delivery, so librdkafka is not asked to copy
+        // them (the other clients copy the record into their buffer).
         err = rd_kafka_producev(
             rk, RD_KAFKA_V_TOPIC(TOPIC),
             RD_KAFKA_V_KEY(message->key, KEY_SIZE),
             RD_KAFKA_V_VALUE(message->value, VALUE_SIZE),
             RD_KAFKA_V_OPAQUE(future),
-            RD_KAFKA_V_MSGFLAGS((getenv("NO_MSG_F_BLOCK") != NULL ? 0 : RD_KAFKA_MSG_F_BLOCK)),
+            // Non-blocking, retried on QUEUE_FULL above, as the Python harness
+            // produces; MSG_F_BLOCK=1 blocks inside producev instead.
+            RD_KAFKA_V_MSGFLAGS(V2_MSG_FLAGS),
             RD_KAFKA_V_END);
     } while (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
     if (PERF_DEBUG_TIMING) {
@@ -1087,7 +1126,6 @@ static bool queue_push(Queue* q, void* item) {
 }
 
 static bool queue_pop(Queue* q, void ** item, int timeout_ms) {
-    struct timespec ts;
     pthread_mutex_lock(&q->mutex);
     if (!q->closed && q->cnt > 0) {
         *item = q->items[q->head];
@@ -1102,23 +1140,19 @@ static bool queue_pop(Queue* q, void ** item, int timeout_ms) {
     }
 
     if (timeout_ms >= 0) {
-        struct timespec ts;
-        struct timeval now;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        int64_t limit = ts.tv_sec * 1000000000LL + ts.tv_nsec + timeout_ms * 1000000LL;
-        gettimeofday(&now,NULL);
-        ts.tv_sec = now.tv_sec + timeout_ms / 1000;
-        ts.tv_nsec = now.tv_usec * 1000 + (timeout_ms % 1000) * 1000000;
-        if (ts.tv_nsec >= 1000000000) {
-            ts.tv_sec++;
-            ts.tv_nsec -= 1000000000;
+        // Absolute deadline on the condvar's clock (CLOCK_REALTIME, the
+        // default), computed once so a spurious wakeup waits out the rest.
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += timeout_ms / 1000;
+        deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
         }
 
         while (queue_empty(q) && !q->closed) {
-            pthread_cond_timedwait(&q->not_empty, &q->mutex, &ts);
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            int64_t now = ts.tv_sec * 1000000000LL + ts.tv_nsec;
-            if (now >= limit)
+            if (pthread_cond_timedwait(&q->not_empty, &q->mutex, &deadline) == ETIMEDOUT)
                 break;
         }
     } else {
@@ -1399,35 +1433,38 @@ static void run_test() {
         int64_t num_messages_conf = NUM_MESSAGES > INT_MAX ? INT_MAX : NUM_MESSAGES;
 
         rd_kafka_conf_t* conf = rd_kafka_conf_new();
-        rd_kafka_conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS, NULL, 0);
+        bool conf_ok = conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS);
         if (sasl_enabled) {
-            rd_kafka_conf_set(conf, "security.protocol", SECURITY_PROTOCOL, NULL, 0);
-            rd_kafka_conf_set(conf, "sasl.mechanism", SASL_MECHANISM, NULL, 0);
-            rd_kafka_conf_set(conf, "sasl.username", SASL_USERNAME, NULL, 0);
-            rd_kafka_conf_set(conf, "sasl.password", SASL_PASSWORD, NULL, 0);
+            conf_ok = conf_set(conf, "security.protocol", SECURITY_PROTOCOL) && conf_ok;
+            conf_ok = conf_set(conf, "sasl.mechanism", SASL_MECHANISM) && conf_ok;
+            conf_ok = conf_set(conf, "sasl.username", SASL_USERNAME) && conf_ok;
+            conf_ok = conf_set(conf, "sasl.password", SASL_PASSWORD) && conf_ok;
         }
         if (SSL_CA_LOCATION) {
-            rd_kafka_conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION, NULL, 0);
+            conf_ok = conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION) && conf_ok;
         }
 
         if (!USE_DEFAULTS) {
-            if (NUM_MESSAGES > 0) {
+            if (BUFFER_MEMORY_MB > 0) {
+                // Bounded by bytes only, as the other clients' buffer.memory:
+                // lift librdkafka's message-count cap (100,000 by default).
+                conf_ok = conf_set(conf, "queue.buffering.max.messages", "2147483647") && conf_ok;
+                // KiB from the MiB setting directly, without a 32-bit byte count.
+                snprintf(buffer, sizeof(buffer), "%" PRId64, (int64_t)BUFFER_MEMORY_MB * 1024);
+                conf_ok = conf_set(conf, "queue.buffering.max.kbytes", buffer) && conf_ok;
+            } else if (NUM_MESSAGES > 0) {
                 snprintf(buffer, sizeof(buffer), "%" PRId64, num_messages_conf);
-                rd_kafka_conf_set(conf, "queue.buffering.max.messages", buffer, NULL, 0);
-            }
-            if (buffer_memory_bytes > 0) {
-                snprintf(buffer, sizeof(buffer), "%" PRId64, buffer_memory_bytes / 1024);
-                rd_kafka_conf_set(conf, "queue.buffering.max.kbytes", buffer, NULL, 0);
+                conf_ok = conf_set(conf, "queue.buffering.max.messages", buffer) && conf_ok;
             }
             snprintf(buffer, sizeof(buffer), "%" PRId64, batch_size_bytes);
-            rd_kafka_conf_set(conf, "batch.size", buffer, NULL, 0);
+            conf_ok = conf_set(conf, "batch.size", buffer) && conf_ok;
             snprintf(buffer, sizeof(buffer), "%" PRId64, max_request_size_bytes);
-            rd_kafka_conf_set(conf, "message.max.bytes", buffer, NULL, 0);
-            rd_kafka_conf_set(conf, "compression.type", COMPRESSION_TYPE, NULL, 0);
-            rd_kafka_conf_set(conf, "linger.ms", LINGER_MS, NULL, 0);
-            rd_kafka_conf_set(conf, "acks", ACKS, NULL, 0);
-            rd_kafka_conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE, NULL, 0);
-            rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
+            conf_ok = conf_set(conf, "message.max.bytes", buffer) && conf_ok;
+            conf_ok = conf_set(conf, "compression.type", COMPRESSION_TYPE) && conf_ok;
+            conf_ok = conf_set(conf, "linger.ms", LINGER_MS) && conf_ok;
+            conf_ok = conf_set(conf, "acks", ACKS) && conf_ok;
+            conf_ok = conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE) && conf_ok;
+            conf_ok = conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT) && conf_ok;
         }
 
         /* A/B debugging knobs: PARTITIONER (e.g. murmur2_random) and
@@ -1446,14 +1483,17 @@ static void run_test() {
                     r == RD_KAFKA_CONF_OK ? "OK" : errstr);
         }
         if (getenv("PERF_LRK_STATS") != NULL) {
-            rd_kafka_conf_set(conf, "statistics.interval.ms", "10000", NULL, 0);
+            conf_ok = conf_set(conf, "statistics.interval.ms", "10000") && conf_ok;
             rd_kafka_conf_set_stats_cb(conf, v2_stats_cb);
         }
         rd_kafka_conf_set_dr_msg_cb(conf, test_v2_dr);
 
-        producer = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
+        char errstr[512];
+        producer = conf_ok ? rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr)) : NULL;
         if (!producer) {
-            fprintf(stderr, "Failed to create librdkafka producer\n");
+            if (conf_ok) {
+                fprintf(stderr, "Failed to create librdkafka producer: %s\n", errstr);
+            }
             rd_kafka_conf_destroy(conf);
         } else {
             start_polling_rdkafka(producer);
@@ -1766,16 +1806,18 @@ end:
 static void recreate_topic(void) {
     char errstr[512];
     rd_kafka_conf_t *conf = rd_kafka_conf_new();
-    rd_kafka_conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS, NULL, 0);
-    if (SECURITY_PROTOCOL) rd_kafka_conf_set(conf, "security.protocol", SECURITY_PROTOCOL, NULL, 0);
-    if (SASL_MECHANISM) rd_kafka_conf_set(conf, "sasl.mechanism", SASL_MECHANISM, NULL, 0);
-    if (SASL_USERNAME) rd_kafka_conf_set(conf, "sasl.username", SASL_USERNAME, NULL, 0);
-    if (SASL_PASSWORD) rd_kafka_conf_set(conf, "sasl.password", SASL_PASSWORD, NULL, 0);
-    if (SSL_CA_LOCATION) rd_kafka_conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION, NULL, 0);
+    bool conf_ok = conf_set(conf, "bootstrap.servers", BOOTSTRAP_SERVERS);
+    if (SECURITY_PROTOCOL) conf_ok = conf_set(conf, "security.protocol", SECURITY_PROTOCOL) && conf_ok;
+    if (SASL_MECHANISM) conf_ok = conf_set(conf, "sasl.mechanism", SASL_MECHANISM) && conf_ok;
+    if (SASL_USERNAME) conf_ok = conf_set(conf, "sasl.username", SASL_USERNAME) && conf_ok;
+    if (SASL_PASSWORD) conf_ok = conf_set(conf, "sasl.password", SASL_PASSWORD) && conf_ok;
+    if (SSL_CA_LOCATION) conf_ok = conf_set(conf, "ssl.ca.location", SSL_CA_LOCATION) && conf_ok;
 
-    rd_kafka_t *admin = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+    rd_kafka_t *admin = conf_ok ? rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr)) : NULL;
     if (!admin) {
-        fprintf(stderr, "recreate_topic: failed to create admin client: %s\n", errstr);
+        if (conf_ok) {
+            fprintf(stderr, "recreate_topic: failed to create admin client: %s\n", errstr);
+        }
         rd_kafka_conf_destroy(conf);  // not consumed on failure
         return;
     }
@@ -1878,16 +1920,16 @@ int main(int argc, char** argv) {
 
     const char* warmup_seconds_env = getenv("WARMUP_SECONDS");
     if (warmup_seconds_env != NULL) {
-        WARMUP_S = atoi(warmup_seconds_env);
+        WARMUP_S = (int)parse_env_long("WARMUP_SECONDS", warmup_seconds_env, 0, INT_MAX);
     }
     const char* test_duration_env = getenv("TEST_DURATION_SECONDS");
     if (test_duration_env != NULL) {
-        TEST_DURATION_S = atoi(test_duration_env);
+        TEST_DURATION_S = (int)parse_env_long("TEST_DURATION_SECONDS", test_duration_env, 0, INT_MAX);
     }
 
     const char* p99_limit_ms_env = getenv("P99_LIMIT_MS");
     if (p99_limit_ms_env != NULL) {
-        P99_LIMIT_MS = atol(p99_limit_ms_env);
+        P99_LIMIT_MS = parse_env_long("P99_LIMIT_MS", p99_limit_ms_env, 0, LONG_MAX);
     }
 
     const char* results_file_env = getenv("RESULTS_FILE");
@@ -1913,7 +1955,7 @@ int main(int argc, char** argv) {
     }
     const char *partitions_env = getenv("PARTITIONS");
     if (partitions_env != NULL) {
-        PARTITIONS = atoi(partitions_env);
+        PARTITIONS = (int)parse_env_long("PARTITIONS", partitions_env, -1, INT_MAX);
     }
 
     const char *enable_idempotence_env = getenv("ENABLE_IDEMPOTENCE");
@@ -1937,19 +1979,26 @@ int main(int argc, char** argv) {
     }
 
     PERF_DEBUG_TIMING = getenv("PERF_DEBUG_TIMING") != NULL && strcmp(getenv("PERF_DEBUG_TIMING"), "1") == 0;
+    const char *msg_f_block_env = getenv("MSG_F_BLOCK");
+    if (msg_f_block_env != NULL &&
+        (strcmp(msg_f_block_env, "1") == 0 || strcmp(msg_f_block_env, "True") == 0 ||
+         strcmp(msg_f_block_env, "true") == 0)) {
+        V2_MSG_FLAGS = RD_KAFKA_MSG_F_BLOCK;
+    }
     const char *buffer_memory_env = getenv("BUFFER_MEMORY");
     if (buffer_memory_env != NULL) {
-        BUFFER_MEMORY_MB = atoi(buffer_memory_env);
+        BUFFER_MEMORY_MB = (int)parse_env_long("BUFFER_MEMORY", buffer_memory_env, 1, MAX_BUFFER_MEMORY_MB);
     }
 
+    // KiB, kept to a byte count that fits 32 bits.
     const char *batch_size_env = getenv("BATCH_SIZE");
     if (batch_size_env != NULL) {
-        BATCH_SIZE_KB = atoi(batch_size_env);
+        BATCH_SIZE_KB = (int)parse_env_long("BATCH_SIZE", batch_size_env, 1, INT_MAX / 1024);
     }
 
     const char *max_request_size_env = getenv("MAX_REQUEST_SIZE");
     if (max_request_size_env != NULL) {
-        MAX_REQUEST_SIZE_KB = atoi(max_request_size_env);
+        MAX_REQUEST_SIZE_KB = (int)parse_env_long("MAX_REQUEST_SIZE", max_request_size_env, 1, INT_MAX / 1024);
     }
 
     const char *linger_ms_env = getenv("LINGER_MS");
@@ -1965,12 +2014,12 @@ int main(int argc, char** argv) {
 
     const char *key_size_env = getenv("KEY_SIZE");
     if (key_size_env != NULL) {
-        KEY_SIZE = atoi(key_size_env);
+        KEY_SIZE = parse_env_long("KEY_SIZE", key_size_env, 0, INT_MAX);
     }
 
     const char *value_size_env = getenv("VALUE_SIZE");
     if (value_size_env != NULL) {
-        VALUE_SIZE = atoi(value_size_env);
+        VALUE_SIZE = parse_env_long("VALUE_SIZE", value_size_env, 0, INT_MAX);
     }
 
     MESSAGE_SIZE = KEY_SIZE + VALUE_SIZE;
@@ -1985,26 +2034,17 @@ int main(int argc, char** argv) {
             printf("SASL authentication enabled\n");
     }
 
+    // In 64 bits, so every BUFFER_MEMORY passes through unchanged (librdkafka
+    // takes it in KiB, computed from BUFFER_MEMORY_MB where it is set).
+    buffer_memory_bytes = BUFFER_MEMORY_MB > 0 ? (int64_t)BUFFER_MEMORY_MB * 1024 * 1024 : BUFFER_MEMORY_MB;
     if (CLIENT_VERSION == 3) {
-        buffer_memory_bytes = BUFFER_MEMORY_MB > 0 ? BUFFER_MEMORY_MB * 1024L * 1024L : BUFFER_MEMORY_MB;
         batch_size_bytes = BATCH_SIZE_KB * 1024L;
         if (MAX_REQUEST_SIZE_KB > 0) {
             max_request_size_bytes = MAX_REQUEST_SIZE_KB * 1024L;
         } else {
             max_request_size_bytes = batch_size_bytes * 64L;
         }
-
-        if (buffer_memory_bytes > -1) {
-            if (buffer_memory_bytes > INT_MAX) {
-                buffer_memory_bytes = INT_MAX;
-            }
-            if (buffer_memory_bytes < 1000000) {
-                buffer_memory_bytes = 1000000;
-            }
-        }
     } else {
-        long max_bytes = BUFFER_MEMORY_MB > 0 ? BUFFER_MEMORY_MB * 1024L * 1024L : BUFFER_MEMORY_MB;
-        buffer_memory_bytes = max_bytes > INT_MAX ? INT_MAX : max_bytes;
         batch_size_bytes = BATCH_SIZE_KB < 1024 ? 1024 * 1024 : BATCH_SIZE_KB * 1024;
         if (MAX_REQUEST_SIZE_KB > 0) {
             max_request_size_bytes = MAX_REQUEST_SIZE_KB * 1024L;
@@ -2026,7 +2066,7 @@ int main(int argc, char** argv) {
     if (buffer_memory_bytes < 0)
          printf("Buffer memory: default\n");
     else
-        printf("Buffer memory: %ld MB\n", buffer_memory_bytes / (1024L * 1024L));
+        printf("Buffer memory: %" PRId64 " MB\n", buffer_memory_bytes / (1024L * 1024L));
     printf("Batch size: %" PRId64 " KB\n", batch_size_bytes / 1024);
     printf("Max request size: %" PRId64 " KB\n", max_request_size_bytes / 1024);
     printf("Linger ms: %s\n", LINGER_MS);
@@ -2047,19 +2087,14 @@ int main(int argc, char** argv) {
     }
     printf("Using topic name: %s\n", TOPIC);
 
-    // Optionally start from a clean topic (delete + re-create) before producing.
-    if (CREATE_TOPIC) {
-        recreate_topic();
-    }
-
     const char *num_messages_env = getenv("NUM_MESSAGES");
     if (num_messages_env != NULL) {
-        NUM_MESSAGES = atol(num_messages_env);
+        NUM_MESSAGES = parse_env_long("NUM_MESSAGES", num_messages_env, 0, LONG_MAX);
     }
 
     const char* limit_rps_env = getenv("LIMIT_RPS");
     if (limit_rps_env != NULL) {
-        LIMIT_RPS = atol(limit_rps_env);
+        LIMIT_RPS = parse_env_long("LIMIT_RPS", limit_rps_env, 0, INT_MAX);
         NUM_MESSAGES = LIMIT_RPS * TEST_DURATION_S; // Run for TEST_DURATION_S seconds
         printf("Producing %ld messages at %ld msg/s\n",
             NUM_MESSAGES, LIMIT_RPS);
@@ -2073,6 +2108,12 @@ int main(int argc, char** argv) {
     }
     TOTAL_SIZE = NUM_MESSAGES * MESSAGE_SIZE;
     TOTAL_SIZE_MB = TOTAL_SIZE / (1024.0 * 1024.0);
+
+    // Optionally start from a clean topic (delete + re-create) before producing;
+    // after every setting is read, so an invalid one changes nothing.
+    if (CREATE_TOPIC) {
+        recreate_topic();
+    }
 
     run_test();
 

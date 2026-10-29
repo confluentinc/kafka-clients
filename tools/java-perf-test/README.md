@@ -24,16 +24,15 @@ Produces `build/libs/java-perf-test-all.jar`.
 
 ## Run
 
-Same env-variable interface as the Python harness — the same `run_test.sh`
-wrapper from the project root works if you point it at this jar instead of
-`producer_performance_test.py`. Example against a SASL_SSL cluster:
+Same env-variable interface as the Python harness. Example against a SASL_SSL
+cluster:
 
 ```bash
 SECURITY_PROTOCOL=SASL_SSL \
 SASL_MECHANISM=PLAIN \
 SASL_USERNAME=... \
 SASL_PASSWORD=... \
-BOOTSTRAP_SERVERS=pkc-xxxx.us-west-2.aws.devel.cpdev.cloud:9092 \
+BOOTSTRAP_SERVERS=<bootstrap-host>:9092 \
 TOPIC_NAME=test-topic \
 KEY_SIZE=100 \
 VALUE_SIZE=2048 \
@@ -60,19 +59,23 @@ gradle run
 | Variable | Default | Notes |
 |---|---|---|
 | `BOOTSTRAP_SERVERS` | `localhost:9092` | |
-| `TOPIC_NAME` | `test-topic` | Topic must exist; this test does not auto-create. |
+| `TOPIC_NAME` | `test-topic` | Deleted and re-created before the run unless `CREATE_TOPIC=False`. |
+| `CREATE_TOPIC` | `True` | Delete the topic (if present) and re-create it, waiting 10 s after each step. |
+| `PARTITIONS` | `-1` (broker default) | Partition count of the re-created topic; the replication factor is always the broker default. |
 | `NUM_MESSAGES` | `0` (time-based) | If > 0, run until this many messages are produced. |
-| `LIMIT_RPS` | `0` (unlimited) | Send-rate cap. |
+| `LIMIT_RPS` | `0` (unlimited) | Send-rate cap; the run is then bounded by `LIMIT_RPS × TEST_DURATION_SECONDS` messages or `TEST_DURATION_SECONDS` + 10 s, whichever comes first. |
 | `KEY_SIZE` | `0` (no key) | Bytes. Set to >0 to test keyed partitioning. |
 | `VALUE_SIZE` | `2048` | Bytes. |
-| `BATCH_SIZE` | `1024` (KB → 1 MiB) | Interpreted in **KB** (`× 1024`). Matches the C/Rust tests. |
-| `MAX_REQUEST_SIZE` | `batch × 64`, capped 8 MiB | KB. Matches the C/Rust tests. |
-| `BUFFER_MEMORY` | unset | MB if set. |
+| `BATCH_SIZE` | `1024` (KiB → 1 MiB) | Interpreted in **KiB** (`× 1024`). Matches the C/Rust tests. |
+| `MAX_REQUEST_SIZE` | `batch × 64`, capped 8 MiB | KiB. Matches the C/Rust tests. |
+| `BUFFER_MEMORY` | unset | MiB if set. |
+| `BUFFER_MEMORY_ALLOCATION_STRATEGY` | unset | `full` / `incremental`; maps to `buffer.memory.allocation.strategy` (kafka-clients 4.4+). |
 | `LINGER_MS` | `5` | ms. Matches the C/Rust tests. |
 | `COMPRESSION_TYPE` | `none` | `none` / `gzip` / `snappy` / `lz4` / `zstd` |
 | `ENABLE_IDEMPOTENCE` | `false` | |
 | `ACKS` | `all` | `all` / `-1` / `1` / `0`. Matches the C/Rust/Python tests. |
 | `MAX_IN_FLIGHT` | unset | maps to `max.in.flight.requests.per.connection` |
+| `USE_DEFAULTS` | `False` | `True`: set only the bootstrap servers, serializers and security settings, leaving every tuning knob above at the client default. |
 | `WARMUP_SECONDS` | `120` | Matches the C/Rust tests. |
 | `TEST_DURATION_SECONDS` | `600` | |
 | `P99_LIMIT_MS` | `0` (off) | Per-message p99 latency budget (ms); a breach exits non-zero. |
@@ -83,6 +86,9 @@ gradle run
 | `SASL_MECHANISM` | unset | `PLAIN` / `SCRAM-SHA-256` / etc. |
 | `SASL_USERNAME` | unset | |
 | `SASL_PASSWORD` | unset | |
+
+A numeric variable that does not parse (`LIMIT_RPS=10k`) fails the run, naming
+the variable, rather than falling back to its default.
 
 ## Output
 
@@ -129,10 +135,13 @@ identifies the implementation (`java` here, `rust`, `librdkafka`, `rust-c-ffi`,
 Empty bucket max is the literal string `"-inf"` (matches Python's
 `str(-math.inf)`).
 
+On SIGINT / SIGTERM the test stops sending and still writes `results.json`
+(the JVM waits up to 25 s for it), then exits with the signal's status.
+
 ## Consistency with the C and Rust tests
 
 This test is aligned with `c/tests/producer_perf_test.c` and
-`tests/integration/producer_perf_test.rs` so all three are directly comparable:
+`rust/tests/performance/producer_perf_test.rs` so all three are directly comparable:
 
 - **CPU** is an interval rate from `/proc/self/stat` (utime+stime over each
   window, `USER_HZ = 100`) — per-core percent where 100 % = one core fully
