@@ -2246,6 +2246,7 @@ mod tests {
 
     /// Like [`new_records`] but with the batch records compressed, to
     /// exercise the `RecordSource::Stream` (record-at-a-time) path.
+    #[cfg(feature = "gzip")]
     fn new_compressed_records(base_offset: i64, count: i32, first_message_id: i64) -> Vec<u8> {
         let simple_records: Vec<SimpleRecord> = (0..count)
             .map(|i| {
@@ -2469,6 +2470,7 @@ mod tests {
     /// records are decompressed one at a time, each into a buffer of its own,
     /// then its key/value is borrowed from it — same observable result as the
     /// uncompressed path.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_simple_compressed() {
         let fetch_offset = 5;
@@ -2509,7 +2511,10 @@ mod tests {
     /// order, with correct key/value — must be unchanged.
     #[test]
     fn test_multi_batch_ordering_and_offsets() {
-        for compression in [Compression::none().build(), Compression::gzip().build()] {
+        for compression in [Compression::none().build(), Compression::gzip().build()]
+            .into_iter()
+            .filter(|compression| Compression::is_enabled(compression.compression_type()))
+        {
             let base_offset = 50;
             let batch_count = 4;
             let records_per_batch = 3;
@@ -3747,6 +3752,7 @@ mod tests {
     /// Whether taking a buffer of `size` from `pool` allocates one, that is
     /// whether the pool holds none of that size. A buffer it holds is taken out
     /// of it and freed.
+    #[cfg(feature = "gzip")]
     fn takes_an_allocation(pool: &BufferSupplier, size: usize) -> bool {
         let _guard = crate::AllocTrackingGuard::new();
         drop(pool.get(size));
@@ -3766,6 +3772,7 @@ mod tests {
     /// only when the second is installed fails both: a batch that fails its
     /// checks installs nothing, and a stream opened while the first still holds
     /// the buffer finds the pool empty and allocates a second one.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_exhausted_inflated_batch_is_released_before_the_next_is_inflated() {
         let compression = Compression::gzip().build();
@@ -3829,14 +3836,17 @@ mod tests {
         }
     }
 
-    /// The four codecs a compressed batch can use.
-    fn codecs() -> [Compression; 4] {
+    /// The four codecs a compressed batch can use, those the build enables.
+    fn codecs() -> Vec<Compression> {
         [
             Compression::gzip().build(),
             Compression::snappy().build(),
             Compression::lz4().build(),
             Compression::zstd().build(),
         ]
+        .into_iter()
+        .filter(|compression| Compression::is_enabled(compression.compression_type()))
+        .collect()
     }
 
     /// Rebuilds the uncompressed `batch` around `records`, a records section of
@@ -4102,6 +4112,7 @@ mod tests {
 
     /// A compressed batch whose stream cannot be decompressed fails with the
     /// codec's own text, before any record is returned.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_compressed_batch_that_fails_to_decompress_is_invalid() {
         for check_crcs in [false, true] {
@@ -4143,7 +4154,10 @@ mod tests {
             (Compression::lz4().build(), 129, "failed to fill whole buffer"),
             (Compression::zstd().build(), 129, "incomplete frame"),
         ];
-        for (compression, count, failure) in cases {
+        for (compression, count, failure) in cases
+            .into_iter()
+            .filter(|(compression, ..)| Compression::is_enabled(compression.compression_type()))
+        {
             // The first half of the compressed records, re-framed and re-signed
             // so the cut is the only fault.
             let whole = compressed_by_record(&batch, &compression);
@@ -4829,6 +4843,7 @@ mod tests {
     /// record, as Java's `ensureNoneRemaining` reads past it
     /// (`DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`), and the record is withheld, as
     /// Java's `DefaultRecordBatch.RecordIterator#next` throws instead of returning it.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_compressed_batch_with_a_wrong_gzip_checksum_fails_on_its_last_record() {
         for check_crcs in [false, true] {
@@ -4859,6 +4874,7 @@ mod tests {
     /// a checksum that does not match, or a trailer cut off. The text after
     /// `batch: ` comes from the gzip library, so a new version of it may change
     /// it.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_last_declared_record_followed_by_bytes_is_withheld() {
         let gzip = Compression::gzip().build();
