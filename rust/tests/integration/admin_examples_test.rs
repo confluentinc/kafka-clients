@@ -462,6 +462,10 @@ async fn transaction_examples() {
     let mut props = client_config(&ctx);
     props.insert("transactional.id".to_string(), transactional_id.clone());
     props.insert("linger.ms".to_string(), "0".to_string());
+    // Above the time the examples below take on a loaded machine: a timed-out
+    // transaction is aborted by its coordinator, which bumps the producer
+    // epoch, and `abort_transaction` then fails with `InvalidProducerEpoch`.
+    props.insert("transaction.timeout.ms".to_string(), "600000".to_string());
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         ProducerConfig::new(&props).expect("producer config"),
         ByteArraySerializer::default(),
