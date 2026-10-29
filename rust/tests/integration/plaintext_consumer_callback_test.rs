@@ -609,9 +609,8 @@ async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned
     // Resume and consume the remaining records from `starting_offset`:
     // Java's `consumeAndVerifyRecords(consumer, tp, totalRecords - startingOffset,
     // startingOffset, startingOffset, startingOffset)`, which checks each
-    // record's partition, timestamp type, timestamp, offset, key and value.
-    // (Java also checks the serialized sizes; the gRPC record does not carry
-    // them, so they are not checked on any arm.)
+    // record's partition, timestamp type, timestamp, offset, key, value and
+    // serialized sizes.
     consumer
         .resume(std::slice::from_ref(&tp))
         .await
@@ -643,6 +642,12 @@ async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned
             assert_eq!(
                 rec.value().map(Vec::as_slice),
                 Some(format!("value {i}").as_bytes()),
+                "{backend} backend"
+            );
+            assert_eq!(rec.serialized_key_size(), format!("key {i}").len() as i32, "{backend} backend");
+            assert_eq!(
+                rec.serialized_value_size(),
+                format!("value {i}").len() as i32,
                 "{backend} backend"
             );
             consumed += 1;
