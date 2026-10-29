@@ -30,6 +30,22 @@
 //! `test_async_consumer_unsubscribe_topic` runs on the native backend only,
 //! under its plain name, blocked by findings log #1 (see its comment).
 //!
+//! # `group.consumer.assignment.interval.ms` (KIP-1263, KAFKA-20291)
+//!
+//! Java runs `testAsyncConsumerRe2JPatternSubscription`,
+//! `testAsyncConsumerRe2JPatternExpandSubscription`,
+//! `testRe2JPatternSubscriptionAndTopicSubscription`,
+//! `testAsyncConsumerExpandingTopicSubscriptions`,
+//! `testAsyncConsumerShrinkingTopicSubscriptions` and
+//! `testAsyncConsumerUnsubscribeTopic` on two broker configs, the interval at
+//! `0` and at `1000`. Each of the five translated here is three scenarios
+//! ([`assignment_interval_consumer_test!`], as `consumer_bounce_test.rs` does):
+//! `<name>_assignment_interval_0` and `<name>_assignment_interval_1000` are
+//! Java's two arms and run on a 4.3+ broker; `<name>` runs the default config
+//! on an older broker, which has no interval (the `0` behaviour), and skips
+//! itself on 4.3+. The three client-side `Pattern` tests Java also runs on both
+//! values stay SKIPped (below).
+//!
 //! # Methods classification
 //!
 //! The Java suite contains 14 CONSUMER-arm `@ClusterTest` methods.
@@ -113,6 +129,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::assignment_interval_consumer_test;
 use crate::common::backend_factory::{ConsumerBackendFactory, RustNativeFactory};
 use crate::common::callback_log::{CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
@@ -495,7 +512,7 @@ async fn async_consumer_re2j_pattern_subscription<F: ConsumerBackendFactory>(ctx
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-multilanguage_consumer_test!(
+assignment_interval_consumer_test!(
     test_async_consumer_re2j_pattern_subscription,
     async_consumer_re2j_pattern_subscription,
     cluster_config_with_kip848_3brokers()
@@ -608,7 +625,7 @@ async fn async_consumer_re2j_pattern_expand_subscription<F: ConsumerBackendFacto
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-multilanguage_consumer_test!(
+assignment_interval_consumer_test!(
     test_async_consumer_re2j_pattern_expand_subscription,
     async_consumer_re2j_pattern_expand_subscription,
     cluster_config_with_kip848_3brokers()
@@ -766,7 +783,7 @@ async fn re2j_pattern_subscription_and_topic_subscription<F: ConsumerBackendFact
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-multilanguage_consumer_test!(
+assignment_interval_consumer_test!(
     test_re2j_pattern_subscription_and_topic_subscription,
     re2j_pattern_subscription_and_topic_subscription,
     cluster_config_with_kip848_3brokers()
@@ -878,7 +895,7 @@ async fn async_consumer_expanding_topic_subscriptions<F: ConsumerBackendFactory>
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-multilanguage_consumer_test!(
+assignment_interval_consumer_test!(
     test_async_consumer_expanding_topic_subscriptions,
     async_consumer_expanding_topic_subscriptions,
     cluster_config_with_kip848_3brokers()
@@ -928,7 +945,7 @@ async fn async_consumer_shrinking_topic_subscriptions<F: ConsumerBackendFactory>
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-multilanguage_consumer_test!(
+assignment_interval_consumer_test!(
     test_async_consumer_shrinking_topic_subscriptions,
     async_consumer_shrinking_topic_subscriptions,
     cluster_config_with_kip848_3brokers()
