@@ -6,12 +6,11 @@ translation of the Apache Kafka Java client (client only), translated from
 sources are the `kafka/` submodule at the repository root).
 
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
-- **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
 - **Schema:** All Kafka message schemas are generated from the official JSON definitions
 - **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
-- **C FFI:** Behind the `ffi` feature, the crate exports the C API that the
+- **C FFI: (experimental)** Behind the `ffi` feature, the crate exports the C API that the
   bindings in `../c/` and `../python/` are built on; the build writes its header
-  to `target/include/confluent_kafka.h`. The FFI layer is experimental right now.
+  to `target/include/confluent_kafka.h` for C users or to `target/include/confluent_kafka_bindings.h` for usage by other bindings. The FFI layer is experimental right now.
 
 ## Status
 
@@ -47,13 +46,6 @@ Makefile                # Targets the repository root's Makefile delegates to
 ```
 
 `../design/current/structure.md` describes every module in detail.
-
-## Where commands run
-
-Run every `cargo` command **from this directory**. `rust-toolchain.toml` and
-`.cargo/config.toml` (which defines the `cargo xtask` alias) are looked up from
-the current directory, so `cargo --manifest-path rust/Cargo.toml` from the
-repository root would use a different toolchain and lose `cargo xtask`.
 
 ## Install development tools
 
@@ -156,6 +148,31 @@ Generated code is automatically updated on build. To force regeneration:
 ```bash
 cargo clean && cargo build
 ```
+
+## Examples
+
+See [./examples/README.md](./examples/README.md).
+
+## Known limitations
+
+The 1.0 release does not include the following Java client features:
+
+- **Consumer groups:** only the KIP-848 group protocol
+  (`group.protocol=consumer`). The classic protocol (`group.protocol=classic`)
+  and client-side partition assignors are not supported, and
+  `KafkaConsumer::new` returns `LocalUnsupportedOperationError` for them.
+- **Share groups:** KIP-932 share groups and the share consumer are not
+  included.
+- **SASL:** only `PLAIN`, over `SASL_PLAINTEXT` and `SASL_SSL`. SCRAM, GSSAPI
+  (Kerberos) and OAUTHBEARER are not supported, and any other `sasl.mechanism`
+  fails the configuration.
+- **TLS stores:** PEM only, as files or inline in the configuration. JKS and
+  PKCS12 keystores and truststores are not supported, so convert them to PEM.
+  Encrypted private keys are rejected.
+- **Client telemetry:** KIP-714 is not implemented, so `enable.metrics.push`
+  is not a defined configuration.
+- **Interceptors:** producer and consumer interceptors cannot be registered.
+- **Windows:** it's not supported yet.
 
 ## License
 
