@@ -234,11 +234,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # AsyncProducer.send is a coroutine that returns an AsyncKafkaFuture.
         try:
             future = await producer.send(record=record, callback=callback)
-        except KafkaError as e:
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("send raised")
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
+            # Raised by send() itself, Java's send throwing, as opposed to the
+            # future failing below: raised_by_send tells the harness which.
+            if not isinstance(e, KafkaError):
+                LOG.exception("send raised")
+            return pb.SendResponse(error=_kafka_error_to_proto(e), raised_by_send=True)
 
         # Await the record future on the event loop, where the producer drains
         # its queued completions. Bounded like the sync server's 120s.
