@@ -70,13 +70,15 @@ name: build-test-release
 #     -alpha.N, -beta.N, -rc.N or -dev.N suffix.
 #   - python/v<version> publishes the confluent-kafka wheels. The version is
 #     [project] version in python/pyproject.toml, and may carry an aN, bN or
-#     rcN suffix, optionally followed by .devN, or a .devN suffix alone. Every
-#     version goes to Test PyPI first and is checked there; a final version
-#     then goes to PyPI through the manual "Publish to PyPI" promotion of the
-#     tag build, while a pre-release (an aN, bN or rcN suffix) or a dev version
-#     (a .devN suffix, python/v4.4.0a1.dev1) stops at Test PyPI. The PyPI
-#     project is shared with confluent-kafka-python, the librdkafka-based
-#     client.
+#     rcN suffix, optionally followed by .devN, or a .devN suffix alone. The
+#     tag build builds and tests the wheels but publishes nothing. Every
+#     version goes to Test PyPI first, through the manual "Publish to Test
+#     PyPI" promotion of the tag build, and is checked there; a final version
+#     then goes to PyPI through the manual "Publish to PyPI" promotion of that
+#     Test PyPI pipeline, while a pre-release (an aN, bN or rcN suffix) or a
+#     dev version (a .devN suffix, python/v4.4.0a1.dev1) stops at Test PyPI.
+#     The PyPI project is shared with confluent-kafka-python, the
+#     librdkafka-based client.
 #   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
 #     runs CI and the blocks that package and test the crate (recorded in the
 #     workflow's artifacts), and skips every publish block.
@@ -89,14 +91,19 @@ name: build-test-release
 #      and is new, and every CI job passed on that build, then pushes one tag
 #      per client entered, rust/v<version> and python/v<version>.
 #   3. Each tag push runs this pipeline on that tag. CI runs again, and the
-#      release blocks of that client publish it once every CI job has passed:
-#      the crate to crates.io, the wheels to Test PyPI.
-#   4. For a final Python version, run the manual "Publish to PyPI" promotion
-#      (publish-pypi.yml) on that tag build once its Test PyPI blocks have
+#      release blocks of that client run once every CI job has passed: the
+#      crate is published to crates.io; the wheels are built, tested and
+#      packaged, and recorded in the workflow's artifacts.
+#   4. For the wheels, run the manual "Publish to Test PyPI" promotion
+#      (publish-testpypi.yml) on that tag build once its packaging block has
+#      passed. It publishes them to Test PyPI and checks them there.
+#   5. For a final Python version, run the manual "Publish to PyPI" promotion
+#      (publish-pypi.yml) on that Test PyPI pipeline once its blocks have
 #      passed.
 # A release tag pushed by other means follows the same path from step 3. The
-# release blocks are skipped on every other build, so "Publish to PyPI" is the
-# only publish to start by hand.
+# release blocks are skipped on every other build, and both Python promotions
+# publish nothing there, so the crate is the only package published without a
+# manual step.
 #
 # Every job records its result and the commit it tested as
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
@@ -898,11 +905,13 @@ blocks:
   # Python release blocks. They run only on the build of a Python release tag,
   # python/v<version> where <version> is <major>.<minor>.<patch> with an
   # optional aN, bN or rcN suffix and an optional .devN suffix (PEP 440, in its
-  # normalized form), and are skipped on every other build. A pre-release or
-  # a dev tag stops at Test PyPI: the blocks of publish-pypi.yml use the same
-  # tag pattern without either suffix. Each pattern must stay identical in all
-  # of the blocks that use it; the first is also in publish-wheels.sh and
-  # create-release-tag.yml.
+  # normalized form), and are skipped on every other build. They build, test
+  # and package the wheels; the publishes are the manual promotions below.
+  # The blocks of publish-testpypi.yml use the same tag pattern; those of
+  # publish-pypi.yml use it without either suffix, so a pre-release or a dev
+  # tag stops at Test PyPI. Each pattern must stay identical in all of the
+  # blocks that use it; the first is also in publish-testpypi.yml,
+  # publish-wheels.sh and create-release-tag.yml.
   #
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (Python): wheels (<platform>)" builds the wheels for one
@@ -916,16 +925,18 @@ blocks:
   #   3. "Release (Python): packaging" depends on the CI blocks that test the
   #      Rust library and the Python binding, and on the four verification
   #      blocks, so it starts only when all of them have passed. It checks the tag and the version, and records the tested
-  #      wheels as the release, with their checksums.
-  #   4. "Release (Python): publish to Test PyPI" uploads the release, and its
-  #      post-publish blocks verify the wheels as users receive them from Test
-  #      PyPI.
-  #   5. For a final version, the manual "Publish to PyPI" promotion
-  #      (publish-pypi.yml) uploads the same wheels to PyPI and verifies them
-  #      there. It refuses unless they passed the Test PyPI checks in this
-  #      workflow. A pre-release is published to Test PyPI only.
-  # None of the VMs before the publish holds a secret, and the publish builds
-  # nothing: it uploads a wheel only if it is byte-identical to a tested one.
+  #      wheels as the release, with their checksums. The tag build ends here;
+  #      it publishes nothing.
+  #   4. The manual "Publish to Test PyPI" promotion of the tag build
+  #      (publish-testpypi.yml) uploads the release, and its post-publish
+  #      blocks verify the wheels as users receive them from Test PyPI. It
+  #      refuses unless the packaging block passed.
+  #   5. For a final version, the manual "Publish to PyPI" promotion of that
+  #      Test PyPI pipeline (publish-pypi.yml) uploads the same wheels to PyPI
+  #      and verifies them there. It refuses unless they passed the Test PyPI
+  #      checks in this workflow. A pre-release is published to Test PyPI only.
+  # No VM of this pipeline holds a PyPI token, and the publishes build
+  # nothing: a wheel is uploaded only if it is byte-identical to a tested one.
   # The publish and checksum logic, shared by both indexes, is in
   # .semaphore/publish-wheels.sh and .semaphore/check-published-wheels.py.
   #
@@ -933,8 +944,8 @@ blocks:
   # PowerShell, which cannot run the bash in this file's global prologue and
   # epilogue.
   #
-  # As for the crate, to resume an interrupted publish, rerun the failed blocks
-  # of the tag build (or of the promotion).
+  # As for the crate, to resume an interrupted release, rerun the failed blocks
+  # of the pipeline that failed: the tag build or either promotion.
   - name: "Release (Python): wheels (Linux amd64)"
     dependencies: []
     run:
@@ -1161,66 +1172,6 @@ blocks:
           commands:
             - bash .semaphore/publish-wheels.sh package
 
-  - name: "Release (Python): publish to Test PyPI"
-    # Publishes the wheels recorded by the packaging block. publish-wheels.sh
-    # repeats the tag check and checks that the version is new on Test PyPI
-    # before the token is loaded.
-    dependencies: ["Release (Python): packaging"]
-    run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 30
-    task:
-      env_vars:
-        - name: PYPI_INDEX
-          value: https://test.pypi.org
-      jobs:
-        - name: "twine upload (Test PyPI)"
-          commands:
-            - bash .semaphore/publish-wheels.sh prepare
-            - bash .semaphore/publish-wheels.sh upload
-
-  - name: "Release (Python): post-publish checksum (Test PyPI)"
-    # Checks that Test PyPI lists every uploaded wheel, not yanked, with the
-    # checksum of the uploaded bytes, serves exactly those bytes for download,
-    # and lists no other file for the version. This block and the smoke test
-    # below it load no token and repeat none of the release checks. A failure
-    # stops the release before PyPI; release a fixed version.
-    dependencies: ["Release (Python): publish to Test PyPI"]
-    run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 20
-    task:
-      jobs:
-        - name: "Test PyPI index and downloads match the upload"
-          commands:
-            # Written by the publish job after a successful upload. If it is
-            # absent, nothing was published from this workflow and the job
-            # fails.
-            - artifact pull workflow pypi/test.pypi.org/uploaded.sha256 --destination /tmp/uploaded.sha256
-            - /usr/bin/python3 .semaphore/check-published-wheels.py https://test.pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/v}" /tmp/uploaded.sha256
-
-  - name: "Release (Python): post-publish smoke test (Test PyPI, Linux amd64)"
-    # Installs the released version from Test PyPI with each supported Python
-    # version, in each Linux distribution that the wheels were tested in, and
-    # runs the import and smoke tests (.semaphore/test-wheels.sh --index). It
-    # waits for the checksum block, which waits until the index lists every
-    # wheel. Once they pass, it records the wheels as verified on Test PyPI,
-    # which "Publish to PyPI" requires.
-    dependencies: ["Release (Python): post-publish checksum (Test PyPI)"]
-    run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 40
-    task:
-      jobs:
-        - name: "Install from Test PyPI (Linux amd64)"
-          commands:
-            - sh .semaphore/test-wheels.sh --index https://test.pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/v}"
-            - artifact pull workflow pypi/test.pypi.org/uploaded.sha256 --destination /tmp/verified.sha256
-            - artifact push workflow /tmp/verified.sha256 --destination pypi/test.pypi.org/verified --force
-
 promotions:
   - name: Start translation plan
     pipeline_file: start-translation-plan.yml
@@ -1245,17 +1196,20 @@ promotions:
           required: false
           description: "The version of the confluent-kafka wheels to publish:
             [project] version in python/pyproject.toml at this commit (for
-            example 4.4.0, published to Test PyPI and then, through the
-            \"Publish to PyPI\" promotion of the tag build, to PyPI; or
-            4.4.0rc1, published to Test PyPI only). Leave empty to not
-            release the wheels."
-  # Manual. Publishes a final Python version to PyPI (publish-pypi.yml). Run it
-  # on the build of its python/v<version> tag once the Test PyPI blocks have
-  # passed. Its blocks are skipped on any other build, and its publish job
-  # refuses unless the wheels passed the Test PyPI checks in this workflow, so
-  # starting it from a failed or unrelated pipeline publishes nothing.
-  - name: Publish to PyPI
-    pipeline_file: publish-pypi.yml
+            example 4.4.0 or 4.4.0rc1). The tag build builds and tests the
+            wheels; its \"Publish to Test PyPI\" promotion publishes them to
+            Test PyPI and, for a final version, that pipeline's \"Publish to
+            PyPI\" promotion then to PyPI. Leave empty to not release the
+            wheels."
+  # Manual. Publishes a Python version to Test PyPI and checks it there
+  # (publish-testpypi.yml). Run it on the build of its python/v<version> tag
+  # once "Release (Python): packaging" has passed. Its blocks are skipped on
+  # any other build, and its publish job refuses unless that block recorded
+  # the wheels in this workflow, so starting it from a failed or unrelated
+  # pipeline publishes nothing. For a final version, its own "Publish to PyPI"
+  # promotion (publish-pypi.yml) then publishes the same wheels to PyPI.
+  - name: Publish to Test PyPI
+    pipeline_file: publish-testpypi.yml
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
