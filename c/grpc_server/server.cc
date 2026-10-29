@@ -625,9 +625,11 @@ class CallbackLog {
 // (CLAUDE.md §4 rule 3: the caller owns it and keeps it alive until the
 // registration is released), and the release points differ per interface:
 //
-//   - a rebalance listener's `self` must live until the next `subscribe_*`,
-//     `unsubscribe` or the consumer's destruction, and a later re-subscribe
-//     must be able to reuse the same state;
+//   - a rebalance listener's `self` must live until a later successful
+//     `subscribe_*` replaces it or the consumer is destroyed (a KafkaConsumer
+//     also releases it when `close` returns; `unsubscribe`, `assign` and its
+//     empty-topics `subscribe_*` keep it), and a later re-subscribe must be
+//     able to reuse the same state;
 //   - a commit callback's `self` must live until `onComplete` fired (or the
 //     consumer was destroyed);
 //   - a delivery callback's `self` must live until the callback fired, so a
@@ -1564,8 +1566,8 @@ struct OffsetMapHandles {
 //
 // One heap instance per registration, owned by the service's
 // `action_states_` for the whole session, like LogState: a registration's
-// `self` must outlive its release point (the next subscribe_*, unsubscribe or
-// the consumer's destruction), and there is no destroy hook. Its handle is
+// `self` must outlive its release point (a later successful subscribe_* that replaces it, or the consumer's destruction; a KafkaConsumer's close also releases it),
+// and there is no destroy hook. Its handle is
 // released at Close, after the consumer is destroyed (the C API lets the
 // handle outlive the consumer, so nothing the consumer runs can find it gone).
 // ---------------------------------------------------------------------------
@@ -1959,8 +1961,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (req->with_listener()) {
       // A real ConsumerRebalanceListener whose invocations land in the callback
       // log. Its `self` is the consumer's LogState, which lives for the whole
-      // session and so outlives every release point of the registration (the
-      // next subscribe_*, unsubscribe, or the consumer's destruction). The
+      // session and so outlives every release point of the registration (a
+      // later successful subscribe_* that replaces it, a KafkaConsumer's close,
+      // or the consumer's destruction). The
       // registration is COPIED by subscribe, success or failure, so the handle
       // is destroyed right after.
       //
@@ -6697,8 +6700,9 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     retain(state);
 
     // The listener's `self` is the retained state, which outlives every release
-    // point of the registration (the next subscribe / unsubscribe, or the
-    // consumer's destruction). subscribe copies the registration, success or
+    // point of the registration (a later successful subscribe that replaces
+    // it, a KafkaConsumer's close, or the consumer's destruction). subscribe
+    // copies the registration, success or
     // failure, so the handle is destroyed right after.
     kafka_consumer_ConsumerRebalanceListener_t* listener =
         kafka_consumer_ConsumerRebalanceListener_new(state.get(), chaos_partitions_revoked,

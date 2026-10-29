@@ -486,8 +486,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     def Subscribe(self, request, context):
         # with_listener => subscribe with a real ConsumerRebalanceListener built
-        # by consumer.py, whose invocations land in the callback log. Registration
-        # is per-subscribe: a listener-less Subscribe releases it.
+        # by consumer.py, whose invocations land in the callback log. The binding
+        # keeps the registration until a later subscribe replaces it (a non-empty
+        # topic list or a pattern; a listener-less one included) or a
+        # KafkaConsumer closes; unsubscribe, an empty topic list and assign keep it.
         # A pending SetListenerAction belongs to this registration: the
         # listener calls back into the consumer from inside the method it
         # targets, on this thread, inside the consumer call running it.
