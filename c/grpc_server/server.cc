@@ -752,6 +752,7 @@ void maybe_run_listener_action(ActionListenerState* state, const kafka_List_t* p
       break;
     default:
       entry.set_error("c server: unknown listener action " + std::to_string(spec.action));
+      entry.set_error_code(kafka_common_Error_LOCAL_ILLEGAL_STATE);
       break;
   }
   if (err != nullptr) {
@@ -786,11 +787,13 @@ extern "C" void action_partitions_lost(void* self, const kafka_List_t* partition
   action_rebalance(self, partitions, callback_id, KIND_LOST);
 }
 
-// Copies a BORROWED error's message into `entry`; nothing is destroyed.
+// Copies a BORROWED error's message and FFI code into `entry`; nothing is
+// destroyed.
 void copy_error_into(CallbackLogEntry* entry, const kafka_common_Error_t* error) {
   if (error == nullptr) return;
   const char* msg = kafka_common_Error_message(error);
   entry->set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
+  entry->set_error_code(kafka_common_Error__enum(error));
 }
 
 // Copies a BORROWED offsets map (`kafka_common_TopicPartition_t *` ->
