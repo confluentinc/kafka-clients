@@ -74,6 +74,16 @@
 //! - `testAsyncClose`, including its coordinator-failure and
 //!   cluster-failure parts → `test_async_close`
 //!
+//! ## Rust-only harness coverage (no Java counterpart)
+//!
+//! - `test_consumer_reads_from_restarted_leader`, a multilanguage scenario on
+//!   the same dedicated cluster: every backend's consumer reads, through its
+//!   own connection, from a partition whose only replica is on a broker that
+//!   was stopped and started again while the consumer ran, and its metadata
+//!   then names that broker as the leader. Java's bounce tests run only the
+//!   Java client; this checks the containerized backends reach a restarted
+//!   broker too.
+//!
 //! ## SKIPped
 //!
 //! - `testClassic*` twins — classic-protocol-only (`consumer-threading.md` §20).
@@ -84,6 +94,7 @@
 //!   `classic`, and only `heartbeat.interval.ms` is gated on the arm. The
 //!   classic protocol is out of scope (`consumer-threading.md` §20).
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -97,6 +108,8 @@ use async_trait::async_trait;
 use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClient;
 use confluent_kafka::admin::AdminClientConfig;
+use confluent_kafka::admin::CreateTopicsOptions;
+use confluent_kafka::admin::NewTopic;
 use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
@@ -749,6 +762,158 @@ async fn async_consumer_consumption_with_broker_failures<F: ConsumerBackendFacto
 multilanguage_consumer_test!(
     test_async_consumer_consumption_with_broker_failures,
     async_consumer_consumption_with_broker_failures,
+    bounce_cluster_config()
+);
+
+/// The records [`consumer_reads_from_restarted_leader`] produces before and
+/// again after the restart.
+const RECONNECT_RECORDS: usize = 10;
+
+/// The leader of `tp` as `describeTopics` reports it: `None` while the
+/// partition has no leader, or while the describe fails.
+async fn partition_leader(admin: &dyn Admin, tp: &TopicPartition) -> Option<i32> {
+    let described = admin.describe_topics_with_topic_names(&[tp.topic().to_string()]);
+    let topics = described.all_topic_names()?.get().await.ok()?;
+    topics
+        .get(tp.topic())?
+        .partitions()
+        .iter()
+        .find(|info| info.partition() == tp.partition())?
+        .leader()
+        .map(|node| node.id())
+}
+
+/// Waits up to 30 s until [`partition_leader`] of `tp` is `expected`.
+async fn wait_for_partition_leader(admin: &dyn Admin, tp: &TopicPartition, expected: Option<i32>) {
+    test_utils::wait_until_true_with_timeout(
+        || async move { partition_leader(admin, tp).await == expected },
+        &format!("the leader of {tp} did not become {expected:?} within 30 s"),
+        30_000,
+        100,
+    )
+    .await;
+}
+
+/// Polls until `consumed` reaches `target`, checking that the offsets follow
+/// each other from `consumed` on; fails after `timeout`.
+async fn poll_until_consumed(
+    consumer: &mut BytesConsumer,
+    backend: &str,
+    consumed: &mut i64,
+    target: i64,
+    timeout: Duration,
+) {
+    let deadline = std::time::Instant::now() + timeout;
+    while *consumed < target {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{backend} backend: consumed {consumed} of {target} records within {timeout:?}"
+        );
+        let records = consumer
+            .poll(Duration::from_millis(500))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
+        for record in &records {
+            assert_eq!(*consumed, record.offset(), "{backend} backend: records in offset order");
+            *consumed += 1;
+        }
+    }
+}
+
+/// Rust-only harness coverage, no Java counterpart: the consumer under test
+/// reconnects to a broker that was stopped and started again while it ran.
+///
+/// The topic has one partition with one replica, placed on the restarted
+/// broker (the highest broker id), so that broker is its only possible leader:
+/// the partition has no leader while it is down and the same leader once it is
+/// back, which `describeTopics` on a native admin confirms at each step. The
+/// consumer, assigned to that partition, reads records produced before the
+/// stop, keeps polling while the broker is down, then reads records produced
+/// after the restart, which only that broker serves. Its own metadata
+/// (`partitions_for`) must then name the restarted broker as the leader.
+async fn consumer_reads_from_restarted_leader<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
+    let broker_id = *ctx.cluster().broker_ids().last().expect("at least one broker");
+    let topic = ctx.topic("reconnect");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let admin = create_admin(ctx);
+    let new_topic = NewTopic::with_replicas_assignments(topic.clone(), BTreeMap::from([(0, vec![broker_id])]));
+    admin
+        .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("create topic");
+    test_utils::wait_for_all_partitions_metadata(admin.as_ref(), &topic, 1).await;
+    wait_for_partition_leader(admin.as_ref(), &tp, Some(broker_id)).await;
+
+    send_records(ctx, &tp, RECONNECT_RECORDS).await;
+    let configs = HashMap::from([("enable.auto.commit".to_string(), "false".to_string())]);
+    let mut consumer = create_consumer_for(ctx, factory, &configs).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    let mut consumed: i64 = 0;
+    poll_until_consumed(
+        &mut consumer,
+        backend,
+        &mut consumed,
+        RECONNECT_RECORDS as i64,
+        Duration::from_secs(30),
+    )
+    .await;
+
+    ctx.cluster().shutdown_broker(broker_id).await;
+    wait_for_partition_leader(admin.as_ref(), &tp, None).await;
+    for _ in 0..3 {
+        let records = consumer
+            .poll(Duration::from_millis(500))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll while broker {broker_id} is down: {e}"));
+        assert!(
+            records.is_empty(),
+            "{backend} backend: no records while the only replica's broker {broker_id} is down"
+        );
+    }
+
+    ctx.cluster().start_broker(broker_id).await;
+    wait_for_partition_leader(admin.as_ref(), &tp, Some(broker_id)).await;
+    send_records(ctx, &tp, RECONNECT_RECORDS).await;
+    poll_until_consumed(
+        &mut consumer,
+        backend,
+        &mut consumed,
+        2 * RECONNECT_RECORDS as i64,
+        Duration::from_secs(60),
+    )
+    .await;
+
+    let partitions = consumer
+        .partitions_for(&topic)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: partitions_for should succeed: {e}"));
+    let info = partitions
+        .iter()
+        .find(|info| info.partition() == tp.partition())
+        .unwrap_or_else(|| panic!("{backend} backend: partitions_for lists {tp}: {partitions:?}"));
+    assert_eq!(
+        info.leader().map(|node| node.id()),
+        Some(broker_id),
+        "{backend} backend: the consumer's metadata names the restarted broker as the leader of {tp}"
+    );
+    assert!(
+        info.replicas().iter().any(|node| node.id() == broker_id),
+        "{backend} backend: the consumer's metadata lists the restarted broker as a replica of {tp}"
+    );
+
+    close_consumer(Some(consumer)).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+}
+
+multilanguage_consumer_test!(
+    test_consumer_reads_from_restarted_leader,
+    consumer_reads_from_restarted_leader,
     bounce_cluster_config()
 );
 
