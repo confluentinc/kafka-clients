@@ -13,7 +13,39 @@ breaking changes.
 - The FFI layer (the `ffi` feature) is experimental right now.
 - Windows is not supported yet.
 
-## 1.0.0-rc.1
+## [1.0.0-rc.2] - 2026-10-29
+
+### Common
+
+- **Breaking:** the compression codecs, TLS and SCRAM credential salting are
+  optional, each behind a default feature: `gzip`, `snappy`, `lz4`, `zstd`,
+  `rustls` and `aws-lc-rs` (which `rustls` implies). With default features on
+  nothing changes. A build with `default-features = false` kept all of them
+  before and now has none, and it still compiles: add
+  `features = ["gzip", "snappy", "lz4", "zstd", "webpki-roots"]` to keep the
+  previous behaviour (`webpki-roots` enables `rustls`). With one off, the
+  client fails with an explicit error where it would need it: a disabled
+  `compression.type` fails the producer's configuration, a fetched batch in a
+  disabled codec fails with `InvalidRecordError`, `SSL` and `SASL_SSL` fail
+  the client's construction, and a SCRAM upsertion fails its user's future
+  with `LocalUnsupportedOperationError`. See "Cargo features" in `README.md`.
+  `serde` and `serde_json` are no longer dependencies of the library.
+- **Breaking:** Mozilla's root certificates, trusted without
+  `ssl.truststore.location` or `ssl.truststore.certificates`, now come from the
+  default feature `webpki-roots`. With default features on nothing changes. A
+  build with `default-features = false` must add `features = ["webpki-roots"]`;
+  without it the build stops with "confluent-kafka needs a default trust
+  store", since no other default trust store exists yet. A later one is then a
+  feature of its own, and `default-features = false` selects it without the
+  bundle.
+- **Breaking:** `Uuid::from_string` applies Java's `Base64.getUrlDecoder()` rules to `=`
+  padding: a `=` that starts a 4-character unit, a single `=` after two
+  characters, or anything after the padding is an `IllegalArgumentError` with
+  Java's message, where it was accepted or reported as a wrong decoded length.
+  A one-character input and a last unit of one character also report Java's
+  messages (#269).
+
+## [1.0.0-rc.1] - 2026-10-28
 
 ### Consumer
 

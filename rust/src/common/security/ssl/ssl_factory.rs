@@ -252,7 +252,8 @@ fn validate_store_format(format: &str, store_name: &str) -> io::Result<()> {
 /// Loads certificates from:
 /// 1. `truststore_location` — PEM file path
 /// 2. `truststore_certificates` — inline PEM string
-/// 3. System roots via `webpki-roots` (fallback when neither 1 nor 2 is set)
+/// 3. Mozilla's root certificates, from the `webpki-roots` feature (fallback
+///    when neither 1 nor 2 is set)
 fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<RootCertStore> {
     let mut root_store = RootCertStore::empty();
 
@@ -305,12 +306,19 @@ fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<RootCertStore> {
             })?;
         }
     } else {
-        // Fallback to system roots
+        // Fallback to Mozilla's root certificates.
+        #[cfg(feature = "webpki-roots")]
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
     Ok(root_store)
 }
+
+// Without a truststore the client needs a default one, and `webpki-roots` is the
+// only one so far: with it off, every SSL client without a truststore key would
+// trust no certificate at all, so the build stops here instead.
+#[cfg(not(feature = "webpki-roots"))]
+compile_error!("confluent-kafka needs a default trust store: enable the `webpki-roots` feature (on by default)");
 
 /// Loads client certificate and private key for mTLS, if configured.
 ///
@@ -780,6 +788,17 @@ B2V9lhUZNk+pRjtJw9unpXsM
         let config = SslConfigs::default();
         let factory = SslFactory::new(&config).unwrap();
         assert!(factory.hostname_verification());
+    }
+
+    #[test]
+    fn test_default_trusts_the_mozilla_bundle() {
+        assert!(
+            webpki_roots::TLS_SERVER_ROOTS.len() > 100,
+            "{}",
+            webpki_roots::TLS_SERVER_ROOTS.len()
+        );
+        let root_store = build_root_cert_store(&SslConfigs::default()).unwrap();
+        assert_eq!(root_store.len(), webpki_roots::TLS_SERVER_ROOTS.len());
     }
 
     #[test]
