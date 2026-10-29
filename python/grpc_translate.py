@@ -552,8 +552,8 @@ class CallbackLog:
         self._entries = {}
         self._lock = threading.Lock()
 
-    def append(self, client_id, kind, partitions=(), offsets=None, error="",
-               method="", result_partitions=()):
+    def append(self, client_id, kind, partitions=(), offsets=None, exception=None,
+               error="", method="", result_partitions=()):
         """Record one invocation.
 
         Args:
@@ -561,17 +561,25 @@ class CallbackLog:
             kind: one of the ``KIND_*`` constants.
             partitions: iterable of ``TopicPartition`` (or ``(topic, partition)``).
             offsets: optional ``{"<topic>-<partition>": offset}`` mapping.
-            error: error message, or "" when the callback saw no error.
+            exception: the error the callback saw, or ``None``; logged as its
+                message and its FFI error code.
+            error: a message of the server's own, for an error with no
+                exception object; logged with ``_LOCAL_ILLEGAL_STATE``.
             method: ``KIND_LISTENER_ACTION`` only, the listener method the
                 action ran in (``KIND_ASSIGNED`` / ``KIND_REVOKED``).
             result_partitions: ``KIND_LISTENER_ACTION`` only, the partitions
                 the ASSIGNMENT action read.
         """
+        if exception is not None:
+            message, code = str(exception), _kafka_error_to_proto(exception).code
+        else:
+            message, code = error or "", _LOCAL_ILLEGAL_STATE if error else 0
         entry = pb.CallbackLogEntry(
             kind=kind,
             partitions=[_callback_log_partition(p) for p in partitions],
             offsets=dict(offsets or {}),
-            error=error or "",
+            error=message,
+            error_code=code,
             method=method,
             result_partitions=[_callback_log_partition(p) for p in result_partitions],
         )
@@ -673,8 +681,9 @@ class ListenerAction:
         """The fields every ``KIND_LISTENER_ACTION`` entry of this action has."""
         return {"partitions": partitions, "method": self.method}
 
-    def log_result(self, log, client_id, partitions, *, assignment=(), offsets=None, error=""):
-        log.append(client_id, KIND_LISTENER_ACTION, offsets=offsets, error=error,
+    def log_result(self, log, client_id, partitions, *, assignment=(), offsets=None,
+                   exception=None, error=""):
+        log.append(client_id, KIND_LISTENER_ACTION, offsets=offsets, exception=exception, error=error,
                    result_partitions=sorted(assignment, key=lambda p: (p.topic(), p.partition())),
                    **self.entry_fields(partitions))
 
@@ -698,7 +707,7 @@ class ListenerAction:
             else:
                 self.log_result(log, client_id, partitions, error=f"unknown listener action {self.action}")
         except Exception as e:  # noqa: BLE001  (logged, as the listener must not fail the rebalance)
-            self.log_result(log, client_id, partitions, error=str(e))
+            self.log_result(log, client_id, partitions, exception=e)
 
     async def run_async(self, consumer, log, client_id, partitions):
         """Run the action on an asyncio consumer, from inside its listener:
@@ -721,7 +730,7 @@ class ListenerAction:
             else:
                 self.log_result(log, client_id, partitions, error=f"unknown listener action {self.action}")
         except Exception as e:  # noqa: BLE001  (logged, as the listener must not fail the rebalance)
-            self.log_result(log, client_id, partitions, error=str(e))
+            self.log_result(log, client_id, partitions, exception=e)
 
 
 def _offsets_by_key(offsets):
@@ -794,7 +803,7 @@ def make_logging_commit_callback(log, client_id):
             partitions=list(offsets.keys()),
             offsets={_offset_key(tp.topic(), tp.partition()): oam.offset()
                      for tp, oam in offsets.items()},
-            error="" if exception is None else str(exception),
+            exception=exception,
         )
 
     return on_complete
@@ -824,7 +833,7 @@ def make_logging_delivery_callback(log, client_id):
             KIND_DELIVERY,
             partitions=partitions,
             offsets=offsets,
-            error="" if exception is None else str(exception),
+            exception=exception,
         )
 
     return delivery_callback

@@ -76,7 +76,7 @@ pub const KIND_LISTENER_ACTION: &str = "listener_action";
 ///
 /// Mirrors the proto `CallbackLogEntry` (see `producer_service.proto` for the
 /// per-`kind` field encoding, which every server must follow).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CallbackLogEntry {
     /// One of the `KIND_*` constants.
     pub kind: String,
@@ -88,6 +88,12 @@ pub struct CallbackLogEntry {
     pub offsets: HashMap<String, i64>,
     /// The callback's error message; empty when the callback saw no error.
     pub error: String,
+    /// The error itself, `None` when the callback saw none: classify it with
+    /// the `Error::is_*_error` predicates rather than by its text. Native: the
+    /// error the callback received. gRPC: rebuilt from the entry's
+    /// `error_code` (the FFI error code) and `error`, as a `KafkaError` reply
+    /// is.
+    pub error_value: Option<Error>,
     /// [`KIND_LISTENER_ACTION`] only: the listener method the action ran in,
     /// [`KIND_ASSIGNED`] or [`KIND_REVOKED`]. Empty for every other kind.
     pub method: String,
@@ -233,6 +239,7 @@ impl ListenerAction {
         };
         if let Err(e) = result {
             entry.error = e.to_string();
+            entry.error_value = Some(e);
         }
         entry
     }
@@ -324,6 +331,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
             partitions: Vec::with_capacity(offsets.len()),
             offsets: HashMap::with_capacity(offsets.len()),
             error: error.map(|e| e.to_string()).unwrap_or_default(),
+            error_value: error.cloned(),
             ..Default::default()
         };
         for (tp, oam) in offsets {
@@ -341,6 +349,7 @@ fn delivery_entry(metadata: Option<&RecordMetadata>, error: Option<&Error>) -> C
     let mut entry = CallbackLogEntry {
         kind: KIND_DELIVERY.to_string(),
         error: error.map(|e| e.to_string()).unwrap_or_default(),
+        error_value: error.cloned(),
         ..Default::default()
     };
     if let Some(m) = metadata {
@@ -674,6 +683,14 @@ pub mod grpc {
                 kind: e.kind,
                 partitions: e.partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
                 offsets: e.offsets,
+                // NONE (0) means the callback saw no error.
+                error_value: (e.error_code != 0).then(|| {
+                    kafka_error_from_proto(proto::KafkaError {
+                        code: e.error_code,
+                        message: e.error.clone(),
+                        ..Default::default()
+                    })
+                }),
                 error: e.error,
                 method: e.method,
                 result_partitions: e.result_partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
