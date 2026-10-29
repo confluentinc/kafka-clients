@@ -60,7 +60,7 @@ test-integration:
 		printf '  rust/target/release/libconfluent_kafka.a\n'; \
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-c gRPC arm jobs.\n'; \
 		printf 'Run it natively on this host with: %smake test-integration-c-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \

@@ -73,8 +73,8 @@ test: build
 # compile and no test runtime.
 #
 # Only the non-Rust backends are filtered, and only at runtime: they are the
-# ones needing prebuilt gRPC images and a container per test. Each binding's
-# own verify job owns its arm (`test-integration-grpc-python` /
+# ones needing prebuilt gRPC images and a container per test. The CI "gRPC arm"
+# jobs of each binding run them (`test-integration-grpc-python` /
 # `test-integration-grpc-c` below, driven by python/'s and c/'s
 # `test-integration`), so this job never builds Docker images it never starts.
 #

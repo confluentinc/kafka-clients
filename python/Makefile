@@ -22,7 +22,7 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 # repository root's Makefile activates its venv first) and, except
 # `check-static` and `test-soak`, expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
-.PHONY: init build test test-unit typecheck check-static docs test-soak test-verifiable-clients \
+.PHONY: init build test test-except-grpc-arm test-unit typecheck check-static docs test-soak test-verifiable-clients \
 	test-integration test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
 
@@ -40,7 +40,12 @@ build:
 # broker-backed binding tests (a testcontainers KRaft broker; they skip without
 # Docker): what the Java tests drive through a MockClient the binding cannot
 # inject. They are not the gRPC multilanguage arm of `test-integration` below.
-test: build
+test: test-except-grpc-arm
+	$(MAKE) test-integration
+
+# Everything `test` runs except the gRPC multilanguage arm (`test-integration`):
+# the CI plaintext verify-python job, whose arm runs in a job of its own.
+test-except-grpc-arm: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	$(MAKE) typecheck
 	python -m pytest test/unit -v
@@ -48,7 +53,6 @@ test: build
 	$(MAKE) check-static
 	$(MAKE) test-soak
 	$(MAKE) test-verifiable-clients
-	$(MAKE) test-integration
 
 # Unit tests only (pytest test/unit). The gRPC multilanguage arm runs on Linux
 # only; this is what the macOS verify job runs.
@@ -126,7 +130,7 @@ test-integration:
 		printf '  rust/target/release/libconfluent_kafka.so\n'; \
 		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-python gRPC arm jobs.\n'; \
 		printf 'Run it natively on this host with: %smake test-integration-python-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \

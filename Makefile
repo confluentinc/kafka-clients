@@ -24,7 +24,7 @@ VENV = . venv/bin/activate
 	build-grpc-native-python build-grpc-native-c \
 	test-integration-python-native test-integration-c-native \
 	test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
-	test-c test-python test-rust-all-features \
+	test-c test-python test-c-except-grpc-arm test-python-except-grpc-arm test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
@@ -255,6 +255,16 @@ test-c-macos-docker: build-c
 test-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test)
 
+# test-c / test-python without the gRPC multilanguage arm, which the CI
+# plaintext verify jobs leave to the "plaintext gRPC arm" jobs (they run
+# test-integration-c / test-integration-python). `verify` still runs the arms,
+# through test-c / test-python.
+test-c-except-grpc-arm: build-c
+	$(MAKE) -C c $(ROOTS) test-unit
+
+test-python-except-grpc-arm: build-python
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-except-grpc-arm)
+
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
@@ -263,7 +273,10 @@ test-python-macos-docker: build-python
 
 verify: build format-check check-generated lint test check-bindings
 
-verify-c: test-c
+# The CI plaintext verify jobs. The gRPC multilanguage arm is not part of them:
+# it runs in the "plaintext gRPC arm" jobs (test-integration-c /
+# test-integration-python), like the ssl / sasl_ssl arm jobs.
+verify-c: test-c-except-grpc-arm
 
 # Also runs the gRPC multilanguage arm with the gRPC server as a native host
 # process (see test-integration-c-native), since the Linux container arm cannot
@@ -271,7 +284,7 @@ verify-c: test-c
 verify-c-macos-docker: test-c-macos-docker
 	$(MAKE) test-integration-c-native
 
-verify-python: test-python check-bindings
+verify-python: test-python-except-grpc-arm check-bindings
 	$(MAKE) test-integration-perf-python
 
 # macOS verify-python: Python unit tests, then the gRPC multilanguage arm with
