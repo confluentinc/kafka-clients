@@ -114,3 +114,33 @@ state:
   The scenario's un-revert is Actor 121's. Found by the Java-parity change of COMMENTS.121 item 5
   (owner decision 4, approved); the previous form of the test registered no listener and so never
   reached it.
+
+### 2. Rust core: after a failed `subscribe`, a `KafkaConsumer` keeps calling the previous listener
+
+- **Scenario** (described; no converted test exercises it): `subscribe(pattern, L1)` (or
+  `subscribe([t1], L1)`), then a `subscribe([t2], L2)` that fails after the background thread
+  processed its `TopicSubscriptionChangeEvent`, for example with the mixed-subscription-type
+  `IllegalStateException` after an `assign`, or with the event's timeout while the background
+  thread still processes it. Then a rebalance callback, or `close()` of a group member.
+- **Arms**: every arm, since the core decides it (`__rust`, and the bindings over it).
+- **Java 4.4**: one slot. `ApplicationEventProcessor#process(TopicSubscriptionChangeEvent)` calls
+  `SubscriptionState#subscribe(Set,Optional)`, which runs `registerRebalanceListener(listener)`
+  before `setSubscriptionType` throws, so after the failure the slot holds L2 (or nothing, for a
+  listener-less `subscribe([t2])`). Every invocation reads that slot:
+  `ConsumerRebalanceListenerInvoker` (`subscriptions.rebalanceListener()`),
+  `AsyncKafkaConsumer`'s `PartitionsAssignedEvent` handling and `runRebalanceCallbacksOnClose`
+  through the invoker. So later callbacks go to L2, and after a failed listener-less subscribe
+  `close()` calls no listener.
+- **Rust**: two slots. The background task runs the same `SubscriptionState::subscribe_with_topics`
+  (register first, then the type check), so its slot holds L2, but the app side invokes the
+  mirror `AsyncKafkaConsumer::rebalance_listener`, which `subscribe_internal_topics` and
+  `subscribe_to_regex` write only after the event completed `Ok`. After the failure the mirror
+  still holds L1: the background task queues the callback events (its slot `is_some()`), and the
+  app side runs them, and `run_rebalance_callbacks_on_close`, on L1.
+- **Impact**: low. It needs a failed subscribe followed by group activity on the same consumer.
+  When it happens, the callbacks reach a listener Java no longer calls, and a listener-less
+  failed subscribe leaves `close()` calling L1 where Java calls none. The bindings follow the
+  core: the Python binding keeps the failed subscribe's listener context alive until the consumer
+  is destroyed (`finding-1` commits), so making the core Java-faithful does not turn that path
+  into a use after free.
+- **State**: needs owner (core change outside this run). Found by Critic 120 round 6, item 2.
