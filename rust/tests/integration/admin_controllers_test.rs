@@ -47,12 +47,13 @@
 //!
 //! Java runs that test both through the brokers and through
 //! `bootstrap.controllers` (`@ValueSource(booleans = {true, false})` over
-//! `usingBootstrapControllers`). The broker arm is the two multilanguage
-//! scenarios below; the controller arm,
-//! [`test_unregister_controller_errors_through_bootstrap_controllers`], runs on
-//! the native client only, because the gRPC backends run in containers, which
-//! cannot reach the host-advertised controller listener
-//! (`KafkaCluster::bootstrap_controllers`).
+//! `usingBootstrapControllers`). The broker arm is the first two scenarios
+//! below; the controller arm is
+//! `test_unregister_controller_errors_through_bootstrap_controllers`, which
+//! connects each backend to a PLAINTEXT controller listener it can reach
+//! (`TestContext::bootstrap_controllers_for`: the host-advertised
+//! `CONTROLLERHOST` one, or `CONTROLLERCONTAINER`, advertised by container
+//! name, for a gRPC backend in a container).
 //!
 //! The **success** arm is not reachable on a pooled cluster: Java's
 //! `KRaftClusterTest.testUnregisterController` first shuts a controller down in a
@@ -71,8 +72,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::Error;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
-use crate::common::backend_factory::{AdminBackendFactory, RustNativeFactory};
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
 
@@ -238,25 +238,24 @@ async fn assert_active_controller_rejected<A: AdminBackend>(admin: &A, backend: 
 /// (a) and (b) through `bootstrap.controllers`. `unregisterController` uses
 /// `LeastLoadedBrokerOrActiveKController`, so the request goes to the active
 /// controller itself.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_unregister_controller_errors_through_bootstrap_controllers() {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+async fn unregister_controller_errors_through_bootstrap_controllers<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let bootstrap_controllers = ctx
-        .cluster()
-        .bootstrap_controllers()
-        .expect("a combined node publishes its controller listener")
+        .bootstrap_controllers_for(factory.needs_container_bootstrap())
+        .expect("a combined node publishes its controller listeners")
         .to_string();
-    // The controller listener is PLAINTEXT, whatever protocol the run selects.
+    // The controller listeners are PLAINTEXT, whatever protocol the run selects.
     let config = HashMap::from([(
         AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
         bootstrap_controllers,
     )]);
-    let factory = RustNativeFactory;
+    let backend = factory.name();
     let admin = factory
         .create(config)
         .await
-        .unwrap_or_else(|e| panic!("rust backend: create a bootstrap.controllers admin client: {e}"));
-    let backend = "rust (bootstrap.controllers)";
+        .unwrap_or_else(|e| panic!("{backend} backend: create a bootstrap.controllers admin client: {e}"));
 
     assert_unregistered_id_rejected(&admin, backend).await;
     assert_active_controller_rejected(&admin, backend).await;
@@ -264,7 +263,7 @@ async fn test_unregister_controller_errors_through_bootstrap_controllers() {
     admin
         .close(Some(Duration::from_secs(5)))
         .await
-        .unwrap_or_else(|e| panic!("{backend}: close: {e}"));
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
     ctx.cleanup().await;
 }
 
@@ -305,6 +304,10 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_unregister_controller_rejects_the_active_controller,
     unregister_controller_rejects_the_active_controller
+);
+multilanguage_admin_test!(
+    test_unregister_controller_errors_through_bootstrap_controllers,
+    unregister_controller_errors_through_bootstrap_controllers
 );
 multilanguage_admin_test!(
     test_unregister_controller_on_the_mock_client,
