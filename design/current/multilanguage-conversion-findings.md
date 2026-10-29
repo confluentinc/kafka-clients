@@ -120,38 +120,61 @@ state:
   - The test servers' comments are corrected in a harness commit.
   - Left for the owner: the core comment in `AsyncKafkaConsumer::unsubscribe` ("The retained
     listener is released by the next `subscribe(...)` ... or when the consumer is dropped") misses
-    `subscribe([])`, which keeps it, and `close()`, which releases it. It is shipped code outside
-    ruling 1's files, so it stays as it is.
+    `subscribe([])`, which keeps it, and `close()`, which releases it, and a failed `subscribe(...)`,
+    which leaves the app-side mirror as it is (finding #2). It is shipped code outside ruling 1's
+    files, so it stays as it is.
   - The scenario is back on every backend (Actor 121's un-revert). Found by the Java-parity change
     of COMMENTS.121 item 5 (owner decision 4, approved); the previous form of the test registered
     no listener and so never reached it.
 
-### 2. Rust core: after a failed `subscribe`, a `KafkaConsumer` keeps calling the previous listener
+### 2. Rust core: after a failed `subscribe`, a `KafkaConsumer` calls the listener the call did not register
 
-- **Scenario** (described; no converted test exercises it): `subscribe(pattern, L1)` (or
-  `subscribe([t1], L1)`), then a `subscribe([t2], L2)` that fails after the background thread
-  processed its `TopicSubscriptionChangeEvent`, for example with the mixed-subscription-type
-  `IllegalStateException` after an `assign`, or with the event's timeout while the background
-  thread still processes it. Then a rebalance callback, or `close()` of a group member.
+- **Scenario** (described; no converted test exercises it): a `subscribe` that fails after the
+  background thread processed its `TopicSubscriptionChangeEvent`, while the consumer stays in the
+  group. The clean reproduction:
+  1. `subscribe(pattern, L1)`, then poll until the consumer is assigned;
+  2. `subscribe([t2], L2)` (or `subscribe([t2])`): it fails by itself with the
+     mixed-subscription-type `IllegalStateException`, since a pattern and topics are two
+     subscription types, and the consumer keeps its pattern subscription and its membership;
+  3. a reassignment (a second member joins, or a new topic matches the pattern), polled.
+
+  A `subscribe` whose event times out while the background thread still processes it lands the
+  same way. (After `subscribe([t1], L1)` the type check cannot fail without an `unsubscribe()`
+  first, which leaves the group, so that setup leads to no rebalance callback.)
 - **Arms**: every arm, since the core decides it (`__rust`, and the bindings over it).
 - **Java 4.4**: one slot. `ApplicationEventProcessor#process(TopicSubscriptionChangeEvent)` calls
   `SubscriptionState#subscribe(Set,Optional)`, which runs `registerRebalanceListener(listener)`
-  before `setSubscriptionType` throws, so after the failure the slot holds L2 (or nothing, for a
-  listener-less `subscribe([t2])`). Every invocation reads that slot:
-  `ConsumerRebalanceListenerInvoker` (`subscriptions.rebalanceListener()`),
-  `AsyncKafkaConsumer`'s `PartitionsAssignedEvent` handling and `runRebalanceCallbacksOnClose`
-  through the invoker. So later callbacks go to L2, and after a failed listener-less subscribe
-  `close()` calls no listener.
-- **Rust**: two slots. The background task runs the same `SubscriptionState::subscribe_with_topics`
-  (register first, then the type check), so its slot holds L2, but the app side invokes the
-  mirror `AsyncKafkaConsumer::rebalance_listener`, which `subscribe_internal_topics` and
-  `subscribe_to_regex` write only after the event completed `Ok`. After the failure the mirror
-  still holds L1: the background task queues the callback events (its slot `is_some()`), and the
-  app side runs them, and `run_rebalance_callbacks_on_close`, on L1.
+  before `setSubscriptionType` throws, so after the failure the slot holds what the failed call
+  carried: L2, or nothing for a listener-less call. Every invocation reads that slot:
+  `ConsumerRebalanceListenerInvoker` (`subscriptions.rebalanceListener()`), `AsyncKafkaConsumer`'s
+  `process(PartitionsAssignedEvent)` (`subscriptions.rebalanceListener().isEmpty()`), and
+  `runRebalanceCallbacksOnClose` through the invoker. `ConsumerNetworkThread` processes an event
+  whatever its deadline, so a timed-out subscribe lands too.
+- **Rust**: two slots, read for different things.
+  - The background slot: `process_topic_subscription_change` runs the same
+    `SubscriptionState::subscribe_with_topics` (register first, then the type check), so it holds
+    what the failed call carried. It is read only for presence, and only for revoke, lost and the
+    unsubscribe leave
+    (`AbstractMembershipManager::enqueue_rebalance_callback_with_ack_through_application_events`
+    queues those events only when it holds a listener). `PartitionsAssigned` is queued whatever it
+    holds (`enqueue_partitions_assigned_event`).
+  - The app-side mirror `AsyncKafkaConsumer::rebalance_listener`: every invocation reads it (the
+    `PartitionsRemoved` and `PartitionsAssigned` handling in `process_background_events`, and
+    `run_rebalance_callbacks_on_close`). `subscribe_internal_topics` and `subscribe_to_regex` write
+    it only after the event completed `Ok`, so after the failure it still holds the earlier
+    listener.
+- **What each one calls afterwards**:
+
+  | Listener before | The failed call | Java | Rust |
+  |---|---|---|---|
+  | L1 | `subscribe([t2], L2)` | L2 gets every callback | L1 gets every callback |
+  | L1 | `subscribe([t2])` | no listener runs | L1 gets `on_partitions_assigned` on every assignment, and the close callback, but never a revoke, a lost or the unsubscribe leave (the background slot is empty) |
+  | none | `subscribe([t2], L2)` | L2 gets every callback | no listener runs (the revoke and lost events are queued, the mirror is `None`, and the app side completes them without a call) |
 - **Impact**: low. It needs a failed subscribe followed by group activity on the same consumer.
-  When it happens, the callbacks reach a listener Java no longer calls, and a listener-less
-  failed subscribe leaves `close()` calling L1 where Java calls none. The bindings follow the
-  core: the Python binding keeps the failed subscribe's listener context alive until the consumer
-  is destroyed (`finding-1` commits), so making the core Java-faithful does not turn that path
-  into a use after free.
-- **State**: needs owner (core change outside this run). Found by Critic 120 round 6, item 2.
+  Then the callbacks reach a listener Java no longer calls (row 1), arrive unpaired, assigned
+  without the matching revoked (row 2), or do not run at all (row 3). The bindings follow the core:
+  the Python binding keeps the failed subscribe's listener context alive until the consumer is
+  destroyed (`finding-1` commits), so making the core Java-faithful does not turn that path into a
+  use after free.
+- **State**: needs owner (core change outside this run). Found by Critic 120 round 6, item 2;
+  rows 2 and 3 and the reproduction by Critic 120 round 7, item 2.
