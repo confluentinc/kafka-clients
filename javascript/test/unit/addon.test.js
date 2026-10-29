@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const kafka = require('../..');
+const native = require('../../lib/_native');
 
 test('the addon loads and links libconfluent_kafka', () => {
-  assert.equal(kafka._probe(), true);
+  assert.equal(native.probe(), true);
 });

@@ -26,10 +26,36 @@
     {
       "target_name": "confluent_kafka_js",
       "sources": [
-        "src/addon.c"
+        "src/addon.c",
+        "src/error.c",
+        "src/producer.c",
+        "src/record.c"
       ],
       "include_dirs": [
-        "<(ck_include_dir)"
+        "<(ck_include_dir)",
+        "src"
+      ],
+      "actions": [
+        {
+          # KafkaError.name: each kafka_common_Error_e value's enumerator name,
+          # read from the header this addon is built against.
+          "action_name": "error_names",
+          "inputs": [
+            "scripts/gen_error_names.js",
+            "scripts/header.js",
+            "<(ck_include_dir)/confluent_kafka_bindings.h"
+          ],
+          "outputs": [
+            "<(INTERMEDIATE_DIR)/error_names.c"
+          ],
+          "action": [
+            "node",
+            "scripts/gen_error_names.js",
+            "<(ck_include_dir)/confluent_kafka_bindings.h",
+            "<(INTERMEDIATE_DIR)/error_names.c"
+          ],
+          "process_outputs_as_sources": 1
+        }
       ],
       "defines": [
         "NAPI_VERSION=8"

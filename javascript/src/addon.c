@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Module initialisation of the Node-API addon `confluent_kafka_js`: the
-// instance data and the probe. The public JS
+// instance data, the probe and the producer's native functions. The public JS
 // surface lives in lib/; this module exports only what lib/ calls.
 
 #include <stdio.h>
@@ -54,11 +54,13 @@ static napi_value js_probe(napi_env env, napi_callback_info info) {
     kafka_common_Error_t* ffi_err = NULL;
     kafka_Map_t* map = NULL;
     kafka_common_Error_t* err = (map = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err));
-    if (err == NULL) err = (kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err));
     if (err != NULL) {
-        kafka_common_Error_destroy_err(err, &ffi_err);
-        kafka_common_Error_destroy_err(ffi_take(&ffi_err), &ffi_err);
-        napi_throw_error(env, NULL, "libconfluent_kafka probe failed");
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    err = (kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
         return NULL;
     }
     napi_value result;
@@ -79,9 +81,10 @@ static napi_value addon_init(napi_env env, napi_value exports) {
     }
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
+        {"setFactories", NULL, js_set_factories, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
-    return exports;
+    return producer_init(env, exports);
 }
 
 NAPI_MODULE_INIT() {
