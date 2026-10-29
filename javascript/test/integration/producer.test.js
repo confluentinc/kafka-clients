@@ -223,29 +223,50 @@ test('a Buffer reused after each awaited send keeps every record value', { skip:
   }
 });
 
-test('a loop awaiting sends taken at once lets the event loop and the callbacks run', { skip: SKIP, timeout: 300000 }, async () => {
-  const topic = freshTopic('yield');
+// Watches the event loop during a send loop: `turn()` counts the sends
+// between two of its turns (a setImmediate that reschedules itself), which is
+// bounded whatever the load, unlike a timer's gap. One turn is due at least
+// after FAST_PATH_YIELD_EVERY + 1 sends taken at once, so two consecutive
+// turns are at most about 2 x 1001 sends apart.
+function eventLoopWatch() {
+  const watch = { turns: 0, sends: 0, maxSendsPerTurn: 0, running: true };
+  const turn = () => {
+    if (!watch.running) return;
+    watch.turns++;
+    watch.maxSendsPerTurn = Math.max(watch.maxSendsPerTurn, watch.sends);
+    watch.sends = 0;
+    setImmediate(turn);
+  };
+  setImmediate(turn);
+  watch.stop = () => {
+    watch.running = false;
+    watch.maxSendsPerTurn = Math.max(watch.maxSendsPerTurn, watch.sends);
+  };
+  return watch;
+}
+const MAX_SENDS_PER_TURN = 2 * 1001 + 64;
+
+async function warmedProducer(what) {
+  const topic = freshTopic(what);
   const producer = new KafkaProducer({ 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 5 });
+  // Warmed: the topic's metadata is cached, so the producer takes every
+  // record at once and no send() suspends on its own.
+  await (await producer.send(new ProducerRecord({ topic, partition: 0, value: 'warm' }))).get();
+  return { topic, producer };
+}
+
+test('a loop awaiting sends taken at once lets the event loop and the callbacks run', { skip: SKIP, timeout: 300000 }, async () => {
+  const { topic, producer } = await warmedProducer('yield');
   try {
-    // Warmed: the topic's metadata is cached, so the producer takes every
-    // record at once and no send() suspends on its own.
-    await (await producer.send(new ProducerRecord({ topic, partition: 0, value: 'warm' }))).get();
     const SENDS = 200000;
     const value = Buffer.alloc(100, 0x78);
-    let ticks = 0;
-    let maxGap = 0;
-    let last = Date.now();
-    const timer = setInterval(() => {
-      const now = Date.now();
-      maxGap = Math.max(maxGap, now - last);
-      last = now;
-      ticks++;
-    }, 10);
+    const watch = eventLoopWatch();
     let callbacks = 0;
     let nested = null;
     const rssBefore = process.memoryUsage().rss;
     let rssPeak = rssBefore;
     for (let i = 0; i < SENDS; i++) {
+      watch.sends++;
       await producer.send(new ProducerRecord({ topic, partition: 0, value }), (m, error) => {
         assert.equal(error, null);
         callbacks++;
@@ -256,18 +277,94 @@ test('a loop awaiting sends taken at once lets the event loop and the callbacks 
       if (i % 10000 === 0) rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
     }
     const callbacksDuringLoop = callbacks;
-    const ticksDuringLoop = ticks;
-    const gapDuringLoop = Math.max(maxGap, Date.now() - last);
-    clearInterval(timer);
-    // The timer kept firing and the delivery callbacks ran while the loop sent:
-    // their backlog stays bounded instead of growing with the run.
-    assert.ok(ticksDuringLoop > 0, 'the timer never fired during the loop');
-    assert.ok(gapDuringLoop < 200, `the timer was starved for ${gapDuringLoop} ms`);
+    watch.stop();
+    // The event loop kept turning and the delivery callbacks ran while the
+    // loop sent: their backlog stays bounded instead of growing with the run.
+    assert.ok(watch.turns > 0, 'the event loop never turned during the loop');
+    assert.ok(
+      watch.maxSendsPerTurn <= MAX_SENDS_PER_TURN,
+      `${watch.maxSendsPerTurn} sends ran between two event-loop turns`,
+    );
     assert.ok(callbacksDuringLoop > SENDS / 2, `only ${callbacksDuringLoop} of ${SENDS} callbacks ran during the loop`);
     assert.ok(rssPeak - rssBefore < 300e6, `RSS grew by ${Math.round((rssPeak - rssBefore) / 1e6)} MB`);
     assert.ok(nested !== null);
     const nestedMetadata = await (await nested).get();
     assert.equal(nestedMetadata.topic, topic);
+    await producer.flush();
+    assert.equal(callbacks, SENDS);
+  } finally {
+    await producer.close();
+  }
+});
+
+test('a loop awaiting one send in seven lets the event loop run', { skip: SKIP, timeout: 300000 }, async () => {
+  // 7 divides 1001 (the yield period when only one send per period waits for
+  // the turn), so a turn given to a fire-and-forget send would never reach
+  // the awaited one.
+  const { topic, producer } = await warmedProducer('yield-seven');
+  try {
+    const ITERATIONS = 30000;
+    const L = 7;
+    const value = Buffer.alloc(100, 0x78);
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 1);
+    const watch = eventLoopWatch();
+    let callbacks = 0;
+    const callback = (m, error) => {
+      assert.equal(error, null);
+      callbacks++;
+    };
+    const fired = [];
+    for (let i = 0; i < ITERATIONS; i++) {
+      for (let j = 0; j < L; j++) {
+        watch.sends++;
+        const sent = producer.send(new ProducerRecord({ topic, partition: 0, value }), callback);
+        if (j === 0) await sent;
+        else fired.push(sent);
+      }
+    }
+    const ticksDuringLoop = ticks;
+    watch.stop();
+    clearInterval(timer);
+    assert.ok(ticksDuringLoop > 0, 'the timer never fired during the loop');
+    assert.ok(watch.turns > 0, 'the event loop never turned during the loop');
+    assert.ok(
+      watch.maxSendsPerTurn <= MAX_SENDS_PER_TURN,
+      `${watch.maxSendsPerTurn} sends ran between two event-loop turns`,
+    );
+    await Promise.all(fired);
+    await producer.flush();
+    assert.equal(callbacks, ITERATIONS * L);
+  } finally {
+    await producer.close();
+  }
+});
+
+test('send() runs the delivery callbacks already due before handing its record over', { skip: SKIP, timeout: 300000 }, async () => {
+  const { topic, producer } = await warmedProducer('pump');
+  try {
+    const SENDS = 50000;
+    let inSend = false;
+    let callbacks = 0;
+    let callbacksInsideSend = 0;
+    const callback = (m, error) => {
+      assert.equal(error, null);
+      callbacks++;
+      if (inSend) callbacksInsideSend++;
+    };
+    for (let i = 0; i < SENDS; i++) {
+      inSend = true;
+      let sent;
+      try {
+        sent = producer.send(new ProducerRecord({ topic, partition: 0, value: `v${i}` }), callback);
+      } finally {
+        inSend = false;
+      }
+      await sent;
+    }
+    // Without the pump, callbacks run only from the threadsafe function's
+    // call_js, outside every send() call.
+    assert.ok(callbacksInsideSend > 0, 'no delivery callback ran inside a send() call');
     await producer.flush();
     assert.equal(callbacks, SENDS);
   } finally {

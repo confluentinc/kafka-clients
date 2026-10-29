@@ -34,15 +34,17 @@ const NEGATIVE_TIMEOUT_MESSAGE = 'The timeout cannot be negative.';
 // awaiting it runs only microtasks: a loop that awaits such sends never returns
 // to the event loop, where timers, I/O and the threadsafe function's callback
 // drain run, and every record's delivery state piles up until it ends. After
-// this many such sends in a row, the next one's Promise settles from
-// setImmediate, giving the event loop one turn (Python's
-// AsyncProducer._FAST_PATH_YIELD_EVERY). Its record is handed over at once all
-// the same: only the resolution waits.
+// this many such sends since the event loop last turned, every further one
+// settles its Promise only once a turn has run: the first schedules one
+// setImmediate, which settles them all in order and restarts the count
+// (Python's AsyncProducer._FAST_PATH_YIELD_EVERY). Whichever of them the caller
+// awaits, its await then waits for that turn. Their records are handed over at
+// once all the same: only the resolutions wait.
 const FAST_PATH_YIELD_EVERY = 1000;
-// Between those turns, every this many such sends in a row (and on the first
-// after a queued hand-over) send() runs the callback drain itself on entry, so
-// delivery callbacks run and their state is released in batches of at most
-// this many records (Python's AsyncProducer._PUMP_EVERY).
+// Every this many such sends (the count goes on during the deferral), send()
+// runs the callback drain itself on entry, so delivery callbacks run and their
+// state is released in batches of at most this many records (Python's
+// AsyncProducer._PUMP_EVERY).
 const PUMP_EVERY = 64;
 
 /**
@@ -61,8 +63,11 @@ class KafkaProducer {
   // The native producer was destroyed by a completed close.
   #destroyed = false;
   #closing = null;
-  // Sends in a row whose hand-over completed inside the call.
+  // Sends whose hand-over completed inside the call since the event loop last
+  // turned (as far as this producer saw: the deferral's setImmediate).
   #fastPathSends = 0;
+  // Settlements waiting for the event-loop turn, or null when none is scheduled.
+  #deferred = null;
 
   /**
    * A producer is instantiated by providing a set of key-value pairs as
@@ -105,10 +110,11 @@ class KafkaProducer {
    * started before they resolved does not wait for them.
    *
    * A loop awaiting sends the producer takes at once still lets the event loop
-   * run: after 1000 such sends in a row, the next one resolves only after one
-   * event-loop turn (its record is handed over at once all the same), and
-   * every 64 `send()` runs the delivery callbacks already due before handing
-   * its record over.
+   * run: after 1000 such sends in a row, such sends resolve only after one
+   * event-loop turn, whichever of them is awaited (their records are handed
+   * over at once all the same), and every 64th runs the delivery callbacks
+   * already due before handing its record over, so a callback may run inside
+   * a `send()` call.
    *
    * A Buffer or Uint8Array key or value is borrowed, not copied, until the
    * returned Promise settles: it must not be modified or detached (transferred)
@@ -133,8 +139,6 @@ class KafkaProducer {
       // A callback it ran may have closed the producer.
       if (this.#closed) throw illegalState(CLOSED_MESSAGE);
     }
-    const yieldTurn = this.#fastPathSends >= FAST_PATH_YIELD_EVERY;
-    if (yieldTurn) this.#fastPathSends = 0;
     const args = record._toNative();
     const future = KafkaFuture._create();
     let resolve;
@@ -153,13 +157,12 @@ class KafkaProducer {
     };
     const onHandover = (error) => {
       if (!inCall) {
-        // Queued: the caller's await already gave the event loop its turns.
-        this.#fastPathSends = 0;
+        // Queued. Its completion may run in another send()'s pump, with no
+        // event-loop turn since the count started: the count stays.
         settle(error);
-      } else if (yieldTurn) {
-        setImmediate(settle, error);
+      } else if (this.#fastPathSends++ >= FAST_PATH_YIELD_EVERY) {
+        this.#deferSettlement(settle, error);
       } else {
-        this.#fastPathSends++;
         settle(error);
       }
     };
@@ -183,6 +186,21 @@ class KafkaProducer {
       inCall = false;
     }
     return handedOver;
+  }
+
+  // Settles `settle(error)` once the event loop has turned: one setImmediate
+  // per turn settles every deferred send in order and restarts the count.
+  #deferSettlement(settle, error) {
+    if (this.#deferred === null) {
+      this.#deferred = [];
+      setImmediate(() => {
+        const deferred = this.#deferred;
+        this.#deferred = null;
+        this.#fastPathSends = 0;
+        for (let i = 0; i < deferred.length; i += 2) deferred[i](deferred[i + 1]);
+      });
+    }
+    this.#deferred.push(settle, error);
   }
 
   /**
