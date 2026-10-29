@@ -16,10 +16,11 @@
 #
 #
 # Packages the tested wheels of a Python release tag build and publishes them
-# to one index, for the "Release (Python): packaging" and "Release (Python):
-# publish to ..." blocks of semaphore.yml and publish-pypi.yml. Every version
-# goes to Test PyPI first; a final version then goes to PyPI, after its wheels
-# have passed the post-publish checks on Test PyPI.
+# to one index, for the "Release (Python): packaging" block of semaphore.yml
+# and the "Release (Python): publish to ..." blocks of publish-testpypi.yml
+# and publish-pypi.yml, the tag build's manual promotions. Every version goes
+# to Test PyPI first; a final version then goes to PyPI, after its wheels have
+# passed the post-publish checks on Test PyPI.
 #
 # Usage, from the repository root of a python/v<version> tag build:
 #   .semaphore/publish-wheels.sh package
@@ -353,7 +354,7 @@ PYTHON
     # so this check, not the order of the blocks, is what guarantees it.
     if [ "${PYPI_INDEX}" = https://pypi.org ]; then
         artifact pull workflow pypi/test.pypi.org/verified --destination "${work}/test-pypi-verified" --force >/dev/null \
-            || refuse "${PYPI_PACKAGE} ${PACKAGE_VERSION} has not passed the post-publish checks on Test PyPI in this workflow; the Test PyPI blocks of this tag build must pass first"
+            || refuse "${PYPI_PACKAGE} ${PACKAGE_VERSION} has not passed the post-publish checks on Test PyPI in this workflow; the \"Publish to Test PyPI\" promotion of this tag build must pass first"
         cmp -s <(sort "${work}/upload.sha256") <(sort "${work}/test-pypi-verified") \
             || refuse "the wheels to upload to PyPI are not the wheels that passed the checks on Test PyPI"
     fi

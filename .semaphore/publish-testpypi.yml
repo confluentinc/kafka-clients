@@ -1,0 +1,106 @@
+version: v1.0
+name: publish-testpypi
+
+# The manual "Publish to Test PyPI" promotion of semaphore.yml. It publishes a
+# Python version to Test PyPI from the build of its python/v<version> tag, with
+# exactly the wheels that build's "Release (Python): packaging" block recorded
+# (see the Python release blocks of semaphore.yml), and checks them there. Its
+# blocks run on the tag of any Python version, final or not; the tag pattern
+# must stay the pattern of semaphore.yml. For a final version, the "Publish to
+# PyPI" promotion of this pipeline (publish-pypi.yml) then publishes the same
+# wheels to PyPI once the checks here have passed.
+#
+# A promotion can be started even from a failed pipeline, so the publish job
+# does not rely on the result of the build it was promoted from:
+# publish-wheels.sh refuses, before the token is loaded, unless the packaging
+# block recorded these wheels in this workflow and the tag still points at
+# the commit it built.
+#
+# To resume an interrupted publish, rerun the failed blocks of this pipeline.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 2
+
+global_job_config:
+  env_vars:
+    # As in semaphore.yml: [project] name in python/pyproject.toml.
+    - name: PYPI_PACKAGE
+      value: confluent-kafka
+  prologue:
+    commands:
+      - checkout
+      # As in semaphore.yml: the `python` that installs twine.
+      - sem-version python 3.10
+
+blocks:
+  - name: "Release (Python): publish to Test PyPI"
+    # Publishes the wheels recorded by the packaging block of the tag build.
+    # publish-wheels.sh repeats the tag check and checks that the version is
+    # new on Test PyPI before the token is loaded.
+    dependencies: []
+    run:
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      env_vars:
+        - name: PYPI_INDEX
+          value: https://test.pypi.org
+      jobs:
+        - name: "twine upload (Test PyPI)"
+          commands:
+            - bash .semaphore/publish-wheels.sh prepare
+            - bash .semaphore/publish-wheels.sh upload
+
+  - name: "Release (Python): post-publish checksum (Test PyPI)"
+    # Checks that Test PyPI lists every uploaded wheel, not yanked, with the
+    # checksum of the uploaded bytes, serves exactly those bytes for download,
+    # and lists no other file for the version. This block and the smoke test
+    # below it load no token and repeat none of the release checks. A failure
+    # stops the release before PyPI; release a fixed version.
+    dependencies: ["Release (Python): publish to Test PyPI"]
+    run:
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 20
+    task:
+      jobs:
+        - name: "Test PyPI index and downloads match the upload"
+          commands:
+            # Written by the publish job after a successful upload. If it is
+            # absent, nothing was published from this workflow and the job
+            # fails.
+            - artifact pull workflow pypi/test.pypi.org/uploaded.sha256 --destination /tmp/uploaded.sha256
+            - /usr/bin/python3 .semaphore/check-published-wheels.py https://test.pypi.org "${PYPI_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#python/v}" /tmp/uploaded.sha256
+
+  - name: "Release (Python): post-publish smoke test (Test PyPI, Linux amd64)"
+    # Installs the released version from Test PyPI with each supported Python
+    # version, in each Linux distribution that the wheels were tested in, and
+    # runs the import and smoke tests (.semaphore/test-wheels.sh --index). It
+    # waits for the checksum block, which waits until the index lists every
+    # wheel. Once they pass, it records the wheels as verified on Test PyPI,
+    # which "Publish to PyPI" requires.
+    dependencies: ["Release (Python): post-publish checksum (Test PyPI)"]
+    run:
+      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 40
+    task:
+      jobs:
+        - name: "Install from Test PyPI (Linux amd64)"
+          commands:
+            - sh .semaphore/test-wheels.sh --index https://test.pypi.org/simple/ "${SEMAPHORE_GIT_TAG_NAME#python/v}"
+            - artifact pull workflow pypi/test.pypi.org/uploaded.sha256 --destination /tmp/verified.sha256
+            - artifact push workflow /tmp/verified.sha256 --destination pypi/test.pypi.org/verified --force
+
+promotions:
+  # Manual. Publishes a final Python version to PyPI (publish-pypi.yml). Run it
+  # once the blocks of this pipeline have passed. Its blocks are skipped on the
+  # tag of any other version, and its publish job refuses unless the wheels
+  # passed the Test PyPI checks in this workflow, so starting it from a failed
+  # or unrelated pipeline publishes nothing.
+  - name: Publish to PyPI
+    pipeline_file: publish-pypi.yml
