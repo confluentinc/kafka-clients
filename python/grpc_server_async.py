@@ -38,7 +38,6 @@ BackendPool waits for.
 """
 
 import asyncio
-import datetime as _dt
 import logging
 import os
 import sys
@@ -79,6 +78,7 @@ from grpc_translate import (  # noqa: E402
     ListenerAction,
     LoggingRebalanceListener,
     _binding_error,
+    _duration_of_ms,
     _consumer_close_options,
     _consumer_subscribe_kwargs,
     _consumer_timeout,
@@ -392,7 +392,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
     async def CloseTimeout(self, request, context):
         # AsyncKafkaProducer.close(*, timeout=...) is Java's close(Duration), the
         # FFI's close_with_timeout. timeout_ms is milliseconds; Duration is seconds.
-        timeout = _dt.timedelta(milliseconds=request.timeout_ms)
+        timeout = _duration_of_ms(request.timeout_ms)
         return await self._close(request.producer_id, timeout)
 
     async def GetCallbackLog(self, request, context):
@@ -504,7 +504,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         if consumer is None:
             return cpb.PollResponse(error=self._unknown_consumer(request.consumer_id))
         try:
-            records = await consumer.poll(timeout=request.timeout_ms / 1000.0)
+            records = await consumer.poll(timeout=_duration_of_ms(request.timeout_ms))
         except Exception as e:  # noqa: BLE001
             # As in _run_status: a binding error is the reply's, anything else
             # is re-raised.
