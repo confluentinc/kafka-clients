@@ -127,20 +127,27 @@ state:
     of COMMENTS.121 item 5 (owner decision 4, approved); the previous form of the test registered
     no listener and so never reached it.
 
-### 2. Rust core: after a failed `subscribe`, a `KafkaConsumer` calls the listener the call did not register
+### 2. Rust core: after a failed `subscribe`, a `KafkaConsumer` calls the listener from before the call, not the one the call left registered
 
 - **Scenario** (described; no converted test exercises it): a `subscribe` that fails after the
-  background thread processed its `TopicSubscriptionChangeEvent`, while the consumer stays in the
-  group. The clean reproduction:
+  background thread processed its `TopicSubscriptionChangeEvent` (or
+  `TopicRe2JPatternSubscriptionChangeEvent`), while the consumer stays in the group. The clean
+  reproduction:
   1. `subscribe(pattern, L1)`, then poll until the consumer is assigned;
   2. `subscribe([t2], L2)` (or `subscribe([t2])`): it fails by itself with the
      mixed-subscription-type `IllegalStateException`, since a pattern and topics are two
      subscription types, and the consumer keeps its pattern subscription and its membership;
   3. a reassignment (a second member joins, or a new topic matches the pattern), polled.
 
-  A `subscribe` whose event times out while the background thread still processes it lands the
-  same way. (After `subscribe([t1], L1)` the type check cannot fail without an `unsubscribe()`
-  first, which leaves the group, so that setup leads to no rebalance callback.)
+  The reverse order fails the same way: after `subscribe([t1], L1)`, `subscribe(pattern, L2)` (or
+  `subscribe(pattern)`) fails the type check by itself and the consumer keeps `[t1]` and its
+  membership (`SubscriptionState#subscribe(SubscriptionPattern,Optional)` and the core's
+  `subscribe_with_pattern` also register first, and `subscribe_to_regex` writes the mirror only
+  after `Ok`). The table holds with that call as the failed call. A `subscribe` whose event times
+  out while the background thread still processes it lands the same way. Only an `assign` in
+  between needs an `unsubscribe()` first, which leaves the group; even then `close()` runs Java
+  4.4's stale-snapshot `onPartitionsLost` (finding #1), Java on the slot, the core on the mirror,
+  so on the wrong listener too.
 - **Arms**: every arm, since the core decides it (`__rust`, and the bindings over it).
 - **Java 4.4**: one slot. `ApplicationEventProcessor#process(TopicSubscriptionChangeEvent)` calls
   `SubscriptionState#subscribe(Set,Optional)`, which runs `registerRebalanceListener(listener)`
