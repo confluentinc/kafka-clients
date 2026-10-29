@@ -51,7 +51,7 @@ class UpdateFeaturesResult(_Result, Generic[KindT]):
         """Java's package-private ``UpdateFeaturesResult(futures)``.
 
         :param futures: a map from feature name to future, which can be used to check
-        the status of individual feature updates.
+            the status of individual feature updates.
         """
         result = cls.__new__(cls)
         result._futures = None if futures is None else dict(futures)

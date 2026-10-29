@@ -22,7 +22,7 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 # repository root's Makefile activates its venv first) and, except
 # `check-static` and `test-soak`, expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
-.PHONY: init build test test-unit typecheck check-static test-soak test-verifiable-clients \
+.PHONY: init build test test-unit typecheck check-static docs test-soak test-verifiable-clients \
 	test-integration test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
 
@@ -78,6 +78,14 @@ typecheck:
 # only, so they need neither the Rust library nor the C extension built.
 check-static:
 	python -m pytest test/static -v
+
+# The API reference (docs/, the `docs` extra): Sphinx autodoc over this source
+# tree with the C extension mocked, so it needs neither the Rust library nor the
+# C extension built. Signatures come from the stubs a type checker reads (a
+# module's .pyi, a class's `if TYPE_CHECKING:` branch).
+# -W fails the build on any warning, a signature showing MISSING included.
+docs:
+	python -m sphinx -W --keep-going -b html docs docs/_build/html
 
 # Soak client unit tests (soak/test): the payload round-trip, the
 # duplicate/gap accounting and the startup config validation. Pure logic, no
@@ -196,4 +204,4 @@ grpc-native:
 		$(GRPC_PROTO_DIR)/admin_service.proto $(GRPC_PROTO_DIR)/chaos_service.proto
 
 clean:
-	rm -rf build *.egg-info __pycache__ *.so producer_service_pb2*.py
+	rm -rf build *.egg-info __pycache__ *.so producer_service_pb2*.py docs/_build docs/api
