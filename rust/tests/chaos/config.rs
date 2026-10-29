@@ -426,28 +426,20 @@ impl ChaosConfig {
 
         // `--security-protocol`: which broker listener every client uses. A
         // gRPC (python / c) backend whose server runs in a sibling container
-        // reaches the broker through its container-network listeners, which
-        // exist for PLAINTEXT, SSL and SASL_SSL but not SASL_PLAINTEXT. A
-        // natively launched server uses the host listeners like the Rust
-        // client, so every protocol is available to it.
+        // reaches the broker through the container-network twin of that
+        // listener, which every protocol has; a natively launched server uses
+        // the host listeners like the Rust client.
         let security_protocol = {
             let raw = env_str(var, "CHAOS_SECURITY_PROTOCOL", "plaintext");
-            let protocol = SecurityProtocol::parse(&raw).ok_or_else(|| {
+            SecurityProtocol::parse(&raw).ok_or_else(|| {
                 format!("CHAOS_SECURITY_PROTOCOL must be plaintext, ssl, sasl_plaintext or sasl_ssl, got '{raw}'")
-            })?;
-            if let Some(spec) = workloads.iter().find(|w| w.backend.is_grpc())
-                && grpc_backends_use_containers(lookup)?
-                && protocol == SecurityProtocol::SaslPlaintext
-            {
-                return Err(format!(
-                    "--security-protocol sasl_plaintext is not supported for '{}' with \
-                     MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through \
-                     their container-network listeners, which exist for plaintext, ssl and sasl_ssl only",
-                    spec.label()
-                ));
-            }
-            protocol
+            })?
         };
+        // A gRPC workload's backend mode is checked up front, as
+        // `backend_pool` panics on a value it does not know.
+        if workloads.iter().any(|w| w.backend.is_grpc()) {
+            grpc_backends_use_containers(lookup)?;
+        }
 
         // Faults, librdkafka-style: broker rolling is implicit (default-on)
         // unless `--no-broker-roll`. Other faults are layered on via valued
@@ -1305,13 +1297,13 @@ mod tests {
     }
 
     /// A gRPC-backed workload takes the run's security protocol like a Rust
-    /// one. Only SASL_PLAINTEXT with a containerised server is rejected: the
-    /// brokers' container-network listeners cover PLAINTEXT, SSL and SASL_SSL.
+    /// one, in either backend mode: the brokers' container-network listeners
+    /// cover all four protocols, as the host ones do.
     #[test]
     fn grpc_workloads_accept_every_protocol_their_listeners_cover() {
         let workloads = ("CHAOS_WORKLOADS", "producer:python,consumer:c");
         for mode in ["container", "native"] {
-            for protocol in ["plaintext", "ssl", "sasl_ssl"] {
+            for protocol in ["plaintext", "ssl", "sasl_plaintext", "sasl_ssl"] {
                 let cfg = parse(&[
                     workloads,
                     ("CHAOS_SECURITY_PROTOCOL", protocol),
@@ -1321,25 +1313,6 @@ mod tests {
                 assert_eq!(cfg.security_protocol, SecurityProtocol::parse(protocol).unwrap());
             }
         }
-
-        let native = parse(&[
-            workloads,
-            ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-            ("MULTILANG_BACKEND_MODE", "native"),
-        ])
-        .expect("a host-process server uses the host SASL_PLAINTEXT listener");
-        assert_eq!(native.security_protocol, SecurityProtocol::SaslPlaintext);
-
-        assert_eq!(
-            parse_err(&[
-                workloads,
-                ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-                ("MULTILANG_BACKEND_MODE", "container"),
-            ]),
-            "--security-protocol sasl_plaintext is not supported for 'producer-python-1' with \
-             MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through their \
-             container-network listeners, which exist for plaintext, ssl and sasl_ssl only"
-        );
 
         // Rust-only runs never consult the backend mode.
         parse(&[
