@@ -71,11 +71,12 @@ test: build
 # joining a job that has no image for it.
 #
 # The feature stays ON rather than being dropped, because it is the *compile*
-# that matters: with `multilanguage-tests` off, the whole gRPC harness
-# (`backend_pool`, `backend_factory`, `multilanguage_consumer`, the two test
-# macros) is not built at all, and silently rots whenever the client API
-# changes. Compiling it here catches that immediately, for the cost of one
-# compile and no test runtime.
+# that matters: with `multilanguage-tests` off, the gRPC harness
+# (`backend_pool`, the gRPC factories, `multilanguage_consumer`,
+# `multilanguage_producer`) is not built, and the test macros expand only their
+# `__rust` arms, so the harness silently rots whenever the client API changes.
+# Compiling it here catches that immediately, for the cost of one compile and no
+# test runtime.
 #
 # Only the non-Rust backends are filtered, and only at runtime: they are the
 # ones needing prebuilt gRPC images and a container per test. The CI "gRPC arm"
