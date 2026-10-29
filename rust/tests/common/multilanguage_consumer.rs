@@ -489,7 +489,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 Some(proto::topic_partition_list_response::Result::Partitions(list)) => {
                     list.partitions.into_iter().map(tp_from_proto).collect()
                 },
-                _ => HashSet::new(),
+                Some(proto::topic_partition_list_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed assignment: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -507,7 +510,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 .into_inner();
             match resp.result {
                 Some(proto::subscription_response::Result::Topics(list)) => list.values.into_iter().collect(),
-                _ => HashSet::new(),
+                Some(proto::subscription_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed subscription: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -527,7 +533,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 Some(proto::topic_partition_list_response::Result::Partitions(list)) => {
                     list.partitions.into_iter().map(tp_from_proto).collect()
                 },
-                _ => HashSet::new(),
+                Some(proto::topic_partition_list_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed paused: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
