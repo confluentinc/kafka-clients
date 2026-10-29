@@ -84,6 +84,8 @@
 //!   single-broker `Type::Kraft` cluster, stops the broker)
 //! - `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance` (4.4,
 //!   45c4bdc48a) → `test_async_static_member_close_with_leave_group_triggers_rebalance`
+//! - `testAsyncConsumerUnsubscribeDoesNotCommitOffsetsWithAutoCommitEnabled`
+//!   (KAFKA-20119) → `test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commit_enabled`
 //!
 //! ## Translated on both assignment intervals (KIP-1263, KAFKA-20291)
 //!
