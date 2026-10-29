@@ -110,8 +110,10 @@ impl ListenerRegistration {
         // SAFETY: `method` is one of the method pointers registered with `self.self_` through
         // `kafka_consumer_ConsumerRebalanceListener_new` (every caller passes a field of `self` or
         // `lost_or_revoked`), whose rustdoc has the caller keep `self_` alive until the handle is
-        // destroyed and, once passed to a `subscribe_*`, until the next `subscribe_*`,
-        // `unsubscribe` or the consumer's destruction releases it. A registration is copied only
+        // destroyed and, once passed to a `subscribe_*`, until a later successful `subscribe_*`
+        // replaces it (on a `KafkaConsumer`, one with a non-empty topic list or a pattern), or the
+        // consumer is destroyed, or a `KafkaConsumer`'s `close` returns (a `MockConsumer` still calls
+        // it after `close`). A registration is copied only
         // out of a live handle: by an invoker, which fires it within its own call, or into a
         // consumer's adapter, whose invocations run inside the operation that triggered them
         // (inline, from the callbacks vector while that operation waits for the report, or as
@@ -217,8 +219,11 @@ pub(crate) unsafe fn listener_adapter(
 ///
 /// The returned handle is owned by the caller, freed with
 /// `kafka_consumer_ConsumerRebalanceListener_destroy`. The caller owns `self_` and keeps it alive
-/// until the handle is destroyed and, once passed to a `subscribe_*`, until the next `subscribe_*`,
-/// `unsubscribe` or the consumer's destruction releases it.
+/// until the handle is destroyed and, once passed to a `subscribe_*`, until a later successful
+/// `subscribe_*` replaces it, or the consumer is destroyed. A `KafkaConsumer` also releases it
+/// when `close` returns; a `MockConsumer` keeps it, since its `rebalance` and `lose_partitions`
+/// still call it after `close`, as Java's mock does. `unsubscribe` and `assign` keep it, and so,
+/// on a `KafkaConsumer`, does a `subscribe_*` with an empty topic list.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
