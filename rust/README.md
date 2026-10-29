@@ -16,8 +16,7 @@ sources are the `kafka/` submodule at the repository root).
 
 **Generally Available:** this is the first GA release of the Rust client, version 1.0.0. We welcome your feedback, see [RFCs and feedback](../README.md#rfcs-and-feedback).
 
-Windows is not supported yet.
-
+See [Known limitations](#known-limitations) for what this release does not support yet.
 
 ## Directory Structure
 
