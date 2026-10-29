@@ -1358,15 +1358,18 @@ mod tests {
     use crate::common::record::internal::DefaultRecordBatch;
     use crate::common::record::internal::Record;
 
-    /// All compression types to test with.
+    /// All compression types to test with: those the build enables.
     fn all_compressions() -> Vec<Compression> {
-        vec![
+        [
             Compression::none().build(),
             Compression::gzip().build(),
             Compression::snappy().build(),
             Compression::lz4().build(),
             Compression::zstd().build(),
         ]
+        .into_iter()
+        .filter(|compression| Compression::is_enabled(compression.compression_type()))
+        .collect()
     }
 
     /// Corresponds to Java's `MemoryRecordsTest.testIterator`.
@@ -1501,6 +1504,7 @@ mod tests {
     }
 
     /// Corresponds to Java's `MemoryRecordsTest.testChecksum` (v2 only).
+    #[cfg(feature = "lz4")]
     #[test]
     fn test_checksum_v2() {
         // We get reasonable coverage with uncompressed and one compression type

@@ -18,8 +18,11 @@
 //! Package name contains `internals`, so everything here is `pub(crate)`
 //! (CLAUDE.md naming conventions).
 
+// PBKDF2 comes from `aws-lc-rs`, an optional dependency.
+#[cfg(feature = "aws-lc-rs")]
 mod scram_formatter;
 mod scram_mechanism;
 
+#[cfg(feature = "aws-lc-rs")]
 pub(crate) use scram_formatter::ScramFormatter;
 pub(crate) use scram_mechanism::ScramMechanism;

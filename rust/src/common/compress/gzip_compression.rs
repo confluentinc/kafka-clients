@@ -32,6 +32,7 @@ pub struct GzipCompression {
 
 impl GzipCompression {
     /// The configured compression level, read when wrapping an output stream.
+    #[cfg(feature = "gzip")]
     pub(super) fn level(&self) -> i32 {
         self.level
     }

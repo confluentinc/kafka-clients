@@ -14,6 +14,10 @@ semaphore:
     - tags
   branches:
     - master
+    # Branches the org-wide protection rules cover (confluentinc/admin
+    # .github/settings.yml), excluding names with a `/` as GitHub's `*` does
+    - /^[^\/]+-post$/
+    - /^[^\/]+\.x$/
   tasks:
     - name: run-sweep
       branch: master
