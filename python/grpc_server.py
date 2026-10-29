@@ -84,6 +84,7 @@ from grpc_translate import (  # noqa: E402
     ActionLoggingRebalanceListener,
     ListenerAction,
     LoggingRebalanceListener,
+    _binding_error,
     _consumer_close_options,
     _consumer_subscribe_kwargs,
     _consumer_timeout,
@@ -469,11 +470,13 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             fn(consumer)
             return pb.StatusResponse()
-        except KafkaError as e:
-            return self._status_err(e)
         except Exception as e:  # noqa: BLE001
-            LOG.exception("consumer op raised")
-            return self._status_err(e)
+            # Only a binding error is the binding's answer; anything else is
+            # re-raised, a transport failure on which the harness panics.
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return self._status_err(error)
 
     def Subscribe(self, request, context):
         # with_listener => subscribe with a real ConsumerRebalanceListener built
@@ -511,11 +514,13 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
             records = consumer.poll(timeout=request.timeout_ms / 1000.0)
-        except KafkaError as e:
-            return cpb.PollResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("poll raised")
-            return cpb.PollResponse(error=_kafka_error_to_proto(e))
+            # As in _run_status: a binding error is the reply's, anything else
+            # is re-raised.
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.PollResponse(error=_kafka_error_to_proto(error))
         proto_records = [_record_to_proto(r) for r in records]
         return cpb.PollResponse(records=cpb.ConsumerRecordList(records=proto_records))
 
