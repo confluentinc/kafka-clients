@@ -51,7 +51,9 @@ mod sasl_channel_builder;
 pub mod selectable;
 mod selector;
 mod send;
+#[cfg(feature = "rustls")]
 mod ssl_channel_builder;
+#[cfg(feature = "rustls")]
 mod ssl_transport_layer;
 mod transport_layer;
 
@@ -85,6 +87,8 @@ pub use sasl_channel_builder::SaslChannelBuilder;
 pub use selectable::Selectable;
 pub use selector::Selector;
 pub use send::Send;
+#[cfg(feature = "rustls")]
 pub use ssl_channel_builder::SslChannelBuilder;
+#[cfg(feature = "rustls")]
 pub use ssl_transport_layer::SslTransportLayer;
 pub use transport_layer::{InterestOps, TransportLayer};

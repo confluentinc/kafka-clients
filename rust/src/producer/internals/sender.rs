@@ -9742,6 +9742,7 @@ mod tests {
     /// Translated from `SenderTest#testIdempotentSplitBatchAndSend`.
     ///
     /// Was blocked on PLAN §9.18 — the `MESSAGE_TOO_LARGE` split panicked.
+    #[cfg(feature = "gzip")]
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotentSplitBatchAndSend")]
     async fn test_idempotent_split_batch_and_send() {
@@ -9761,6 +9762,7 @@ mod tests {
     ///
     /// Was blocked on PLAN §9.18 — the same panic, reached through the transactional
     /// entry point.
+    #[cfg(feature = "gzip")]
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionalSplitBatchAndSend")]
     async fn test_transactional_split_batch_and_send() {

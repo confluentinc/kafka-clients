@@ -56,6 +56,7 @@ use std::io::{self, BufRead, Cursor, Read, Write};
 // See: https://github.com/xerial/snappy-java
 
 /// Magic header for the xerial/snappy-java format.
+#[cfg(feature = "snappy")]
 const XERIAL_HEADER: [u8; 16] = [
     0x82, b'S', b'N', b'A', b'P', b'P', b'Y', 0, // magic
     0, 0, 0, 1, // min compatible version
@@ -63,24 +64,28 @@ const XERIAL_HEADER: [u8; 16] = [
 ];
 
 /// Default block size for xerial snappy (matches Java's default of 32KB).
+#[cfg(feature = "snappy")]
 const XERIAL_BLOCK_SIZE: usize = 32 * 1024;
 
 /// The longest compressed block the reader accepts: snappy-java's
 /// `SnappyInputStream.MAX_CHUNK_SIZE` (512 MiB), which Kafka keeps by building
 /// its `SnappyInputStream` with the default constructor
 /// (`SnappyCompression.wrapForInput`).
+#[cfg(feature = "snappy")]
 const XERIAL_MAX_CHUNK_SIZE: usize = 512 * 1024 * 1024;
 
 /// A writer that compresses data using the xerial/snappy-java block format.
 ///
 /// Buffers input data and compresses in blocks when the buffer reaches
 /// `XERIAL_BLOCK_SIZE`. Call `finish()` to flush the final block.
+#[cfg(feature = "snappy")]
 pub struct XerialSnappyWriter<W: Write> {
     inner: W,
     buffer: Vec<u8>,
     header_written: bool,
 }
 
+#[cfg(feature = "snappy")]
 impl<W: Write> XerialSnappyWriter<W> {
     fn new(inner: W) -> Self {
         Self { inner, buffer: Vec::with_capacity(XERIAL_BLOCK_SIZE), header_written: false }
@@ -117,6 +122,7 @@ impl<W: Write> XerialSnappyWriter<W> {
     }
 }
 
+#[cfg(feature = "snappy")]
 impl<W: Write> Write for XerialSnappyWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.buffer.extend_from_slice(buf);
@@ -140,12 +146,14 @@ impl<W: Write> Write for XerialSnappyWriter<W> {
 /// A reader that decompresses data in the xerial/snappy-java block format.
 ///
 /// Reads the magic header, then decompresses blocks one at a time.
+#[cfg(feature = "snappy")]
 pub struct XerialSnappyReader<R: Read> {
     inner: R,
     decompressed: Cursor<Vec<u8>>,
     header_read: bool,
 }
 
+#[cfg(feature = "snappy")]
 impl<R: Read> XerialSnappyReader<R> {
     fn new(inner: R) -> Self {
         Self { inner, decompressed: Cursor::new(Vec::new()), header_read: false }
@@ -192,6 +200,7 @@ impl<R: Read> XerialSnappyReader<R> {
 /// Java first compares the field with `SnappyCodec.MAGIC_HEADER_HEAD`, the
 /// start of a concatenated stream's header. This reader does not read
 /// concatenated streams, so such a header is refused here as a negative length.
+#[cfg(feature = "snappy")]
 fn checked_chunk_size(len_buf: [u8; 4]) -> io::Result<usize> {
     let chunk_size = i32::from_be_bytes(len_buf);
     let Ok(len) = usize::try_from(chunk_size) else {
@@ -215,6 +224,7 @@ fn checked_chunk_size(len_buf: [u8; 4]) -> io::Result<usize> {
 
 /// `n` with its digits in groups of three separated by commas, as Java's `%,d`
 /// formats it in an English locale.
+#[cfg(feature = "snappy")]
 fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
@@ -227,6 +237,7 @@ fn group_thousands(n: usize) -> String {
     grouped
 }
 
+#[cfg(feature = "snappy")]
 impl<R: Read> Read for XerialSnappyReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.ensure_header()?;
@@ -252,12 +263,16 @@ pub enum CompressingWriter<W: Write> {
     /// No compression — data is passed through.
     None(W),
     /// Gzip compression.
+    #[cfg(feature = "gzip")]
     Gzip(flate2::write::GzEncoder<W>),
     /// Snappy compression using xerial/snappy-java block format (boxed to reduce enum size).
+    #[cfg(feature = "snappy")]
     Snappy(Box<XerialSnappyWriter<W>>),
     /// LZ4 compression.
+    #[cfg(feature = "lz4")]
     Lz4(lz4_flex::frame::FrameEncoder<W>),
     /// Zstd compression.
+    #[cfg(feature = "zstd")]
     Zstd(zstd::Encoder<'static, W>),
 }
 
@@ -266,9 +281,13 @@ impl<W: Write> CompressingWriter<W> {
     pub fn finish(self) -> io::Result<W> {
         match self {
             Self::None(w) => Ok(w),
+            #[cfg(feature = "gzip")]
             Self::Gzip(encoder) => encoder.finish(),
+            #[cfg(feature = "snappy")]
             Self::Snappy(encoder) => encoder.finish(),
+            #[cfg(feature = "lz4")]
             Self::Lz4(encoder) => encoder.finish().map_err(|e| io::Error::other(e.to_string())),
+            #[cfg(feature = "zstd")]
             Self::Zstd(encoder) => encoder.finish(),
         }
     }
@@ -278,9 +297,13 @@ impl<W: Write> Write for CompressingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::None(w) => w.write(buf),
+            #[cfg(feature = "gzip")]
             Self::Gzip(w) => w.write(buf),
+            #[cfg(feature = "snappy")]
             Self::Snappy(w) => w.write(buf),
+            #[cfg(feature = "lz4")]
             Self::Lz4(w) => w.write(buf),
+            #[cfg(feature = "zstd")]
             Self::Zstd(w) => w.write(buf),
         }
     }
@@ -288,9 +311,13 @@ impl<W: Write> Write for CompressingWriter<W> {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::None(w) => w.flush(),
+            #[cfg(feature = "gzip")]
             Self::Gzip(w) => w.flush(),
+            #[cfg(feature = "snappy")]
             Self::Snappy(w) => w.flush(),
+            #[cfg(feature = "lz4")]
             Self::Lz4(w) => w.flush(),
+            #[cfg(feature = "zstd")]
             Self::Zstd(w) => w.flush(),
         }
     }
@@ -303,12 +330,16 @@ pub enum DecompressingReader<R: BufRead> {
     /// No compression — data is passed through.
     None(R),
     /// Gzip decompression.
+    #[cfg(feature = "gzip")]
     Gzip(flate2::bufread::GzDecoder<R>),
     /// Snappy decompression using xerial/snappy-java block format.
+    #[cfg(feature = "snappy")]
     Snappy(XerialSnappyReader<R>),
     /// LZ4 decompression.
+    #[cfg(feature = "lz4")]
     Lz4(lz4_flex::frame::FrameDecoder<R>),
     /// Zstd decompression.
+    #[cfg(feature = "zstd")]
     Zstd(zstd::Decoder<'static, R>),
 }
 
@@ -316,9 +347,13 @@ impl<R: BufRead> Read for DecompressingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::None(r) => r.read(buf),
+            #[cfg(feature = "gzip")]
             Self::Gzip(r) => r.read(buf),
+            #[cfg(feature = "snappy")]
             Self::Snappy(r) => r.read(buf),
+            #[cfg(feature = "lz4")]
             Self::Lz4(r) => r.read(buf),
+            #[cfg(feature = "zstd")]
             Self::Zstd(r) => r.read(buf),
         }
     }
@@ -356,6 +391,7 @@ mod tests {
         assert_eq!(result, data);
     }
 
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_gzip_round_trip() {
         let data = b"Hello, Kafka! This is a test of gzip compression.";
@@ -363,6 +399,7 @@ mod tests {
         assert_eq!(result, data);
     }
 
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_gzip_with_level() {
         let data = b"Hello, Kafka! Testing gzip with specific level.";
@@ -388,6 +425,7 @@ mod tests {
         assert!(Compression::gzip().level(-1).is_ok());
     }
 
+    #[cfg(feature = "snappy")]
     #[test]
     fn test_snappy_round_trip() {
         let data = b"Hello, Kafka! This is a test of snappy compression.";
@@ -397,6 +435,7 @@ mod tests {
 
     /// A xerial stream holding one block whose length field is `chunk_size`,
     /// followed by `block`.
+    #[cfg(feature = "snappy")]
     fn xerial_stream(chunk_size: u32, block: &[u8]) -> Vec<u8> {
         let mut stream = XERIAL_HEADER.to_vec();
         stream.extend_from_slice(&chunk_size.to_be_bytes());
@@ -406,6 +445,7 @@ mod tests {
 
     /// Reads `stream` with the snappy reader, and returns the error it fails
     /// with and the largest allocation made while reading.
+    #[cfg(feature = "snappy")]
     fn snappy_read_error(stream: &[u8]) -> (io::Error, usize) {
         let _guard = crate::AllocTrackingGuard::new();
         let mut reader = Compression::snappy()
@@ -418,6 +458,7 @@ mod tests {
 
     /// A block longer than snappy-java's `MAX_CHUNK_SIZE` is refused before
     /// anything is allocated for it (`SnappyInputStream.hasNextChunk`).
+    #[cfg(feature = "snappy")]
     #[test]
     fn test_xerial_block_longer_than_max_chunk_size_is_refused() {
         let (err, max_allocation) = snappy_read_error(&xerial_stream(512 * 1024 * 1024 + 1, b"abc"));
@@ -433,6 +474,7 @@ mod tests {
     /// A length field with the high bit set, such as the 4 GiB a broker can
     /// claim, is negative to snappy-java, which reads it as a signed `int`. It
     /// is refused before anything is allocated for it.
+    #[cfg(feature = "snappy")]
     #[test]
     fn test_xerial_block_with_negative_length_is_refused() {
         let (err, max_allocation) = snappy_read_error(&xerial_stream(0xFFFF_FFFF, b"abc"));
@@ -444,6 +486,7 @@ mod tests {
     /// The limits sit where snappy-java's do: a length of exactly
     /// `MAX_CHUNK_SIZE` is accepted, and a longer one is refused up to 2 GiB,
     /// where lengths turn negative.
+    #[cfg(feature = "snappy")]
     #[test]
     fn test_xerial_chunk_size_limits() {
         let chunk_size = |len: u32| checked_chunk_size(len.to_be_bytes()).map_err(|e| e.to_string());
@@ -463,6 +506,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "lz4")]
     #[test]
     fn test_lz4_round_trip() {
         let data = b"Hello, Kafka! This is a test of lz4 compression.";
@@ -480,6 +524,7 @@ mod tests {
         assert!(Compression::lz4().level(0).is_err());
     }
 
+    #[cfg(feature = "zstd")]
     #[test]
     fn test_zstd_round_trip() {
         let data = b"Hello, Kafka! This is a test of zstd compression.";
@@ -487,6 +532,7 @@ mod tests {
         assert_eq!(result, data);
     }
 
+    #[cfg(feature = "zstd")]
     #[test]
     fn test_zstd_with_level() {
         let data = b"Hello, Kafka! Testing zstd with specific level.";
@@ -538,7 +584,7 @@ mod tests {
     #[test]
     fn test_empty_data_round_trip() {
         let data = b"";
-        for compression_type in CompressionType::values() {
+        for compression_type in CompressionType::values().iter().filter(|t| Compression::is_enabled(**t)) {
             let compression = Compression::of(*compression_type).build();
             let result = round_trip(&compression, data);
             assert_eq!(result, data, "Empty data round-trip failed for {:?}", compression_type);
@@ -548,10 +594,37 @@ mod tests {
     #[test]
     fn test_large_data_round_trip() {
         let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
-        for compression_type in CompressionType::values() {
+        for compression_type in CompressionType::values().iter().filter(|t| Compression::is_enabled(**t)) {
             let compression = Compression::of(*compression_type).build();
             let result = round_trip(&compression, &data);
             assert_eq!(result, data, "Large data round-trip failed for {:?}", compression_type);
+        }
+    }
+
+    /// A compression type whose feature is off fails to compress and to
+    /// decompress with an explicit error, naming the feature.
+    #[test]
+    fn test_disabled_compression_type_fails() {
+        for compression_type in CompressionType::values().iter().filter(|t| !Compression::is_enabled(**t)) {
+            let compression = Compression::of(*compression_type).build();
+            let name = compression_type.name();
+            let expected =
+                format!("Compression type {name} is not available: the client was built without the `{name}` feature");
+            assert_eq!(expected, Compression::disabled_message(*compression_type));
+
+            let error = compression
+                .wrap_for_output(Vec::new(), TEST_MESSAGE_VERSION)
+                .err()
+                .expect("compressing fails");
+            assert_eq!(io::ErrorKind::Unsupported, error.kind());
+            assert_eq!(expected, error.to_string());
+
+            let error = compression
+                .wrap_for_input(&b"x"[..], TEST_MESSAGE_VERSION)
+                .err()
+                .expect("decompressing fails");
+            assert_eq!(io::ErrorKind::Unsupported, error.kind());
+            assert_eq!(expected, error.to_string());
         }
     }
 
@@ -578,6 +651,7 @@ mod tests {
     /// given where they are, through its [`BufRead`]: their [`Read`] forms
     /// would first copy them through an input buffer of their own, 32 KiB for
     /// gzip and 128 KiB for zstd.
+    #[cfg(all(feature = "gzip", feature = "zstd"))]
     #[test]
     fn test_gzip_and_zstd_read_their_input_in_place() {
         // `data` compressed with `compression`.

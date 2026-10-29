@@ -30,12 +30,14 @@ use super::ChannelMetadataRegistry;
 use super::KafkaChannel;
 use super::ListenerName;
 use super::PlaintextTransportLayer;
+#[cfg(feature = "rustls")]
 use super::SslTransportLayer;
 
 use crate::common::config::SaslConfigs;
 use crate::common::config::types::Password;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::authenticator::SaslClientAuthenticator;
+#[cfg(feature = "rustls")]
 use crate::common::security::ssl::SslFactory;
 use crate::common::utils::SystemTime;
 use crate::common::utils::internals::LogContext;
@@ -44,6 +46,11 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::net::TcpStream;
+
+/// Without the `rustls` feature there is no `SslFactory`: the uninhabited
+/// stand-in keeps the `ssl_factory` parameter, which can then only be `None`.
+#[cfg(not(feature = "rustls"))]
+type SslFactory = std::convert::Infallible;
 
 /// SASL channel builder that creates channels with SASL authentication.
 ///
@@ -105,7 +112,8 @@ impl SaslChannelBuilder {
     /// - The security protocol is not `SASL_PLAINTEXT` or `SASL_SSL`
     /// - The SASL mechanism is not `PLAIN`
     /// - Username or password is missing in the SASL config
-    /// - `SASL_SSL` is requested but no `ssl_factory` is provided
+    /// - `SASL_SSL` is requested but no `ssl_factory` is provided, or the
+    ///   client was built without the `rustls` feature
     #[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder#SaslChannelBuilder")]
     pub fn new(
         security_protocol: SecurityProtocol,
@@ -124,6 +132,10 @@ impl SaslChannelBuilder {
                     security_protocol
                 ),
             ));
+        }
+        #[cfg(not(feature = "rustls"))]
+        if security_protocol == SecurityProtocol::SaslSsl {
+            return Err(super::ChannelBuilders::tls_disabled_error(security_protocol));
         }
 
         // The authenticator builds only the PLAIN token (RFC 4616). Java picks a
@@ -172,6 +184,32 @@ impl SaslChannelBuilder {
     }
 }
 
+impl SaslChannelBuilder {
+    /// The TLS transport of a `SASL_SSL` channel.
+    #[cfg(feature = "rustls")]
+    fn ssl_transport_layer(
+        &self,
+        stream: TcpStream,
+        peer_host: &str,
+    ) -> io::Result<Box<dyn crate::common::network::TransportLayer>> {
+        let ssl_factory = self.ssl_factory.as_ref().unwrap();
+        let domain = SslFactory::create_server_name(peer_host)?;
+        let conn = rustls::ClientConnection::new(Arc::clone(ssl_factory.client_config()), domain.clone())
+            .map_err(|e| io::Error::other(format!("Failed to construct TLS client connection: {e}")))?;
+        Ok(Box::new(SslTransportLayer::new(stream, conn, domain)))
+    }
+
+    /// Unreachable: `new` rejects `SASL_SSL` without the `rustls` feature.
+    #[cfg(not(feature = "rustls"))]
+    fn ssl_transport_layer(
+        &self,
+        _stream: TcpStream,
+        _peer_host: &str,
+    ) -> io::Result<Box<dyn crate::common::network::TransportLayer>> {
+        Err(super::ChannelBuilders::tls_disabled_error(self.security_protocol))
+    }
+}
+
 impl ChannelBuilder for SaslChannelBuilder {
     fn build_channel(
         &self,
@@ -183,11 +221,7 @@ impl ChannelBuilder for SaslChannelBuilder {
     ) -> io::Result<KafkaChannel> {
         let transport_layer: Box<dyn crate::common::network::TransportLayer> =
             if self.security_protocol == SecurityProtocol::SaslSsl {
-                let ssl_factory = self.ssl_factory.as_ref().unwrap();
-                let domain = SslFactory::create_server_name(peer_host)?;
-                let conn = rustls::ClientConnection::new(Arc::clone(ssl_factory.client_config()), domain.clone())
-                    .map_err(|e| io::Error::other(format!("Failed to construct TLS client connection: {e}")))?;
-                Box::new(SslTransportLayer::new(stream, conn, domain))
+                self.ssl_transport_layer(stream, peer_host)?
             } else {
                 Box::new(PlaintextTransportLayer::new(stream))
             };
@@ -224,6 +258,7 @@ impl ChannelBuilder for SaslChannelBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "rustls")]
     use crate::common::config::SslConfigs;
     use crate::common::config::types::Password;
     use crate::common::network::DefaultChannelMetadataRegistry;
@@ -263,6 +298,7 @@ mod tests {
     }
 
     /// Test 2: Build channel with SASL_SSL creates a channel with SSL transport.
+    #[cfg(feature = "rustls")]
     #[tokio::test]
     async fn test_build_channel_sasl_ssl() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -391,6 +427,7 @@ mod tests {
 
     /// The default `sasl.mechanism` is `GSSAPI` (as in Java), so a config that
     /// forgets `sasl.mechanism=PLAIN` fails instead of leaking its password.
+    #[cfg(feature = "rustls")]
     #[test]
     fn test_default_sasl_mechanism_is_rejected() {
         let sasl_config = SaslConfigs {
@@ -407,6 +444,33 @@ mod tests {
             LogContext::empty(),
         );
         assert!(result.err().unwrap().to_string().contains("'GSSAPI' is not supported"));
+    }
+
+    /// Without the `rustls` feature `SASL_SSL` is refused when the builder is
+    /// created, before its credentials are read.
+    #[cfg(not(feature = "rustls"))]
+    #[test]
+    fn test_sasl_ssl_needs_rustls() {
+        let sasl_config = SaslConfigs {
+            mechanism: "PLAIN".to_string(),
+            username: Some("alice".to_string()),
+            password: Some(Password::new("secret")),
+            ..SaslConfigs::default()
+        };
+        let err = SaslChannelBuilder::new(
+            SecurityProtocol::SaslSsl,
+            &sasl_config,
+            None,
+            None,
+            "test-client",
+            LogContext::empty(),
+        )
+        .expect_err("SASL_SSL needs the rustls feature");
+        assert_eq!(io::ErrorKind::Unsupported, err.kind());
+        assert_eq!(
+            "Security protocol SASL_SSL is not available: the client was built without the `rustls` feature",
+            err.to_string()
+        );
     }
 
     /// `{:?}` of a builder holding credentials renders neither the password

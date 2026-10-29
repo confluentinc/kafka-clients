@@ -59,7 +59,7 @@
 //! broker" is not a state this RPC has. Reassignment does that, and is covered by
 //! `admin_elections_reassignments_offsets_test`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
@@ -73,7 +73,7 @@ use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, Produce
 
 use crate::common::admin_backend::{AdminBackend, ReplicaLogDirInfoView, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::two_log_dir_cluster;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
 
@@ -416,15 +416,6 @@ async fn describe_log_dirs_unknown_broker_and_replica<F: AdminBackendFactory>(ct
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
     ctx.cleanup().await;
-}
-
-/// A dedicated single broker with two log directories, so an actual
-/// cross-directory replica move is possible.
-fn two_log_dir_cluster() -> ClusterConfig {
-    ClusterConfig::with_properties(BTreeMap::from([(
-        "KAFKA_LOG_DIRS".to_string(),
-        "/tmp/kafka-logs-0,/tmp/kafka-logs-1".to_string(),
-    )]))
 }
 
 multilanguage_admin_test!(

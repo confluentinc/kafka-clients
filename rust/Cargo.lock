@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "confluent-kafka"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "ambassador",
  "apache-avro",
@@ -685,6 +685,7 @@ dependencies = [
  "multilanguage-test-server",
  "paste",
  "prost 0.13.5",
+ "prost-reflect",
  "rand 0.9.4",
  "rcgen",
  "regex",
@@ -708,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "consumer-perf"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "confluent-kafka",
  "env_logger",
@@ -1298,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "generator"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "regex",
  "serde",
@@ -2088,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "multilanguage-test-server"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -4158,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "verifiable-clients"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "async-trait",
  "confluent-kafka",
@@ -4705,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "anyhow",
  "quote",
