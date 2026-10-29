@@ -66,7 +66,9 @@ producer's buffer and then returns a `Future`:
    reaches the callback, so do not leave a `send()` Promise unhandled.
 2. The future's `get()` resolves at **delivery** with the record's
    `RecordMetadata`, or rejects with the delivery error. The callback, when
-   given, runs first. A future whose `get()` is never called raises no
+   given, runs first, on the JS thread: from the event loop, or inside a
+   later `send()` call, which runs the callbacks already due before handing
+   its record over. A future whose `get()` is never called raises no
    unhandled rejection. `isDone()` and `isCompletedExceptionally()` tell its
    state; `cancel()` returns `false` (Java's `FutureRecordMetadata`).
 

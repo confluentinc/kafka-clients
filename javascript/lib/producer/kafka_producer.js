@@ -51,7 +51,10 @@ const PUMP_EVERY = 64;
  * A Kafka client that publishes records to the Kafka cluster.
  *
  * The producer is thread safe in Java; here every call is made from the JS
- * thread, and the delivery callbacks run there too, from the event loop.
+ * thread, and the delivery callbacks run there too: from the event loop, or
+ * synchronously inside a later `send()` call, which runs those already due
+ * before handing its record over (so a callback may run while the code that
+ * called `send()` is mid-call).
  * Records are batched and sent by the client in the background; `send`
  * resolves once the record has reached the producer, with a future of the
  * record's metadata.
