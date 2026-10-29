@@ -353,6 +353,11 @@ message CallbackLogEntry {
   // "listener_action" only: the step's kind, consumer_service.proto's
   // ListenerStepKind name without its prefix ("POSITION", "FAIL", ...).
   string step = 8;
+  // The error the callback saw, as a reply carries one (code, message and
+  // payload), so the reader rebuilds it through the same conversion; absent
+  // when the callback saw no error. `error` / `error_code` repeat its message
+  // and code.
+  KafkaError error_detail = 9;
 }
 
 message CallbackLogResponse {
@@ -394,6 +399,19 @@ message KafkaError {
   optional string group_id = 8;            // GROUP_AUTHORIZATION_FAILED
   // CONSUMER_NO_OFFSET_FOR_PARTITION: the error's partitions().
   repeated CallbackLogPartition partitions = 9;
+  // CONSUMER_OFFSET_OUT_OF_RANGE: the error's offsetOutOfRangePartitions().
+  repeated PartitionOffset offset_out_of_range_partitions = 10;
+  // UNKNOWN_SERVER_ERROR (-1) is the code of two classes: Java's bare
+  // `KafkaException` and its `ApiException` subclass `UnknownServerException`.
+  // True for the bare `KafkaException` (Python: not an `ApiError`; C:
+  // `kafka_common_Error_is_api_error` is 0), false otherwise.
+  bool bare_kafka_error = 11;
+}
+
+// A (topic, partition) and an offset inside a KafkaError payload.
+message PartitionOffset {
+  CallbackLogPartition partition = 1;
+  int64 offset = 2;
 }
 
 // ---------------------------------------------------------------------------

@@ -92,8 +92,10 @@ pub struct CallbackLogEntry {
     /// The error itself, `None` when the callback saw none: classify it with
     /// the `Error::is_*_error` predicates rather than by its text. Native: the
     /// error the callback received. gRPC: rebuilt from the entry's
-    /// `error_code` (the FFI error code) and `error`, as a `KafkaError` reply
-    /// is.
+    /// `error_detail`, the proto `KafkaError` a reply carries (code, message,
+    /// payload), through the same conversion as a reply. The classes the proto
+    /// does not carry the payload of come back as `UnknownServerError` (see
+    /// `kafka_error_from_proto`).
     pub error_value: Option<Error>,
     /// [`KIND_LISTENER_ACTION`] only: the listener method the step ran in,
     /// [`KIND_ASSIGNED`], [`KIND_REVOKED`] or [`KIND_LOST`]. Empty for every
@@ -879,14 +881,18 @@ pub mod grpc {
                 kind: e.kind,
                 partitions: e.partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
                 offsets: e.offsets,
-                // NONE (0) means the callback saw no error.
-                error_value: (e.error_code != 0).then(|| {
-                    kafka_error_from_proto(proto::KafkaError {
-                        code: e.error_code,
-                        message: e.error.clone(),
-                        ..Default::default()
-                    })
-                }),
+                // The whole error, rebuilt as a reply's is; NONE (0) without
+                // one means the callback saw no error.
+                error_value: match e.error_detail {
+                    Some(detail) => Some(kafka_error_from_proto(detail)),
+                    None => (e.error_code != 0).then(|| {
+                        kafka_error_from_proto(proto::KafkaError {
+                            code: e.error_code,
+                            message: e.error.clone(),
+                            ..Default::default()
+                        })
+                    }),
+                },
                 error: e.error,
                 method: e.method,
                 result_partitions: e.result_partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
@@ -954,6 +960,7 @@ pub mod grpc {
                     consumer_id: self.consumer_id,
                     offsets: offset_map_to_proto(offsets),
                     with_callback: true,
+                    with_offsets: true,
                 })
                 .await
                 .map_err(|s| status_to_kafka_error(&s, self.backend))?
@@ -1001,6 +1008,7 @@ pub mod grpc {
                     consumer_id: self.consumer_id,
                     offsets: Vec::new(),
                     with_callback: true,
+                    with_offsets: false,
                 })
                 .await
                 .map_err(|s| status_to_kafka_error(&s, self.backend))?

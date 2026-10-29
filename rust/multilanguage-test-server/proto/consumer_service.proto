@@ -306,21 +306,29 @@ message OffsetMap {
 
 message CommitSyncRequest {
   uint64 consumer_id = 1;
-  // Empty => commit the current consumed positions; otherwise commit these.
+  // The offsets of the `Map`-taking overloads; see `with_offsets`.
   repeated OffsetMapEntry offsets = 2;
   // Java's `commitSync(Duration)` / `commitSync(Map, Duration)`; absent calls
   // the overload without a timeout.
   optional int64 timeout_ms = 3;
+  // Selects Java's `commitSync(Map[, Duration])` even when `offsets` is empty
+  // (`commitSync(Map.of())`); false with empty `offsets` is `commitSync([Duration])`,
+  // the current consumed positions. Non-empty `offsets` always select the
+  // `Map` overload.
+  bool with_offsets = 4;
 }
 
 // Same offsets shape as CommitSyncRequest, plus the callback flag.
 message CommitAsyncRequest {
   uint64 consumer_id = 1;
-  // Empty => commit the current consumed positions; otherwise commit these.
+  // The offsets of `commitAsync(Map, OffsetCommitCallback)`; see `with_offsets`.
   repeated OffsetMapEntry offsets = 2;
   // When true the server passes a real OffsetCommitCallback that appends a
   // "commit" entry to the consumer's callback log.
   bool with_callback = 3;
+  // As CommitSyncRequest.with_offsets: the `Map` overload even for an empty
+  // map.
+  bool with_offsets = 4;
 }
 
 message CommittedRequest {

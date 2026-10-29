@@ -163,6 +163,7 @@ from grpc_translate import (  # noqa: E402
     _tp,
     _tp_to_proto,
     ignore_commit_completion,
+    install_error_replies,
     make_logging_commit_callback,
     make_logging_delivery_callback,
 )
@@ -507,7 +508,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         async def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
             timeout_kwargs = _consumer_timeout(request)
-            if offsets:
+            if offsets or request.with_offsets:
                 await c.commit(offsets=offsets, **timeout_kwargs)
             else:
                 await c.commit(**timeout_kwargs)
@@ -526,7 +527,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
         try:
             offsets = _proto_offsets_to_dict(request.offsets)
-            if offsets:
+            if offsets or request.with_offsets:
                 await consumer.commit_nowait(offsets=offsets,
                                              callback=callback or ignore_commit_completion)
             else:
@@ -1569,6 +1570,13 @@ def _log_level(rust_log):
     if level in ("DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"):
         return level
     return "INFO"
+
+
+# Every binding error is returned as its reply's error, never as a transport
+# failure (grpc_translate.install_error_replies).
+install_error_replies(ProducerService, pb, "ProducerService")
+install_error_replies(ConsumerService, cpb, "ConsumerService")
+install_error_replies(AdminService, apb, "AdminService")
 
 
 async def serve():

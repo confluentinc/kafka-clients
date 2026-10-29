@@ -59,6 +59,7 @@ use confluent_kafka::common::metrics::{KafkaMetric, Metrics, MetricsView, gauge}
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerNoOffsetForPartitionError;
+use confluent_kafka::consumer::ConsumerOffsetOutOfRangeError;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::Callback;
@@ -436,11 +437,12 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
 pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 
-    // `code` is the sole discriminator. It is the FFI error code
+    // `code` is the discriminator. It is the FFI error code
     // (`kafka_common_Error_e`), which is injective over the client's error
-    // classes, so it identifies the class on its own — that is why the proto no
-    // longer carries a `variant` field and neither server hand-matches message
-    // text any more.
+    // classes except for -1, shared by the bare `KafkaException` and
+    // `UnknownServerException` and told apart by `bare_kafka_error` — that is
+    // why the proto no longer carries a `variant` field and neither server
+    // hand-matches message text any more.
     //
     // `is_retriable` / `is_fatal` are gone with it: both sides derive them from
     // the code (`Error::is_retriable_error`,
@@ -487,6 +489,20 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
         BOOTSTRAP_RESOLUTION => Error::BootstrapResolution(BootstrapResolutionError::new(p.message)),
+        // Code -1 is shared by Java's bare `KafkaException` and its
+        // `ApiException` subclass `UnknownServerException`; the server says
+        // which it is.
+        UNKNOWN_SERVER_ERROR if p.bare_kafka_error => Error::kafka_message(p.message),
+        CONSUMER_OFFSET_OUT_OF_RANGE => Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::with_message(
+            p.message,
+            p.offset_out_of_range_partitions
+                .into_iter()
+                .map(|e| {
+                    let tp = e.partition.unwrap_or_default();
+                    (TopicPartition::new(tp.topic, tp.partition), e.offset)
+                })
+                .collect(),
+        )),
         // Its public constructor builds the message from the partitions, so the
         // class is rebuilt only when that reproduces the server's message
         // exactly; otherwise it falls back to UNKNOWN_SERVER_ERROR with the
@@ -513,15 +529,15 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         // used to guess at from the message text.
         //
         // A code the table has no class for falls back to `UNKNOWN_SERVER_ERROR`,
-        // as `Errors.forCode` does in Java. Five negatives land there,
+        // as `Errors.forCode` does in Java. Four negatives land there,
         // deliberately, carrying the message. They are exactly the client-side
         // classes that hold structured payload the proto does not transport —
         // `CorrelationIdMismatch`'s two correlation ids, `QuotaViolation`'s
         // metric and bounds, `RecordDeserialization`'s partition and offset, and
-        // `ConsumerLogTruncation` / `ConsumerOffsetOutOfRange`'s partition maps
-        // — so an arm above could only reconstruct the class by fabricating that
-        // payload. Widening the proto is the fix if a test ever needs to assert
-        // on one of them, as `ConsumerNoOffsetForPartition`'s partitions were.
+        // `ConsumerLogTruncation`'s partition map — so an arm above could only
+        // reconstruct the class by fabricating that payload. Widening the proto
+        // is the fix if a test ever needs to assert on one of them, as it was
+        // for `ConsumerNoOffsetForPartition` and `ConsumerOffsetOutOfRange`.
         code => match error_with_message(code, p.message.clone()) {
             Some(error) => error,
             None => error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class"),
@@ -529,16 +545,17 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     }
 }
 
-/// Map a tonic transport-level failure to a `Error`. These are
-/// gRPC-layer problems (connection refused, server crashed mid-call, etc.)
-/// that aren't produced by a real Kafka client; surfacing them as
-/// `LocalIllegalState` makes failures visible without conflating with broker
-/// errors.
+/// A tonic transport-level failure: a gRPC-layer problem (connection refused,
+/// server crashed mid-call, a handler that raised instead of replying) that no
+/// real Kafka client produces. It panics, failing the test: returned as an
+/// `Error`, it would be one a test could match by class and so pass on a
+/// broken server. Every server returns a binding's error as its reply's
+/// `error`, so a transport failure is never the binding's answer.
 pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> Error {
-    Error::local_illegal_state(format!(
+    panic!(
         "{} gRPC backend transport error ({:?}): {}",
         backend,
         status.code(),
         status.message()
-    ))
+    )
 }

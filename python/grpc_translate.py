@@ -36,6 +36,9 @@ arrange that before importing us.
 
 import asyncio
 import datetime as _dt
+import functools
+import inspect
+import logging
 import threading  # noqa: E402  (CallbackLog's lock)
 import time  # noqa: E402  (the SLEEP listener step)
 
@@ -49,6 +52,15 @@ from confluent_kafka.common import KafkaError  # noqa: E402
 # The broker wire ``TimeoutException`` (code 7), distinct from the JDK-analog
 # ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
 from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
+# The classes whose payload a proto KafkaError carries (see _kafka_error_to_proto).
+from confluent_kafka.common.errors import (  # noqa: E402
+    ApiError,
+    UnknownServerError,
+    GroupAuthorizationError,
+    InvalidTopicError,
+    TopicAuthorizationError,
+)
+from confluent_kafka.consumer import OffsetOutOfRangeError as _ConsumerOffsetOutOfRangeError  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
     AsyncConsumerRebalanceListener,
     CloseOptions,
@@ -166,6 +178,25 @@ class _AdminEncodeError(RuntimeError):
     """
 
 
+def _fill_error_payload(proto, err):
+    """The class-specific payload of a proto KafkaError, read through the
+    error's own getters, and the bit that tells a bare ``KafkaError`` (Java's
+    ``KafkaException``) from ``UnknownServerError``, which share code -1."""
+    if isinstance(err, TopicAuthorizationError):
+        proto.unauthorized_topics.extend(sorted(err.unauthorized_topics()))
+    if isinstance(err, InvalidTopicError):
+        proto.invalid_topics.extend(sorted(err.invalid_topics()))
+    if isinstance(err, GroupAuthorizationError) and err.group_id() is not None:
+        proto.group_id = err.group_id()
+    if isinstance(err, NoOffsetForPartitionError):
+        proto.partitions.extend(_callback_log_partition(p) for p in err.partitions())
+    if isinstance(err, _ConsumerOffsetOutOfRangeError):
+        proto.offset_out_of_range_partitions.extend(
+            pb.PartitionOffset(partition=_callback_log_partition(tp), offset=offset)
+            for tp, offset in err.offset_out_of_range_partitions().items())
+    proto.bare_kafka_error = proto.code == UnknownServerError._ffi_id and not isinstance(err, ApiError)
+
+
 def _kafka_error_to_proto(err):
     """Translate a ``confluent_kafka`` KafkaError (or generic Exception) into a
     proto KafkaError.
@@ -193,8 +224,7 @@ def _kafka_error_to_proto(err):
     # its own. Both resolve to their FFI code via ``_error_code_of``.
     if isinstance(err, KafkaError) or hasattr(type(err), "_ffi_id"):
         proto = pb.KafkaError(code=_error_code_of(err), message=str(err) or "")
-        if isinstance(err, NoOffsetForPartitionError):
-            proto.partitions.extend(_callback_log_partition(p) for p in err.partitions())
+        _fill_error_payload(proto, err)
         return proto
     # Unexpected non-Kafka exception: this is the server's own bookkeeping
     # failure, not an error the client reported, so it is fabricated as
@@ -577,10 +607,15 @@ class CallbackLog:
                 the ASSIGNMENT step read.
             step: ``KIND_LISTENER_ACTION`` only, the step's name.
         """
+        detail = None
         if exception is not None:
-            message, code = str(exception), _kafka_error_to_proto(exception).code
+            detail = _kafka_error_to_proto(exception)
+            message, code = str(exception), detail.code
+        elif error:
+            detail = pb.KafkaError(code=_LOCAL_ILLEGAL_STATE, message=error)
+            message, code = error, _LOCAL_ILLEGAL_STATE
         else:
-            message, code = error or "", _LOCAL_ILLEGAL_STATE if error else 0
+            message, code = "", 0
         entry = pb.CallbackLogEntry(
             kind=kind,
             partitions=[_callback_log_partition(p) for p in partitions],
@@ -591,6 +626,8 @@ class CallbackLog:
             step=step,
             result_partitions=[_callback_log_partition(p) for p in result_partitions],
         )
+        if detail is not None:
+            entry.error_detail.CopyFrom(detail)
         with self._lock:
             self._entries.setdefault(client_id, []).append(entry)
 
@@ -3010,3 +3047,97 @@ def admin_create_async(config, num_brokers):
         return AsyncAdminFacade(
             ka.AsyncMockAdminClient(brokers=brokers, controller=brokers[0]), mock=True)
     return AsyncAdminFacade(ka.AsyncAdmin.create(configs=config))
+
+
+# ---------------------------------------------------------------------------
+# Errors as replies
+#
+# A binding error that escapes a handler becomes a gRPC transport failure, not
+# the error the client reported: the Rust harness treats a transport failure
+# as a broken server. Every unary handler whose reply has a KafkaError `error`
+# field is therefore wrapped so that a binding error the handler raises — a
+# ``KafkaError`` or a root class with an FFI code such as ``IllegalStateError``,
+# ``IllegalArgumentError`` or ``TimeoutError``, or the cause of an
+# ``ExecutionError`` — is returned as that reply's error, with its FFI code
+# (``_kafka_error_to_proto``). Any other exception is a server bug and stays a
+# transport failure, so the harness reports it instead of matching it as an
+# error class. Handlers that already return the error themselves are
+# unaffected.
+# ---------------------------------------------------------------------------
+
+_LOG = logging.getLogger("grpc_translate")
+
+_PROTO_MODULES = {
+    "producer_service.proto": pb,
+    "consumer_service.proto": cpb,
+    "admin_service.proto": apb,
+}
+
+
+def _binding_error(e):
+    """The binding error ``e`` is, or ``None`` for anything else.
+
+    A binding error is what ``_kafka_error_to_proto`` maps to a real class: a
+    ``KafkaError``, a root class with an ``_ffi_id`` (``IllegalStateError``,
+    ``IllegalArgumentError``, ``TimeoutError``, ...) or this server's own
+    ``AdminRequestError``. An ``ExecutionError`` (Java's
+    ``ExecutionException``, raised by ``KafkaFuture.get()``) is the error of
+    the future, which it carries as ``__cause__``: the reply carries that cause,
+    as the Rust ``KafkaFuture::get`` returns the future's error itself, when the
+    cause is a binding error. Anything else — a server bug, a plain Python
+    exception — is not the binding's answer.
+    """
+    if isinstance(e, ExecutionError):
+        return _binding_error(e.__cause__) if e.__cause__ is not None else None
+    if isinstance(e, (KafkaError, AdminRequestError)) or hasattr(type(e), "_ffi_id"):
+        return e
+    return None
+
+
+def _replying(fn, reply_cls, name):
+    """Wrap ``fn`` so a binding error it raises comes back as ``reply_cls``'s
+    error. Anything else is re-raised: it stays a transport failure, on which
+    the Rust harness panics with this server's text."""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def handler(self, request, context):
+            try:
+                return await fn(self, request, context)
+            except Exception as e:
+                error = _binding_error(e)
+                if error is None:
+                    raise
+                _LOG.info("%s raised %r; returning it as the reply's error", name, error)
+                return reply_cls(error=_kafka_error_to_proto(error))
+        return handler
+
+    @functools.wraps(fn)
+    def handler(self, request, context):
+        try:
+            return fn(self, request, context)
+        except Exception as e:
+            error = _binding_error(e)
+            if error is None:
+                raise
+            _LOG.info("%s raised %r; returning it as the reply's error", name, error)
+            return reply_cls(error=_kafka_error_to_proto(error))
+    return handler
+
+
+def install_error_replies(servicer_cls, module, service_name):
+    """Wrap every unary handler of ``servicer_cls`` whose reply has a top-level
+    KafkaError ``error`` field (see the section comment). Returns the class."""
+    kafka_error = pb.KafkaError.DESCRIPTOR.full_name
+    for method in module.DESCRIPTOR.services_by_name[service_name].methods:
+        fn = servicer_cls.__dict__.get(method.name)
+        if fn is None or method.client_streaming or method.server_streaming:
+            continue
+        out = method.output_type
+        field = out.fields_by_name.get("error")
+        if field is None or field.message_type is None or field.message_type.full_name != kafka_error:
+            continue
+        reply_cls = getattr(_PROTO_MODULES[out.file.name], out.name, None)
+        if reply_cls is None:
+            continue
+        setattr(servicer_cls, method.name, _replying(fn, reply_cls, method.name))
+    return servicer_cls
