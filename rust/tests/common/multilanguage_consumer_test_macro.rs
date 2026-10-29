@@ -36,6 +36,10 @@
 //! integration test into a scenario costs no coverage at any feature level. The
 //! helpers such a scenario needs at that level live in
 //! [`crate::common::consumer_scenario`].
+//!
+//! Every arm prints one timing line to stderr when it ends, through
+//! [`crate::common::arm_timer::ArmTimer`], which shows in CI logs for passing
+//! tests too.
 
 /// Expand a generic consumer test body into four `#[tokio::test]` wrappers,
 /// one per backend (rust / grpc_python / grpc_python_async / grpc_c). Two forms, mirroring
@@ -59,8 +63,10 @@ macro_rules! multilanguage_consumer_test {
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "rust");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let factory = $crate::common::backend_factory::RustNativeFactory;
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
@@ -69,6 +75,7 @@ macro_rules! multilanguage_consumer_test {
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_python");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::Python,
@@ -77,6 +84,7 @@ macro_rules! multilanguage_consumer_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
@@ -85,6 +93,7 @@ macro_rules! multilanguage_consumer_test {
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_python_async");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::PythonAsync,
@@ -93,6 +102,7 @@ macro_rules! multilanguage_consumer_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
@@ -101,6 +111,7 @@ macro_rules! multilanguage_consumer_test {
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_c");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,
@@ -109,6 +120,7 @@ macro_rules! multilanguage_consumer_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
         }

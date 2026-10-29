@@ -89,6 +89,8 @@ pub mod multilanguage_producer;
 // so the committed integration tests can be converted into scenarios instead of
 // being duplicated by them. See the macros' module docs.
 #[cfg(feature = "integration-tests")]
+pub mod arm_timer;
+#[cfg(feature = "integration-tests")]
 #[macro_use]
 pub mod multilanguage_test_macro;
 #[cfg(feature = "integration-tests")]
