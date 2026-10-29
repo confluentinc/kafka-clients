@@ -1547,7 +1547,7 @@ struct OffsetMapHandles {
 // handle, `kafka_consumer_Consumer_handle`: the consumer itself is held by the
 // blocking call (poll / unsubscribe / close) that is running the listener on
 // this thread. A failing step is logged and ends the script; the listener
-// still reports success, except for a FAIL step, whose LocalIllegalState error
+// still reports success, except for a FAIL step, whose LocalIllegalArgument error
 // it reports, failing the callback as a throwing Java listener does.
 //
 // One heap instance per registration, owned by the service's
@@ -1714,7 +1714,7 @@ kafka_common_Error_t* run_listener_step(ActionListenerState* state, const Listen
       break;
     }
     case confluent::kafka::test::LISTENER_STEP_FAIL:
-      return kafka_common_Error_local_illegal_state(step.message().c_str());
+      return kafka_common_Error_local_illegal_argument(step.message().c_str());
     default:
       return kafka_common_Error_local_illegal_state("c server: unknown listener step");
   }

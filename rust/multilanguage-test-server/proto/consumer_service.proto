@@ -519,9 +519,9 @@ enum ListenerStepKind {
   // step ran.
   LISTENER_STEP_COMMIT_SYNC_POSITION = 7;
   // The listener method fails with `message`: it raises / returns a
-  // LocalIllegalState error, the class the Rust tests return (Java's tests
-  // throw `IllegalArgumentException`). Logged first, with that error. How the
-  // failure then surfaces from poll() is the binding's own (no rewrapping).
+  // LocalIllegalArgument error, Java's tests' `IllegalArgumentException`.
+  // Logged first, with that error. How the failure then surfaces from poll()
+  // is the binding's own (no rewrapping).
   LISTENER_STEP_FAIL = 8;
 }
 
