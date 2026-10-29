@@ -54,15 +54,19 @@ These decide every question, in this order:
    runs only microtasks, so a loop awaiting such sends would never return to
    the event loop: no timer, no I/O, no `call_js`, and every record's delivery
    state would pile up until the loop ended. So `send()` counts the sends
-   whose hand-over completed inside the call since the event loop last turned:
-   every 64th runs the drain on entry, before its record is handed over, and
-   once 1000 are counted, every further one (whichever the caller awaits: a
-   loop may fire some sends without awaiting them) settles its Promise only
-   after one event-loop turn, from a single `setImmediate` that settles them
-   in order and restarts the count. A queued hand-over does not restart it:
-   its completion may run in another `send()`'s pump, with no turn. The record
-   itself is handed over at once in every case (rule 7): only the resolution
-   waits.
+   whose hand-over completed inside the call since this producer's last
+   deferral turn (its own `setImmediate`, below; other event-loop turns do not
+   restart the count, and `call_js` does not either): every 64th runs the
+   drain on entry, before its record is handed over, and once 1000 are
+   counted, every further one (whichever the caller awaits: a loop may fire
+   some sends without awaiting them) settles its Promise only after one
+   event-loop turn, from a single `setImmediate` that settles them in order
+   and restarts the count. A queued hand-over does not restart it: its
+   completion may run in another `send()`'s pump, with no turn. While that
+   deferral turn is pending, a queued hand-over that completes settles in it
+   too, behind the sends already deferred. The record itself is handed over at
+   once in every case (rule 7): only the resolution waits, so a deferred
+   `send()` may settle after its record's delivery callback ran.
 4. **Waiting calls use the `_cb` twin.** `send_with_callback_cb`, `flush_cb`,
    `close_cb`, `close_with_timeout_cb`. The blocking forms would block the
    event loop and run callbacks on the caller's thread.
