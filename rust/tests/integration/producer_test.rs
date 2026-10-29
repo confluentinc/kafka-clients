@@ -49,7 +49,7 @@
 //!   and `testSendTimeoutErrorWhenPartitionDoesNotExist` pin are asserted by
 //!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
 //! - `kafka.api.SslProducerSendTest` (the `BaseProducerSendTest` bodies over
-//!   the SSL listener, native only): `testSendOffset` (`test_ssl_send_offset`),
+//!   the SSL listener): `testSendOffset` (`test_ssl_send_offset`),
 //!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`).
 //!
 //! Each scenario is instantiated through [`multilanguage_test!`], once per
@@ -295,14 +295,31 @@ enum SendTestSecurity {
 }
 
 impl SendTestSecurity {
-    /// Points `props` at this protocol's listener. For SSL: the SSL bootstrap
-    /// servers, the cluster CA as truststore (Scala's generated
-    /// `trustStoreFile`), and no hostname verification because the tests reach
-    /// the broker via `127.0.0.1` (as in `ssl_sasl_test`).
-    ///
-    fn apply(self, ctx: &TestContext, mut props: HashMap<String, String>) -> HashMap<String, String> {
+    /// Points `props` at this protocol's listener as a client on the host
+    /// reaches it: [`Self::apply_for`] with no container bootstrap.
+    fn apply(self, ctx: &TestContext, props: HashMap<String, String>) -> HashMap<String, String> {
+        self.apply_for(ctx, false, props)
+    }
+
+    /// Points `props` at this protocol's listener as the client reaches it. For
+    /// SSL: the SSL bootstrap servers (the container SSL listener when
+    /// `needs_container_bootstrap`, else the host one), the cluster CA as
+    /// truststore (Scala's generated `trustStoreFile`), and no hostname
+    /// verification, as the native tests reach the broker via `127.0.0.1` (as in
+    /// `ssl_sasl_test`).
+    fn apply_for(
+        self,
+        ctx: &TestContext,
+        needs_container_bootstrap: bool,
+        mut props: HashMap<String, String>,
+    ) -> HashMap<String, String> {
         if self == SendTestSecurity::Ssl {
-            props.insert("bootstrap.servers".to_string(), ctx.ssl_bootstrap_servers().to_string());
+            let bootstrap = if needs_container_bootstrap {
+                ctx.cluster().container_ssl_bootstrap_servers()
+            } else {
+                ctx.ssl_bootstrap_servers()
+            };
+            props.insert("bootstrap.servers".to_string(), bootstrap.to_string());
             props.insert("security.protocol".to_string(), "SSL".to_string());
             props.insert("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string());
             props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
@@ -311,22 +328,19 @@ impl SendTestSecurity {
     }
 
     /// The producer-under-test config for `factory`: [`send_test_producer_config`]
-    /// on this protocol's listener.
-    ///
-    /// SSL runs on the native backend only: the multilanguage gRPC servers
-    /// reach the broker over the container-internal PLAINTEXT listener, and
-    /// Java has no binding-specific variant of `SslProducerSendTest`.
+    /// on this protocol's listener, at the address the factory's backend
+    /// reaches (the container listener for the gRPC backends).
     fn producer_config<F: ProducerBackendFactory>(
         self,
         factory: &F,
         ctx: &TestContext,
         opts: &SendTestProducerOpts,
     ) -> HashMap<String, String> {
-        assert!(
-            self == SendTestSecurity::Plaintext || !factory.needs_container_bootstrap(),
-            "SSL send tests run on the native backend only"
-        );
-        self.apply(ctx, send_test_producer_config(&bootstrap_for(factory, ctx), opts))
+        self.apply_for(
+            ctx,
+            factory.needs_container_bootstrap(),
+            send_test_producer_config(&bootstrap_for(factory, ctx), opts),
+        )
     }
 }
 
@@ -2507,45 +2521,29 @@ crate::multilanguage_test!(
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);
 crate::multilanguage_test!(test_close, close_inner, producer_send_cluster_config());
 
-// `kafka.api.SslProducerSendTest` (`SslProducerSendTest.scala:24-27`): the
-// `BaseProducerSendTest` bodies over the SSL listener. Native backend only under
-// both feature sets — see `SendTestSecurity::producer_config`.
+// `kafka.api.SslProducerSendTest`: the `BaseProducerSendTest` bodies over the
+// SSL listener, on every backend. The gRPC backends reach the broker's container
+// SSL listener (`SendTestSecurity::apply_for`); the verification consumer and the
+// admin stay native.
 
-/// `SslProducerSendTest.testSendOffset` (`BaseProducerSendTest.scala:127-194`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_ssl_send_offset() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    send_offset_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+/// `SslProducerSendTest.testSendOffset`.
+async fn ssl_send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_offset_with_security(ctx, factory, SendTestSecurity::Ssl).await;
 }
 
-/// `SslProducerSendTest.testClose` (`BaseProducerSendTest.scala:296-325`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_ssl_close() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    close_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+/// `SslProducerSendTest.testClose`.
+async fn ssl_close_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    close_with_security(ctx, factory, SendTestSecurity::Ssl).await;
 }
 
-/// `SslProducerSendTest.testFlush` (`BaseProducerSendTest.scala:483-501`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_ssl_flush() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    flush_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+/// `SslProducerSendTest.testFlush`.
+async fn ssl_flush_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    flush_with_security(ctx, factory, SendTestSecurity::Ssl).await;
 }
+
+crate::multilanguage_test!(test_ssl_send_offset, ssl_send_offset_inner, producer_send_cluster_config());
+crate::multilanguage_test!(test_ssl_close, ssl_close_inner, producer_send_cluster_config());
+crate::multilanguage_test!(test_ssl_flush, ssl_flush_inner, producer_send_cluster_config());
 
 // ---------------------------------------------------------------------------
 // Broker fault injection (native only under both feature sets: the scenarios
