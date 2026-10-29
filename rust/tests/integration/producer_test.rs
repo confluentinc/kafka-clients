@@ -2651,6 +2651,7 @@ fn producer_send_dedicated_cluster_config() -> ClusterConfig {
 /// Java's `createTopicWithAdmin(.., numPartitions = 1, replicationFactor = 3,
 /// replicaAssignment = Map(0 -> List(0, 1)))` creates the topic from the
 /// assignment alone; [`NewTopic::with_replicas_assignments`] is the same request.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC (every send is acknowledged before the follower stops, so a gRPC arm would test nothing).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
     let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
@@ -2795,12 +2796,14 @@ crate::multilanguage_test!(
 // `python/grpc_server.py` and `python/grpc_server_async.py` call
 // `future.get(timeout=120)`). So the first record's partial batch
 // never ships and `close` is never reached on the python / c backends.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_compressed_message_with_create_time__rust() {
     let mut ctx = TestContext::new(producer_send_cluster_config()).await;
     send_compressed_message_with_create_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_non_compressed_message_with_create_time__rust() {
@@ -2808,6 +2811,7 @@ async fn test_send_non_compressed_message_with_create_time__rust() {
     send_non_compressed_message_with_create_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
         .await;
 }
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_compressed_message_with_log_append_time__rust() {
@@ -2815,6 +2819,7 @@ async fn test_send_compressed_message_with_log_append_time__rust() {
     send_compressed_message_with_log_append_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
         .await;
 }
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_non_compressed_message_with_log_append_time__rust() {
@@ -2858,6 +2863,7 @@ crate::multilanguage_test!(
 );
 // `testCompression` is native-only, also under `multilanguage-tests` — see
 // `compression_inner` for why the gRPC backends cannot run it.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_compression__rust() {
@@ -2898,6 +2904,7 @@ impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSeri
 ///
 /// Native only: the gRPC backends' `Send` RPC blocks until delivery, which with
 /// `linger.ms=Int.MaxValue` never happens.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_with_zero_timeout_aborts_pending() {
@@ -2961,7 +2968,8 @@ async fn close_with_zero_timeout_from_caller_thread_inner<F: ProducerBackendFact
 /// Python `KafkaProducer` record) delivers the record's headers to the broker,
 /// as `KafkaProducer#doSend` appends them:
 /// in order, an empty value and a null value kept apart. It used to append
-/// none. Rust-only: the gRPC producer proto has no headers.
+/// none.
+// MULTILANGUAGE: Rust-only API / null header (the inherent borrowed send; proto `Header.value` cannot carry a null value).
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_borrowed_send_delivers_the_record_headers() {
@@ -3102,6 +3110,7 @@ async fn test_wrong_serializer_errors_send() {
 ///
 /// Native only: it needs `send_with_callback` closures that call back into the
 /// same producer, which cannot cross the gRPC boundary.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC (callbacks call back into the same producer).
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_with_zero_timeout_from_sender_thread() {
@@ -3535,6 +3544,7 @@ crate::multilanguage_test!(
 ///
 /// Native only, like Java's suite: the strategy is an internal producer config with no binding
 /// surface, and the suite verifies the producer, not the bindings.
+// MULTILANGUAGE: Rust-internal allocation budget (the incremental buffer.memory strategy, a native suite).
 #[cfg(feature = "integration-tests")]
 mod incremental_allocation_producer_send {
     use super::*;
@@ -3577,6 +3587,7 @@ mod incremental_allocation_producer_send {
         TestContext::new(producer_send_cluster_config()).await
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_offset() {
         send_offset_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
@@ -3587,21 +3598,25 @@ mod incremental_allocation_producer_send {
     // overrides it with an empty body). The construction failure itself is pinned by the unit test
     // `test_incremental_allocation_strategy_rejects_compression`.
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_non_compressed_message_with_create_time() {
         send_non_compressed_message_with_create_time_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close() {
         close_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_to_partition() {
         send_to_partition_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
         let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
@@ -3610,21 +3625,25 @@ mod incremental_allocation_producer_send {
         ctx.cleanup().await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_before_and_after_partition_expansion() {
         send_before_and_after_partition_expansion_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_flush() {
         flush_sends_pending_records_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close_with_zero_timeout_from_caller_thread() {
         close_with_zero_timeout_from_caller_thread_inner(&IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close_with_zero_timeout_from_sender_thread() {
         close_with_zero_timeout_from_sender_thread_inner(&IncrementalAllocationFactory).await;
@@ -3637,6 +3656,7 @@ mod incremental_allocation_producer_send {
     /// Translated from `IncrementalAllocationProducerSendTest.testBatchSizeZero`:
     /// `sendAndVerify(createProducer(lingerMs = Int.MaxValue, deliveryTimeoutMs = Int.MaxValue,
     /// batchSize = 0))`, which is `batch_size_zero_inner`'s body.
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_size_zero() {
         batch_size_zero_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
@@ -3646,6 +3666,7 @@ mod incremental_allocation_producer_send {
     ///
     /// Java's `TODO: also exercise the compressed codecs here once the incremental strategy
     /// supports compression` is KAFKA-20579; compression is rejected at construction for now.
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_large_records_spanning_multiple_chunks() {
         let mut ctx = send_ctx().await;
