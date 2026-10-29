@@ -26,7 +26,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test-integration-grpc-python test-integration-grpc-c \
 	test-integration-grpc-python-native test-integration-grpc-c-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
+	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -249,6 +249,16 @@ package-check:
 # the tags fetched; not part of `make verify`.
 check-api-compat:
 	cargo xtask api-compat
+
+# Audit Cargo.lock, which covers every crate of the workspace, against the
+# RustSec advisory database with cargo-audit. A vulnerable dependency fails;
+# an unmaintained, unsound or yanked one is only reported. cargo-audit fetches
+# the database on each run, so a new advisory can fail it with no change here.
+# Needs network access and cargo-audit (`cargo install cargo-audit --locked`);
+# not part of `make verify`.
+audit:
+	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found: install it with 'cargo install cargo-audit --locked'" >&2; exit 1; }
+	cargo audit
 
 # Sets one version on the crates and Python packages released together, in
 # each one's syntax: `make bump-version VERSION=0.3.0-rc.1` writes 0.3.0-rc.1
