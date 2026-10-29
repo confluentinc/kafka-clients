@@ -83,8 +83,10 @@ name: build-test-release
 #     runs CI and the blocks that package and test the crate (recorded in the
 #     workflow's artifacts), and skips every publish block.
 # To release a package:
-#   1. Merge the change that sets its version to master.
-#   2. On the build of that master commit, run the manual "Create release tag"
+#   1. Merge the change that sets its version to master, or, for a patch or
+#      pre-release of an earlier line, to its release branch <major>.<minor>.x
+#      (1.0.x), where the fixes are backported.
+#   2. On the build of that commit, run the manual "Create release tag"
 #      promotion (create-release-tag.yml) and enter the version of each client
 #      to release, RUST_VERSION and PYTHON_VERSION; a client left empty is not
 #      released. It refuses unless every version entered matches its manifest
@@ -150,7 +152,8 @@ global_job_config:
       # Replaces this job's previous result with `running` (see the epilogue
       # below), so that a rerun that is still running, was stopped, or could not
       # upload its result does not leave an earlier `passed` in place. On a
-      # master build, the only kind create-release-tag.yml tags, a job that
+      # build of master or of a release branch <major>.<minor>.x, the only
+      # kinds create-release-tag.yml tags, a job that
       # cannot record `running` fails before it runs anything, because an
       # earlier `passed` of this job would otherwise still count. Elsewhere it
       # only warns, so that an artifact store outage does not fail pull
@@ -160,7 +163,8 @@ global_job_config:
         if ! { result_file=$(mktemp) \
           && printf 'running %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
           && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force; }; then
-          if [ "${SEMAPHORE_GIT_REF_TYPE}" = "branch" ] && [ "${SEMAPHORE_GIT_BRANCH}" = "master" ]; then
+          if [ "${SEMAPHORE_GIT_REF_TYPE}" = "branch" ] \
+            && [[ "${SEMAPHORE_GIT_BRANCH}" == master || "${SEMAPHORE_GIT_BRANCH}" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
             echo "Could not record that this job started, so an earlier result of this job could still be counted by create-release-tag.yml; rerun the job" >&2
             exit 1
           fi
@@ -180,8 +184,8 @@ global_job_config:
   # path, and LC_ALL=C ensures that Linux and macOS (BSD tr) map multibyte
   # characters such as the em dash identically; create-release-tag.yml applies
   # the same mapping. A failed upload here produces only a warning: if the
-  # final result cannot be recorded, the job stays `running` (on a master
-  # build the prologue guarantees that it was recorded), and
+  # final result cannot be recorded, the job stays `running` (on a master or
+  # release branch build the prologue guarantees that it was recorded), and
   # create-release-tag.yml refuses to tag the commit.
   epilogue:
     on_pass:
@@ -604,7 +608,8 @@ blocks:
     # before the token is loaded, unless all of the following hold:
     #   - the build is of a release tag that still points at the commit the
     #     build checked out;
-    #   - the tagged commit is part of master;
+    #   - the tagged commit is part of master, or of the release branch
+    #     <major>.<minor>.x of its version (rust/v1.0.1 on 1.0.x);
     #   - the tag matches [package] version in rust/Cargo.toml at that commit;
     #   - the version is not yet on crates.io and is higher than every
     #     published version. The only exception is completing an interrupted
@@ -665,7 +670,7 @@ blocks:
           - |
             release_tag_pattern='^rust/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
             if [ "${SEMAPHORE_GIT_REF_TYPE}" != "tag" ]; then
-              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag rust/v<version> for the master commit to release"
+              refuse "only a release tag build can publish (ref type '${SEMAPHORE_GIT_REF_TYPE}'); push a tag rust/v<version> for the commit to release"
             fi
             if [[ "${SEMAPHORE_GIT_TAG_NAME:-}" =~ ^rust/v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]]; then
               refuse "${SEMAPHORE_GIT_TAG_NAME} is a dev tag: its build tests and packages the crate, and publishes nothing"
@@ -679,7 +684,11 @@ blocks:
             export CRATE_VERSION="${SEMAPHORE_GIT_TAG_NAME#rust/v}"
           # Because a crates.io version can never be replaced, the tag must
           # still point at the commit this build tested, and that commit must be
-          # part of master. Checking immediately before the upload also catches
+          # part of master or of the release branch of its version,
+          # <major>.<minor>.x, where fixes are backported for patch and
+          # pre-release versions of an earlier line. A branch that does not
+          # exist is not an error: the commit must then be on master. Checking
+          # immediately before the upload also catches
           # a tag that was moved or deleted while CI ran. `git ls-remote`
           # reports a lightweight tag as the commit itself, and an annotated tag
           # as the tag object followed by `<tag>^{}`, the commit it references.
@@ -696,10 +705,22 @@ blocks:
             if [ "${tag_sha}" != "${head_sha}" ]; then
               refuse "tag ${SEMAPHORE_GIT_TAG_NAME} now points at ${tag_sha}, not at ${head_sha}, which this build tested; the build of the moved tag publishes instead"
             fi
-            git fetch --quiet --no-tags origin master \
-              || refuse "could not fetch origin/master to confirm that ${SEMAPHORE_GIT_TAG_NAME} is on master"
-            git merge-base --is-ancestor "${head_sha}" FETCH_HEAD \
-              || refuse "${SEMAPHORE_GIT_TAG_NAME} (${head_sha}) is not on master; tag a master commit"
+            release_branch="$(printf '%s' "${CRATE_VERSION}" | cut -d. -f1-2).x"
+            on_branch=""
+            for branch in master "${release_branch}"; do
+              remote_branch=$(git ls-remote --heads origin "refs/heads/${branch}") \
+                || refuse "could not read branch ${branch} from origin"
+              [ -n "${remote_branch}" ] || continue
+              git fetch --quiet --no-tags origin "refs/heads/${branch}" \
+                || refuse "could not fetch origin/${branch} to confirm that ${SEMAPHORE_GIT_TAG_NAME} is on it"
+              if git merge-base --is-ancestor "${head_sha}" FETCH_HEAD; then
+                on_branch=${branch}
+                break
+              fi
+            done
+            [ -n "${on_branch}" ] \
+              || refuse "${SEMAPHORE_GIT_TAG_NAME} (${head_sha}) is neither on master nor on ${release_branch}; tag a commit of one of them"
+            echo "${SEMAPHORE_GIT_TAG_NAME} (${head_sha}) is on ${on_branch}"
           # The tag must match [package] version in rust/Cargo.toml at the
           # tagged commit. /usr/bin/python3 is the image's system Python (3.12
           # on Ubuntu 24.04), which provides tomllib.
