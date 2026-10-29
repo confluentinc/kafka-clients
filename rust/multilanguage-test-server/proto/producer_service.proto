@@ -146,6 +146,11 @@ message SendResponse {
     RecordMetadata metadata = 1;
     KafkaError error = 2;
   }
+  // True when `error` was raised by the send call itself (Java's `send`
+  // throwing: Python's `send()` raising, C's send returning NULL with
+  // `out_err`), false when the record's future failed with it. The harness
+  // returns the first as `Err` from `send` and the second as a failed future.
+  bool raised_by_send = 3;
 }
 
 message RecordMetadata {

@@ -1073,6 +1073,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // metadata beside the error, as Java does), so pump it into the log.
       pump_callbacks(producer);
       fill_proto_error(resp->mutable_error(), send_err);
+      // NULL with `out_err`: send itself failed (Java's send throwing), as
+      // opposed to a future that fails below.
+      resp->set_raised_by_send(true);
       return grpc::Status::OK;
     }
 
