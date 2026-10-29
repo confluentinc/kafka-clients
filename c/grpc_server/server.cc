@@ -351,37 +351,82 @@ KafkaError make_synthetic_error(
   return err;
 }
 
+void copy_partitions_into(::google::protobuf::RepeatedPtrField<CallbackLogPartition>* dst,
+                          const kafka_List_t* partitions);
+
+// Copies an owned list of `char *` into a repeated string field, then frees it.
+void take_string_list(::google::protobuf::RepeatedPtrField<std::string>* dst, kafka_List_t* list) {
+  if (list == nullptr) return;
+  const int32_t n = kafka_List_size(list);
+  for (int32_t i = 0; i < n; i++) {
+    const char* s = static_cast<const char*>(kafka_List_get(list, i));
+    dst->Add(s ? std::string(s) : std::string());
+  }
+  kafka_List_destroy(list);
+}
+
+// Fills a proto KafkaError from a BORROWED error handle: its FFI code and
+// message, the class-specific payload read through the error's views (each
+// borrowed from `err`; the lists and maps they return are owned and freed
+// here), and the bit that tells a bare KafkaException from
+// UnknownServerException, which share code -1.
+void fill_proto_error_borrowed(KafkaError* dst, const kafka_common_Error_t* err) {
+  const char* msg = kafka_common_Error_message(err);
+  dst->set_code(kafka_common_Error__enum(err));
+  dst->set_message(msg ? std::string(msg) : std::string());
+  if (const auto* view = kafka_common_Error_topic_authorization_error(err)) {
+    take_string_list(dst->mutable_unauthorized_topics(),
+                     kafka_common_TopicAuthorizationError_unauthorized_topics(view));
+  }
+  if (const auto* view = kafka_common_Error_invalid_topic(err)) {
+    take_string_list(dst->mutable_invalid_topics(), kafka_common_InvalidTopicError_invalid_topics(view));
+  }
+  if (const auto* view = kafka_common_Error_group_authorization_error(err)) {
+    if (const char* group_id = kafka_common_GroupAuthorizationError_group_id(view)) dst->set_group_id(group_id);
+  }
+  if (const auto* view = kafka_common_Error_consumer_no_offset_for_partition(err)) {
+    kafka_List_t* partitions = kafka_common_ConsumerNoOffsetForPartitionError_partitions(view);
+    copy_partitions_into(dst->mutable_partitions(), partitions);
+    kafka_List_destroy(partitions);
+  }
+  if (const auto* view = kafka_common_Error_consumer_offset_out_of_range(err)) {
+    // Owned map of owned TopicPartition -> owned `int64_t *`.
+    kafka_Map_t* offsets = kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(view);
+    const int32_t n = kafka_Map_size(offsets);
+    for (int32_t i = 0; i < n; i++) {
+      const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(offsets, i));
+      const char* topic = kafka_common_TopicPartition_topic(tp);
+      auto* entry = dst->add_offset_out_of_range_partitions();
+      entry->mutable_partition()->set_topic(topic ? topic : "");
+      entry->mutable_partition()->set_partition(kafka_common_TopicPartition_partition(tp));
+      entry->set_offset(*static_cast<const int64_t*>(kafka_Map_value(offsets, i)));
+    }
+    kafka_Map_destroy(offsets);
+  }
+  dst->set_bare_kafka_error(dst->code() == kafka_common_Error_UNKNOWN_SERVER_ERROR &&
+                            kafka_common_Error_is_api_error(err) == 0);
+}
+
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
 //
-// `kafka_common_Error__enum` identifies the error's class on its own -- the
-// codes are injective -- so nothing else has to be inferred here. This is what
-// retired `guess_variant_from_message`, which substring-matched the message
-// text to recover a class the code could not carry, on the two producer paths
-// that bothered; every consumer path shipped an unclassified error.
+// `kafka_common_Error__enum` identifies the error's class (with
+// `bare_kafka_error` for the one code two classes share), so nothing else has
+// to be inferred here. This is what retired `guess_variant_from_message`,
+// which substring-matched the message text to recover a class the code could
+// not carry, on the two producer paths that bothered; every consumer path
+// shipped an unclassified error.
 //
 // `is_retriable` and `is_fatal` are gone from the proto: no reader consumed
 // them, both are derivable from the code, and this was the server's only
 // predicate call.
-void copy_partitions_into(::google::protobuf::RepeatedPtrField<CallbackLogPartition>* dst,
-                          const kafka_List_t* partitions);
-
 void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err) {
   if (err == nullptr) {
     // Also the server's own bookkeeping failure, so it takes the same code.
     *dst = make_synthetic_error("null error handle");
     return;
   }
-  const char* msg = kafka_common_Error_message(err);
-  dst->set_code(kafka_common_Error__enum(err));
-  dst->set_message(msg ? std::string(msg) : std::string());
-  // NoOffsetForPartition's partitions(), read through its view (borrowed from
-  // `err`); the returned list is owned.
-  if (const auto* no_offset = kafka_common_Error_consumer_no_offset_for_partition(err)) {
-    kafka_List_t* partitions = kafka_common_ConsumerNoOffsetForPartitionError_partitions(no_offset);
-    copy_partitions_into(dst->mutable_partitions(), partitions);
-    kafka_List_destroy(partitions);
-  }
+  fill_proto_error_borrowed(dst, err);
   kafka_common_Error_destroy(err);
 }
 
@@ -664,13 +709,16 @@ extern "C" void log_partitions_lost(void* self, const kafka_List_t* partitions,
   log_rebalance(self, partitions, callback_id, KIND_LOST);
 }
 
-// Copies a BORROWED error's message and FFI code into `entry`; nothing is
+// Copies a BORROWED error into `entry` (its message, FFI code and, as
+// `error_detail`, the whole proto KafkaError); nothing is
 // destroyed.
 void copy_error_into(CallbackLogEntry* entry, const kafka_common_Error_t* error) {
   if (error == nullptr) return;
   const char* msg = kafka_common_Error_message(error);
   entry->set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
   entry->set_error_code(kafka_common_Error__enum(error));
+  // The whole error, as a reply carries one (payload included).
+  fill_proto_error_borrowed(entry->mutable_error_detail(), error);
 }
 
 // Copies a BORROWED offsets map (`kafka_common_TopicPartition_t *` ->
@@ -2001,7 +2049,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
     // An absent timeout_ms selects the overload without a Duration.
-    if (req->offsets().empty()) {
+    // with_offsets selects the Map overload even for an empty map.
+    if (req->offsets().empty() && !req->with_offsets()) {
       if (req->has_timeout_ms()) {
         kafka_consumer_Consumer_commit_sync_with_timeout(c, req->timeout_ms(), &err);
       } else {
@@ -2028,7 +2077,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
-    if (req->offsets().empty() && !req->with_callback()) {
+    if (req->offsets().empty() && !req->with_offsets() && !req->with_callback()) {
       kafka_consumer_Consumer_commit_async(c, &err);
     } else {
       // A real OffsetCommitCallback (or the reporting no-op, see
@@ -2039,7 +2088,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       kafka_consumer_OffsetCommitCallback_t* callback = kafka_consumer_OffsetCommitCallback_new(
           log_state_for(req->consumer_id()),
           req->with_callback() ? log_commit_complete : discard_commit_complete);
-      if (req->offsets().empty()) {
+      if (req->offsets().empty() && !req->with_offsets()) {
         kafka_consumer_Consumer_commit_async_with_callback(c, callback, &err);
       } else {
         OffsetMapHandles offsets(req->offsets());
@@ -2813,8 +2862,8 @@ void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
     *dst = make_synthetic_error("null error handle");
     return;
   }
-  dst->set_code(kafka_common_Error__enum(err));
-  dst->set_message(cstr(kafka_common_Error_message(err)));
+  // Code, message, payload and the bare-KafkaException bit, as fill_proto_error.
+  fill_proto_error_borrowed(dst, err);
 }
 
 // Awaits a future; on success `*out` is the borrowed value (null for a Void
