@@ -28,8 +28,6 @@ use crate::integrity::workload::{
     CopierSpec, GroupSpec, Props, Restart, RestartMode, RunSpec, TopicSpec, WriterSpec, admin, run,
 };
 
-const CODECS: [&str; 5] = ["none", "gzip", "snappy", "lz4", "zstd"];
-
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
         .ok()
@@ -49,7 +47,6 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 }
 
 /// The settings of a run, from the environment.
-#[derive(Debug)]
 struct LongRunConfig {
     bootstrap_servers: String,
     security_protocol: Option<String>,
@@ -99,12 +96,14 @@ impl LongRunConfig {
         }
     }
 
-    /// Every setting but the credentials, for the report.
-    fn describe(&self) -> serde_json::Value {
+    /// Every setting but the credentials, for the report; the security
+    /// settings as the clients got them (`props`), from the variables or the
+    /// file.
+    fn describe(&self, props: &Props) -> serde_json::Value {
         serde_json::json!({
             "bootstrap_servers": if self.bootstrap_servers.is_empty() { "local cluster" } else { &self.bootstrap_servers },
-            "security_protocol": self.security_protocol,
-            "sasl_mechanism": self.sasl_mechanism,
+            "security_protocol": props.get("security.protocol"),
+            "sasl_mechanism": props.get("sasl.mechanism"),
             "duration_s": self.duration.as_secs(),
             "rate_per_writer": self.rate_per_writer,
             "large_rate": self.large_rate,
@@ -136,13 +135,12 @@ impl LongRunConfig {
         // Credentials build the login line for whichever mechanism is set, by
         // the variable or by the file.
         if let (Some(user), Some(pass)) = (&self.sasl_username, &self.sasl_password) {
-            let mechanism = props.get("sasl.mechanism").cloned().unwrap_or_else(|| "PLAIN".to_string());
+            let mechanism = props.entry("sasl.mechanism".to_string()).or_insert_with(|| "PLAIN".to_string());
             let module = if mechanism.starts_with("SCRAM") {
                 "org.apache.kafka.common.security.scram.ScramLoginModule"
             } else {
                 "org.apache.kafka.common.security.plain.PlainLoginModule"
             };
-            props.insert("sasl.mechanism".to_string(), mechanism);
             let quoted = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
             props.insert(
                 "sasl.jaas.config".to_string(),
@@ -213,26 +211,21 @@ impl Stream {
             Stream::Copy => "copy",
         }
     }
-
-    /// The writer id, unique across the streams.
-    fn writer(self) -> u32 {
-        match self {
-            Stream::Codec(codec) => CODECS.iter().position(|c| *c == codec).expect("a known codec") as u32,
-            Stream::Txn => 5,
-            Stream::Large => 6,
-            Stream::Copy => 7,
-        }
-    }
 }
 
-/// Adds `stream`'s topics, writer and copier to `spec`.
-fn add_stream(spec: &mut RunSpec, config: &LongRunConfig, name: &dyn Fn(&str) -> String, stream: Stream) {
+/// Adds `stream`'s topics, writer (`writer_id`, unique across the streams) and
+/// copier to `spec`.
+fn add_stream(
+    spec: &mut RunSpec,
+    config: &LongRunConfig,
+    name: &dyn Fn(&str) -> String,
+    writer_id: u32,
+    stream: Stream,
+) {
     let (partitions, rf) = (config.partitions, config.replication_factor);
     let restart = Restart::Every(config.producer_restart);
     let topic = name(stream.name());
-    let writer = WriterSpec::new(stream.writer(), &topic)
-        .rate(config.rate_per_writer)
-        .restart(restart);
+    let writer = WriterSpec::new(writer_id, &topic).rate(config.rate_per_writer).restart(restart);
     match stream {
         Stream::Codec(codec) => {
             spec.topics.push(TopicSpec::source(&topic, partitions, rf));
@@ -254,11 +247,8 @@ fn add_stream(spec: &mut RunSpec, config: &LongRunConfig, name: &dyn Fn(&str) ->
         Stream::Copy => {
             let input = name("copy-in");
             spec.topics.push(TopicSpec::source(&input, partitions, rf));
-            spec.writers.push(
-                WriterSpec::new(stream.writer(), &input)
-                    .rate(config.rate_per_writer)
-                    .restart(restart),
-            );
+            spec.writers
+                .push(WriterSpec::new(writer_id, &input).rate(config.rate_per_writer).restart(restart));
             spec.topics.push(TopicSpec::mirror(&topic, &input, partitions, rf));
             spec.copiers.push(CopierSpec {
                 input,
@@ -279,8 +269,8 @@ fn add_stream(spec: &mut RunSpec, config: &LongRunConfig, name: &dyn Fn(&str) ->
 fn run_spec(config: &LongRunConfig, run_id: u64) -> RunSpec {
     let name = |stream: &str| format!("{}-{run_id:016x}-{stream}", config.topic_prefix);
     let mut spec = RunSpec::new(run_id, config.seed);
-    for &stream in &Stream::ALL {
-        add_stream(&mut spec, config, &name, stream);
+    for (writer, &stream) in Stream::ALL.iter().enumerate() {
+        add_stream(&mut spec, config, &name, writer as u32, stream);
     }
     let topics = spec.topics.iter().map(|t| t.name.clone()).collect();
     // A hard-stopped member holds its partitions for `max.poll.interval.ms`.
@@ -306,16 +296,18 @@ fn run_spec(config: &LongRunConfig, run_id: u64) -> RunSpec {
         min_producer_restarts: u64::from(config.duration > config.producer_restart),
         min_copier_aborts: 1,
         every_partition_read: true,
+        // Nothing injects faults: more than one failure in a hundred is a bug.
+        max_failed_percent: Some(1.0),
     };
     spec
 }
 
 /// Writes the run's `report.json` and `verdict.txt` into `dir`.
-fn write_report(dir: &Path, verdict: &Verdict, config: &LongRunConfig, run_id: u64, topics: &[String]) {
+fn write_report(dir: &Path, verdict: &Verdict, config: &LongRunConfig, base: &Props, run_id: u64, topics: &[String]) {
     std::fs::create_dir_all(dir).expect("create the report directory");
     let mut report = verdict.to_json();
     report["run_id"] = serde_json::json!(format!("{run_id:016x}"));
-    report["config"] = config.describe();
+    report["config"] = config.describe(base);
     report["topics"] = serde_json::json!(topics);
     std::fs::write(dir.join("report.json"), serde_json::to_string_pretty(&report).expect("json"))
         .expect("write report.json");
@@ -351,16 +343,14 @@ async fn integrity_run() {
     let spec = run_spec(&config, run_id);
     let topics: Vec<String> = spec.topics.iter().map(|t| t.name.clone()).collect();
     eprintln!("integrity: topics {topics:?}");
-    let verdict = run(spec, base.clone()).await;
-    eprintln!("{verdict}");
-    let dir = config.report_dir.join(format!("{run_id:016x}"));
-    write_report(&dir, &verdict, &config, run_id, &topics);
-    eprintln!("integrity: report written to {}", dir.display());
-
-    if !config.keep_topics && local.is_none() {
+    // On a task of its own, so the topics are deleted even if it panics.
+    let outcome = tokio::spawn(run(spec, base.clone())).await;
+    // A failed run keeps its topics for inspection.
+    let passed = outcome.as_ref().is_ok_and(Verdict::passed);
+    if !config.keep_topics && local.is_none() && (passed || outcome.is_err()) {
         let admin = admin(&base);
         if let Err(e) = admin
-            .delete_topics_with_topic_collection(TopicCollection::of_topic_names(topics))
+            .delete_topics_with_topic_collection(TopicCollection::of_topic_names(topics.clone()))
             .all()
             .get()
             .await
@@ -368,6 +358,13 @@ async fn integrity_run() {
             eprintln!("integrity: could not delete the run's topics: {e}");
         }
         admin.close().await;
+    } else if !passed && local.is_none() {
+        eprintln!("integrity: the run failed, its topics are kept: {topics:?}");
     }
+    let verdict = outcome.unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+    eprintln!("{verdict}");
+    let dir = config.report_dir.join(format!("{run_id:016x}"));
+    write_report(&dir, &verdict, &config, &base, run_id, &topics);
+    eprintln!("integrity: report written to {}", dir.display());
     assert!(verdict.passed(), "the integrity run failed:\n{verdict}");
 }

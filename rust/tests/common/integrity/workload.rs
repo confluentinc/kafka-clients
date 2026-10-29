@@ -17,11 +17,12 @@
 //! - **writers** produce self-checking records, optionally in transactions,
 //!   replacing their producer now and then (a new producer id each time);
 //! - a **live group** reads every topic while the writers run, commits after
-//!   every poll, reads its commits back, and restarts its members, alternating
-//!   a clean `close()` with a hard stop (the consumer dropped, uncommitted
-//!   records left behind, as a crash would);
+//!   every poll, now and then reads its commits back, and restarts its members,
+//!   cycling through clean `close()`s and hard stops (the consumer abandoned,
+//!   uncommitted records left behind, as a crash would);
 //! - **copiers** run a consume-transform-produce loop with random aborts
-//!   (Apache Kafka's `TransactionalMessageCopier`);
+//!   (Apache Kafka's `TransactionalMessageCopier`) and check their committed
+//!   offsets;
 //! - a **final read-back** reads every partition from the start with a fresh
 //!   read_committed consumer once everything has stopped.
 //!
@@ -61,6 +62,8 @@ const SETTLED_FUTURE_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a failed client waits before it is created again.
 const RETRY_BACKOFF: Duration = Duration::from_secs(1);
+/// A copier reads its committed offsets back after every this many commits.
+const COPIER_READBACK_EVERY: u64 = 10;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -174,7 +177,8 @@ impl WriterSpec {
 /// How a live-group member ends before it is created again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartMode {
-    /// `close()`, after committing everything it read.
+    /// `close()`, after committing everything it read (a commit that fails is
+    /// reported, and the next owner reads those records again).
     Clean,
     /// Read one more batch, do not commit it, and stop polling without
     /// `close()`, as a stuck or crashed application does. Its partitions move
@@ -291,10 +295,11 @@ pub struct RunSpec {
     /// How long the writers run; `None` waits until every writer has written
     /// its `records`.
     pub duration: Option<Duration>,
-    /// How long the live group and the copiers get to catch up once the
-    /// writers stopped.
+    /// Once the writers are told to stop: how long each writer, copier and
+    /// member gets to stop, and the live group to catch up.
     pub drain_timeout: Duration,
-    /// How long the final read-back may go without reading a record.
+    /// How long the final read-back may go without moving forward: setting
+    /// up, or a partition's position advancing.
     pub final_timeout: Duration,
     /// The run is stopped and fails when nothing is sent or read for this long.
     pub watchdog: Duration,
@@ -388,8 +393,9 @@ async fn seed_group_offsets(base: &Props, group_id: &str, topics: &[&TopicSpec])
     consumer.close().await.expect("close the seed consumer");
 }
 
-/// Holds a writer to `rate_per_sec`: by the end of each 10 ms tick it may have
-/// sent `ticks * rate_per_sec / 100` records, so any rate is kept exactly.
+/// Holds a writer to at most `rate_per_sec`: by the end of each 10 ms tick it
+/// may have sent `ticks * rate_per_sec / 100` records, so a rate that is not a
+/// multiple of 100 is not rounded away.
 struct Pacer {
     interval: Option<tokio::time::Interval>,
     rate_per_sec: u64,
@@ -459,22 +465,31 @@ async fn commit_transaction(
     }
 }
 
-/// Ends `txn` as it intends and reports it. Returns `false` when the producer
-/// can no longer be used.
-async fn end_txn(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, txn: OpenTxn, spec: &WriterSpec, ledger: &Ledger) -> bool {
-    let (outcome, healthy) = if txn.intent == TxnIntent::Abort {
-        // Send the records before aborting, so the broker writes and then
-        // aborts them and read_committed readers must skip them; an abort of
-        // unsent batches would only drop them in the client.
-        if let Err(e) = producer.flush().await {
+/// Ends `txn` as it intends, or aborts it when one of its sends `failed`, and
+/// reports it. Returns `false` when the producer can no longer be used.
+async fn end_txn(
+    producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
+    txn: OpenTxn,
+    failed: bool,
+    spec: &WriterSpec,
+    ledger: &Ledger,
+) -> bool {
+    let (outcome, healthy) = if txn.intent == TxnIntent::Abort || failed {
+        // Send the records of a planned abort first, so the broker writes and
+        // then aborts them and read_committed readers must skip them; an abort
+        // of unsent batches would only drop them in the client.
+        let mut planned = !failed;
+        if planned && let Err(e) = producer.flush().await {
             ledger.event(Event::ProducerError, format!("writer {} flush: {e}", spec.writer));
+            planned = false;
         }
         match producer.abort_transaction().await {
-            Ok(()) => (TxnOutcome::Aborted, true),
+            Ok(()) if planned => (TxnOutcome::Aborted, true),
+            Ok(()) => (TxnOutcome::Failed, true),
             Err(e) => {
                 // Never committed: the coordinator aborts it when it times out.
                 ledger.event(Event::ProducerError, format!("writer {} abort_transaction: {e}", spec.writer));
-                (TxnOutcome::Aborted, false)
+                (TxnOutcome::Failed, false)
             },
         }
     } else {
@@ -483,7 +498,7 @@ async fn end_txn(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, txn: OpenTxn, spec:
             Err(e) => {
                 ledger.event(Event::ProducerError, format!("writer {} commit_transaction: {e}", spec.writer));
                 match producer.abort_transaction().await {
-                    Ok(()) => (TxnOutcome::Aborted, true),
+                    Ok(()) => (TxnOutcome::Failed, true),
                     Err(e) => {
                         ledger.event(Event::ProducerError, format!("writer {} abort_transaction: {e}", spec.writer));
                         (TxnOutcome::Unknown, false)
@@ -558,8 +573,9 @@ async fn run_writer(
         let mut written_here = 0u64;
         let mut in_flight: VecDeque<(u64, KafkaFuture<RecordMetadata>)> = VecDeque::new();
         let mut txn: Option<OpenTxn> = None;
+        let mut restart_due = false;
         while healthy && !finished(written) {
-            let restart_due = match spec.restart {
+            restart_due = match spec.restart {
                 Some(Restart::EveryRecords(n)) => written_here >= n,
                 Some(Restart::Every(every)) => started.elapsed() >= every,
                 None => false,
@@ -600,9 +616,8 @@ async fn run_writer(
                     ledger.send_rejected(&spec.topic, spec.writer, seq, &e);
                     // The transaction can no longer commit (Java's producer is
                     // then in an abortable error), so end it now.
-                    if let Some(mut open) = txn.take() {
-                        open.intent = TxnIntent::Abort;
-                        healthy = end_txn(&producer, open, &spec, &ledger).await;
+                    if let Some(open) = txn.take() {
+                        healthy = end_txn(&producer, open, true, &spec, &ledger).await;
                     }
                 },
             }
@@ -620,11 +635,13 @@ async fn run_writer(
                     .as_ref()
                     .is_some_and(|t| t.futures.len() >= txn_spec.records_per_txn as usize)
             {
-                healthy = end_txn(&producer, txn.take().expect("open"), &spec, &ledger).await;
+                healthy = end_txn(&producer, txn.take().expect("open"), false, &spec, &ledger).await;
             }
         }
-        if let Some(open) = txn.take() {
-            end_txn(&producer, open, &spec, &ledger).await;
+        if let Some(open) = txn.take()
+            && !end_txn(&producer, open, false, &spec, &ledger).await
+        {
+            healthy = false;
         }
         if let Err(e) = producer.close().await {
             ledger.event(Event::ProducerError, format!("writer {} close: {e}", spec.writer));
@@ -634,14 +651,16 @@ async fn run_writer(
             ledger.delivered(&spec.topic, spec.writer, seq, &result);
         }
         incarnation += 1;
-        if !finished(written) {
+        // Only the planned restarts count: a producer replaced after a failure
+        // is reported by the failure.
+        if restart_due {
             ledger.event(
                 Event::ProducerRestart,
                 format!("writer {} incarnation {incarnation}", spec.writer),
             );
-            if !healthy {
-                tokio::time::sleep(RETRY_BACKOFF).await;
-            }
+        }
+        if !healthy && !finished(written) {
+            tokio::time::sleep(RETRY_BACKOFF).await;
         }
     }
 }
@@ -761,9 +780,7 @@ async fn run_member(
                 },
             };
             let records: Vec<_> = records.into_iter().collect();
-            for record in &records {
-                ledger.live_record(record);
-            }
+            ledger.live_batch(&records);
             let offsets = next_offsets(&records);
             if offsets.is_empty() {
                 continue;
@@ -816,15 +833,19 @@ async fn run_member(
     }
 }
 
-/// Seeks every partition of `partitions` back to its committed offset:
-/// Apache Kafka's `TransactionalMessageCopier.resetToLastCommittedPositions`.
-async fn rewind(consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>, partitions: &[TopicPartition]) -> Result<(), Error> {
+/// Seeks every partition of `partitions` back to its committed offset, and
+/// returns those offsets: Apache Kafka's
+/// `TransactionalMessageCopier.resetToLastCommittedPositions`.
+async fn rewind(
+    consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>,
+    partitions: &[TopicPartition],
+) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
     let committed = consumer.committed(partitions).await?;
     for tp in partitions {
         let offset = committed.get(tp).map_or(0, OffsetAndMetadata::offset);
         consumer.seek_with_offset(tp.clone(), offset).await?;
     }
-    Ok(())
+    Ok(committed)
 }
 
 /// Whether the copier owns every input partition and has read each to its end.
@@ -841,6 +862,37 @@ async fn copied_everything(consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>, input
         }
     }
     Ok(true)
+}
+
+/// The copier's consumer, subscribed to its input. `None` once `stop` is set
+/// without one.
+async fn start_copier_consumer(
+    spec: &CopierSpec,
+    base: &Props,
+    ledger: &Ledger,
+    stop: &AtomicBool,
+) -> Option<KafkaConsumer<Vec<u8>, Vec<u8>>> {
+    loop {
+        match create_consumer(base, &spec.group_id, "integrity-copier".to_string(), &spec.props) {
+            Ok(mut consumer) => match consumer
+                .subscribe_with_topics_listener(vec![spec.input.clone()], Arc::new(WaitForPoll))
+                .await
+            {
+                Ok(()) => return Some(consumer),
+                Err(e) => {
+                    ledger.event(Event::ConsumerError, format!("copier subscribe: {e}"));
+                    if let Err(e) = consumer.close().await {
+                        ledger.event(Event::ConsumerError, format!("copier consumer close: {e}"));
+                    }
+                },
+            },
+            Err(e) => ledger.event(Event::ConsumerError, format!("copier consumer create: {e}")),
+        }
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        tokio::time::sleep(RETRY_BACKOFF).await;
+    }
 }
 
 /// The copier's transactional producer, with its transactions initialised.
@@ -862,20 +914,20 @@ async fn start_copier_producer(
         &Props::new(),
     );
     loop {
-        let producer = KafkaProducer::new(
-            ProducerConfig::new(&props).expect("valid producer config"),
-            ByteArraySerializer::default(),
-            ByteArraySerializer::default(),
-        )
-        .expect("copier producer");
-        match producer.init_transactions().await {
-            Ok(()) => return Some(producer),
-            Err(e) => {
-                ledger.event(Event::ProducerError, format!("copier init_transactions: {e}"));
-                if let Err(e) = producer.close().await {
-                    ledger.event(Event::ProducerError, format!("copier close: {e}"));
-                }
+        let created = ProducerConfig::new(&props).and_then(|config| {
+            KafkaProducer::new(config, ByteArraySerializer::default(), ByteArraySerializer::default())
+        });
+        match created {
+            Ok(producer) => match producer.init_transactions().await {
+                Ok(()) => return Some(producer),
+                Err(e) => {
+                    ledger.event(Event::ProducerError, format!("copier init_transactions: {e}"));
+                    if let Err(e) = producer.close().await {
+                        ledger.event(Event::ProducerError, format!("copier close: {e}"));
+                    }
+                },
             },
+            Err(e) => ledger.event(Event::ProducerError, format!("copier create: {e}")),
         }
         if stop.load(Ordering::SeqCst) {
             return None;
@@ -885,24 +937,24 @@ async fn start_copier_producer(
 }
 
 /// Seeks the partitions of `partitions` the copier still owns back to their
-/// committed offsets, retrying until it succeeds or `stop` is set. A partition
-/// it lost meanwhile is left to its new owner, which starts from the same
-/// committed offset.
+/// committed offsets, retrying until it succeeds (returning those offsets) or
+/// `stop` is set. A partition it lost meanwhile is left to its new owner,
+/// which starts from the same committed offset.
 async fn rewind_owned(
     consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>,
     partitions: &[TopicPartition],
     ledger: &Ledger,
     stop: &AtomicBool,
-) {
+) -> Option<HashMap<TopicPartition, OffsetAndMetadata>> {
     loop {
         let assigned = consumer.assignment();
         let owned: Vec<TopicPartition> = partitions.iter().filter(|tp| assigned.contains(tp)).cloned().collect();
         match rewind(consumer, &owned).await {
-            Ok(()) => return,
+            Ok(committed) => return Some(committed),
             Err(e) => ledger.event(Event::ConsumerError, format!("copier rewind: {e}")),
         }
         if stop.load(Ordering::SeqCst) {
-            return;
+            return None;
         }
         tokio::time::sleep(RETRY_BACKOFF).await;
     }
@@ -922,13 +974,15 @@ async fn run_copier(
     stop: Arc<AtomicBool>,
 ) {
     let mut aborts = AbortPlan::new(spec.abort_one_in, seed ^ 0xC0_FFEE);
-    let mut consumer =
-        create_consumer(&base, &spec.group_id, "integrity-copier".to_string(), &spec.props).expect("copier consumer");
-    consumer
-        .subscribe_with_topics_listener(vec![spec.input.clone()], Arc::new(WaitForPoll))
-        .await
-        .expect("copier subscribe");
+    let Some(mut consumer) = start_copier_consumer(&spec, &base, &ledger, &stop).await else {
+        return;
+    };
     let mut producer = start_copier_producer(&spec, &base, &ledger, &stop).await;
+    // The offsets the copier committed, as far as it knows; the group's
+    // committed offsets must match them (a partition missing here holds its
+    // seeded 0).
+    let mut expected: HashMap<TopicPartition, i64> = HashMap::new();
+    let mut commits = 0u64;
     while let Some(active) = producer.as_ref()
         && !stop.load(Ordering::SeqCst)
     {
@@ -954,33 +1008,32 @@ async fn run_copier(
         let partitions: Vec<TopicPartition> = offsets.keys().cloned().collect();
         let mut futures = Vec::with_capacity(records.len());
         let mut healthy = true;
-        let committed = match active.begin_transaction() {
+        let outcome = match active.begin_transaction() {
             Err(e) => {
                 ledger.event(Event::ProducerError, format!("copier begin_transaction: {e}"));
                 healthy = false;
-                false
+                TxnOutcome::Failed
             },
             Ok(()) => {
                 let mut failed = None;
                 for record in &records {
                     match Producer::send(active, copy_record(record, &spec.output)).await {
-                        Ok(future) => futures.push(future),
+                        Ok(future) => futures.push((record.partition(), record.offset(), future)),
                         Err(e) => failed = Some(e),
                     }
                 }
                 if failed.is_none() {
                     let group = consumer.group_metadata();
-                    if let Err(e) = active.send_offsets_to_transaction(offsets, group.as_ref()).await {
+                    if let Err(e) = active.send_offsets_to_transaction(offsets.clone(), group.as_ref()).await {
                         failed = Some(e);
                     }
                 }
-                let planned_abort = failed.is_none() && aborts.next_aborts();
-                if planned_abort {
-                    // Send the copies first, so the broker aborts them and
-                    // read_committed readers must skip them.
-                    if let Err(e) = active.flush().await {
-                        ledger.event(Event::ProducerError, format!("copier flush: {e}"));
-                    }
+                let mut planned_abort = failed.is_none() && aborts.next_aborts();
+                // Send the copies of a planned abort first, so the broker
+                // aborts them and read_committed readers must skip them.
+                if planned_abort && let Err(e) = active.flush().await {
+                    failed = Some(e);
+                    planned_abort = false;
                 }
                 let committed = failed.is_none()
                     && !planned_abort
@@ -995,24 +1048,28 @@ async fn run_copier(
                     ledger.event(Event::ProducerError, format!("copier: {e}"));
                 }
                 if committed {
-                    ledger.copier_txn(true);
+                    TxnOutcome::Committed
                 } else {
                     match active.abort_transaction().await {
-                        Ok(()) => ledger.copier_txn(false),
+                        Ok(()) if planned_abort => TxnOutcome::Aborted,
+                        Ok(()) => TxnOutcome::Failed,
                         Err(e) => {
                             ledger.event(Event::ProducerError, format!("copier abort_transaction: {e}"));
                             healthy = false;
+                            TxnOutcome::Failed
                         },
                     }
                 }
-                committed
             },
         };
-        for future in futures {
+        ledger.copier_txn(outcome);
+        let committed = outcome == TxnOutcome::Committed;
+        for (partition, offset, future) in futures {
             if let Err(e) = settle(future).await
                 && committed
             {
-                ledger.copier_failed_in_committed_txn(&spec.output, &e);
+                let source = format!("{}-{partition}@{offset}", spec.input);
+                ledger.copier_failed_in_committed_txn(&spec.output, &source, &e);
             }
         }
         if !healthy {
@@ -1021,11 +1078,28 @@ async fn run_copier(
             {
                 ledger.event(Event::ProducerError, format!("copier close: {e}"));
             }
-            ledger.event(Event::ProducerRestart, "copier".to_string());
             producer = start_copier_producer(&spec, &base, &ledger, &stop).await;
         }
-        if !committed {
-            rewind_owned(&mut consumer, &partitions, &ledger, &stop).await;
+        if committed {
+            expected.extend(offsets.iter().map(|(tp, o)| (tp.clone(), o.offset())));
+            commits += 1;
+            if commits.is_multiple_of(COPIER_READBACK_EVERY) {
+                match consumer.committed(&partitions).await {
+                    Ok(read) => ledger.copier_readback(&expected, &read),
+                    Err(e) => ledger.event(Event::ConsumerError, format!("copier committed: {e}")),
+                }
+            }
+        } else if let Some(read) = rewind_owned(&mut consumer, &partitions, &ledger, &stop).await {
+            if outcome == TxnOutcome::Aborted {
+                // A planned abort leaves the offsets where the last commit put
+                // them.
+                ledger.copier_readback(&expected, &read);
+            } else {
+                // A failed transaction may still have committed (a replacement
+                // producer completes a commit in flight): what was read back
+                // says whether it did.
+                expected.extend(read.iter().map(|(tp, o)| (tp.clone(), o.offset())));
+            }
         }
     }
     if let Some(producer) = producer
@@ -1040,7 +1114,8 @@ async fn run_copier(
 
 /// Reads every partition of `topics` from the start with a fresh read_committed
 /// consumer (no group) and reports each record. Returns whether it reached the
-/// end of every partition; it gives up once `timeout` passes without a record.
+/// end of every partition; it gives up once `timeout` passes without moving
+/// forward.
 pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger, timeout: Duration) -> bool {
     let props = merged(
         base,
@@ -1054,17 +1129,30 @@ pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger
         ],
         &Props::new(),
     );
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        ByteArrayDeserializer::default(),
-        ByteArrayDeserializer::default(),
-    )
-    .expect("final read-back consumer");
+    let deadline = Instant::now() + timeout;
+    let mut consumer = loop {
+        let created = ConsumerConfig::new(&props).and_then(|config| {
+            KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+                config,
+                ByteArrayDeserializer::default(),
+                ByteArrayDeserializer::default(),
+            )
+        });
+        match created {
+            Ok(consumer) => break consumer,
+            Err(e) => {
+                ledger.event(Event::ConsumerError, format!("final read-back create: {e}"));
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(RETRY_BACKOFF).await;
+            },
+        }
+    };
     let partitions: Vec<TopicPartition> = topics
         .iter()
         .flat_map(|t| (0..t.partitions).map(|p| TopicPartition::new(t.name.clone(), p)))
         .collect();
-    let deadline = Instant::now() + timeout;
     // A connection can drop under any of these calls (a disconnect fails a
     // ListOffsets as Java's does), so retry until the deadline rather than
     // lose the verdict of a long run to one transient error.
@@ -1079,7 +1167,7 @@ pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger
             Err(e) => {
                 ledger.event(Event::ConsumerError, format!("final read-back setup: {e}"));
                 if Instant::now() >= deadline {
-                    let _ = consumer.close().await;
+                    close_final_read_back(consumer, ledger).await;
                     return false;
                 }
                 tokio::time::sleep(RETRY_BACKOFF).await;
@@ -1098,7 +1186,10 @@ pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger
     while !remaining.is_empty() && Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(500)).await {
             Ok(records) => records.into_iter().for_each(|record| ledger.final_record(&record)),
-            Err(e) => ledger.event(Event::ConsumerError, format!("final read-back poll: {e}")),
+            Err(e) => {
+                ledger.event(Event::ConsumerError, format!("final read-back poll: {e}"));
+                tokio::time::sleep(RETRY_BACKOFF).await;
+            },
         }
         let mut done = Vec::new();
         for tp in &remaining {
@@ -1116,18 +1207,35 @@ pub async fn final_read_back(base: &Props, topics: &[TopicSpec], ledger: &Ledger
             remaining.remove(&tp);
         }
     }
-    let _ = consumer.close().await;
+    close_final_read_back(consumer, ledger).await;
     remaining.is_empty()
 }
 
-/// Waits for `handle`, or gives up after `timeout`; `false` when it timed out.
-async fn join(mut handle: JoinHandle<()>, timeout: Duration) -> bool {
+async fn close_final_read_back(mut consumer: KafkaConsumer<Vec<u8>, Vec<u8>>, ledger: &Ledger) {
+    if let Err(e) = consumer.close().await {
+        ledger.event(Event::ConsumerError, format!("final read-back close: {e}"));
+    }
+}
+
+/// Waits for `handle`, or gives up after `timeout`. `None` when it finished,
+/// otherwise what went wrong: a panicking task fails the run with its report
+/// rather than taking the report down with it.
+async fn join(mut handle: JoinHandle<()>, timeout: Duration) -> Option<String> {
     match tokio::time::timeout(timeout, &mut handle).await {
-        Ok(Ok(())) => true,
-        Ok(Err(e)) => std::panic::resume_unwind(e.into_panic()),
+        Ok(Ok(())) => None,
+        Ok(Err(e)) if e.is_panic() => {
+            let panic = e.into_panic();
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            Some(format!("panicked: {message}"))
+        },
+        Ok(Err(e)) => Some(format!("failed: {e}")),
         Err(_) => {
             handle.abort();
-            false
+            Some(format!("did not stop within {timeout:?}"))
         },
     }
 }
@@ -1236,32 +1344,38 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
     eprintln!("integrity: stopping the writers");
     stop_writers.store(true, Ordering::SeqCst);
     for writer in writers {
-        if !join(writer, spec.drain_timeout).await && aborted.is_none() {
-            aborted = Some(format!("a writer did not stop within {:?}", spec.drain_timeout));
+        if let Some(why) = join(writer, spec.drain_timeout).await
+            && aborted.is_none()
+        {
+            aborted = Some(format!("a writer {why}"));
         }
     }
     writers_done.store(true, Ordering::SeqCst);
     for copier in copiers {
-        if !join(copier, spec.drain_timeout).await && aborted.is_none() {
-            aborted = Some(format!("a copier did not finish within {:?}", spec.drain_timeout));
+        if let Some(why) = join(copier, spec.drain_timeout).await
+            && aborted.is_none()
+        {
+            aborted = Some(format!("a copier {why}"));
         }
     }
     if spec.group.is_some() {
         eprintln!("integrity: waiting for the live group to catch up");
         let deadline = Instant::now() + spec.drain_timeout;
         while ledger.live_outstanding() > 0 && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
     stop_readers.store(true, Ordering::SeqCst);
     for reader in readers {
-        if !join(reader, spec.drain_timeout).await && aborted.is_none() {
-            aborted = Some(format!("a live-group member did not stop within {:?}", spec.drain_timeout));
+        if let Some(why) = join(reader, spec.drain_timeout).await
+            && aborted.is_none()
+        {
+            aborted = Some(format!("a live-group member {why}"));
         }
     }
     eprintln!("integrity: final read-back");
     let complete = final_read_back(&base, &spec.topics, &ledger, spec.final_timeout).await;
-    let mut verdict = ledger.verdict(spec.group.is_some(), true, complete, &spec.requirements);
+    let mut verdict = ledger.verdict(spec.group.is_some(), complete, &spec.requirements);
     verdict.aborted = aborted;
     verdict
 }

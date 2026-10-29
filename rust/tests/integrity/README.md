@@ -3,8 +3,8 @@
 These tests check that what the Rust client writes is what it reads back. Each
 record must come back byte for byte. No acknowledged record may be lost, and no
 record may be duplicated, reordered, or visible when its transaction aborted.
-Only the Rust client is exercised: the brokers are Apache Kafka, and nothing
-else touches the data.
+Only the Rust client is exercised: nothing but the brokers (Apache Kafka on a
+local cluster) touches the data.
 
 There are two forms, on one harness (`tests/common/integrity/`):
 
@@ -38,7 +38,7 @@ holds:
   header.
 
 The digest does not depend on Kafka's own CRC, so it catches corruption
-anywhere between the application and the application: serialization, batching,
+anywhere between the producing and the consuming application: serialization, batching,
 compression, the wire, the fetch path and decompression.
 
 Keys, values and headers come from a generator seeded by `(seed, writer,
@@ -55,31 +55,45 @@ outcome:
 | Outcome | Expectation |
 |---|---|
 | acknowledged, or in a committed transaction | exactly once |
-| failed with a retriable error, or the commit outcome is unknown | at most once |
+| failed with a retriable error, or in a transaction whose commit and abort both failed | at most once; exactly once if a reader finds it |
 | rejected, or in an aborted transaction | never |
+
+A record whose outcome is unknown may be missing, but once a reader finds it
+(or a copy of it), it was written and must be there exactly once. The records
+of a transaction of unknown outcome are all visible or none is.
 
 While the run is going, the live consumer group is checked:
 
 - **Corruption**: a record whose identity header or digest is wrong.
 - **Aborted records**: under `read_committed`, no record of an aborted
   transaction is visible.
-- **Order**: within a partition, a writer's sequence numbers only increase.
+- **Order**: within a partition, a writer's sequence numbers only increase,
+  and within one poll, offsets only increase.
 - **Double writes**: one record is never stored at two offsets.
 - **Placement**: a record is read at the partition and offset its
   acknowledgement reported.
 - **Committed offsets**: a restarted member never reads below the committed
   offset, and reading the committed offset back never gives less than was
-  committed.
+  committed, nor more than the group read.
+- **Loss**: the group reads every record that is due once.
+
+The copier checks its own committed offsets: read back, they are exactly what
+it last committed, and an aborted transaction leaves them unchanged. A copier
+or writer transaction that commits must not have a failed send.
 
 At the end, a fresh consumer with no group reads every partition from the
-beginning to its end offset. This final read-back checks the exact count of
-every record against its expectation, so it finds lost, duplicated and leaked
-records.
+beginning to its end offset. This final read-back checks order and placement
+again, and the exact count of every record against its expectation, so it
+finds lost, duplicated and leaked records. A copy topic must hold each record
+of its source as often as the source does, and nothing else.
 
 A run that tested nothing does not pass. Each scenario states its
 requirements, for example a minimum number of records per stream, committed
 and aborted transactions, clean restarts and hard stops, and every partition
-read. A watchdog stops the run when nothing is sent or read for too long.
+read. Only planned aborts and planned restarts count: an abort or a producer
+replaced after a failure does not. The long run also fails when more than 1%
+of its sends, or of its transactions, fail. A watchdog stops the run when
+nothing is sent or read for too long.
 
 ## The long run
 
@@ -101,7 +115,8 @@ Every writer replaces its producer every `PRODUCER_RESTART_S`. One consumer
 group of `CONSUMERS` members reads every topic. A
 member restarts every `CONSUMER_RESTART_S`, alternately cleanly and hard:
 
-- A clean restart commits what was read and calls `close()`.
+- A clean restart commits what was read (a failed commit is reported, and the
+  next owner reads those records again) and calls `close()`.
 - A hard restart reads one more batch without committing it and stops polling,
   as a stuck or crashed application would. Its partitions move to another
   member once `MAX_POLL_INTERVAL_S` expires, and that member must read the
@@ -112,8 +127,9 @@ member restarts every `CONSUMER_RESTART_S`, alternately cleanly and hard:
   So the abandoned consumer is closed only when the run stops.
 
 At the end, the writers stop and the group catches up. Then the final
-read-back runs and the verdict is printed. The drain and the read-back come on top of `DURATION_S`: the read-back
-reads every record again, which took 10 to 30 minutes after a 30-minute run.
+read-back runs and the verdict is printed. The drain and the read-back come on
+top of `DURATION_S`, and the read-back reads every record again: after a
+30-minute run it took 10 to 30 minutes in our runs.
 
 ### Against a local cluster
 
@@ -145,7 +161,7 @@ For anything else, `CLIENT_CONFIG_FILE` names a Java-style properties file of
 client settings. The variables above override that file.
 
 The run creates its topics as `<TOPIC_PREFIX>-<run id>-<stream>` and deletes
-them at the end unless `KEEP_TOPICS=true`. The credentials need these
+them at the end unless `KEEP_TOPICS=true` or the run failed. The credentials need these
 permissions:
 
 - create, delete, read and write on those topics;
@@ -170,11 +186,11 @@ permissions:
 | `CONSUMER_RESTART_S` | 60 | How often each member restarts |
 | `MAX_POLL_INTERVAL_S` | 30 | The group's `max.poll.interval.ms`, in seconds: how long a hard-stopped member holds its partitions |
 | `PRODUCER_RESTART_S` | 90 | How often each writer replaces its producer |
-| `DRAIN_S` | 300 | How long the group may take to catch up, and how long the final read-back may go without reading a record |
-| `INTEGRITY_SEED` | random | The payload seed; set it to replay the same data |
+| `DRAIN_S` | 300 | How long each client may take to stop and the group to catch up, and how long the final read-back may go without moving forward |
+| `INTEGRITY_SEED` | random | The seed of the payloads and of which transactions abort; set it to replay a run |
 | `TOPIC_PREFIX` | `integrity` | The prefix of the topic, group and transactional id names |
 | `KEEP_TOPICS` | `false` | Keep the topics of an external run |
-| `REPORT_DIR` | `target/integrity-runs` | Where the report is written |
+| `REPORT_DIR` | `target/integrity-runs` | Where the report is written, relative to `rust/` |
 | `INTEGRATION_TEST_BROKER_TAG` | `4.4.0` (via xtask) | The `apache/kafka` image tag of the local cluster |
 | `RUST_LOG` | unset | The client's log filter, for example `confluent_kafka=info` |
 
@@ -190,5 +206,5 @@ Everything is also written to `REPORT_DIR/<run id>/`:
 - `report.json`: every counter, the examples, the unmet requirements and the
   settings, without the credentials.
 
-The test fails unless the verdict passes. To replay a failed run's data, use the seed printed at its start,
-`INTEGRITY_SEED=<seed>`.
+The test fails unless the verdict passes. To replay a failed run's data, use
+the seed printed at its start, `INTEGRITY_SEED=<seed>`.
