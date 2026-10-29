@@ -165,10 +165,10 @@ class KafkaProducer {
         // a deferral turn is pending it settles in that turn too, after the
         // sends already deferred (an await on it would otherwise resume in a
         // microtask, with no turn).
-        if (this.#deferred !== null) this.#deferSettlement(settle, error);
+        if (this.#deferred !== null) this.#deferSettlement(resolve, reject, future, error);
         else settle(error);
       } else if (this.#fastPathSends++ >= FAST_PATH_YIELD_EVERY) {
-        this.#deferSettlement(settle, error);
+        this.#deferSettlement(resolve, reject, future, error);
       } else {
         settle(error);
       }
@@ -195,9 +195,12 @@ class KafkaProducer {
     return handedOver;
   }
 
-  // Settles `settle(error)` once the event loop has turned: one setImmediate
+  // Settles a send's Promise once the event loop has turned: one setImmediate
   // per turn settles every deferred send in order and restarts the count.
-  #deferSettlement(settle, error) {
+  // Only the resolving function and its value are kept, not a closure over
+  // the send() context, so a delivered record's context can be collected
+  // while its settlement waits.
+  #deferSettlement(resolve, reject, future, error) {
     if (this.#deferred === null) {
       this.#deferred = [];
       setImmediate(() => {
@@ -207,7 +210,8 @@ class KafkaProducer {
         for (let i = 0; i < deferred.length; i += 2) deferred[i](deferred[i + 1]);
       });
     }
-    this.#deferred.push(settle, error);
+    if (error !== null) this.#deferred.push(reject, error);
+    else this.#deferred.push(resolve, future);
   }
 
   /**
