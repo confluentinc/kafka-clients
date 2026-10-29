@@ -154,7 +154,9 @@ pub async fn poll_until_entry(
 ///   two arms, on `$cfg` with the interval set; they skip themselves on an
 ///   older broker, which ignores the config.
 ///
-/// A skipped arm runs on `$cfg` itself
+/// A skipped arm says so on stderr, outside libtest's capture
+/// ([`crate::common::cluster_config::log_assignment_interval_skip`]), and runs
+/// on `$cfg` itself
 /// ([`crate::common::cluster_config::assignment_interval_arm`]), so it starts
 /// no cluster of its own.
 #[macro_export]
@@ -166,23 +168,40 @@ macro_rules! assignment_interval_consumer_test {
                 factory: &F,
             ) {
                 if $crate::common::cluster_config::broker_has_assignment_interval() {
-                    eprintln!(
-                        "skipped: the broker {:?} has group.consumer.assignment.interval.ms; the two Java arms run instead",
-                        $crate::common::kafka_cluster::broker_release()
+                    $crate::common::cluster_config::log_assignment_interval_skip(
+                        stringify!($name),
+                        factory.name(),
+                        "the broker has group.consumer.assignment.interval.ms; Java's two arms run instead",
                     );
                     return;
                 }
                 $body(ctx, factory).await;
             }
 
-            async fn [<$body _with_assignment_interval>]<F: $crate::common::backend_factory::ConsumerBackendFactory>(
+            async fn [<$body _with_assignment_interval_0>]<F: $crate::common::backend_factory::ConsumerBackendFactory>(
                 ctx: &mut $crate::common::test_context::TestContext,
                 factory: &F,
             ) {
                 if !$crate::common::cluster_config::broker_has_assignment_interval() {
-                    eprintln!(
-                        "skipped: group.consumer.assignment.interval.ms is a 4.3 broker config; the broker is {:?}",
-                        $crate::common::kafka_cluster::broker_release()
+                    $crate::common::cluster_config::log_assignment_interval_skip(
+                        stringify!([<$name _assignment_interval_0>]),
+                        factory.name(),
+                        "group.consumer.assignment.interval.ms is a 4.3 broker config",
+                    );
+                    return;
+                }
+                $body(ctx, factory).await;
+            }
+
+            async fn [<$body _with_assignment_interval_1000>]<F: $crate::common::backend_factory::ConsumerBackendFactory>(
+                ctx: &mut $crate::common::test_context::TestContext,
+                factory: &F,
+            ) {
+                if !$crate::common::cluster_config::broker_has_assignment_interval() {
+                    $crate::common::cluster_config::log_assignment_interval_skip(
+                        stringify!([<$name _assignment_interval_1000>]),
+                        factory.name(),
+                        "group.consumer.assignment.interval.ms is a 4.3 broker config",
                     );
                     return;
                 }
@@ -192,12 +211,12 @@ macro_rules! assignment_interval_consumer_test {
             $crate::multilanguage_consumer_test!($name, [<$body _without_assignment_interval>], $cfg);
             $crate::multilanguage_consumer_test!(
                 [<$name _assignment_interval_0>],
-                [<$body _with_assignment_interval>],
+                [<$body _with_assignment_interval_0>],
                 $crate::common::cluster_config::assignment_interval_arm($cfg, 0)
             );
             $crate::multilanguage_consumer_test!(
                 [<$name _assignment_interval_1000>],
-                [<$body _with_assignment_interval>],
+                [<$body _with_assignment_interval_1000>],
                 $crate::common::cluster_config::assignment_interval_arm($cfg, 1000)
             );
         }
