@@ -16,6 +16,13 @@
 //! `kafka/core/src/test/scala/integration/kafka/api/PlaintextConsumerAssignorsTest.scala`
 //! (Apache Kafka 4.3.1).
 //!
+//! The translated tests run as multilanguage scenarios: each one runs against
+//! the native Rust consumer and, through the gRPC backends, the Python (sync
+//! and asyncio) and C consumers ([`multilanguage_consumer_test!`]); each name
+//! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
+//! are native fixtures; only the consumer is under test.
+//!
 //! # Methods classification
 //!
 //! ## Translated (KIP-848 server-side assignors)
@@ -44,19 +51,18 @@ use confluent_kafka::admin::AdminClient;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
+use crate::multilanguage_consumer_test;
 
 /// `AbstractConsumerTest.brokerCount`.
 const BROKER_COUNT: i16 = 3;
@@ -73,10 +79,19 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
 
 /// `createConsumer()` with the class-level `consumerConfig` settings of
 /// `kafka.api.AbstractConsumerTest` plus the test's own `setProperty` overrides,
-/// on the consumer group protocol (the only parameter these tests run with).
-fn create_consumer(ctx: &TestContext, overrides: &[(&str, &str)]) -> BytesConsumer {
+/// on the consumer group protocol (the only parameter these tests run with),
+/// built by `factory` on the bootstrap its backend reaches.
+async fn create_consumer<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    overrides: &[(&str, &str)],
+) -> BytesConsumer {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("client.id".to_string(), "ConsumerTestConsumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -87,14 +102,11 @@ fn create_consumer(ctx: &TestContext, overrides: &[(&str, &str)]) -> BytesConsum
     for (k, v) in overrides {
         props.insert((*k).to_string(), (*v).to_string());
     }
-    Box::new(
-        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            ConsumerConfig::new(&props).expect("valid consumer config"),
-            ByteArrayDeserializer::default(),
-            ByteArrayDeserializer::default(),
-        )
-        .expect("KafkaConsumer::new should succeed"),
-    )
+    ctx.apply_security(&mut props);
+    factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
 /// `createProducer()` with the `producerConfig` settings of
@@ -165,6 +177,7 @@ async fn create_topic_and_send_records(
 async fn await_assignment(
     consumer: &mut BytesConsumer,
     expected_assignment: &HashSet<TopicPartition>,
+    backend: &str,
 ) -> Result<(), Error> {
     let deadline = Instant::now() + DEFAULT_MAX_WAIT;
     loop {
@@ -174,45 +187,45 @@ async fn await_assignment(
         }
         if Instant::now() >= deadline {
             panic!(
-                "Timed out while awaiting expected assignment {expected_assignment:?}. The current assignment is {:?}",
+                "{backend} backend: Timed out while awaiting expected assignment {expected_assignment:?}. The current assignment is {:?}",
                 consumer.assignment()
             );
         }
     }
 }
 
-/// Translates `testRemoteAssignorInvalid` (`PlaintextConsumerAssignorsTest.scala:239`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_remote_assignor_invalid() {
-    let mut ctx = TestContext::new(kip848_3_broker(2)).await;
+/// Translates `kafka.api.PlaintextConsumerAssignorsTest#testRemoteAssignorInvalid`.
+async fn remote_assignor_invalid<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     // 1 consumer using invalid remote assignor
     let group = ctx.group_id("invalid-assignor-group");
-    let mut consumer = create_consumer(&ctx, &[("group.id", &group), ("group.remote.assignor", "invalid")]);
+    let mut consumer =
+        create_consumer(ctx, factory, &[("group.id", &group), ("group.remote.assignor", "invalid")]).await;
 
     // create two new topics, each having 2 partitions
     let topic1 = ctx.topic("topic1");
-    let admin = create_admin(&ctx);
-    let producer = create_producer(&ctx);
+    let admin = create_admin(ctx);
+    let producer = create_producer(ctx);
     let expected_assignment = create_topic_and_send_records(admin.as_ref(), &producer, &topic1, 2, 100).await;
 
-    assert_eq!(0, consumer.assignment().len());
+    assert_eq!(0, consumer.assignment().len(), "initial assignment ({backend} backend)");
 
     // subscribe to two topics
     consumer
         .subscribe_with_topics(vec![topic1.clone()])
         .await
-        .expect("subscribe should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
 
-    let e = await_assignment(&mut consumer, &expected_assignment)
+    let e = await_assignment(&mut consumer, &expected_assignment, backend)
         .await
         .expect_err("awaitAssignment should fail with UnsupportedAssignor");
     let Error::UnsupportedAssignor(e) = e else {
-        panic!("expected UnsupportedAssignor, got {e:?}");
+        panic!("{backend} backend: expected UnsupportedAssignor, got {e:?}");
     };
     assert!(
         e.message()
             .starts_with("ServerAssignor invalid is not supported. Supported assignors: "),
-        "unexpected message: {}",
+        "unexpected message: {} ({backend} backend)",
         e.message()
     );
 
@@ -223,40 +236,43 @@ async fn test_remote_assignor_invalid() {
     ctx.cleanup().await;
 }
 
-/// Translates `testRemoteAssignorRange` (`PlaintextConsumerAssignorsTest.scala:267`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_remote_assignor_range() {
-    let mut ctx = TestContext::new(kip848_3_broker(2)).await;
+multilanguage_consumer_test!(test_remote_assignor_invalid, remote_assignor_invalid, kip848_3_broker(2));
+
+/// Translates `kafka.api.PlaintextConsumerAssignorsTest#testRemoteAssignorRange`.
+async fn remote_assignor_range<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     // 1 consumer using range assignment
     let group = ctx.group_id("range-group");
     let mut consumer = create_consumer(
-        &ctx,
+        ctx,
+        factory,
         &[
             ("group.id", &group),
             ("group.remote.assignor", "range"),
             ("max.poll.interval.ms", "30000"),
             ("enable.auto.commit", "false"),
         ],
-    );
+    )
+    .await;
 
     // create two new topics, each having 2 partitions
     let topic1 = ctx.topic("topic1");
     let topic2 = ctx.topic("topic2");
-    let admin = create_admin(&ctx);
-    let producer = create_producer(&ctx);
+    let admin = create_admin(ctx);
+    let producer = create_producer(ctx);
     let mut expected_assignment = create_topic_and_send_records(admin.as_ref(), &producer, &topic1, 2, 100).await;
     expected_assignment.extend(create_topic_and_send_records(admin.as_ref(), &producer, &topic2, 2, 100).await);
 
-    assert_eq!(0, consumer.assignment().len());
+    assert_eq!(0, consumer.assignment().len(), "initial assignment ({backend} backend)");
 
     // subscribe to two topics
     consumer
         .subscribe_with_topics(vec![topic1.clone(), topic2.clone()])
         .await
-        .expect("subscribe should succeed");
-    await_assignment(&mut consumer, &expected_assignment)
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    await_assignment(&mut consumer, &expected_assignment, backend)
         .await
-        .expect("poll should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
 
     // add one more topic with 2 partitions
     let topic3 = ctx.topic("topic3");
@@ -267,26 +283,38 @@ async fn test_remote_assignor_range() {
     consumer
         .subscribe_with_topics(vec![topic1.clone(), topic2.clone(), topic3.clone()])
         .await
-        .expect("subscribe should succeed");
-    await_assignment(&mut consumer, &new_expected_assignment)
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    await_assignment(&mut consumer, &new_expected_assignment, backend)
         .await
-        .expect("poll should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
 
     // remove the topic we just added
     consumer
         .subscribe_with_topics(vec![topic1.clone(), topic2.clone()])
         .await
-        .expect("subscribe should succeed");
-    await_assignment(&mut consumer, &expected_assignment)
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    await_assignment(&mut consumer, &expected_assignment, backend)
         .await
-        .expect("poll should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
 
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
-    assert_eq!(0, consumer.assignment().len());
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed: {e}"));
+    assert_eq!(
+        0,
+        consumer.assignment().len(),
+        "assignment after unsubscribe ({backend} backend)"
+    );
 
-    consumer.close().await.expect("consumer close");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
     <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::close(&producer)
         .await
         .expect("producer close");
     ctx.cleanup().await;
 }
+
+multilanguage_consumer_test!(test_remote_assignor_range, remote_assignor_range, kip848_3_broker(2));
