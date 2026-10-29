@@ -347,7 +347,7 @@ impl NativeListenerAction {
             let result = self.run_step(step, &mut entry, &mut positions).await;
             let failed = result.is_err();
             if let Err(e) = &result {
-                entry.error = e.to_string();
+                entry.error = e.message().to_string();
                 entry.error_value = Some(e.clone());
             }
             push(log, entry);
@@ -475,7 +475,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
             kind: KIND_COMMIT.to_string(),
             partitions: Vec::with_capacity(offsets.len()),
             offsets: HashMap::with_capacity(offsets.len()),
-            error: error.map(|e| e.to_string()).unwrap_or_default(),
+            error: error.map(|e| e.message().to_string()).unwrap_or_default(),
             error_value: error.cloned(),
             ..Default::default()
         };
@@ -493,7 +493,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
 fn delivery_entry(metadata: Option<&RecordMetadata>, error: Option<&Error>) -> CallbackLogEntry {
     let mut entry = CallbackLogEntry {
         kind: KIND_DELIVERY.to_string(),
-        error: error.map(|e| e.to_string()).unwrap_or_default(),
+        error: error.map(|e| e.message().to_string()).unwrap_or_default(),
         error_value: error.cloned(),
         ..Default::default()
     };
