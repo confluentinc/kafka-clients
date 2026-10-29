@@ -20,28 +20,41 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.AuthorizationException;
+import org.apache.kafka.common.errors.OutOfOrderSequenceException;
+import org.apache.kafka.common.errors.ProducerFencedException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -84,12 +97,26 @@ import java.util.concurrent.atomic.AtomicLong;
  * transaction (throws, or its future has already failed before commit is
  * attempted) aborts that transaction without sending offsets or committing; it
  * counts as an aborted transaction (+ the records attempted) and fails the run.
- * A failed {@code commitTransaction} is aborted and counted the same way, but is
- * not a run failure by itself. Rate limiting: each of the N producers is paced at
+ * A {@code commitTransaction} that fails with an abortable error (or a failed
+ * {@code sendOffsetsToTransaction}) is aborted and counted the same way, and also
+ * fails the run: every such error-driven abort is counted apart from the
+ * {@code ABORT_RATE} ones ({@code error_aborted_transactions} in results.json). A
+ * transactional call that times out is retried, as {@code KafkaProducer} allows
+ * nothing else after a timeout; a fatal error (fenced, out-of-order sequence,
+ * authorization, unsupported version) fails the worker. A failed warmup fails
+ * the run before it is measured. The measured clock
+ * starts once every producer is created and initialized (and, in EOS mode, its
+ * consumer subscribed). Rate limiting: each of the N producers is paced at
  * {@code LIMIT_RPS / N} msg/s (exact, as a floating-point rate), so the
- * per-producer rates sum to {@code LIMIT_RPS}.
+ * per-producer rates sum to {@code LIMIT_RPS}. Pacing sleeps only at a
+ * transaction boundary (immediately before {@code beginTransaction}), never inside
+ * an open transaction. A counted run (a message target) also stops, at a
+ * transaction boundary, once the measured interval reaches
+ * {@code TEST_DURATION_SECONDS} + 10 s; it then prints a {@code capped:} line and
+ * still writes results.json with the measured numbers, without failing.
  *
- * <p>Latency (both modes): per-record latency = a record's {@code send()} ->
+ * <p>Latency (both modes, {@code System.nanoTime()} stamps; avg/min/max exact,
+ * percentiles from 1 ms buckets): per-record latency = a record's {@code send()} ->
  * the moment its transaction's commit completes (committed txns only).
  * Per-transaction commit latency = {@code beginTransaction} ->
  * {@code commitTransaction} completes. Per-transaction abort latency =
@@ -151,21 +178,41 @@ public class TransactionalProducerPerformanceTest {
 
     // --- Mutable state (shared across producer threads) ----------------------
     private static volatile boolean terminating = false;
+    // Counted down by exit(): releases the shutdown hook, which on SIGINT /
+    // SIGTERM waits for main to write results.json (see installSignalHandler).
+    private static final CountDownLatch MAIN_DONE = new CountDownLatch(1);
+    // How long that hook waits: under the 30 s `cargo xtask perf-cloud` leaves
+    // between its SIGINT and SIGKILL.
+    private static final int SHUTDOWN_WAIT_SECONDS = 25;
+    // Workers count it down once set up (producer created, initTransactions,
+    // EOS consumer subscribed) or failed; main then starts the measured clock
+    // (measuredStartNs) and opens START_GATE. Set before the workers start.
+    private static CountDownLatch workersReady;
+    private static final CountDownLatch START_GATE = new CountDownLatch(1);
+    private static volatile long measuredStartNs;
     private static final AtomicLong completedMessages = new AtomicLong(0); // committed records
     private static final AtomicLong verified = new AtomicLong(0);
     private static final AtomicLong committedTransactions = new AtomicLong(0);
     private static final AtomicLong abortedTransactions = new AtomicLong(0);
     private static final AtomicLong abortedRecords = new AtomicLong(0);
+    // Aborts forced by an error (a rejected send, a failed sendOffsetsToTransaction
+    // or commitTransaction), included in abortedTransactions; any fails the run.
+    private static final AtomicLong errorAbortedTransactions = new AtomicLong(0);
 
     // Summary histograms + running totals, guarded by HIST_LOCK (written by all
     // producer threads; contention is low — once per committed record / txn).
+    // The totals and extremes are exact ns (System.nanoTime stamps), kept
+    // outside the 1 ms histograms so avg/min/max are never bucket indices.
     private static final Object HIST_LOCK = new Object();
-    private static long maxLatencyMs = 0;
-    private static long totalLatencyMs = 0;
-    private static long maxCommitLatencyMs = 0;
-    private static long totalCommitLatencyMs = 0;
-    private static long maxAbortLatencyMs = 0;
-    private static long totalAbortLatencyMs = 0;
+    private static long totalLatencyNs = 0;
+    private static long minLatencyNs = Long.MAX_VALUE;
+    private static long maxLatencyNs = 0;
+    private static long totalCommitLatencyNs = 0;
+    private static long minCommitLatencyNs = Long.MAX_VALUE;
+    private static long maxCommitLatencyNs = 0;
+    private static long totalAbortLatencyNs = 0;
+    private static long minAbortLatencyNs = Long.MAX_VALUE;
+    private static long maxAbortLatencyNs = 0;
 
     // --- Config from env -----------------------------------------------------
     private static final int KEY_SIZE = envInt("KEY_SIZE", 0);
@@ -180,6 +227,13 @@ public class TransactionalProducerPerformanceTest {
     private static final long NUM_MESSAGES = LIMIT_RPS > 0
         ? LIMIT_RPS * TEST_DURATION_SECONDS
         : envLong("NUM_MESSAGES", 0);
+    // A counted run (NUM_MESSAGES > 0) also stops once the measured interval
+    // reaches TEST_DURATION_SECONDS + this grace, checked only at transaction
+    // boundaries (a transaction is never split). The shortfall is reported
+    // (`capped:`), not failed.
+    private static final int COUNTED_RUN_GRACE_SECONDS = 10;
+    private static final long COUNTED_RUN_CAP_NS =
+        (TEST_DURATION_SECONDS + COUNTED_RUN_GRACE_SECONDS) * 1_000_000_000L;
     private static final boolean DO_VERIFY = envBool("DO_VERIFY", true);
     private static final boolean CREATE_TOPIC = envBool("CREATE_TOPIC", true);
     private static final int PARTITIONS = envInt("PARTITIONS", -1);
@@ -200,6 +254,12 @@ public class TransactionalProducerPerformanceTest {
     // Set when the verified count disagrees with the committed count on a run
     // that was not interrupted; fails the run (results.json is still written).
     private static boolean countMismatch = false;
+    // Set by a counted-run worker that stopped at the time cap
+    // (COUNTED_RUN_CAP_NS); reported with a `capped:` line, not a failure.
+    private static final AtomicBoolean timeCapped = new AtomicBoolean(false);
+    // Produce mode: records sent (committed, aborted or rejected) across all
+    // producers, for the `capped:` line. EOS mode reports eosProcessed.
+    private static final AtomicLong producedRecords = new AtomicLong(0);
     // EOS count mode: TOTAL source records processed (committed, aborted or
     // failed transactions) across all producers, compared against NUM_MESSAGES.
     private static final AtomicLong eosProcessed = new AtomicLong(0);
@@ -212,6 +272,9 @@ public class TransactionalProducerPerformanceTest {
     // --- Transaction knobs ---
     private static final long RECORDS_PER_TRANSACTION = Math.max(1, envLong("RECORDS_PER_TRANSACTION", 100));
     private static final double ABORT_RATE = Math.min(1.0, Math.max(0.0, envDouble("ABORT_RATE", 0.0)));
+    // Attempts of a transactional call that times out (each up to max.block.ms):
+    // KafkaProducer allows only retrying the same call after a timeout.
+    private static final int TXN_CALL_ATTEMPTS = 3;
     private static final int NUM_TRANSACTIONAL_PRODUCERS = Math.max(1, envInt("NUM_TRANSACTIONAL_PRODUCERS", 1));
     private static final String TRANSACTIONAL_ID = envOr("TRANSACTIONAL_ID", "perf-txn");
     private static final String TXN_MODE = envOr("TXN_MODE", "produce");
@@ -253,11 +316,11 @@ public class TransactionalProducerPerformanceTest {
             if (SOURCE_TOPIC == null || SOURCE_TOPIC.isEmpty()) {
                 System.err.println(
                     "TXN_MODE=eos requires SOURCE_TOPIC (the input topic to consume from). Aborting.");
-                System.exit(2);
+                exit(2);
             }
         } else if (!"produce".equals(TXN_MODE)) {
             System.err.println("Unknown TXN_MODE '" + TXN_MODE + "' (expected 'produce' or 'eos'). Aborting.");
-            System.exit(2);
+            exit(2);
         }
 
         if (LIMIT_RPS == 0) {
@@ -287,8 +350,10 @@ public class TransactionalProducerPerformanceTest {
         final List<KeyValue> generated = generateMessages(10_000, KEY_SIZE, VALUE_SIZE);
 
         // === WARMUP === (single producer, a few single-record transactions).
-        if (WARMUP_SECONDS > 0) {
-            runWarmup(baseConf, generated);
+        // A failed warmup fails the run before it is measured.
+        if (WARMUP_SECONDS > 0 && !runWarmup(baseConf, generated)) {
+            System.err.println("Warmup failed; the run is not measured");
+            exit(1);
         }
 
         // === EOS: seed SOURCE_TOPIC BEFORE the measured clock (canonical KAFKA_BIN
@@ -303,13 +368,6 @@ public class TransactionalProducerPerformanceTest {
                     + "via kafka-producer-perf-test.sh)");
             }
         }
-
-        // === MEASURED INTERVAL ===
-        long beforeMs = System.currentTimeMillis();
-        final long firstMessageNs = System.nanoTime();
-        eosLastRecordsNs.set(firstMessageNs);
-        metrics.measurementStartMs = beforeMs;
-        System.out.println("Starting measured interval at " + beforeMs + " ms");
 
         // Split the total rate across producers as an exact floating-point
         // share, so the per-producer rates sum to LIMIT_RPS (0 = unlimited).
@@ -331,19 +389,44 @@ public class TransactionalProducerPerformanceTest {
                 continue;
             }
             Runnable body = EOS_MODE
-                ? () -> runEosProducer(index, baseConf, metrics, firstMessageNs, perProducerRps)
-                : () -> runProducer(index, baseConf, generated, metrics, firstMessageNs,
+                ? () -> runEosProducer(index, baseConf, metrics, perProducerRps)
+                : () -> runProducer(index, baseConf, generated, metrics,
                     perProducerNumMessages, perProducerRps);
-            Thread t = new Thread(body, "txn-producer-" + k);
-            threads.add(t);
+            threads.add(new Thread(body, "txn-producer-" + k));
+        }
+        // The clock starts after every producer is created and initialized
+        // (and, in EOS mode, its consumer subscribed), as in the Rust harness.
+        workersReady = new CountDownLatch(threads.size());
+        for (Thread t : threads) {
             t.start();
         }
+        workersReady.await();
+
+        // === MEASURED INTERVAL ===
+        long beforeMs = System.currentTimeMillis();
+        measuredStartNs = System.nanoTime();
+        eosLastRecordsNs.set(measuredStartNs);
+        metrics.measurementStartMs = beforeMs;
+        System.out.println("Starting measured interval at " + beforeMs + " ms");
+        START_GATE.countDown();
         for (Thread t : threads) {
             t.join();
         }
 
         long afterMs = System.currentTimeMillis();
+        // Elapsed time from the monotonic clock; the wall-clock stamps only mark
+        // the measured windows in metrics.jsonl.
+        long elapsedNs = System.nanoTime() - measuredStartNs;
         metrics.measurementEndMs = afterMs;
+
+        // A counted run that hit the time cap: report the shortfall (the
+        // driver's report flags a client below its target rate); not a failure.
+        if (timeCapped.get()) {
+            long sent = EOS_MODE ? eosProcessed.get() : producedRecords.get();
+            System.out.println(String.format(Locale.ROOT,
+                "capped: sent %d of %d records in %.2f s (TEST_DURATION_SECONDS + %d s)",
+                sent, NUM_MESSAGES, elapsedNs / 1e9, COUNTED_RUN_GRACE_SECONDS));
+        }
 
         long committed = completedMessages.get();
         long verifiedCount = verified.get();
@@ -355,27 +438,34 @@ public class TransactionalProducerPerformanceTest {
             countMismatch = true;
         }
 
-        double durationS = (afterMs - beforeMs) / 1000.0;
+        double durationS = elapsedNs / 1e9;
         double rate = durationS > 0 ? committed / durationS : 0.0;
         double mibRate = durationS > 0 ? (committed * (double) MESSAGE_SIZE) / (1024.0 * 1024.0) / durationS : 0.0;
         double txnRate = durationS > 0 ? committedTransactions.get() / durationS : 0.0;
-        double avgLatencyMs = committed == 0 ? 0 : (double) totalLatencyMs / committed;
+        // Exact avg / min / max (ms as a float) from the ns totals and
+        // extremes, never from histogram bucket indices.
+        double avgLatencyMs = committed == 0 ? 0 : totalLatencyNs / 1e6 / committed;
+        double minLatencyMs = committed == 0 ? 0 : minLatencyNs / 1e6;
+        double maxLatencyMs = committed == 0 ? 0 : maxLatencyNs / 1e6;
         long committedTxns = committedTransactions.get();
-        double avgCommitMs = committedTxns == 0 ? 0 : (double) totalCommitLatencyMs / committedTxns;
+        double avgCommitMs = committedTxns == 0 ? 0 : totalCommitLatencyNs / 1e6 / committedTxns;
+        double minCommitMs = committedTxns == 0 ? 0 : minCommitLatencyNs / 1e6;
+        double maxCommitMs = committedTxns == 0 ? 0 : maxCommitLatencyNs / 1e6;
         // Abort-latency summary is over the deterministic-abort samples actually
         // recorded (the abortLatencyHist count), which may be fewer than the
         // global abortedTransactions if any abort was error-driven.
         long abortSamples = 0;
         for (long c : abortLatencyHist) abortSamples += c;
-        double avgAbortMs = abortSamples == 0 ? 0 : (double) totalAbortLatencyMs / abortSamples;
+        double avgAbortMs = abortSamples == 0 ? 0 : totalAbortLatencyNs / 1e6 / abortSamples;
+        double minAbortMs = abortSamples == 0 ? 0 : minAbortLatencyNs / 1e6;
+        double maxAbortMs = abortSamples == 0 ? 0 : maxAbortLatencyNs / 1e6;
         long p99Ms = percentileFromHist(latencyHist, 0.99);
 
-        int samples = metrics.totalExternalMetrics;
-        double avgCpu = samples > 0 ? metrics.totalCpu / samples : 0.0;
-        double avgRssKib = samples > 0 ? metrics.totalRss / samples / 1024.0 : 0.0;
+        double avgCpu = metrics.getAverageCpu();
+        double avgRssKib = metrics.getAverageRss() / 1024.0;
 
         System.out.println();
-        System.out.println("Duration: " + (afterMs - beforeMs) + " ms");
+        System.out.println("Duration: " + (elapsedNs / 1_000_000L) + " ms");
         System.out.println("Average CPU: " + String.format("%.2f %%", avgCpu));
         System.out.println("Average RSS: " + String.format("%.2f KiB", avgRssKib));
         System.out.println("CPU efficiency: " + String.format("%.2f msg/(s * 1%% CPU)",
@@ -385,12 +475,13 @@ public class TransactionalProducerPerformanceTest {
         System.out.println("Committed transactions: " + committedTxns);
         System.out.println("Aborted transactions: " + abortedTransactions.get());
         System.out.println("Aborted records: " + abortedRecords.get());
+        System.out.println("Error-driven aborted transactions: " + errorAbortedTransactions.get());
         System.out.println("Committed records: " + committed);
         System.out.println("Average rate msg/s: " + String.format("%.2f msg/s", rate));
         System.out.println("Average rate MiB/s: " + String.format("%.2f MiB/s", mibRate));
         System.out.println("Transactions/s: " + String.format("%.2f", txnRate));
         System.out.println("Average per-record latency: " + String.format("%.2f ms", avgLatencyMs));
-        System.out.println("Max per-record latency: " + maxLatencyMs + " ms");
+        System.out.println("Max per-record latency: " + String.format("%.2f ms", maxLatencyMs));
         System.out.println("p99 per-record latency: " + p99Ms + " ms");
         System.out.println("Average commit latency: " + String.format("%.2f ms", avgCommitMs));
         System.out.println("p99 commit latency: " + percentileFromHist(commitLatencyHist, 0.99) + " ms");
@@ -403,45 +494,35 @@ public class TransactionalProducerPerformanceTest {
 
         // Machine-readable summary (same file/keys/latency_ms shape as the sibling
         // tests) plus the transaction-specific fields. client = "java-txn".
-        long minLatencyMs = 0;
-        for (int i = 0; i < latencyHist.length; i++) {
-            if (latencyHist[i] > 0) { minLatencyMs = i; break; }
-        }
-        long minCommitMs = 0;
-        for (int i = 0; i < commitLatencyHist.length; i++) {
-            if (commitLatencyHist[i] > 0) { minCommitMs = i; break; }
-        }
-        long minAbortMs = 0;
-        for (int i = 0; i < abortLatencyHist.length; i++) {
-            if (abortLatencyHist[i] > 0) { minAbortMs = i; break; }
-        }
+        // min / avg / max are exact (ms as a float); the percentiles are 1 ms
+        // bucket indices.
         Map<String, Object> latency = new LinkedHashMap<>();
-        latency.put("min", minLatencyMs);
+        latency.put("min", Math.round(minLatencyMs * 100.0) / 100.0);
         latency.put("avg", Math.round(avgLatencyMs * 100.0) / 100.0);
         latency.put("p50", percentileFromHist(latencyHist, 0.50));
         latency.put("p90", percentileFromHist(latencyHist, 0.90));
         latency.put("p95", percentileFromHist(latencyHist, 0.95));
         latency.put("p99", p99Ms);
         latency.put("p999", percentileFromHist(latencyHist, 0.999));
-        latency.put("max", maxLatencyMs);
+        latency.put("max", Math.round(maxLatencyMs * 100.0) / 100.0);
         Map<String, Object> commitLatency = new LinkedHashMap<>();
-        commitLatency.put("min", minCommitMs);
+        commitLatency.put("min", Math.round(minCommitMs * 100.0) / 100.0);
         commitLatency.put("avg", Math.round(avgCommitMs * 100.0) / 100.0);
         commitLatency.put("p50", percentileFromHist(commitLatencyHist, 0.50));
         commitLatency.put("p90", percentileFromHist(commitLatencyHist, 0.90));
         commitLatency.put("p95", percentileFromHist(commitLatencyHist, 0.95));
         commitLatency.put("p99", percentileFromHist(commitLatencyHist, 0.99));
         commitLatency.put("p999", percentileFromHist(commitLatencyHist, 0.999));
-        commitLatency.put("max", maxCommitLatencyMs);
+        commitLatency.put("max", Math.round(maxCommitMs * 100.0) / 100.0);
         Map<String, Object> abortLatency = new LinkedHashMap<>();
-        abortLatency.put("min", minAbortMs);
+        abortLatency.put("min", Math.round(minAbortMs * 100.0) / 100.0);
         abortLatency.put("avg", Math.round(avgAbortMs * 100.0) / 100.0);
         abortLatency.put("p50", percentileFromHist(abortLatencyHist, 0.50));
         abortLatency.put("p90", percentileFromHist(abortLatencyHist, 0.90));
         abortLatency.put("p95", percentileFromHist(abortLatencyHist, 0.95));
         abortLatency.put("p99", percentileFromHist(abortLatencyHist, 0.99));
         abortLatency.put("p999", percentileFromHist(abortLatencyHist, 0.999));
-        abortLatency.put("max", maxAbortLatencyMs);
+        abortLatency.put("max", Math.round(maxAbortMs * 100.0) / 100.0);
         Map<String, Object> results = new LinkedHashMap<>();
         results.put("test", "producer");
         results.put("client", "java-txn");
@@ -453,6 +534,7 @@ public class TransactionalProducerPerformanceTest {
         results.put("committed_transactions", committedTxns);
         results.put("aborted_transactions", abortedTransactions.get());
         results.put("aborted_records", abortedRecords.get());
+        results.put("error_aborted_transactions", errorAbortedTransactions.get());
         results.put("transactions_per_s", Math.round(txnRate * 100.0) / 100.0);
         results.put("latency_ms", latency);
         results.put("commit_latency_ms", commitLatency);
@@ -487,13 +569,18 @@ public class TransactionalProducerPerformanceTest {
         if (workerFailed.get()) {
             System.err.println("One or more transactional producer workers failed (see above)");
         }
-        System.exit((latencyBudgetExceeded || resultsWriteFailed || countMismatch || workerFailed.get()) ? 1 : 0);
+        long errorAborts = errorAbortedTransactions.get();
+        if (errorAborts > 0) {
+            System.err.println(errorAborts + " transaction(s) aborted on an error, not by ABORT_RATE (see above)");
+        }
+        exit((latencyBudgetExceeded || resultsWriteFailed || countMismatch || workerFailed.get()
+            || errorAborts > 0) ? 1 : 0);
     }
 
     // === Per-producer worker =================================================
 
     private static void runProducer(int index, Properties baseConf, List<KeyValue> generated,
-                                    TransactionalMetrics metrics, long firstMessageNs,
+                                    TransactionalMetrics metrics,
                                     long perProducerNumMessages, double perProducerRps) {
         Properties conf = new Properties();
         conf.putAll(baseConf);
@@ -502,36 +589,61 @@ public class TransactionalProducerPerformanceTest {
         conf.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
         conf.put(ProducerConfig.ACKS_CONFIG, "all");
 
-        long rateCheckpoint = rateCheckpointFor(perProducerRps);
         long txnIndex = 0;
         long recordsSent = 0;
-        int n = (int) RECORDS_PER_TRANSACTION;
+        boolean ready = false;
 
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(conf)) {
             producer.initTransactions();
+            ready = true;
+            long firstMessageNs = awaitMeasuredStart();
 
             // The duration / count bound is checked at the top of the loop so
             // every path through the body (including the error-path
-            // `continue`s) passes through it.
+            // `continue`s) passes through it. It is a transaction boundary, so
+            // the counted-run time cap never splits a transaction.
             while (!terminating) {
                 if (perProducerNumMessages > 0) {
                     if (recordsSent >= perProducerNumMessages) {
+                        // The wait owed for the last transaction's records,
+                        // which the next beginTransaction would have taken:
+                        // without it a fast client ends a counted run early
+                        // and overstates throughput.
+                        if (perProducerRps > 0) {
+                            paceTo(firstMessageNs, recordsSent, perProducerRps);
+                        }
+                        break;
+                    }
+                    if (System.nanoTime() - firstMessageNs >= COUNTED_RUN_CAP_NS) {
+                        timeCapped.set(true);
                         break;
                     }
                 } else if (System.nanoTime() - firstMessageNs > (long) TEST_DURATION_SECONDS * 1_000_000_000L) {
                     break;
                 }
 
-                long beginMs = System.currentTimeMillis();
+                // Pace only here, before beginTransaction: a sleep inside the
+                // open transaction would count toward its commit latency and
+                // the latency of the records already sent.
+                if (perProducerRps > 0) {
+                    paceTo(firstMessageNs, recordsSent, perProducerRps);
+                }
+
+                // A counted run's last transaction carries only what is left of
+                // this producer's share, so the records sent never exceed it.
+                int n = perProducerNumMessages > 0
+                    ? (int) Math.min(RECORDS_PER_TRANSACTION, perProducerNumMessages - recordsSent)
+                    : (int) RECORDS_PER_TRANSACTION;
+                long beginNs = System.nanoTime();
                 producer.beginTransaction();
 
-                long[] produceMs = new long[n];
+                long[] produceNs = new long[n];
                 List<Future<RecordMetadata>> futures = new ArrayList<>(n);
                 Exception sendError = null;
                 long attempted = 0;
                 for (int r = 0; r < n; r++) {
                     KeyValue m = generated.get((int) (recordsSent % generated.size()));
-                    produceMs[r] = System.currentTimeMillis();
+                    produceNs[r] = System.nanoTime();
                     attempted++;
                     try {
                         futures.add(producer.send(new ProducerRecord<>(TOPIC_NAME, m.key, m.value)));
@@ -539,10 +651,7 @@ public class TransactionalProducerPerformanceTest {
                         sendError = e;
                     }
                     recordsSent++;
-
-                    if (perProducerRps > 0 && recordsSent % rateCheckpoint == 0) {
-                        paceTo(firstMessageNs, recordsSent, perProducerRps);
-                    }
+                    producedRecords.incrementAndGet();
                     if (sendError != null) {
                         break;
                     }
@@ -562,12 +671,12 @@ public class TransactionalProducerPerformanceTest {
                 if (shouldAbort(txnIndex, ABORT_RATE)) {
                     // Aborted transactions STILL produced their N records above;
                     // on abort they count toward neither throughput nor latency.
-                    producer.abortTransaction();
+                    retryOnTimeout("abort_transaction", producer::abortTransaction);
                     abortedTransactions.incrementAndGet();
                     abortedRecords.addAndGet(n);
-                    recordAbortLatency(metrics, beginMs, System.currentTimeMillis());
+                    recordAbortLatency(metrics, beginNs, System.nanoTime());
                 } else if (commitOrAbort(producer, attempted)) {
-                    recordCommitted(metrics, beginMs, System.currentTimeMillis(), futures, produceMs);
+                    recordCommitted(metrics, beginNs, System.nanoTime(), futures, produceNs);
                 }
 
                 txnIndex++;
@@ -575,13 +684,18 @@ public class TransactionalProducerPerformanceTest {
         } catch (Exception e) {
             System.err.println("Producer " + index + " failed: " + e.getMessage());
             workerFailed.set(true);
+        } finally {
+            // A worker that failed before it was ready must not hold up the clock.
+            if (!ready) {
+                workersReady.countDown();
+            }
         }
     }
 
     // === EOS (read-process-write) per-producer worker ========================
 
     private static void runEosProducer(int index, Properties baseConf, TransactionalMetrics metrics,
-                                       long firstMessageNs, double perProducerRps) {
+                                       double perProducerRps) {
         Properties pconf = new Properties();
         pconf.putAll(baseConf);
         // Unique transactional.id per producer; transactions require idempotence.
@@ -594,7 +708,6 @@ public class TransactionalProducerPerformanceTest {
         // Count mode: the bound is the TOTAL number of source records processed
         // across all producers (the shared eosProcessed counter).
         final boolean countMode = NUM_MESSAGES > 0;
-        long rateCheckpoint = rateCheckpointFor(perProducerRps);
         long txnIndex = 0;
         long recordsSent = 0;
         // Consecutive empty polls, to warn (once) that the source is starving the
@@ -602,18 +715,30 @@ public class TransactionalProducerPerformanceTest {
         // txn-rate), so an under-fed source shows up here, not as a deadlock.
         long consecutiveEmptyPolls = 0;
         boolean starvationWarned = false;
+        boolean ready = false;
 
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(pconf);
              KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(cconf)) {
             producer.initTransactions();
             consumer.subscribe(Collections.singletonList(SOURCE_TOPIC));
+            ready = true;
+            long firstMessageNs = awaitMeasuredStart();
 
             // The duration / count bound is checked at the top of the loop so
             // every path through the body (empty polls and the error-path
-            // `continue`s alike) passes through it.
+            // `continue`s alike) passes through it. It is a transaction
+            // boundary, so the counted-run time cap never splits a transaction.
             while (!terminating) {
                 if (countMode) {
                     if (eosProcessed.get() >= NUM_MESSAGES) {
+                        // This producer's owed wait, as in the produce loop.
+                        if (perProducerRps > 0) {
+                            paceTo(firstMessageNs, recordsSent, perProducerRps);
+                        }
+                        break;
+                    }
+                    if (System.nanoTime() - firstMessageNs >= COUNTED_RUN_CAP_NS) {
+                        timeCapped.set(true);
                         break;
                     }
                 } else if (System.nanoTime() - firstMessageNs > (long) TEST_DURATION_SECONDS * 1_000_000_000L) {
@@ -653,18 +778,25 @@ public class TransactionalProducerPerformanceTest {
 
                 final int polled = records.count();
                 try {
-                    long beginMs = System.currentTimeMillis();
+                    // Pace only here, before beginTransaction: a sleep inside
+                    // the open transaction would count toward its commit
+                    // latency and the latency of the records already sent.
+                    if (perProducerRps > 0) {
+                        paceTo(firstMessageNs, recordsSent, perProducerRps);
+                    }
+
+                    long beginNs = System.nanoTime();
                     producer.beginTransaction();
 
-                    List<Long> produceMs = new ArrayList<>();
-                    List<Future<RecordMetadata>> futures = new ArrayList<>();
+                    long[] produceNs = new long[polled];
+                    List<Future<RecordMetadata>> futures = new ArrayList<>(polled);
                     // Standard Kafka EOS offset bookkeeping: commit last-consumed
                     // offset + 1 per TopicPartition.
                     Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
                     Exception sendError = null;
                     long batch = 0;
                     for (ConsumerRecord<byte[], byte[]> rec : records) {
-                        produceMs.add(System.currentTimeMillis());
+                        produceNs[(int) batch] = System.nanoTime();
                         batch++;
                         // Transform (identity/echo) and produce to the destination topic.
                         try {
@@ -681,9 +813,6 @@ public class TransactionalProducerPerformanceTest {
                         }
 
                         recordsSent++;
-                        if (perProducerRps > 0 && recordsSent % rateCheckpoint == 0) {
-                            paceTo(firstMessageNs, recordsSent, perProducerRps);
-                        }
                         if (sendError != null) {
                             break;
                         }
@@ -709,12 +838,16 @@ public class TransactionalProducerPerformanceTest {
                     // the outer catch, leaving the transaction begun-but-unresolved
                     // and uncounted.
                     try {
-                        producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata());
+                        retryOnTimeout("send_offsets_to_transaction",
+                            () -> producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata()));
+                    } catch (TimeoutException e) {
+                        // Still timing out after the retries: the call may yet
+                        // complete, so the transaction cannot be aborted.
+                        throw e;
                     } catch (Exception e) {
                         System.err.println("send_offsets_to_transaction error: " + e.getMessage());
                         abortQuietly(producer);
-                        abortedTransactions.incrementAndGet();
-                        abortedRecords.addAndGet(batch);
+                        countErrorAbort(batch);
                         txnIndex++;
                         continue;
                     }
@@ -725,16 +858,12 @@ public class TransactionalProducerPerformanceTest {
                         // consumed offsets are NOT committed, and the consumer is NOT
                         // sought back (a benchmark simplification; a real EOS app
                         // seeks to the committed position).
-                        producer.abortTransaction();
+                        retryOnTimeout("abort_transaction", producer::abortTransaction);
                         abortedTransactions.incrementAndGet();
                         abortedRecords.addAndGet(batch);
-                        recordAbortLatency(metrics, beginMs, System.currentTimeMillis());
+                        recordAbortLatency(metrics, beginNs, System.nanoTime());
                     } else if (commitOrAbort(producer, batch)) {
-                        long[] produceMsArr = new long[produceMs.size()];
-                        for (int r = 0; r < produceMsArr.length; r++) {
-                            produceMsArr[r] = produceMs.get(r);
-                        }
-                        recordCommitted(metrics, beginMs, System.currentTimeMillis(), futures, produceMsArr);
+                        recordCommitted(metrics, beginNs, System.nanoTime(), futures, produceNs);
                     }
 
                     txnIndex++;
@@ -747,20 +876,71 @@ public class TransactionalProducerPerformanceTest {
         } catch (Exception e) {
             System.err.println("EOS producer " + index + " failed: " + e.getMessage());
             workerFailed.set(true);
+        } finally {
+            // A worker that failed before it was ready must not hold up the clock.
+            if (!ready) {
+                workersReady.countDown();
+            }
         }
     }
 
     // === Worker helpers ======================================================
 
-    /** Records per pacing checkpoint: max(floor(rps / 10), 1), i.e. ~100 ms windows. */
-    private static long rateCheckpointFor(double rps) {
-        return rps > 0 ? Math.max((long) Math.floor(rps / 10.0), 1L) : 0;
+    /**
+     * Marks this worker ready and waits for main to start the measured clock;
+     * returns its start ({@link System#nanoTime()}).
+     */
+    private static long awaitMeasuredStart() throws InterruptedException {
+        workersReady.countDown();
+        START_GATE.await();
+        return measuredStartNs;
+    }
+
+    /** A transactional producer call, retried by {@link #retryOnTimeout}. */
+    private interface TxnCall {
+        void run();
     }
 
     /**
-     * Sleep until {@code start + recordsSent / rps}. The deadline is derived from
-     * the cumulative count (not "previous deadline + 100 ms") so the rate stays
-     * exact for any rps, including rates that are not a multiple of 10.
+     * Runs {@code call}, retrying it after a {@link TimeoutException} up to
+     * {@link #TXN_CALL_ATTEMPTS} times: the call may still be completing, so
+     * {@code KafkaProducer} allows only the same call again (another one, such
+     * as an abort after a commit timeout, is rejected). The last timeout, or
+     * one while terminating, is rethrown.
+     */
+    private static void retryOnTimeout(String op, TxnCall call) {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                call.run();
+                return;
+            } catch (TimeoutException e) {
+                if (attempt >= TXN_CALL_ATTEMPTS || terminating) {
+                    throw e;
+                }
+                System.err.println(op + " timed out (attempt " + attempt + " of " + TXN_CALL_ATTEMPTS
+                    + "), retrying: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * An abort forced by an error rather than {@code ABORT_RATE}: counted as an
+     * aborted transaction with the records attempted, and apart, failing the run.
+     */
+    private static void countErrorAbort(long attempted) {
+        abortedTransactions.incrementAndGet();
+        abortedRecords.addAndGet(attempted);
+        errorAbortedTransactions.incrementAndGet();
+    }
+
+    /**
+     * Sleep until {@code start + recordsSent / rps}. Called only at a transaction
+     * boundary, immediately before {@code beginTransaction}, so no sleep lands
+     * inside an open transaction (where it would inflate the commit latency and
+     * the latency of the records already sent, and a faster client would sleep
+     * longer and look slower). The deadline is derived from the cumulative count
+     * (not "previous deadline + one transaction") so the rate stays exact for
+     * any rps.
      */
     private static void paceTo(long startNs, long recordsSent, double rps) {
         long deadlineNs = startNs + (long) (recordsSent / rps * 1e9);
@@ -801,7 +981,7 @@ public class TransactionalProducerPerformanceTest {
 
     private static void abortQuietly(KafkaProducer<byte[], byte[]> producer) {
         try {
-            producer.abortTransaction();
+            retryOnTimeout("abort_transaction", producer::abortTransaction);
         } catch (Exception ae) {
             System.err.println("abort_transaction error: " + ae.getMessage());
         }
@@ -809,7 +989,7 @@ public class TransactionalProducerPerformanceTest {
 
     /**
      * A send was rejected inside the transaction: abort it (no offsets, no
-     * commit), count it as an aborted transaction with the records attempted,
+     * commit), count it as an error-driven abort with the records attempted,
      * and fail the run. No latency or completion is recorded for its records.
      */
     private static void abortRejectedTransaction(KafkaProducer<byte[], byte[]> producer, int index,
@@ -817,26 +997,30 @@ public class TransactionalProducerPerformanceTest {
         System.err.println("Producer " + index + ": produce rejected inside a transaction, aborting it: "
             + sendError.getMessage());
         abortQuietly(producer);
-        abortedTransactions.incrementAndGet();
-        abortedRecords.addAndGet(attempted);
+        countErrorAbort(attempted);
         workerFailed.set(true);
     }
 
     /**
-     * Commit the transaction; on failure abort it and count it as an aborted
-     * transaction with the records attempted (not a run failure by itself — a
-     * producer left unusable fails the worker at the next beginTransaction).
-     * Returns whether the commit succeeded.
+     * Commit the transaction, retrying a timeout ({@link #retryOnTimeout}). On
+     * an abortable error abort it and count an error-driven abort with the
+     * records attempted (the worker continues; the run fails). A fatal error
+     * (the {@code KafkaProducer} javadoc's fenced, out-of-order sequence and
+     * authorization errors, or an unsupported version), or a timeout still
+     * there after the retries, is rethrown and fails the worker: the producer
+     * can then only be closed. Returns whether the commit succeeded.
      */
     private static boolean commitOrAbort(KafkaProducer<byte[], byte[]> producer, long attempted) {
         try {
-            producer.commitTransaction();
+            retryOnTimeout("commit_transaction", producer::commitTransaction);
             return true;
-        } catch (Exception e) {
+        } catch (ProducerFencedException | OutOfOrderSequenceException | AuthorizationException
+                 | UnsupportedVersionException | TimeoutException e) {
+            throw e;
+        } catch (KafkaException e) {
             System.err.println("commit_transaction error: " + e.getMessage());
             abortQuietly(producer);
-            abortedTransactions.incrementAndGet();
-            abortedRecords.addAndGet(attempted);
+            countErrorAbort(attempted);
             return false;
         }
     }
@@ -845,34 +1029,34 @@ public class TransactionalProducerPerformanceTest {
      * Per-transaction abort latency = begin -> abort completes (symmetric with
      * commit latency; deterministic-abort path only).
      */
-    private static void recordAbortLatency(TransactionalMetrics metrics, long beginMs, long abortMs) {
-        long abortLatency = abortMs - beginMs;
-        metrics.abortLatency.addMeasurement(abortLatency);
+    private static void recordAbortLatency(TransactionalMetrics metrics, long beginNs, long abortNs) {
+        long abortLatencyNs = abortNs - beginNs;
+        metrics.abortLatency.addMeasurement(abortLatencyNs / 1e6);
         synchronized (HIST_LOCK) {
-            int ai = (int) Math.min(Math.max(abortLatency, 0), MAX_LATENCY_MS + 1);
-            abortLatencyHist[ai]++;
-            totalAbortLatencyMs += abortLatency;
-            if (abortLatency > maxAbortLatencyMs) maxAbortLatencyMs = abortLatency;
+            abortLatencyHist[histBucket(abortLatencyNs)]++;
+            totalAbortLatencyNs += abortLatencyNs;
+            if (abortLatencyNs < minAbortLatencyNs) minAbortLatencyNs = abortLatencyNs;
+            if (abortLatencyNs > maxAbortLatencyNs) maxAbortLatencyNs = abortLatencyNs;
         }
     }
 
     /**
      * Account a committed transaction: commit latency (begin -> commit
      * completes) and, per record, verification plus latency (send -> commit
-     * completes).
+     * completes). All stamps are {@link System#nanoTime()}.
      */
-    private static void recordCommitted(TransactionalMetrics metrics, long beginMs, long commitMs,
-                                        List<Future<RecordMetadata>> futures, long[] produceMs) {
+    private static void recordCommitted(TransactionalMetrics metrics, long beginNs, long commitNs,
+                                        List<Future<RecordMetadata>> futures, long[] produceNs) {
         committedTransactions.incrementAndGet();
 
-        long commitLatency = commitMs - beginMs;
+        long commitLatencyNs = commitNs - beginNs;
         metrics.transactions.addMeasurement(1);
-        metrics.commitLatency.addMeasurement(commitLatency);
+        metrics.commitLatency.addMeasurement(commitLatencyNs / 1e6);
         synchronized (HIST_LOCK) {
-            int ci = (int) Math.min(Math.max(commitLatency, 0), MAX_LATENCY_MS + 1);
-            commitLatencyHist[ci]++;
-            totalCommitLatencyMs += commitLatency;
-            if (commitLatency > maxCommitLatencyMs) maxCommitLatencyMs = commitLatency;
+            commitLatencyHist[histBucket(commitLatencyNs)]++;
+            totalCommitLatencyNs += commitLatencyNs;
+            if (commitLatencyNs < minCommitLatencyNs) minCommitLatencyNs = commitLatencyNs;
+            if (commitLatencyNs > maxCommitLatencyNs) maxCommitLatencyNs = commitLatencyNs;
         }
 
         for (int r = 0; r < futures.size(); r++) {
@@ -882,17 +1066,22 @@ public class TransactionalProducerPerformanceTest {
                 System.out.println("Produce call resulted in exception: " + e.getMessage());
             }
             completedMessages.incrementAndGet();
-            long latency = commitMs - produceMs[r];
-            metrics.latency.addMeasurement(latency);
+            long latencyNs = commitNs - produceNs[r];
+            metrics.latency.addMeasurement(latencyNs / 1e6);
             metrics.messages.addMeasurement(1);
             metrics.bytes.addMeasurement(MESSAGE_SIZE);
             synchronized (HIST_LOCK) {
-                int li = (int) Math.min(Math.max(latency, 0), MAX_LATENCY_MS + 1);
-                latencyHist[li]++;
-                totalLatencyMs += latency;
-                if (latency > maxLatencyMs) maxLatencyMs = latency;
+                latencyHist[histBucket(latencyNs)]++;
+                totalLatencyNs += latencyNs;
+                if (latencyNs < minLatencyNs) minLatencyNs = latencyNs;
+                if (latencyNs > maxLatencyNs) maxLatencyNs = latencyNs;
             }
         }
+    }
+
+    /** Percentile bucket of a latency: floor(ns / 1 ms), clamped to the top (overflow) bucket. */
+    private static int histBucket(long latencyNs) {
+        return (int) Math.min(Math.max(latencyNs / 1_000_000L, 0), MAX_LATENCY_MS + 1);
     }
 
     /**
@@ -927,7 +1116,12 @@ public class TransactionalProducerPerformanceTest {
         return c;
     }
 
-    private static void runWarmup(Properties baseConf, List<KeyValue> generated) {
+    /**
+     * Runs the warmup transactions on a producer of its own. Returns false when
+     * the warmup failed, true when it completed or a signal cut it short (a
+     * failure while terminating is not counted).
+     */
+    private static boolean runWarmup(Properties baseConf, List<KeyValue> generated) {
         System.out.println("Warming up for " + WARMUP_SECONDS + " seconds ...");
         Properties conf = new Properties();
         conf.putAll(baseConf);
@@ -947,7 +1141,7 @@ public class TransactionalProducerPerformanceTest {
                     verifyRecordMetadata(f.get());
                 } catch (Exception e) {
                     System.out.println("Warmup failed due to message verification error: " + e.getMessage());
-                    return;
+                    return terminating;
                 }
                 try {
                     Thread.sleep(100);
@@ -958,12 +1152,13 @@ public class TransactionalProducerPerformanceTest {
             }
         } catch (Exception e) {
             System.out.println("Warmup failed: " + e.getMessage());
-            return;
+            return terminating;
         }
         // Warmup records are excluded from the measured statistics (the measured
         // interval markers are set after this returns); reset the verified count.
         verified.set(0);
         System.out.println("Warmup complete.");
+        return true;
     }
 
     // Deterministic, evenly-spread abort selection (Bresenham). Per-producer
@@ -1209,41 +1404,47 @@ public class TransactionalProducerPerformanceTest {
 
         // Java .properties file: bootstrap + acks + any security keys from
         // baseConf. Passed via --producer.config (bootstrap comes from the file,
-        // exactly like the Python consumer-perf spawn_producer).
-        File props = File.createTempFile("txn_perf_seed_", ".properties");
-        try (FileWriter w = new FileWriter(props)) {
-            w.write("bootstrap.servers=" + baseConf.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG) + "\n");
-            w.write("acks=1\n");
-            for (String k : new String[]{"security.protocol", "sasl.mechanism", "sasl.jaas.config"}) {
-                if (baseConf.containsKey(k)) {
-                    // One logical .properties line: collapse the cosmetic
-                    // whitespace in the jaas value to single spaces.
-                    String v = baseConf.get(k).toString().replaceAll("\\s+", " ");
-                    w.write(k + "=" + v + "\n");
+        // exactly like the Python consumer-perf spawn_producer). It holds the
+        // SASL secret, so it is created owner-only (0600) from the start —
+        // never world-readable, not even before a chmod — and removed both in
+        // the finally below and, via deleteOnExit, when the JVM is stopped by
+        // SIGINT / SIGTERM while the seeder runs.
+        Path props = Files.createTempFile("txn_perf_seed_", ".properties",
+            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        props.toFile().deleteOnExit();
+        try {
+            try (BufferedWriter w = Files.newBufferedWriter(props, StandardCharsets.UTF_8)) {
+                w.write("bootstrap.servers=" + baseConf.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG) + "\n");
+                w.write("acks=1\n");
+                for (String k : new String[]{"security.protocol", "sasl.mechanism", "sasl.jaas.config"}) {
+                    if (baseConf.containsKey(k)) {
+                        // One logical .properties line: collapse the cosmetic
+                        // whitespace in the jaas value to single spaces.
+                        String v = baseConf.get(k).toString().replaceAll("\\s+", " ");
+                        w.write(k + "=" + v + "\n");
+                    }
                 }
             }
-        }
 
-        File log = new File(System.getProperty("java.io.tmpdir"),
-            "txn_perf_seed_" + ProcessHandle.current().pid() + ".log");
-        System.out.println(">>> Seeding source topic '" + SOURCE_TOPIC + "' via " + bin
-            + ": throughput=" + SEED_THROUGHPUT + " ("
-            + (SEED_THROUGHPUT < 0 ? "PEAK/unbounded" : "fixed msg/s") + "), "
-            + recordSize + " bytes, " + seedCount + " records");
+            File log = new File(System.getProperty("java.io.tmpdir"),
+                "txn_perf_seed_" + ProcessHandle.current().pid() + ".log");
+            System.out.println(">>> Seeding source topic '" + SOURCE_TOPIC + "' via " + bin
+                + ": throughput=" + SEED_THROUGHPUT + " ("
+                + (SEED_THROUGHPUT < 0 ? "PEAK/unbounded" : "fixed msg/s") + "), "
+                + recordSize + " bytes, " + seedCount + " records");
 
-        List<String> cmd = new ArrayList<>();
-        cmd.add(bin);
-        cmd.add("--topic");
-        cmd.add(SOURCE_TOPIC);
-        cmd.add("--num-records");
-        cmd.add(Long.toString(seedCount));
-        cmd.add("--record-size");
-        cmd.add(Integer.toString(recordSize));
-        cmd.add("--throughput");
-        cmd.add(Long.toString(SEED_THROUGHPUT));
-        cmd.add("--producer.config");
-        cmd.add(props.getAbsolutePath());
-        try {
+            List<String> cmd = new ArrayList<>();
+            cmd.add(bin);
+            cmd.add("--topic");
+            cmd.add(SOURCE_TOPIC);
+            cmd.add("--num-records");
+            cmd.add(Long.toString(seedCount));
+            cmd.add("--record-size");
+            cmd.add(Integer.toString(recordSize));
+            cmd.add("--throughput");
+            cmd.add(Long.toString(SEED_THROUGHPUT));
+            cmd.add("--producer.config");
+            cmd.add(props.toAbsolutePath().toString());
             Process p = new ProcessBuilder(cmd)
                 .redirectOutput(ProcessBuilder.Redirect.to(log))
                 .redirectErrorStream(true)
@@ -1257,7 +1458,7 @@ public class TransactionalProducerPerformanceTest {
                     + "); continuing — the EOS consumer will warn if starved");
             }
         } finally {
-            props.delete();  // holds credentials
+            Files.deleteIfExists(props);  // holds credentials
         }
     }
 
@@ -1277,28 +1478,61 @@ public class TransactionalProducerPerformanceTest {
         return hist.length - 1;
     }
 
+    /**
+     * On SIGINT / SIGTERM the JVM runs its shutdown hooks and halts as soon as
+     * they return, so the hook sets {@code terminating} and then waits (at most
+     * {@link #SHUTDOWN_WAIT_SECONDS}) for the main thread to stop the workers and
+     * write results.json, as the Python harness's signal handler lets it. The
+     * JVM still exits with the signal's status.
+     */
     private static void installSignalHandler() {
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> terminating = true));
+        Thread main = Thread.currentThread();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            terminating = true;
+            long deadlineNs = System.nanoTime() + SHUTDOWN_WAIT_SECONDS * 1_000_000_000L;
+            try {
+                while (!MAIN_DONE.await(100, TimeUnit.MILLISECONDS)
+                        && main.isAlive() && System.nanoTime() < deadlineNs) {
+                    // main is finishing the run (not alive: it died of an exception)
+                }
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }, "shutdown-wait"));
+    }
+
+    /**
+     * {@link System#exit}, first releasing a shutdown hook that waits for main:
+     * exit() blocks while hooks run, so the hook must not wait for it.
+     */
+    private static void exit(int status) {
+        MAIN_DONE.countDown();
+        System.exit(status);
     }
 
     private static String envOr(String key, String defaultValue) {
         String v = System.getenv(key);
         return v == null ? defaultValue : v;
     }
+    // A value that does not parse fails the run naming the variable, rather
+    // than silently running with the default (LIMIT_RPS=10k is not unlimited).
     private static int envInt(String key, int defaultValue) {
         String v = System.getenv(key);
         if (v == null) return defaultValue;
-        try { return Integer.parseInt(v); } catch (NumberFormatException e) { return defaultValue; }
+        try { return Integer.parseInt(v.trim()); } catch (NumberFormatException e) { throw invalidEnv(key, v, "an integer"); }
     }
     private static long envLong(String key, long defaultValue) {
         String v = System.getenv(key);
         if (v == null) return defaultValue;
-        try { return Long.parseLong(v); } catch (NumberFormatException e) { return defaultValue; }
+        try { return Long.parseLong(v.trim()); } catch (NumberFormatException e) { throw invalidEnv(key, v, "an integer"); }
     }
     private static double envDouble(String key, double defaultValue) {
         String v = System.getenv(key);
         if (v == null) return defaultValue;
-        try { return Double.parseDouble(v); } catch (NumberFormatException e) { return defaultValue; }
+        try { return Double.parseDouble(v.trim()); } catch (NumberFormatException e) { throw invalidEnv(key, v, "a number"); }
+    }
+    private static IllegalArgumentException invalidEnv(String key, String value, String expected) {
+        return new IllegalArgumentException("Invalid " + key + "='" + value + "': expected " + expected);
     }
     private static boolean envBool(String key, boolean defaultValue) {
         String v = System.getenv(key);

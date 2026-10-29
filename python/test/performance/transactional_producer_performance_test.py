@@ -16,17 +16,22 @@
 
 Sibling of ``producer_performance_test.py``, driving the transactional producer
 API. It shares the configuration contract, message shape, warmup/measured/
-cooldown scaffolding, rate pacing, CPU/RSS aggregation and the
-``metrics.jsonl`` / ``results.json`` schema of the sibling transactional
-producer performance tests
+cooldown scaffolding, rate pacing (at the transaction boundary), CPU/RSS
+aggregation and the ``metrics.jsonl`` / ``results.json`` schema of the sibling
+transactional producer performance tests
 (``rust/tests/performance/transactional_producer_perf_test.rs``,
 ``c/tests/transactional_producer_perf_test.c`` and
 ``tools/java-perf-test/.../TransactionalProducerPerformanceTest.java``) so
 results are comparable across implementations, plus the transaction-specific
 schema additions (``committed_transactions`` / ``aborted_transactions`` /
-``aborted_records`` / ``transactions_per_s`` / ``commit_latency_ms`` /
+``aborted_records`` / ``error_aborted_transactions`` / ``transactions_per_s`` /
+``commit_latency_ms`` /
 ``abort_latency_ms``, and the ``transactions`` / ``commit_latency`` /
-``abort_latency`` metrics.jsonl buckets).
+``abort_latency`` metrics.jsonl buckets). ``aborted_transactions`` counts every
+abort; ``error_aborted_transactions`` the ones an error forced (a produce
+rejected inside a transaction, a failed ``send_offsets_to_transaction`` or
+commit) rather than ``ABORT_RATE``, and any of those fails the run, as in the
+Java harness.
 
 Backends (``CLIENT_VERSION`` env, matching the base harness):
   * ``v3`` (default) = the Python Rust binding ``producer.KafkaProducer``;
@@ -49,7 +54,17 @@ Two modes (``TXN_MODE`` env):
     fails. Without a target the run is bounded by
     ``TEST_DURATION_SECONDS``.
 
-Latency definitions (both modes, matching the native harnesses):
+A run with a message target (either mode) also stops, at a transaction boundary,
+once its measured time reaches ``TEST_DURATION_SECONDS`` + 10 s; it then prints a
+``capped:`` line and is not failed for the records it did not send (the
+driver's report flags a client that held less than 95% of the target rate).
+With ``LIMIT_RPS`` each producer paces at the transaction boundary only: before
+``begin`` it sleeps until ``measured start + its records sent / its rate``, never
+inside an open transaction.
+
+Latency definitions (both modes, matching the native harnesses), stamped with
+``time.perf_counter_ns()`` (monotonic): percentiles from 1 ms floor buckets,
+min/avg/max exact:
   * per-record latency = a record's produce -> the moment its transaction's
     commit completes (committed transactions only);
   * per-transaction commit latency = ``begin`` -> ``commit`` completes
@@ -108,7 +123,8 @@ import time
 from threading import Lock, Thread
 
 from performance_common import (Bucket, LatencyBucket, Metrics, MAX_LATENCY_MS,
-                                percentile_from_hist, recreate_topic)
+                                latency_bucket, percentile_from_hist,
+                                recreate_topic)
 
 # --------------------------------------------------------------------------
 # Configuration (env), mirroring producer_performance_test.py plus the
@@ -154,6 +170,9 @@ p99_limit_ms = int(os.getenv("P99_LIMIT_MS", "0"))
 results_file = os.getenv("RESULTS_FILE", "results.json")
 # Seconds to keep collecting metrics after the measured interval (cooldown).
 POST_TEST_AWAIT_SECONDS = 10
+# A counted run (a message target) also stops, at a transaction boundary, once
+# its measured time reaches TEST_DURATION_SECONDS + this many seconds.
+COUNTED_RUN_CAP_SLACK_S = 10
 
 # --- transaction-specific knobs ---
 records_per_transaction = max(1, int(os.getenv("RECORDS_PER_TRANSACTION", "100")))
@@ -255,14 +274,22 @@ stats_lock = Lock()
 completed_messages = 0   # committed records
 verified = 0             # committed records that passed verification
 committed_transactions = 0
-aborted_transactions = 0
+aborted_transactions = 0   # every abort, ABORT_RATE's and error-driven
 aborted_records = 0
-total_latency_ms = 0
-max_latency_ms = 0
-total_commit_latency_ms = 0
-max_commit_latency_ms = 0
-total_abort_latency_ms = 0
-max_abort_latency_ms = 0
+# The aborts forced by an error rather than ABORT_RATE; any fails the run.
+error_aborted_transactions = 0
+# Exact latency sums / minima / maxima in ns (time.perf_counter_ns() stamps):
+# the summary's min/avg/max. The percentiles come from the floor-ms histograms
+# (1 ms buckets plus one overflow bucket, as the native harnesses).
+total_latency_ns = 0
+min_latency_ns = None
+max_latency_ns = 0
+total_commit_latency_ns = 0
+min_commit_latency_ns = None
+max_commit_latency_ns = 0
+total_abort_latency_ns = 0
+min_abort_latency_ns = None
+max_abort_latency_ns = 0
 latency_hist = [0] * (MAX_LATENCY_MS + 2)
 commit_latency_hist = [0] * (MAX_LATENCY_MS + 2)
 abort_latency_hist = [0] * (MAX_LATENCY_MS + 2)
@@ -276,10 +303,17 @@ eos_processed_records = 0
 # a producer that owns no source partitions cannot fail a run the others are
 # still making progress on.
 eos_last_progress = time.monotonic()
-# Set when the run must exit non-zero: a worker failure (client creation,
-# init/begin_transaction, an unexpected exception escaping a worker), a produce
-# rejected inside a transaction, the EOS idle safety net, an unwritable
-# results.json, or a committed/verified mismatch. Only ever set to True, so the
+# Produce mode: records sent by every producer worker, added once per worker as
+# it stops (for the `capped:` line). Guarded by stats_lock.
+records_sent_total = 0
+# Set when a counted run stopped at the time cap (see COUNTED_RUN_CAP_SLACK_S).
+# Only ever set to True, like run_failed.
+run_capped = False
+# Set when the run must exit non-zero: a failed warmup, a worker failure (client
+# creation, init/begin_transaction, an unexpected exception escaping a worker),
+# a produce rejected inside a transaction, an error-driven abort, the EOS idle
+# safety net, an unwritable results.json, or a committed/verified mismatch.
+# Only ever set to True, so the
 # unguarded write from several worker threads is safe.
 run_failed = False
 
@@ -305,63 +339,78 @@ def eos_target_reached():
         return eos_processed_records >= num_messages
 
 
-def _hist_index(latency_ms):
-    return min(max(int(latency_ms), 0), MAX_LATENCY_MS + 1)
-
-
-def record_commit(commit_latency):
-    """Record one committed transaction's commit latency (ms)."""
-    global total_commit_latency_ms, max_commit_latency_ms, committed_transactions
+def record_commit(commit_latency_ns):
+    """Record one committed transaction's commit latency (ns)."""
+    global total_commit_latency_ns, min_commit_latency_ns, max_commit_latency_ns
+    global committed_transactions
     with stats_lock:
         metrics.transactions.add_measurement(1)
-        metrics.commit_latency.add_measurement(commit_latency)
+        metrics.commit_latency.add_measurement(commit_latency_ns / 1_000_000)
         committed_transactions += 1
-        total_commit_latency_ms += commit_latency
-        if commit_latency > max_commit_latency_ms:
-            max_commit_latency_ms = commit_latency
-        commit_latency_hist[_hist_index(commit_latency)] += 1
+        total_commit_latency_ns += commit_latency_ns
+        if commit_latency_ns > max_commit_latency_ns:
+            max_commit_latency_ns = commit_latency_ns
+        if min_commit_latency_ns is None or commit_latency_ns < min_commit_latency_ns:
+            min_commit_latency_ns = commit_latency_ns
+        commit_latency_hist[latency_bucket(commit_latency_ns)] += 1
 
 
-def record_abort(abort_latency, records):
-    """Record one aborted transaction's abort latency (ms) plus its attempted
+def record_abort(abort_latency_ns, records):
+    """Record one aborted transaction's abort latency (ns) plus its attempted
     record count. Deterministic-abort path only (symmetric with commit)."""
-    global total_abort_latency_ms, max_abort_latency_ms
+    global total_abort_latency_ns, min_abort_latency_ns, max_abort_latency_ns
     global aborted_transactions, aborted_records
     with stats_lock:
-        metrics.abort_latency.add_measurement(abort_latency)
+        metrics.abort_latency.add_measurement(abort_latency_ns / 1_000_000)
         aborted_transactions += 1
         aborted_records += records
-        total_abort_latency_ms += abort_latency
-        if abort_latency > max_abort_latency_ms:
-            max_abort_latency_ms = abort_latency
-        abort_latency_hist[_hist_index(abort_latency)] += 1
+        total_abort_latency_ns += abort_latency_ns
+        if abort_latency_ns > max_abort_latency_ns:
+            max_abort_latency_ns = abort_latency_ns
+        if min_abort_latency_ns is None or abort_latency_ns < min_abort_latency_ns:
+            min_abort_latency_ns = abort_latency_ns
+        abort_latency_hist[latency_bucket(abort_latency_ns)] += 1
 
 
-def record_error_abort(records):
+def record_error_abort(records, error=True):
     """Count an error-driven abort (a failed commit / send_offsets, or a produce
     rejected inside the transaction): it is aborted but contributes NO
     abort-latency sample (matching the native harnesses, which only measure the
-    deterministic-abort path)."""
-    global aborted_transactions, aborted_records
+    deterministic-abort path), and is counted apart as well, in
+    error_aborted_transactions, which fails the run (as the Java harness).
+    ``error=False``: aborted because the run is terminating, not an error."""
+    global aborted_transactions, aborted_records, error_aborted_transactions
     with stats_lock:
         aborted_transactions += 1
         aborted_records += records
+        if error:
+            error_aborted_transactions += 1
 
 
-def record_committed_record(latency, ok):
-    """Record one committed record's per-record latency (ms) + throughput."""
-    global completed_messages, verified, total_latency_ms, max_latency_ms
+def record_committed_record(latency_ns, ok):
+    """Record one committed record's per-record latency (ns) + throughput."""
+    global completed_messages, verified
+    global total_latency_ns, min_latency_ns, max_latency_ns
     with stats_lock:
-        metrics.latency.add_measurement(latency)
+        metrics.latency.add_measurement(latency_ns / 1_000_000)
         metrics.messages.add_measurement(1)
         metrics.bytes.add_measurement(message_size)
         completed_messages += 1
         if ok:
             verified += 1
-        total_latency_ms += latency
-        if latency > max_latency_ms:
-            max_latency_ms = latency
-        latency_hist[_hist_index(latency)] += 1
+        total_latency_ns += latency_ns
+        if latency_ns > max_latency_ns:
+            max_latency_ns = latency_ns
+        if min_latency_ns is None or latency_ns < min_latency_ns:
+            min_latency_ns = latency_ns
+        latency_hist[latency_bucket(latency_ns)] += 1
+
+
+def add_records_sent(records):
+    """Add a stopped produce-mode worker's sent-record count to the total."""
+    global records_sent_total
+    with stats_lock:
+        records_sent_total += records
 
 
 # Deterministic, evenly-spread abort selection (Bresenham). Per-producer 0-based
@@ -375,7 +424,14 @@ def should_abort(txn_index, rate):
 
 
 def now_ms():
+    """Wall-clock ms: the metrics.jsonl window / measurement markers only."""
     return int(time.time() * 1000)
+
+
+def now_ns():
+    """Monotonic ns: every latency stamp, the measured interval, the rate
+    pacing and the duration bounds."""
+    return time.perf_counter_ns()
 
 
 # --------------------------------------------------------------------------
@@ -433,7 +489,9 @@ def producer_config(bootstrap_servers, txn_id):
         if "MAX_REQUEST_SIZE" in os.environ:
             max_request_size = int(os.environ["MAX_REQUEST_SIZE"]) * 1024
         else:
-            max_request_size = min(batch_size * 64, 8 * 1024 * 1024)
+            max_request_size = batch_size * 64
+        # Capped at 8 MiB, set or not, as the Rust/C/Java harnesses do.
+        max_request_size = min(max_request_size, 8 * 1024 * 1024)
         compression = os.environ.get("COMPRESSION_TYPE", "none")
         linger = os.environ.get("LINGER_MS", "5")
         if v2:
@@ -446,6 +504,14 @@ def producer_config(bootstrap_servers, txn_id):
             conf["max.request.size"] = max_request_size
             if "MAX_IN_FLIGHT" in os.environ:
                 conf["max.in.flight.requests.per.connection"] = os.environ["MAX_IN_FLIGHT"]
+        # BUFFER_MEMORY is in MiB, applied as the base harness does.
+        if "BUFFER_MEMORY" in os.environ:
+            buffer_memory = int(os.environ["BUFFER_MEMORY"]) * 1024 * 1024  # Convert MB to bytes
+            if not v2:
+                conf["buffer.memory"] = buffer_memory
+            else:
+                conf["queue.buffering.max.kbytes"] = buffer_memory // 1024  # Convert bytes to KB
+                conf["queue.buffering.max.messages"] = 2147483647
         conf["compression.type"] = compression
         conf["linger.ms"] = linger
     return conf
@@ -551,26 +617,28 @@ def verify_v2(msg):
 
 
 # --------------------------------------------------------------------------
-# Rate limiting: every max(floor(rate / 10), 1) records (~100 ms of traffic),
-# sleep until start + records_sent / rate. The deadline is derived from the
-# cumulative count rather than stepped by a fixed 100 ms per checkpoint, so any
-# rate (including non-multiples of 10 and a fractional per-producer share) is
-# honoured exactly. Matches the base harness and the native transactional tests.
+# Rate limiting at the transaction boundary: immediately before
+# begin_transaction, sleep until start + records_sent / rate (this producer's
+# records and rate). Never inside an open transaction: that sleep would count
+# in the commit latency and in the latency of the records already sent, and a
+# faster client would sleep longer and look slower. The deadline is derived
+# from the cumulative count, so any rate (including a fractional per-producer
+# share) is honoured exactly. Matches the native transactional tests.
 # --------------------------------------------------------------------------
 class RateLimiter:
     def __init__(self, per_producer_rps, measured_start_ns):
         # per_producer_rps is a float (LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS);
-        # 0 / None = unlimited.
+        # 0 / None = unlimited. measured_start_ns is on the now_ns() clock.
         self.rate = float(per_producer_rps) if per_producer_rps else 0.0
-        self.checkpoint = max(math.floor(self.rate / 10.0), 1) if self.rate > 0 else 0
         self.start_ns = measured_start_ns
 
     def _wait_s(self, records_sent):
-        """Seconds to sleep after ``records_sent`` records (<= 0 = none)."""
-        if self.checkpoint == 0 or records_sent % self.checkpoint != 0:
+        """Seconds to sleep before the next begin_transaction, after
+        ``records_sent`` records (<= 0 = none)."""
+        if self.rate <= 0:
             return 0.0
         deadline_ns = self.start_ns + records_sent * 1e9 / self.rate
-        return (deadline_ns - time.time_ns()) / 1e9
+        return (deadline_ns - now_ns()) / 1e9
 
     def maybe_wait(self, records_sent):
         wait_s = self._wait_s(records_sent)
@@ -580,7 +648,7 @@ class RateLimiter:
     async def maybe_wait_async(self, records_sent):
         """maybe_wait for the async workers: yields to the event loop
         (asyncio.sleep) instead of blocking it, so concurrent producer tasks keep
-        progressing while one waits out its pacing checkpoint."""
+        progressing while one waits for its next transaction."""
         wait_s = self._wait_s(records_sent)
         if wait_s > 0:
             await asyncio.sleep(wait_s)
@@ -596,29 +664,43 @@ def _producer_shares(total, producers):
 
 
 def _time_bound_reached(measured_start_ns):
-    return (time.time_ns() - measured_start_ns) > (test_duration_s + 1) * 1e9
+    return (now_ns() - measured_start_ns) > (test_duration_s + 1) * 1e9
+
+
+def _counted_run_capped(measured_start_ns):
+    """Count mode: True (and the run is marked capped) once the measured time
+    reaches TEST_DURATION_SECONDS + COUNTED_RUN_CAP_SLACK_S. Only consulted at a
+    transaction boundary, so a transaction is never split."""
+    global run_capped
+    if now_ns() - measured_start_ns < \
+            (test_duration_s + COUNTED_RUN_CAP_SLACK_S) * 1_000_000_000:
+        return False
+    run_capped = True
+    return True
 
 
 def _produce_bound_reached(records_sent, per_producer_num_messages, measured_start_ns):
-    """Produce mode: stop at this producer's share of NUM_MESSAGES (count mode)
-    or at the duration bound. Checked at the top of every loop iteration, so
-    every path through the loop body (including the error paths) obeys it."""
+    """Produce mode: stop at this producer's share of NUM_MESSAGES (count mode,
+    or at the time cap) or at the duration bound. Checked at the top of every
+    loop iteration, so every path through the loop body (including the error
+    paths) obeys it."""
     if terminating:
         return True
     if per_producer_num_messages > 0:
-        return records_sent >= per_producer_num_messages
+        return records_sent >= per_producer_num_messages \
+            or _counted_run_capped(measured_start_ns)
     return _time_bound_reached(measured_start_ns)
 
 
 def _eos_bound_reached(measured_start_ns):
     """EOS mode: stop once the shared processed-record counter reaches
-    NUM_MESSAGES (count mode) or at the duration bound. Checked at the top of
-    every loop iteration, i.e. at a transaction boundary, so every path through
-    the loop body (including the error paths) obeys it."""
+    NUM_MESSAGES (count mode, or at the time cap) or at the duration bound.
+    Checked at the top of every loop iteration, i.e. at a transaction boundary,
+    so every path through the loop body (including the error paths) obeys it."""
     if terminating:
         return True
     if num_messages > 0:
-        return eos_target_reached()
+        return eos_target_reached() or _counted_run_capped(measured_start_ns)
     return _time_bound_reached(measured_start_ns)
 
 
@@ -646,19 +728,20 @@ def _eos_source_exhausted(index):
     return True
 
 
-def _abort_after_error(producer, records):
+def _abort_after_error(producer, records, error=True):
     """Abort the open transaction after an error (rejected produce, failed
     send_offsets or commit) and count it as an error-driven abort of
-    ``records`` attempted records. An abort that itself fails is only logged:
-    the producer is then unusable and the next begin_transaction fails the
-    worker."""
+    ``records`` attempted records (``error=False``: a transaction cut short by
+    a signal, see record_error_abort). An abort that itself fails is only
+    logged: the producer is then unusable and the next begin_transaction fails
+    the worker."""
     try:
         producer.abort_transaction()
         if v2:
             producer.poll(0)  # drain purge delivery reports
     except Exception as e:  # noqa: BLE001
         print(f"abort_transaction error: {e}")
-    record_error_abort(records)
+    record_error_abort(records, error)
 
 
 # --------------------------------------------------------------------------
@@ -681,31 +764,35 @@ def run_producer(index, bootstrap_servers, measured_start_ns,
         producer.init_transactions()
         while not _produce_bound_reached(records_sent, per_producer_num_messages,
                                          measured_start_ns):
-            begin_ms = now_ms()
+            # Pace at the transaction boundary only (see RateLimiter).
+            rate.maybe_wait(records_sent)
+            begin_ns = now_ns()
             producer.begin_transaction()
 
-            produce_ms = []
+            produce_ns = []
             if v2:
                 delivered = []  # list of (err, msg) appended by the DR callback
             else:
                 futures = []
             rejected = None
+            interrupted = False
             attempted = 0
             for _ in range(n):
                 key, value = generated_messages[records_sent % msg_count]
-                produce_ms.append(now_ms())
-                attempted += 1
+                produce_ns.append(now_ns())
                 try:
                     if v2:
-                        _v2_produce(producer, topic_name, key, value, delivered)
+                        if not _v2_produce(producer, topic_name, key, value, delivered):
+                            interrupted = True
+                            break
                     else:
                         from confluent_kafka.producer import ProducerRecord
                         futures.append(producer.send(
                             record=ProducerRecord(topic=topic_name, key=key, value=value)))
                 except Exception as e:  # noqa: BLE001
                     rejected = e
+                attempted += 1
                 records_sent += 1
-                rate.maybe_wait(records_sent)
                 if rejected is not None:
                     break
 
@@ -716,12 +803,18 @@ def run_producer(index, bootstrap_servers, measured_start_ns,
                 mark_run_failed(f"Producer {index}: produce rejected inside a "
                                 f"transaction: {rejected}")
                 _abort_after_error(producer, attempted)
+            elif interrupted:
+                # Terminating with the transaction partly produced (the last
+                # record was not): abort it, counting the produced records as
+                # aborted (not as an error), rather than commit a partial
+                # transaction.
+                _abort_after_error(producer, attempted, error=False)
             elif should_abort(txn_index, abort_rate):
                 # Aborted transactions STILL produced their N records above; on
                 # abort those records count toward neither throughput nor latency.
                 producer.abort_transaction()
-                abort_ms = now_ms()
-                record_abort(abort_ms - begin_ms, n)
+                abort_ns = now_ns()
+                record_abort(abort_ns - begin_ns, n)
                 if v2:
                     producer.poll(0)  # drain purge delivery reports
             else:
@@ -729,21 +822,28 @@ def run_producer(index, bootstrap_servers, measured_start_ns,
                     producer.commit_transaction()
                 except Exception as e:  # noqa: BLE001
                     # A failed commit does not kill the worker: abort, count the
-                    # attempted records as aborted and carry on.
+                    # attempted records as aborted and carry on;
+                    # the error abort fails the run at the end.
                     print(f"commit_transaction error: {e}")
                     _abort_after_error(producer, n)
                 else:
-                    commit_ms = now_ms()
-                    record_commit(commit_ms - begin_ms)
+                    commit_ns = now_ns()
+                    record_commit(commit_ns - begin_ns)
                     results = _drain_committed(producer, delivered, n) if v2 else futures
                     for r in range(n):
                         ok = _verify_committed(results, r)
-                        record_committed_record(commit_ms - produce_ms[r], ok)
+                        record_committed_record(commit_ns - produce_ns[r], ok)
 
             txn_index += 1
+        # The wait owed for the last transaction's records, which the next
+        # begin_transaction would have taken: without it a fast client ends a
+        # counted run early and overstates throughput.
+        if not terminating and 0 < per_producer_num_messages <= records_sent:
+            rate.maybe_wait(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"Producer {index} failed: {e}")
     finally:
+        add_records_sent(records_sent)
         _close_producer(producer)
 
 
@@ -796,36 +896,40 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
             consecutive_empty_polls = 0
 
             batch_records = len(batch)
+            # Pace at the transaction boundary only (see RateLimiter).
+            rate.maybe_wait(records_sent)
             try:
-                begin_ms = now_ms()
+                begin_ns = now_ns()
                 producer.begin_transaction()
-                produce_ms = []
+                produce_ns = []
                 if v2:
                     delivered = []
                 else:
                     futures = []
                 offsets = {}  # (topic, partition) -> max consumed offset + 1
                 rejected = None
+                interrupted = False
                 attempted = 0
                 for rec in batch:
                     key, value, rtopic, rpart, roff = rec
-                    produce_ms.append(now_ms())
-                    attempted += 1
+                    produce_ns.append(now_ns())
                     try:
                         if v2:
-                            _v2_produce(producer, topic_name, key, value, delivered)
+                            if not _v2_produce(producer, topic_name, key, value, delivered):
+                                interrupted = True
+                                break
                         else:
                             from confluent_kafka.producer import ProducerRecord
                             futures.append(producer.send(
                                 record=ProducerRecord(topic=topic_name, key=key, value=value)))
                     except Exception as e:  # noqa: BLE001
                         rejected = e
+                    attempted += 1
                     nxt = roff + 1
                     cur = offsets.get((rtopic, rpart))
                     if cur is None or nxt > cur:
                         offsets[(rtopic, rpart)] = nxt
                     records_sent += 1
-                    rate.maybe_wait(records_sent)
                     if rejected is not None:
                         break
 
@@ -852,6 +956,11 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
                                     f"a transaction: {rejected}")
                     _abort_after_error(producer, attempted)
                     continue  # the loop-top bound check still applies
+                if interrupted:
+                    # Terminating with the batch partly produced: abort, as in
+                    # the produce loop, without sending the offsets.
+                    _abort_after_error(producer, attempted, error=False)
+                    continue  # the loop-top bound check stops the worker
 
                 # Send the consumed offsets to the transaction (offset + 1 per
                 # partition, with the consumer group metadata).
@@ -864,8 +973,8 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
 
                 if should_abort(txn_index, abort_rate):
                     producer.abort_transaction()
-                    abort_ms = now_ms()
-                    record_abort(abort_ms - begin_ms, batch_records)
+                    abort_ns = now_ns()
+                    record_abort(abort_ns - begin_ns, batch_records)
                     if v2:
                         producer.poll(0)
                 else:
@@ -873,23 +982,27 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
                         producer.commit_transaction()
                     except Exception as e:  # noqa: BLE001
                         # A failed commit does not kill the worker: abort, count
-                        # the attempted records as aborted and carry on.
+                        # the attempted records as aborted and carry on;
+                        # the error abort fails the run at the end.
                         print(f"commit_transaction error: {e}")
                         _abort_after_error(producer, batch_records)
                     else:
-                        commit_ms = now_ms()
-                        record_commit(commit_ms - begin_ms)
+                        commit_ns = now_ns()
+                        record_commit(commit_ns - begin_ns)
                         results = _drain_committed(producer, delivered, batch_records) \
                             if v2 else futures
                         for r in range(batch_records):
                             ok = _verify_committed(results, r)
-                            record_committed_record(commit_ms - produce_ms[r], ok)
+                            record_committed_record(commit_ns - produce_ns[r], ok)
             finally:
                 # The batch's transaction is finished (committed, aborted or
                 # failed): count its source records toward the global EOS bound.
                 eos_add_processed(batch_records)
                 txn_index += 1
                 _eos_note_progress()
+        # This producer's owed wait, as in the produce loop.
+        if not terminating and num_messages > 0 and eos_target_reached():
+            rate.maybe_wait(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"EOS producer {index} failed: {e}")
     finally:
@@ -902,15 +1015,17 @@ def run_eos_producer(index, bootstrap_servers, measured_start_ns,
 # --------------------------------------------------------------------------
 def _v2_produce(producer, topic, key, value, delivered):
     """librdkafka produce with a per-record delivery callback that appends
-    (err, msg) to ``delivered``. Retries on local queue overflow."""
+    (err, msg) to ``delivered``. Retries on local queue overflow until the run
+    is terminating. Returns whether the record was produced."""
     def cb(err, msg):
         delivered.append((err, msg))
     while not terminating:
         try:
             producer.produce(topic=topic, key=key, value=value, callback=cb)
-            return
+            return True
         except BufferError:
             producer.poll(0.001)
+    return False
 
 
 def _drain_committed(producer, delivered, n):
@@ -1004,9 +1119,12 @@ def _close_consumer(consumer):
 # connections. Mirrors the single-producer warmup of the native harnesses.
 # --------------------------------------------------------------------------
 def run_warmup(bootstrap_servers):
+    """Returns False when the warmup failed (and fails the run); a warmup cut
+    short by a signal is not a failure."""
     print(f"Warming up for {warmup_s} seconds ...")
-    producer = create_producer(bootstrap_servers, f"{transactional_id}-warmup")
+    producer = None
     try:
+        producer = create_producer(bootstrap_servers, f"{transactional_id}-warmup")
         producer.init_transactions()
         warmup_end = time.time_ns() + warmup_s * 1_000_000_000
         i = 0
@@ -1016,42 +1134,46 @@ def run_warmup(bootstrap_servers):
             key, value = generated_messages[i % msg_count]
             if v2:
                 delivered = []
-                _v2_produce(producer, topic_name, key, value, delivered)
+                if not _v2_produce(producer, topic_name, key, value, delivered):
+                    break  # terminating
                 producer.commit_transaction()
-                _drain_committed(producer, delivered, 1)
+                results = _drain_committed(producer, delivered, 1)
             else:
                 from confluent_kafka.producer import ProducerRecord
-                fut = producer.send(record=ProducerRecord(topic=topic_name, key=key, value=value))
+                results = [producer.send(
+                    record=ProducerRecord(topic=topic_name, key=key, value=value))]
                 producer.commit_transaction()
-                try:
-                    fut.get()
-                except Exception as e:  # noqa: BLE001
-                    print(f"Warmup failed due to message verification error: {e}")
-                    return
+            if not _verify_committed(results, 0):
+                mark_run_failed("Warmup failed due to message verification error")
+                return False
             time.sleep(0.1)
             i += 1
     except Exception as e:  # noqa: BLE001
-        print(f"Warmup failed: {e}")
+        mark_run_failed(f"Warmup failed: {e}")
+        return False
     finally:
-        _close_producer(producer)
+        if producer is not None:
+            _close_producer(producer)
     print("Warmup complete.")
+    return True
 
 
 # --------------------------------------------------------------------------
 # Summary + results.json
 # --------------------------------------------------------------------------
-def _summary_bucket(hist, total_ms, max_ms):
+def _summary_bucket(hist, total_ns, min_ns, max_ns):
+    """One latency block of results.json: the percentiles from the floor-ms
+    histogram, min/avg/max exact (ms) from the ns sum / min / max."""
     total = sum(hist)
-    min_ms = next((ms for ms, c in enumerate(hist) if c), 0)
     return {
-        "min": min_ms,
-        "avg": round(total_ms / total, 2) if total > 0 else 0.0,
+        "min": round(min_ns / 1_000_000, 2) if total > 0 and min_ns is not None else 0.0,
+        "avg": round(total_ns / total / 1_000_000, 2) if total > 0 else 0.0,
         "p50": percentile_from_hist(hist, 0.50),
         "p90": percentile_from_hist(hist, 0.90),
         "p95": percentile_from_hist(hist, 0.95),
         "p99": percentile_from_hist(hist, 0.99),
         "p999": percentile_from_hist(hist, 0.999),
-        "max": max_ms,
+        "max": round(max_ns / 1_000_000, 2) if total > 0 else 0.0,
     }
 
 
@@ -1077,6 +1199,7 @@ def print_summary(measured_secs):
     print(f"Committed transactions: {committed_transactions}")
     print(f"Aborted transactions: {aborted_transactions}")
     print(f"Aborted records: {aborted_records}")
+    print(f"Error-driven aborted transactions: {error_aborted_transactions}")
     print(f"Committed records: {completed_messages}")
     if eos_mode:
         print(f"EOS source records processed: {eos_processed_records}")
@@ -1099,12 +1222,16 @@ def print_summary(measured_secs):
         "committed_transactions": committed_transactions,
         "aborted_transactions": aborted_transactions,
         "aborted_records": aborted_records,
+        "error_aborted_transactions": error_aborted_transactions,
         "transactions_per_s": round(txn_rate, 2),
-        "latency_ms": _summary_bucket(latency_hist, total_latency_ms, max_latency_ms),
+        "latency_ms": _summary_bucket(
+            latency_hist, total_latency_ns, min_latency_ns, max_latency_ns),
         "commit_latency_ms": _summary_bucket(
-            commit_latency_hist, total_commit_latency_ms, max_commit_latency_ms),
+            commit_latency_hist, total_commit_latency_ns, min_commit_latency_ns,
+            max_commit_latency_ns),
         "abort_latency_ms": _summary_bucket(
-            abort_latency_hist, total_abort_latency_ms, max_abort_latency_ms),
+            abort_latency_hist, total_abort_latency_ns, min_abort_latency_ns,
+            max_abort_latency_ns),
         "cpu_avg_pct": round(avg_cpu, 2),
         "rss_avg_kib": round(avg_rss_kib, 2),
     }
@@ -1305,22 +1432,23 @@ async def run_producer_async(index, bootstrap_servers, measured_start_ns,
         await producer.init_transactions()
         while not _produce_bound_reached(records_sent, per_producer_num_messages,
                                          measured_start_ns):
-            begin_ms = now_ms()
+            # Pace at the transaction boundary only (see RateLimiter).
+            await rate.maybe_wait_async(records_sent)
+            begin_ns = now_ns()
             await producer.begin_transaction()
-            produce_ms = []
+            produce_ns = []
             futures = []
             rejected = None
             attempted = 0
             for _ in range(n):
                 key, value = generated_messages[records_sent % msg_count]
-                produce_ms.append(now_ms())
+                produce_ns.append(now_ns())
                 attempted += 1
                 try:
                     futures.append(await _async_send(producer, key, value))
                 except Exception as e:  # noqa: BLE001
                     rejected = e
                 records_sent += 1
-                await rate.maybe_wait_async(records_sent)
                 if rejected is not None:
                     break
             if rejected is not None:
@@ -1332,28 +1460,35 @@ async def run_producer_async(index, bootstrap_servers, measured_start_ns,
                 await _abort_after_error_async(producer, attempted)
             elif should_abort(txn_index, abort_rate):
                 await producer.abort_transaction()
-                abort_ms = now_ms()
-                record_abort(abort_ms - begin_ms, n)
+                abort_ns = now_ns()
+                record_abort(abort_ns - begin_ns, n)
             else:
                 try:
                     await producer.commit_transaction()
                 except Exception as e:  # noqa: BLE001
                     # A failed commit does not kill the worker: abort, count the
-                    # attempted records as aborted and carry on.
+                    # attempted records as aborted and carry on;
+                    # the error abort fails the run at the end.
                     print(f"commit_transaction error (async): {e}")
                     await _abort_after_error_async(producer, n)
                 else:
-                    commit_ms = now_ms()
-                    record_commit(commit_ms - begin_ms)
+                    commit_ns = now_ns()
+                    record_commit(commit_ns - begin_ns)
                     results = await asyncio.gather(*map(_delivery, futures),
                                                    return_exceptions=True)
                     for r in range(n):
                         ok = _verify_async_result(results[r]) if r < len(results) else False
-                        record_committed_record(commit_ms - produce_ms[r], ok)
+                        record_committed_record(commit_ns - produce_ns[r], ok)
             txn_index += 1
+        # The wait owed for the last transaction's records, which the next
+        # begin_transaction would have taken: without it a fast client ends a
+        # counted run early and overstates throughput.
+        if not terminating and 0 < per_producer_num_messages <= records_sent:
+            await rate.maybe_wait_async(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"Async producer {index} failed: {e}")
     finally:
+        add_records_sent(records_sent)
         await _close_producer_async(producer)
 
 
@@ -1398,17 +1533,19 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
                 continue
             consecutive_empty_polls = 0
             batch_records = len(batch)
+            # Pace at the transaction boundary only (see RateLimiter).
+            await rate.maybe_wait_async(records_sent)
             try:
-                begin_ms = now_ms()
+                begin_ns = now_ns()
                 await producer.begin_transaction()
-                produce_ms = []
+                produce_ns = []
                 futures = []
                 offsets = {}
                 rejected = None
                 attempted = 0
                 for rec in batch:
                     key, value, rtopic, rpart, roff = rec
-                    produce_ms.append(now_ms())
+                    produce_ns.append(now_ns())
                     attempted += 1
                     try:
                         futures.append(await _async_send(producer, key, value))
@@ -1419,7 +1556,6 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
                     if cur is None or nxt > cur:
                         offsets[(rtopic, rpart)] = nxt
                     records_sent += 1
-                    await rate.maybe_wait_async(records_sent)
                     if rejected is not None:
                         break
                 if rejected is not None:
@@ -1439,30 +1575,34 @@ async def run_eos_producer_async(index, bootstrap_servers, measured_start_ns,
                     continue  # the loop-top bound check still applies
                 if should_abort(txn_index, abort_rate):
                     await producer.abort_transaction()
-                    abort_ms = now_ms()
-                    record_abort(abort_ms - begin_ms, batch_records)
+                    abort_ns = now_ns()
+                    record_abort(abort_ns - begin_ns, batch_records)
                 else:
                     try:
                         await producer.commit_transaction()
                     except Exception as e:  # noqa: BLE001
                         # A failed commit does not kill the worker: abort, count
-                        # the attempted records as aborted and carry on.
+                        # the attempted records as aborted and carry on;
+                        # the error abort fails the run at the end.
                         print(f"commit_transaction error (async): {e}")
                         await _abort_after_error_async(producer, batch_records)
                     else:
-                        commit_ms = now_ms()
-                        record_commit(commit_ms - begin_ms)
+                        commit_ns = now_ns()
+                        record_commit(commit_ns - begin_ns)
                         results = await asyncio.gather(*map(_delivery, futures),
                                                        return_exceptions=True)
                         for r in range(batch_records):
                             ok = _verify_async_result(results[r]) if r < len(results) else False
-                            record_committed_record(commit_ms - produce_ms[r], ok)
+                            record_committed_record(commit_ns - produce_ns[r], ok)
             finally:
                 # The batch's transaction is finished (committed, aborted or
                 # failed): count its source records toward the global EOS bound.
                 eos_add_processed(batch_records)
                 txn_index += 1
                 _eos_note_progress()
+        # This producer's owed wait, as in the produce loop.
+        if not terminating and num_messages > 0 and eos_target_reached():
+            await rate.maybe_wait_async(records_sent)
     except Exception as e:  # noqa: BLE001
         mark_run_failed(f"Async EOS producer {index} failed: {e}")
     finally:
@@ -1521,12 +1661,15 @@ def main():
     if eos_mode and kafka_bin:
         spawn_seed_producer(bootstrap_servers, seed_record_count())
 
-    if warmup_s > 0:
-        run_warmup(bootstrap_servers)
+    if warmup_s > 0 and not run_warmup(bootstrap_servers):
+        # Fail the run before it measures, as the native harnesses do.
+        metrics.stop_collecting()
+        print("Run FAILED (see the ERROR lines above)")
+        sys.exit(1)
 
     # === MEASURED INTERVAL ===
     metrics.measurement_start_ms = now_ms()
-    measured_start_ns = time.time_ns()
+    measured_start_ns = now_ns()
     _eos_note_progress()
     print(f"Starting measured interval at {metrics.measurement_start_ms} ms: "
           f"{datetime.datetime.now(tz=datetime.timezone.utc)}")
@@ -1564,11 +1707,22 @@ def main():
             t.join()
 
     metrics.measurement_end_ms = now_ms()
-    measured_secs = (time.time_ns() - measured_start_ns) / 1e9
+    measured_secs = (now_ns() - measured_start_ns) / 1e9
+
+    if run_capped:
+        # The shortfall does not fail the run: results.json carries the real
+        # numbers and the driver's report flags the missed target rate.
+        sent = eos_processed_records if eos_mode else records_sent_total
+        print(f"capped: sent {sent} of {num_messages} records in {measured_secs:.2f} s "
+              f"(TEST_DURATION_SECONDS + {COUNTED_RUN_CAP_SLACK_S} s)")
 
     if verified != completed_messages and not terminating:
         mark_run_failed(f"Verified messages {verified} does not match committed "
                         f"messages {completed_messages}")
+    if error_aborted_transactions > 0:
+        # As the Java harness: a run whose commits failed does not pass.
+        mark_run_failed(f"{error_aborted_transactions} transaction(s) aborted on an "
+                        "error, not by ABORT_RATE (see above)")
 
     latency_budget_exceeded = print_summary(measured_secs)
 
