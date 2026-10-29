@@ -21,6 +21,15 @@
 //! `seek`) against a real 3-broker Kafka 4.2.0 cluster with KIP-848
 //! (`group.protocol=consumer`) enabled.
 //!
+//! They run as multilanguage scenarios: each one runs against the native
+//! Rust consumer and, through the gRPC backends, the Python (sync and
+//! asyncio) and C consumers ([`multilanguage_consumer_test!`]); each name
+//! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
+//! are native fixtures; only the consumer is under test. The commit callback
+//! of `test_async_assign_and_commit_async_not_committed` is the backend's own
+//! logging callback ([`ConsumerCallbackLog`]), asserted through its log.
+//!
 //! # Translated methods (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
 //! All 8 KIP-848 tests are translated and pass. Phase-13a's pilot
@@ -70,43 +79,35 @@
 //! - SKIP: `testClassicPollAfterTopicDeleted` — classic-protocol-only
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
-
-use async_trait::async_trait;
 
 use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClient;
 use confluent_kafka::admin::AdminClientConfig;
-use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
-use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::KafkaConsumer;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::consumer::OffsetAndMetadata;
-use confluent_kafka::consumer::OffsetCommitCallback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::callback_log::{ConsumerCallbackLog, KIND_COMMIT};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
+use crate::common::consumer_scenario::poll_until_entry;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
+use crate::multilanguage_consumer_test;
 
-// Type alias matching the bytes-typed `Consumer` trait object returned
-// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
-// the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
+// The bytes-typed consumer trait object every backend factory returns. Used in
+// helper signatures; the tests pass `&mut *consumer` (a reborrow through the
+// `Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 // ── Cluster config ────────────────────────────────────────────────────
 
@@ -131,41 +132,46 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
     kip848_3_broker(1)
 }
 
-// ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
-
-/// Local byte-array deserializer for these tests. The crate exports
-/// `ByteArraySerializer` but no symmetric `ByteArrayDeserializer`; this
-/// inline impl is identical to what such a struct would do.
-struct ByteArrayDeserializer;
-
-impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(data.to_vec())
-    }
-}
-
 // ── Consumer config builder ───────────────────────────────────────────
 
-/// Build a `ConsumerConfig` matching what Java's
+/// Build the consumer properties matching what Java's
 /// `clusterInstance.consumer(Map.of(GROUP_PROTOCOL_CONFIG, "consumer"))`
-/// produces.
+/// produces, on the bootstrap the backend under test reaches.
 ///
 /// `auto.offset.reset=earliest` and `enable.auto.commit=false` so the
 /// tests' explicit `seek` / `commit_sync` / `commit_async` calls are the
 /// only offset-state transitions.
-fn make_consumer_config_bytes(ctx: &TestContext, group_id: Option<&str>) -> ConsumerConfig {
+fn make_consumer_props<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+) -> HashMap<String, String> {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
+        ("group.id".to_string(), group_id.to_string()),
     ]);
-    if let Some(gid) = group_id {
-        props.insert("group.id".to_string(), gid.to_string());
-    }
     ctx.apply_security(&mut props);
-    ConsumerConfig::new(&props).expect("invalid test config")
+    props
+}
+
+/// Create the consumer under test through `factory`.
+async fn create_consumer<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+) -> Box<BytesConsumer> {
+    factory
+        .create(make_consumer_props(ctx, factory, group_id))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -261,33 +267,6 @@ async fn create_test_topic(ctx: &TestContext, topic: &str, num_partitions: i32) 
 
 // ── Consumer test helpers (mirror ClientsTestUtils.poll/consume) ──────
 
-/// Translates Java's `ClientsTestUtils.pollUntilTrue(consumer, predicate,
-/// waitTimeMs, msg)`. Drives `consumer.poll(...)` in a tight loop until
-/// `predicate()` returns true or the deadline passes.
-///
-/// Per `consumer-threading.md` §31, driving `poll()` is what delivers
-/// any `OffsetCommitCallback` enqueued by a prior `commit_async` to the
-/// caller's task — without `poll()`, the callback never fires.
-async fn poll_until_true<F>(consumer: &mut BytesConsumer, mut predicate: F, wait_time: Duration, msg: &str)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = Instant::now() + wait_time;
-    while Instant::now() < deadline {
-        if predicate() {
-            return;
-        }
-        let _ = consumer
-            .poll(Duration::from_millis(100))
-            .await
-            .expect("poll should not return a fatal error in poll_until_true");
-        if predicate() {
-            return;
-        }
-    }
-    panic!("{msg}");
-}
-
 /// Translates Java's `ClientsTestUtils.consumeAndVerifyRecords(consumer,
 /// tp, numRecords, startingOffset, startingKeyAndValueIndex,
 /// startingTimestamp)` (with `timestampIncrement = -1`, i.e. 1ms per
@@ -306,14 +285,14 @@ async fn consume_and_verify_records_bytes(
     starting_offset: i64,
     starting_key_and_value_index: usize,
     starting_timestamp: i64,
+    backend: &str,
 ) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut next_index: usize = 0;
     while next_index < num_records && Instant::now() < deadline {
-        let records = consumer
-            .poll(Duration::from_millis(100))
-            .await
-            .expect("poll should succeed in consume_and_verify_records_bytes");
+        let records = consumer.poll(Duration::from_millis(100)).await.unwrap_or_else(|e| {
+            panic!("{backend} backend: poll should succeed in consume_and_verify_records_bytes: {e}")
+        });
         // `into_iter()` consumes the batch; we own each record and can
         // inspect every field. `ConsumerRecord` is not `Clone`, so we
         // verify inline rather than buffering into a `Vec`.
@@ -329,11 +308,15 @@ async fn consume_and_verify_records_bytes(
             let i = next_index;
             let offset = starting_offset + i as i64;
 
-            assert_eq!(record.topic(), tp.topic(), "record topic should match tp.topic()");
+            assert_eq!(
+                record.topic(),
+                tp.topic(),
+                "record topic should match tp.topic() ({backend} backend)"
+            );
             assert_eq!(
                 record.partition(),
                 tp.partition(),
-                "record partition should match tp.partition()"
+                "record partition should match tp.partition() ({backend} backend)"
             );
 
             // Offset is asserted BEFORE timestamp deliberately. Record `i` is
@@ -343,19 +326,19 @@ async fn consume_and_verify_records_bytes(
             // (producer reordering) or the right record at the wrong offset
             // (consumer position). Asserting timestamp first hides the offset
             // and makes the failure un-diagnosable.
-            assert_eq!(record.offset(), offset, "record offset should be {offset}");
+            assert_eq!(record.offset(), offset, "record offset should be {offset} ({backend} backend)");
 
             assert_eq!(
                 record.timestamp_type(),
                 TimestampType::CreateTime,
-                "record timestamp_type should be CreateTime (broker default)"
+                "record timestamp_type should be CreateTime (broker default) ({backend} backend)"
             );
             let expected_ts = starting_timestamp + i as i64;
             assert_eq!(
                 record.timestamp(),
                 expected_ts,
                 "record timestamp should be {expected_ts} (expected record #{i} at offset {offset}); \
-                 the observed timestamp is that of produced record #{}",
+                 the observed timestamp is that of produced record #{} ({backend} backend)",
                 record.timestamp() - starting_timestamp
             );
 
@@ -365,23 +348,23 @@ async fn consume_and_verify_records_bytes(
             assert_eq!(
                 record.key().expect("record key should be present"),
                 &expected_key,
-                "key at index {i} mismatched"
+                "key at index {i} mismatched ({backend} backend)"
             );
             assert_eq!(
                 record.value().expect("record value should be present"),
                 &expected_value,
-                "value at index {i} mismatched"
+                "value at index {i} mismatched ({backend} backend)"
             );
 
             assert_eq!(
                 record.serialized_key_size() as usize,
                 expected_key.len(),
-                "serialized_key_size mismatch at index {i}"
+                "serialized_key_size mismatch at index {i} ({backend} backend)"
             );
             assert_eq!(
                 record.serialized_value_size() as usize,
                 expected_value.len(),
-                "serialized_value_size mismatch at index {i}"
+                "serialized_value_size mismatch at index {i} ({backend} backend)"
             );
 
             next_index += 1;
@@ -389,102 +372,8 @@ async fn consume_and_verify_records_bytes(
     }
     assert_eq!(
         next_index, num_records,
-        "Timed out before consuming expected {num_records} records (got {next_index})"
+        "Timed out before consuming expected {num_records} records (got {next_index}) ({backend} backend)"
     );
-}
-
-// ── OffsetCommitCallback recorder (mirrors CountConsumerCommitCallback) ─
-
-/// Translates Java's private `CountConsumerCommitCallback`:
-///
-/// ```java
-/// private static class CountConsumerCommitCallback implements OffsetCommitCallback {
-///     int successCount = 0;
-///     int failCount = 0;
-///     Optional<Exception> lastError = Optional.empty();
-///     public void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets, Exception exception) {
-///         if (exception == null) { successCount += 1; }
-///         else { failCount += 1; lastError = Optional.of(exception); }
-///     }
-/// }
-/// ```
-///
-/// Rust counterpart uses `Arc<AtomicUsize>` for the counters (the
-/// callback is shared across the test task and the bg task via
-/// `Arc<dyn OffsetCommitCallback>`) and `Arc<Mutex<Option<Error>>>`
-/// for the last error.
-struct CountConsumerCommitCallback {
-    success_count: Arc<AtomicUsize>,
-    fail_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<Error>>>,
-}
-
-impl CountConsumerCommitCallback {
-    fn new() -> Self {
-        Self {
-            success_count: Arc::new(AtomicUsize::new(0)),
-            fail_count: Arc::new(AtomicUsize::new(0)),
-            last_error: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn handles(&self) -> CountConsumerCommitCallbackHandles {
-        CountConsumerCommitCallbackHandles {
-            success_count: Arc::clone(&self.success_count),
-            fail_count: Arc::clone(&self.fail_count),
-            last_error: Arc::clone(&self.last_error),
-        }
-    }
-}
-
-/// Test-side accessor for the recorded counters. The callback itself is
-/// moved into an `Arc<dyn OffsetCommitCallback>` and consumed by the
-/// consumer; the test keeps these handles to read the counts.
-struct CountConsumerCommitCallbackHandles {
-    success_count: Arc<AtomicUsize>,
-    fail_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<Error>>>,
-}
-
-impl CountConsumerCommitCallbackHandles {
-    fn success_count(&self) -> usize {
-        self.success_count.load(Ordering::SeqCst)
-    }
-
-    #[expect(dead_code)]
-    fn fail_count(&self) -> usize {
-        self.fail_count.load(Ordering::SeqCst)
-    }
-
-    fn last_error_is_some(&self) -> bool {
-        // Lock + read in a single short critical section that does not
-        // cross `.await` — §16-compliant.
-        self.last_error.lock().expect("mutex poisoned").is_some()
-    }
-}
-
-#[async_trait]
-impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(
-        &self,
-        _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-        error: Option<&Error>,
-    ) -> Result<(), Error> {
-        match error {
-            None => {
-                self.success_count.fetch_add(1, Ordering::SeqCst);
-            },
-            Some(err) => {
-                self.fail_count.fetch_add(1, Ordering::SeqCst);
-                // §16: do not hold the guard across an `.await`. The
-                // callback body has no further await, so the guard
-                // simply drops at the end of the scope.
-                let mut guard = self.last_error.lock().expect("mutex poisoned");
-                *guard = Some(err.clone());
-            },
-        }
-        Ok(())
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -495,13 +384,18 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
 /// the commit completes successfully but commits no offset — the
 /// follow-up `committed(...)` returns a map with no entry for `tp`.
 ///
+/// Java's `CountConsumerCommitCallback` counts successes and keeps the last
+/// error; `pollUntilTrue` waits for `successCount >= 1 || lastError.isPresent()`.
+/// Here the backend's logging callback records each completion as a `commit`
+/// entry (its error, if any, in the entry), so waiting for the first `commit`
+/// entry is the same condition.
+///
 /// §31 parity: the `OffsetCommitCallback` is delivered on the caller's
-/// task by the `poll_until_true` loop (each `poll()` invocation drains
+/// task by the polling loop (each `poll()` invocation drains
 /// the pending-callback queue via
 /// `OffsetCommitCallbackInvoker::invoke_pending_callbacks`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_commit_async_not_committed() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_assign_and_commit_async_not_committed<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_commit_async_not_committed");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -509,62 +403,66 @@ async fn test_async_assign_and_commit_async_not_committed() {
     let num_records = 10_000;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, Some(&group_id)),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let (mut consumer, log): (Box<BytesConsumer>, ConsumerCallbackLog) = factory
+        .create_with_callback_log(make_consumer_props(ctx, factory, &group_id))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: create consumer: {e}"));
 
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_test_topic(&ctx, &topic, 2).await;
-    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-
-    let cb = CountConsumerCommitCallback::new();
-    let handles = cb.handles();
+    create_test_topic(ctx, &topic, 2).await;
+    send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
     consumer
-        .commit_async_with_callback(Arc::new(cb))
+        .assign(vec![tp.clone()])
         .await
-        .expect("commit_async_with_callback should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
 
-    poll_until_true(
-        &mut consumer,
-        || handles.success_count() >= 1 || handles.last_error_is_some(),
-        Duration::from_secs(10),
-        "Failed to observe commit callback before timeout",
-    )
-    .await;
+    log.commit_async_with_logging_callback(&mut consumer)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: commit_async_with_callback should succeed: {e}"));
+
+    let entries = poll_until_entry(&mut consumer, &log, KIND_COMMIT, |_| true, Duration::from_secs(10)).await;
+    assert!(
+        entries.iter().any(|e| e.kind == KIND_COMMIT),
+        "{backend} backend: Failed to observe commit callback before timeout: {entries:?}"
+    );
 
     let committed_offset = consumer
         .committed(std::slice::from_ref(&tp))
         .await
-        .expect("committed should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
     // Java: `assertNotNull(committedOffset)`, then `assertNull(committedOffset.get(tp))`.
     assert_eq!(
         committed_offset.get(&tp),
         Some(&None),
-        "committed offset for {tp} should be None (no fetch position was established)"
+        "committed offset for {tp} should be None (no fetch position was established) ({backend} backend)"
     );
 
     let assignment = consumer.assignment();
     assert!(
         assignment.contains(&tp),
-        "consumer assignment should contain {tp}, got {assignment:?}"
+        "consumer assignment should contain {tp}, got {assignment:?} ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_commit_async_not_committed,
+    async_assign_and_commit_async_not_committed,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncAssignAndCommitSyncNotCommitted`.
 /// Same shape as the async variant, but `commit_sync()`
 /// (no offsets argument) commits "all consumed" — which is empty since
 /// `poll()` was never called.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_commit_sync_not_committed() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_assign_and_commit_sync_not_committed<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_commit_sync_not_committed");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -572,181 +470,221 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     let num_records = 10_000;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, Some(&group_id)),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_test_topic(&ctx, &topic, 2).await;
-    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.commit_sync().await.expect("commit_sync should succeed");
+    create_test_topic(ctx, &topic, 2).await;
+    send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    consumer
+        .commit_sync()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: commit_sync should succeed: {e}"));
 
     let committed_offset = consumer
         .committed(std::slice::from_ref(&tp))
         .await
-        .expect("committed should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
     assert_eq!(
         committed_offset.get(&tp),
         Some(&None),
-        "committed offset for {tp} should be None (no fetch position was established)"
+        "committed offset for {tp} should be None (no fetch position was established) ({backend} backend)"
     );
 
     let assignment = consumer.assignment();
     assert!(
         assignment.contains(&tp),
-        "consumer assignment should contain {tp}, got {assignment:?}"
+        "consumer assignment should contain {tp}, got {assignment:?} ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_commit_sync_not_committed,
+    async_assign_and_commit_sync_not_committed,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncAssignAndCommitSyncAllConsumed`.
 /// Assign + `seek(tp, 0)`, consume all 10,000 records, then
 /// `commit_sync()` — the committed offset should equal `num_records`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_commit_sync_all_consumed() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_assign_and_commit_sync_all_consumed<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_commit_sync_all_consumed");
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let num_records: usize = 10_000;
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, Some(&group_id)),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
     let starting_timestamp = current_time_ms();
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_test_topic(&ctx, &topic, 2).await;
-    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-    consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
+    create_test_topic(ctx, &topic, 2).await;
+    send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    consumer
+        .seek_with_offset(tp.clone(), 0)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
+    consume_and_verify_records_bytes(&mut *consumer, &tp, num_records, 0, 0, starting_timestamp, backend).await;
 
-    consumer.commit_sync().await.expect("commit_sync should succeed");
+    consumer
+        .commit_sync()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: commit_sync should succeed: {e}"));
     let committed_offset = consumer
         .committed(std::slice::from_ref(&tp))
         .await
-        .expect("committed should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
     let entry = committed_offset
         .get(&tp)
         .and_then(Option::as_ref)
-        .expect("committed offset for tp should be present after commit_sync");
+        .unwrap_or_else(|| panic!("{backend} backend: committed offset for tp should be present after commit_sync"));
     assert_eq!(
         entry.offset(),
         num_records as i64,
-        "committed offset should equal num_records after consuming everything"
+        "committed offset should equal num_records after consuming everything ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_commit_sync_all_consumed,
+    async_assign_and_commit_sync_all_consumed,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncAssignAndConsume`. Assign,
 /// consume 10 records via `consumeAndVerifyRecords`, assert
 /// `position(tp) == numRecords`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_consume() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_assign_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_consume");
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let num_records: usize = 10;
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, Some(&group_id)),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
     let starting_timestamp = current_time_ms();
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_test_topic(&ctx, &topic, 2).await;
-    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
+    create_test_topic(ctx, &topic, 2).await;
+    send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    consume_and_verify_records_bytes(&mut *consumer, &tp, num_records, 0, 0, starting_timestamp, backend).await;
 
-    let pos = consumer.position(&tp).await.expect("position should succeed");
+    let pos = consumer
+        .position(&tp)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: position should succeed: {e}"));
     assert_eq!(
         pos, num_records as i64,
-        "position(tp) should equal num_records after consuming everything"
+        "position(tp) should equal num_records after consuming everything ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_consume,
+    async_assign_and_consume,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncAssignAndConsumeSkippingPosition`.
 /// Same as `consume` but `seek(tp, 1)` then consume
 /// `numRecords - 1` records starting at offset 1.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_consume_skipping_position() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_assign_and_consume_skipping_position<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_consume_skipping");
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let num_records: usize = 10;
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, Some(&group_id)),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
     let starting_timestamp = current_time_ms();
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_test_topic(&ctx, &topic, 2).await;
-    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    create_test_topic(ctx, &topic, 2).await;
+    send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
     let offset: i64 = 1;
     consumer
         .seek_with_offset(tp.clone(), offset)
         .await
-        .expect("seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
     consume_and_verify_records_bytes(
-        &mut consumer,
+        &mut *consumer,
         &tp,
         num_records - offset as usize,
         offset,
         offset as usize,
         starting_timestamp + offset,
+        backend,
     )
     .await;
 
-    let pos = consumer.position(&tp).await.expect("position should succeed");
+    let pos = consumer
+        .position(&tp)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: position should succeed: {e}"));
     assert_eq!(
         pos, num_records as i64,
-        "position(tp) should equal num_records after consuming everything"
+        "position(tp) should equal num_records after consuming everything ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_consume_skipping_position,
+    async_assign_and_consume_skipping_position,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncAssignAndFetchCommittedOffsets`.
 /// Consumer #1 assigns, seeks, consumes 100, commits;
 /// consumer #2 in the same group asserts the same committed offset is
-/// visible.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_fetch_committed_offsets() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+/// visible. Both consumers are subjects, so both come from `factory`.
+async fn async_assign_and_fetch_committed_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     // Both consumers must share the same group.id (Java uses literal
     // "group1"; we make it unique-per-test for parallelism safety).
@@ -757,66 +695,82 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     let starting_timestamp = current_time_ms();
 
     {
-        let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            make_consumer_config_bytes(&ctx, Some(&group_id)),
-            ByteArrayDeserializer,
-            ByteArrayDeserializer,
-        )
-        .expect("KafkaConsumer::new should succeed (consumer 1)");
+        let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
         // Java's `@BeforeEach setup()` pre-creates the topic empty before any
         // records are produced; mirror that here to close the consumer-side
         // metadata race during produce-triggered auto-create.
-        create_test_topic(&ctx, &topic, 2).await;
-        send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-        consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-        consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-        consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
-        consumer.commit_sync().await.expect("commit_sync should succeed");
+        create_test_topic(ctx, &topic, 2).await;
+        send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+        consumer
+            .assign(vec![tp.clone()])
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+        consumer
+            .seek_with_offset(tp.clone(), 0)
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
+        consume_and_verify_records_bytes(&mut *consumer, &tp, num_records, 0, 0, starting_timestamp, backend).await;
+        consumer
+            .commit_sync()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: commit_sync should succeed: {e}"));
 
         let committed = consumer
             .committed(std::slice::from_ref(&tp))
             .await
-            .expect("committed should succeed");
+            .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
         let entry = committed
             .get(&tp)
             .and_then(Option::as_ref)
-            .expect("committed offset for tp should be present");
-        assert_eq!(entry.offset(), num_records as i64);
+            .unwrap_or_else(|| panic!("{backend} backend: committed offset for tp should be present"));
+        assert_eq!(entry.offset(), num_records as i64, "committed offset ({backend} backend)");
 
-        consumer.close().await.expect("consumer 1 close should succeed");
+        consumer
+            .close()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: consumer 1 close should succeed: {e}"));
     }
 
     {
-        let mut another = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            make_consumer_config_bytes(&ctx, Some(&group_id)),
-            ByteArrayDeserializer,
-            ByteArrayDeserializer,
-        )
-        .expect("KafkaConsumer::new should succeed (consumer 2)");
+        let mut another = create_consumer(ctx, factory, &group_id).await;
 
-        another.assign(vec![tp.clone()]).await.expect("assign should succeed");
+        another
+            .assign(vec![tp.clone()])
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
         let committed = another
             .committed(std::slice::from_ref(&tp))
             .await
-            .expect("committed should succeed");
-        let entry = committed
-            .get(&tp)
-            .and_then(Option::as_ref)
-            .expect("committed offset for tp should be visible to another consumer in same group");
-        assert_eq!(entry.offset(), num_records as i64);
+            .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
+        let entry = committed.get(&tp).and_then(Option::as_ref).unwrap_or_else(|| {
+            panic!("{backend} backend: committed offset for tp should be visible to another consumer in same group")
+        });
+        assert_eq!(entry.offset(), num_records as i64, "committed offset ({backend} backend)");
 
-        another.close().await.expect("consumer 2 close should succeed");
+        another
+            .close()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: consumer 2 close should succeed: {e}"));
     }
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_fetch_committed_offsets,
+    async_assign_and_fetch_committed_offsets,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `testAsyncAssignAndConsumeFromCommittedOffsets`.
 /// Consumer #1 commits a manual offset (10) via
 /// `commit_sync_with_offsets(...)`; consumer #2 reads from that offset and
-/// verifies the remaining records.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_consume_from_committed_offsets() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+/// verifies the remaining records. Both consumers are subjects, so both come
+/// from `factory`.
+async fn async_assign_and_consume_from_committed_offsets<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_consume_from_committed");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -826,19 +780,17 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     let starting_timestamp = current_time_ms();
 
     {
-        let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            make_consumer_config_bytes(&ctx, Some(&group_id)),
-            ByteArrayDeserializer,
-            ByteArrayDeserializer,
-        )
-        .expect("KafkaConsumer::new should succeed (consumer 1)");
+        let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
         // Java's `@BeforeEach setup()` pre-creates the topic empty before any
         // records are produced; mirror that here to close the consumer-side
         // metadata race during produce-triggered auto-create.
-        create_test_topic(&ctx, &topic, 2).await;
-        send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-        consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+        create_test_topic(ctx, &topic, 2).await;
+        send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+        consumer
+            .assign(vec![tp.clone()])
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
 
         // Java: `consumer.commitSync(Map.of(tp, new OffsetAndMetadata(offset)))`.
         let mut offsets = HashMap::new();
@@ -849,62 +801,74 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
         consumer
             .commit_sync_with_offsets(offsets)
             .await
-            .expect("commit_sync_with_offsets should succeed");
+            .unwrap_or_else(|e| panic!("{backend} backend: commit_sync_with_offsets should succeed: {e}"));
 
         let committed = consumer
             .committed(std::slice::from_ref(&tp))
             .await
-            .expect("committed should succeed");
+            .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
         let entry = committed
             .get(&tp)
             .and_then(Option::as_ref)
-            .expect("committed entry should be present");
-        assert_eq!(entry.offset(), offset);
+            .unwrap_or_else(|| panic!("{backend} backend: committed entry should be present"));
+        assert_eq!(entry.offset(), offset, "committed offset ({backend} backend)");
 
-        consumer.close().await.expect("consumer 1 close should succeed");
+        consumer
+            .close()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: consumer 1 close should succeed: {e}"));
     }
 
     {
-        let mut another = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            make_consumer_config_bytes(&ctx, Some(&group_id)),
-            ByteArrayDeserializer,
-            ByteArrayDeserializer,
-        )
-        .expect("KafkaConsumer::new should succeed (consumer 2)");
+        let mut another = create_consumer(ctx, factory, &group_id).await;
 
         let committed = another
             .committed(std::slice::from_ref(&tp))
             .await
-            .expect("committed should succeed");
-        let entry = committed
-            .get(&tp)
-            .and_then(Option::as_ref)
-            .expect("committed entry should be visible to another consumer in same group");
-        assert_eq!(entry.offset(), offset);
+            .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
+        let entry = committed.get(&tp).and_then(Option::as_ref).unwrap_or_else(|| {
+            panic!("{backend} backend: committed entry should be visible to another consumer in same group")
+        });
+        assert_eq!(entry.offset(), offset, "committed offset ({backend} backend)");
 
-        another.assign(vec![tp.clone()]).await.expect("assign should succeed");
+        another
+            .assign(vec![tp.clone()])
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
         consume_and_verify_records_bytes(
-            &mut another,
+            &mut *another,
             &tp,
             num_records - offset as usize,
             offset,
             offset as usize,
             starting_timestamp + offset,
+            backend,
         )
         .await;
 
-        another.close().await.expect("consumer 2 close should succeed");
+        another
+            .close()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: consumer 2 close should succeed: {e}"));
     }
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_consume_from_committed_offsets,
+    async_assign_and_consume_from_committed_offsets,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes`. Verifies that calling `committed(...)` twice on the same
 /// consumer returns the same value both times (i.e. the API is
 /// idempotent — no caching bug that returns a stale snapshot the second
 /// time).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_assign_and_retrieving_committed_offsets_multiple_times<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_committed_multiple_times");
     let tp = TopicPartition::new(topic.clone(), 0);
@@ -912,52 +876,67 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     let num_records: usize = 100;
     let starting_timestamp = current_time_ms();
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, Some(&group_id)),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id).await;
 
     // Java's `@BeforeEach setup()` pre-creates the topic empty before any
     // records are produced; mirror that here to close the consumer-side
     // metadata race during produce-triggered auto-create.
-    create_test_topic(&ctx, &topic, 2).await;
-    send_records_bytes(&ctx, &tp, num_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    create_test_topic(ctx, &topic, 2).await;
+    send_records_bytes(ctx, &tp, num_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
 
-    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
-    consume_and_verify_records_bytes(&mut consumer, &tp, num_records, 0, 0, starting_timestamp).await;
-    consumer.commit_sync().await.expect("commit_sync should succeed");
+    consumer
+        .seek_with_offset(tp.clone(), 0)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
+    consume_and_verify_records_bytes(&mut *consumer, &tp, num_records, 0, 0, starting_timestamp, backend).await;
+    consumer
+        .commit_sync()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: commit_sync should succeed: {e}"));
 
     let first = consumer
         .committed(std::slice::from_ref(&tp))
         .await
-        .expect("committed (first call) should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: committed (first call) should succeed: {e}"));
     assert_eq!(
         first
             .get(&tp)
             .and_then(Option::as_ref)
-            .expect("committed entry should be present (first call)")
+            .unwrap_or_else(|| panic!("{backend} backend: committed entry should be present (first call)"))
             .offset(),
-        num_records as i64
+        num_records as i64,
+        "first committed offset ({backend} backend)"
     );
 
     let second = consumer
         .committed(std::slice::from_ref(&tp))
         .await
-        .expect("committed (second call) should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: committed (second call) should succeed: {e}"));
     assert_eq!(
         second
             .get(&tp)
             .and_then(Option::as_ref)
-            .expect("committed entry should be present (second call)")
+            .unwrap_or_else(|| panic!("{backend} backend: committed entry should be present (second call)"))
             .offset(),
-        num_records as i64
+        num_records as i64,
+        "second committed offset ({backend} backend)"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_assign_and_retrieving_committed_offsets_multiple_times,
+    async_assign_and_retrieving_committed_offsets_multiple_times,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's `PlaintextConsumerAssignTest#testAsyncPollAfterTopicDeleted`
 /// (body `PlaintextConsumerAssignTest#testPollAfterTopicDeleted`) — validates
@@ -967,15 +946,14 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
 /// topic is deleted: the consumer still has the topic id cached, so the
 /// OffsetFetch it issues on the re-assignment gets `UNKNOWN_TOPIC_ID`, which
 /// it must treat as a retriable partition error and recover from.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_poll_after_topic_deleted() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_poll_after_topic_deleted<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic_to_delete = ctx.topic("topic-to-delete-assign");
     // Java: `GROUP_ID_CONFIG, "test-group"` (namespaced per test run here).
     let group_id = ctx.group_id("test-group");
 
     // Java: `clusterInstance.createTopic(topicToDelete, 1, (short) BROKER_COUNT)`.
-    let admin = admin_for(&ctx);
+    let admin = admin_for(ctx);
     test_utils::create_topic(admin.as_ref(), &topic_to_delete, 1, 3).await;
     let tp_to_delete = TopicPartition::new(topic_to_delete.clone(), 0);
 
@@ -984,34 +962,41 @@ async fn test_async_poll_after_topic_deleted() {
 
     // Java: `clusterInstance.consumer(Map.of(GROUP_PROTOCOL_CONFIG, ...,
     // GROUP_ID_CONFIG, "test-group", AUTO_OFFSET_RESET_CONFIG, "earliest"))`.
-    // Unlike this file's `make_consumer_config_bytes`, Java does NOT disable
+    // Unlike this file's `make_consumer_props`, Java does NOT disable
     // auto-commit here, so `enable.auto.commit` is left at its default (true).
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+    let mut props = HashMap::from([
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("group.id".to_string(), group_id.clone()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
     ]);
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        ConsumerConfig::new(&props).expect("invalid test config"),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    ctx.apply_security(&mut props);
+    let mut consumer = factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: create consumer: {e}"));
 
     // Send records and consume them (this caches the topic ID in the consumer)
-    send_records_bytes(&ctx, &tp_to_delete, num_records, starting_timestamp).await;
+    send_records_bytes(ctx, &tp_to_delete, num_records, starting_timestamp).await;
     consumer
         .assign(vec![tp_to_delete.clone()])
         .await
-        .expect("assign should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
     consumer
         .seek_with_offset(tp_to_delete.clone(), 0)
         .await
-        .expect("seek should succeed");
-    consume_and_verify_records_bytes(&mut consumer, &tp_to_delete, num_records, 0, 0, starting_timestamp).await;
-    consumer.commit_sync().await.expect("commit_sync should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
+    consume_and_verify_records_bytes(&mut *consumer, &tp_to_delete, num_records, 0, 0, starting_timestamp, backend)
+        .await;
+    consumer
+        .commit_sync()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: commit_sync should succeed: {e}"));
 
     // Delete the topic and wait for deletion to propagate to metadata
     admin
@@ -1038,23 +1023,35 @@ async fn test_async_poll_after_topic_deleted() {
     // Change assignment to force the consumer to fetch committed offsets on next poll()
     // The consumer still has the topic ID cached, so it will use version 10+
     // and get UNKNOWN_TOPIC_ID from the broker
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe should succeed: {e}"));
     consumer
         .assign(vec![tp_to_delete.clone()])
         .await
-        .expect("assign should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
 
     // poll() should not throw - internally fetches committed offsets for deleted topic and recovers
     let result = consumer.poll(Duration::from_millis(5000)).await;
     assert!(
         result.is_ok(),
-        "poll() after topic deletion should not fail: {:?}",
+        "poll() after topic deletion should not fail: {:?} ({backend} backend)",
         result.err()
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
     admin.close_with_timeout(Duration::from_secs(5)).await;
 }
+
+multilanguage_consumer_test!(
+    test_async_poll_after_topic_deleted,
+    async_poll_after_topic_deleted,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Builds an admin client for topic provisioning / deletion (Java's
 /// `clusterInstance.admin()`). Mirrors the per-file `admin_for` helper the
