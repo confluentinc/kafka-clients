@@ -84,6 +84,12 @@ While the run is going, the live consumer group is checked:
 - **Order**: within a partition, a writer's sequence numbers only increase,
   and within one poll, offsets only increase.
 - **Double writes**: one record is never stored at two offsets.
+
+  This check is not exercised by an idempotent producer's retries: on a
+  healthy cluster no send needs a retry (our runs have no ambiguous send and
+  no producer error), and each producer restart gets a new producer id, so the
+  broker never has to drop a duplicate. A double write would be found, but no
+  run provokes one; that needs injected faults (the chaos tests).
 - **Placement**: a record is read at the partition and offset its
   acknowledgement reported.
 - **Committed offsets**: a restarted member never reads below the committed
@@ -105,8 +111,11 @@ A run that tested nothing does not pass. Each scenario states its
 requirements, for example a minimum number of records per stream, committed
 and aborted transactions, clean restarts and hard stops, and every partition
 read. Only planned aborts and planned restarts count: an abort or a producer
-replaced after a failure does not. The long run also fails when more than 1%
-of its sends, or of its transactions, fail. A watchdog stops the run when
+replaced after a failure does not. A hard stop counts the records its last poll
+fetched; at least one is required, and the next owner's read of each is a
+redelivery. A run also fails when its sends, or its transactions (the writers'
+and the copiers'), fail: the integration tests allow none, the long run at
+most 1%. A watchdog stops the run when
 nothing is sent or read for too long.
 
 ## The long run

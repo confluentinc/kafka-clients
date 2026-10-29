@@ -293,6 +293,7 @@ fn run_spec(config: &LongRunConfig, run_id: u64) -> RunSpec {
         min_txns_aborted: 1,
         min_clean_restarts: restarts_due,
         min_hard_stops: restarts_due,
+        min_abandoned: restarts_due,
         min_producer_restarts: u64::from(config.duration > config.producer_restart),
         min_copier_aborts: 1,
         every_partition_read: true,

@@ -102,6 +102,12 @@ fn spec() -> RunSpec {
     spec
 }
 
+/// Nothing injects faults on the test broker, so no send and no
+/// transaction may fail.
+fn requirements() -> Requirements {
+    Requirements { max_failed_percent: Some(0.0), ..Default::default() }
+}
+
 fn assert_pass(verdict: &Verdict) {
     eprintln!("{verdict}");
     assert!(verdict.passed(), "{verdict}");
@@ -125,7 +131,7 @@ async fn test_integrity_every_codec() {
         topics.push(topic);
     }
     spec.group = Some(GroupSpec::new(&ctx.group_id("codecs"), topics, 1));
-    spec.requirements = Requirements { min_records_per_stream: 2000, every_partition_read: true, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 2000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
 
@@ -148,7 +154,7 @@ async fn test_integrity_record_shapes() {
         topics.push(topic);
     }
     spec.group = Some(GroupSpec::new(&ctx.group_id("shapes"), topics, 1));
-    spec.requirements = Requirements { min_records_per_stream: 3000, every_partition_read: true, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 3000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
 
@@ -180,7 +186,7 @@ async fn test_integrity_record_sizes() {
             .prop("max.partition.fetch.bytes", "65536")
             .prop("fetch.max.bytes", "65536"),
     );
-    spec.requirements = Requirements { min_records_per_stream: 60, every_partition_read: true, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 60, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
 
@@ -198,11 +204,13 @@ async fn test_integrity_transactions() {
             .records(1200),
     );
     spec.group = Some(GroupSpec::new(&ctx.group_id("txn"), vec![topic], 1));
+    // 60 transactions, one in each three aborted: 40 committed (800 records),
+    // 20 aborted.
     spec.requirements = Requirements {
-        min_txns_committed: 5,
-        min_txns_aborted: 2,
-        min_records_per_stream: 100,
-        ..Default::default()
+        min_txns_committed: 40,
+        min_txns_aborted: 20,
+        min_records_per_stream: 800,
+        ..requirements()
     };
     assert_pass(&run(spec, base).await);
 }
@@ -227,7 +235,7 @@ async fn test_integrity_consume_transform_produce() {
         props: Default::default(),
     });
     spec.group = Some(GroupSpec::new(&ctx.group_id("copy"), vec![input, output], 1));
-    spec.requirements = Requirements { min_records_per_stream: 2000, min_copier_aborts: 1, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 2000, min_copier_aborts: 1, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
 
@@ -243,7 +251,7 @@ async fn test_integrity_many_partitions() {
         spec.writers.push(WriterSpec::new(writer, &topic).records(2000));
     }
     spec.group = Some(GroupSpec::new(&ctx.group_id("partitions"), vec![topic], 3));
-    spec.requirements = Requirements { min_records_per_stream: 6000, every_partition_read: true, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 6000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
 
@@ -262,7 +270,7 @@ async fn test_integrity_consumer_restart_clean() {
         GroupSpec::new(&ctx.group_id("restart_clean"), vec![topic], 2)
             .restart(Duration::from_secs(2), &[RestartMode::Clean]),
     );
-    spec.requirements = Requirements { min_records_per_stream: 5000, min_clean_restarts: 3, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 5000, min_clean_restarts: 3, ..requirements() };
     let verdict = run(spec, base).await;
     assert_pass(&verdict);
     assert_eq!(verdict.counts.redelivered, 0, "a clean handoff re-read records:\n{verdict}");
@@ -292,8 +300,9 @@ async fn test_integrity_consumer_restart_hard() {
     spec.requirements = Requirements {
         min_records_per_stream: 10_000,
         min_hard_stops: 2,
+        min_abandoned: 1,
         min_clean_restarts: 1,
-        ..Default::default()
+        ..requirements()
     };
     assert_pass(&run(spec, base).await);
 }
@@ -322,7 +331,7 @@ async fn test_integrity_producer_restart() {
             .restart(Restart::EveryRecords(400)),
     );
     spec.group = Some(GroupSpec::new(&ctx.group_id("producer_restart"), vec![plain, txn], 1));
-    spec.requirements = Requirements { min_records_per_stream: 1000, min_producer_restarts: 6, ..Default::default() };
+    spec.requirements = Requirements { min_records_per_stream: 1000, min_producer_restarts: 6, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
 
@@ -560,11 +569,13 @@ async fn test_integrity_rust_producer_java_consumer() {
         bootstrap: ctx.container_bootstrap_servers().to_string(),
     });
     spec.requirements = Requirements {
-        min_records_per_stream: 6000,
-        min_txns_committed: 5,
-        min_txns_aborted: 2,
+        // 50 transactions of 20 records, one in each three aborted: 33 or 34
+        // committed. The other writers' 6100 records are all due.
+        min_records_per_stream: 6760,
+        min_txns_committed: 33,
+        min_txns_aborted: 16,
         every_partition_read: true,
-        ..Default::default()
+        ..requirements()
     };
     assert_pass(&run(spec, base).await);
 }
@@ -969,6 +980,26 @@ mod self_tests {
         let verdict = ledger.verdict(true, true, &Requirements::default());
         assert_eq!(failure_count(&verdict, "committed offset read-back violations"), 2, "{verdict}");
         assert_eq!(failure_count(&verdict, "re-reads below the committed offset"), 1, "{verdict}");
+    }
+
+    #[test]
+    fn test_ledger_counts_an_abandoned_batch_and_its_redelivery() {
+        let ledger = ledger();
+        let records = deliver(&ledger, 4);
+        ledger.live_record(&unchanged(&records[0], 0, 0));
+        // A member fetches 1..=3 and stops; the next owner reads only 1 and 2.
+        let abandoned: Vec<_> = (1..4).map(|o| unchanged(&records[o], 0, o as i64)).collect();
+        ledger.abandoned_batch(&abandoned);
+        ledger.live_record(&unchanged(&records[1], 0, 1));
+        ledger.live_record(&unchanged(&records[2], 0, 2));
+        let requirements = Requirements { min_abandoned: 4, ..Default::default() };
+        let verdict = ledger.verdict(true, false, &requirements);
+        assert_eq!((verdict.counts.abandoned, verdict.counts.redelivered), (3, 2), "{verdict}");
+        assert_eq!(failure_count(&verdict, "lost (live readers)"), 1, "{verdict}");
+        assert_eq!(
+            verdict.unmet[0], "3 records abandoned by hard stops, expected at least 4",
+            "{verdict}"
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@
 //! where the record was read) is checked through two maps that only hold the
 //! records acknowledged but not yet read, or read but not yet acknowledged.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -157,6 +157,9 @@ pub struct Counts {
     pub redelivered: u64,
     pub clean_restarts: u64,
     pub hard_stops: u64,
+    /// Records a hard-stopped member fetched and never processed; the next
+    /// owner's read of each counts as a redelivery.
+    pub abandoned: u64,
     pub commits: u64,
     pub commit_errors: u64,
     pub readbacks_checked: u64,
@@ -226,6 +229,7 @@ pub struct Requirements {
     pub min_txns_aborted: u64,
     pub min_clean_restarts: u64,
     pub min_hard_stops: u64,
+    pub min_abandoned: u64,
     pub min_producer_restarts: u64,
     pub min_copier_aborts: u64,
     pub every_partition_read: bool,
@@ -276,6 +280,8 @@ struct LiveState {
     last_seq: HashMap<(usize, i32, u32), u64>,
     /// Last successful commit per `(stream, partition)`.
     committed: HashMap<(usize, i32), i64>,
+    /// Records fetched by a hard-stopped member, not read since.
+    abandoned: HashSet<(usize, i32, i64)>,
 }
 
 #[derive(Default)]
@@ -514,6 +520,18 @@ impl Ledger {
         }
     }
 
+    /// The records a member fetched in its last poll before a hard stop, which
+    /// it never processed.
+    pub fn abandoned_batch(&self, records: &[ConsumerRecord<Vec<u8>, Vec<u8>>]) {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        for record in records {
+            let t = st.stream(record.topic());
+            st.counts.abandoned += 1;
+            st.live.abandoned.insert((t, record.partition(), record.offset()));
+        }
+    }
+
     /// A record the live group read.
     pub fn live_record(&self, record: &ConsumerRecord<Vec<u8>, Vec<u8>>) {
         let mut guard = self.lock();
@@ -543,7 +561,10 @@ impl Ledger {
         }
         let flags = st.streams[t].flags(id);
         let max = st.live.max_offset.get(&(t, p)).copied().unwrap_or(-1);
+        let abandoned = st.live.abandoned.remove(&(t, p, offset));
         if offset > max {
+            // A hard-stopped member fetched it first, without processing it.
+            st.counts.redelivered += u64::from(abandoned);
             st.live.max_offset.insert((t, p), offset);
             let last = st.live.last_seq.get(&(t, p, id.writer)).copied();
             if flags & SEEN_LIVE != 0 {
@@ -949,6 +970,7 @@ impl Ledger {
                 requirements.min_clean_restarts,
             ),
             ("hard consumer stops", counts.hard_stops, requirements.min_hard_stops),
+            ("records abandoned by hard stops", counts.abandoned, requirements.min_abandoned),
             (
                 "producer restarts",
                 counts.producer_restarts,
@@ -1053,7 +1075,8 @@ impl Verdict {
             "live_readers": {
                 "consumed": c.live_consumed, "redelivered": c.redelivered, "commits": c.commits,
                 "commit_errors": c.commit_errors, "readbacks_checked": c.readbacks_checked,
-                "clean_restarts": c.clean_restarts, "hard_stops": c.hard_stops, "consumer_errors": c.consumer_errors,
+                "clean_restarts": c.clean_restarts, "hard_stops": c.hard_stops, "abandoned": c.abandoned,
+                "consumer_errors": c.consumer_errors,
             },
             "final_read_back": { "consumed": c.final_consumed },
             "samples": self.samples,
@@ -1097,8 +1120,8 @@ impl fmt::Display for Verdict {
         )?;
         writeln!(
             f,
-            "  consumer restarts        : {} clean, {} hard",
-            c.clean_restarts, c.hard_stops
+            "  consumer restarts        : {} clean, {} hard ({} records abandoned)",
+            c.clean_restarts, c.hard_stops, c.abandoned
         )?;
         writeln!(f, "  consumer errors          : {}", c.consumer_errors)?;
         writeln!(f, "  final read-back          : {}", c.final_consumed)?;

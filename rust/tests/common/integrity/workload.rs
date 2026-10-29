@@ -885,8 +885,9 @@ async fn run_member(
             // Fetch once more and crash before processing it: those records do
             // not count as read, so the next owner must read them from the
             // committed offset or they are reported lost.
-            if let Err(e) = consumer.poll(POLL_TIMEOUT).await {
-                ledger.event(Event::ConsumerError, format!("member {member} poll: {e}"));
+            match consumer.poll(POLL_TIMEOUT).await {
+                Ok(records) => ledger.abandoned_batch(&records.into_iter().collect::<Vec<_>>()),
+                Err(e) => ledger.event(Event::ConsumerError, format!("member {member} poll: {e}")),
             }
             // A crash commits nothing more, not even at the final close.
             pending.lock().unwrap().clear();
