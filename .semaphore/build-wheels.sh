@@ -32,12 +32,12 @@ set -eu
 
 # The manylinux_2_28 image (glibc 2.28) that both the FFI library and the
 # extension are built in, so that the two agree on the glibc floor.
-MANYLINUX_TAG=2026.05.07-2
-CIBUILDWHEEL_VERSION=3.2.1
+MANYLINUX_TAG=2026.10.26-1
+CIBUILDWHEEL_VERSION=4.3.5
 
-# CPython 3.10 to 3.14. The free-threaded build (cp314t), musllinux and 32-bit
-# x86 are not built.
-export CIBW_BUILD="cp310-* cp311-* cp312-* cp313-* cp314-*"
+# CPython 3.10 to 3.15. The free-threaded builds (cp314t, cp315t), musllinux
+# and 32-bit x86 are not built.
+export CIBW_BUILD="cp310-* cp311-* cp312-* cp313-* cp314-* cp315-*"
 export CIBW_SKIP="*musllinux* *i686"
 
 case "$(uname -s)" in
