@@ -21,6 +21,13 @@
 //! `max.partition.fetch.bytes` interactions) against a real 3-broker
 //! Kafka 4.2.0 cluster with KIP-848 (`group.protocol=consumer`) enabled.
 //!
+//! They run as multilanguage scenarios: each one runs against the native
+//! Rust consumer and, through the gRPC backends, the Python (sync and
+//! asyncio) and C consumers ([`multilanguage_consumer_test!`]); each name
+//! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
+//! are native fixtures; only the consumer is under test.
+//!
 //! # Translated methods (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
 //! All 9 KIP-848 tests are translated and pass end-to-end. Previously
@@ -83,27 +90,24 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::Consumer;
-use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::ConsumerRecord;
-use confluent_kafka::consumer::KafkaConsumer;
+use confluent_kafka::consumer::DynConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
-
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
 use crate::common::test_utils::wait_for_partition_leaders;
+use crate::multilanguage_consumer_test;
 
-// Type alias matching the bytes-typed `Consumer` trait object returned
-// by `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
-// the tests pass `&mut consumer` (which deref-coerces from
-// `Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>>`).
-type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
+// The bytes-typed consumer trait object every backend factory returns. Used in
+// helper signatures; the tests pass `&mut *consumer` (a reborrow through the
+// `Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>`).
+type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
 
 // Consumed records bucketed by topic-partition, borrowed from the batch the
 // poll loop collected them into.
@@ -135,30 +139,27 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
     kip848_3_broker(2)
 }
 
-// ── Byte-array deserializer (Java uses `byte[]` keys and values) ──────
-
-/// Local byte-array deserializer for these tests. The crate exports
-/// `ByteArraySerializer` but no symmetric `ByteArrayDeserializer`; this
-/// inline impl is identical to what such a struct would do.
-struct ByteArrayDeserializer;
-
-impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(data.to_vec())
-    }
-}
-
 // ── Consumer config builder ───────────────────────────────────────────
 
-/// Build a `ConsumerConfig` matching what Java's
+/// Build the consumer properties matching what Java's
 /// `clusterInstance.consumer(Map.of(GROUP_PROTOCOL_CONFIG, "consumer", ...))`
-/// produces. Caller-supplied overrides win over defaults.
+/// produces, on the bootstrap the backend under test reaches. Caller-supplied
+/// overrides win over defaults.
 ///
 /// Default `auto.offset.reset=earliest` so the tests' explicit `seek` /
 /// reset-policy calls are the only offset-state transitions.
-fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&str, &str)]) -> ConsumerConfig {
+fn make_consumer_props<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+    overrides: &[(&str, &str)],
+) -> HashMap<String, String> {
     let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
@@ -169,7 +170,20 @@ fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str, overrides: &[(&
         props.insert((*k).to_string(), (*v).to_string());
     }
     ctx.apply_security(&mut props);
-    ConsumerConfig::new(&props).expect("invalid test config")
+    props
+}
+
+/// Create the consumer under test through `factory`.
+async fn create_consumer<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+    overrides: &[(&str, &str)],
+) -> Box<BytesConsumer> {
+    factory
+        .create(make_consumer_props(ctx, factory, group_id, overrides))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
 // ── Producer helpers (mirror Java's ClientsTestUtils.sendRecords) ─────
@@ -270,8 +284,9 @@ async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records:
 async fn consume_records_bytes(
     consumer: &mut BytesConsumer,
     num_records: usize,
+    backend: &str,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
-    consume_records_bytes_with_deadline(consumer, num_records, Duration::from_secs(60)).await
+    consume_records_bytes_with_deadline(consumer, num_records, Duration::from_secs(60), backend).await
 }
 
 /// Variant of [`consume_records_bytes`] with a caller-supplied wall-clock
@@ -285,6 +300,7 @@ async fn consume_records_bytes_with_deadline(
     consumer: &mut BytesConsumer,
     num_records: usize,
     deadline_duration: Duration,
+    backend: &str,
 ) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
     let deadline = Instant::now() + deadline_duration;
     let mut collected: Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> = Vec::with_capacity(num_records);
@@ -292,14 +308,14 @@ async fn consume_records_bytes_with_deadline(
         let records = consumer
             .poll(Duration::from_millis(100))
             .await
-            .expect("poll should succeed in consume_records_bytes");
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed in consume_records_bytes: {e}"));
         for r in records {
             collected.push(r);
         }
     }
     assert!(
         collected.len() >= num_records,
-        "Timed out before consuming expected {num_records} records (got {})",
+        "Timed out before consuming expected {num_records} records (got {}) ({backend} backend)",
         collected.len()
     );
     collected
@@ -314,6 +330,7 @@ async fn consume_records_bytes_with_deadline(
 /// `topic`, `partition`, `timestamp_type == CreateTime`, `timestamp`,
 /// `offset`, key/value bytes, and the serialized-size accessors — the
 /// full Java assertion set.
+#[expect(clippy::too_many_arguments)] // Java's seven parameters plus the backend label.
 async fn consume_and_verify_records_bytes(
     consumer: &mut BytesConsumer,
     tp: &TopicPartition,
@@ -322,37 +339,46 @@ async fn consume_and_verify_records_bytes(
     starting_key_and_value_index: usize,
     starting_timestamp: i64,
     timestamp_increment: i64,
+    backend: &str,
 ) {
     let inc = if timestamp_increment > 0 {
         timestamp_increment
     } else {
         1
     };
-    let collected = consume_records_bytes(consumer, num_records).await;
+    let collected = consume_records_bytes(consumer, num_records, backend).await;
     assert!(
         collected.len() >= num_records,
-        "expected at least {num_records} records, got {}",
+        "expected at least {num_records} records, got {} ({backend} backend)",
         collected.len()
     );
     for (i, record) in collected.iter().take(num_records).enumerate() {
         let offset = starting_offset + i as i64;
 
-        assert_eq!(record.topic(), tp.topic(), "record topic should match tp.topic()");
+        assert_eq!(
+            record.topic(),
+            tp.topic(),
+            "record topic should match tp.topic() ({backend} backend)"
+        );
         assert_eq!(
             record.partition(),
             tp.partition(),
-            "record partition should match tp.partition()"
+            "record partition should match tp.partition() ({backend} backend)"
         );
 
         assert_eq!(
             record.timestamp_type(),
             TimestampType::CreateTime,
-            "record timestamp_type should be CreateTime (broker default)"
+            "record timestamp_type should be CreateTime (broker default) ({backend} backend)"
         );
         let expected_ts = starting_timestamp + i as i64 * inc;
-        assert_eq!(record.timestamp(), expected_ts, "record timestamp should be {expected_ts}");
+        assert_eq!(
+            record.timestamp(),
+            expected_ts,
+            "record timestamp should be {expected_ts} ({backend} backend)"
+        );
 
-        assert_eq!(record.offset(), offset, "record offset should be {offset}");
+        assert_eq!(record.offset(), offset, "record offset should be {offset} ({backend} backend)");
 
         let key_and_value_index = starting_key_and_value_index + i;
         let expected_key = format!("key {key_and_value_index}").into_bytes();
@@ -360,23 +386,23 @@ async fn consume_and_verify_records_bytes(
         assert_eq!(
             record.key().expect("record key should be present"),
             &expected_key,
-            "key at index {i} mismatched"
+            "key at index {i} mismatched ({backend} backend)"
         );
         assert_eq!(
             record.value().expect("record value should be present"),
             &expected_value,
-            "value at index {i} mismatched"
+            "value at index {i} mismatched ({backend} backend)"
         );
 
         assert_eq!(
             record.serialized_key_size() as usize,
             expected_key.len(),
-            "serialized_key_size mismatch at index {i}"
+            "serialized_key_size mismatch at index {i} ({backend} backend)"
         );
         assert_eq!(
             record.serialized_value_size() as usize,
             expected_value.len(),
-            "serialized_value_size mismatch at index {i}"
+            "serialized_value_size mismatch at index {i} ({backend} backend)"
         );
     }
 }
@@ -384,19 +410,19 @@ async fn consume_and_verify_records_bytes(
 /// Translates Java's `ClientsTestUtils.awaitAssignment(consumer,
 /// expectedAssignment)`. Polls until `consumer.assignment()` equals
 /// `expected` or the 60s wall-clock budget elapses.
-async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<TopicPartition>) {
+async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<TopicPartition>, backend: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         let _ = consumer
             .poll(Duration::from_millis(100))
             .await
-            .expect("poll should succeed in await_assignment");
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed in await_assignment: {e}"));
         if &consumer.assignment() == expected {
             return;
         }
     }
     panic!(
-        "Timed out while awaiting expected assignment of {} partitions. The current assignment is {} partitions.",
+        "{backend} backend: Timed out while awaiting expected assignment of {} partitions. The current assignment is {} partitions.",
         expected.len(),
         consumer.assignment().len()
     );
@@ -415,25 +441,23 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 /// its own class now, so the payload survives propagation — it used to be
 /// flattened into `Error::LocalIllegalState` by the removed consumer-error enum,
 /// leaving only the `Display` string to assert against.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_invalid_offset() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+///
+async fn async_consumer_fetch_invalid_offset<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id("g_fetch_invalid_offset");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, &[("auto.offset.reset", "none")]).await;
 
     // produce two records
     let total_records: usize = 2;
-    send_records_bytes(&ctx, &tp, total_records, 0).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    send_records_bytes(ctx, &tp, total_records, 0).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
 
     // poll should fail because there is no offset reset strategy set.
     // we fail only when resetting positions after coordinator is known,
@@ -453,11 +477,12 @@ async fn test_async_consumer_fetch_invalid_offset() {
         Error::ConsumerNoOffsetForPartition(e) => {
             assert_eq!(
                 e.message(),
-                format!("Undefined offset with no reset policy for partitions: [{tp}]")
+                format!("Undefined offset with no reset policy for partitions: [{tp}]"),
+                "message ({backend} backend)"
             );
-            assert_eq!(e.partitions(), &HashSet::from([tp.clone()]));
+            assert_eq!(e.partitions(), &HashSet::from([tp.clone()]), "partitions ({backend} backend)");
         },
-        other => panic!("expected Error::ConsumerNoOffsetForPartition, got: {other:?}"),
+        other => panic!("{backend} backend: expected Error::ConsumerNoOffsetForPartition, got: {other:?}"),
     }
 
     // seek to out of range position
@@ -465,7 +490,7 @@ async fn test_async_consumer_fetch_invalid_offset() {
     consumer
         .seek_with_offset(tp.clone(), out_of_range_pos)
         .await
-        .expect("seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
     let err = consumer
         .poll(Duration::from_millis(20_000))
         .await
@@ -477,7 +502,8 @@ async fn test_async_consumer_fetch_invalid_offset() {
         Error::ConsumerOffsetOutOfRange(e) => {
             assert_eq!(
                 e.offset_out_of_range_partitions(),
-                &HashMap::from([(tp.clone(), out_of_range_pos)])
+                &HashMap::from([(tp.clone(), out_of_range_pos)]),
+                "offset_out_of_range_partitions ({backend} backend)"
             );
             // Message built in
             // org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeErrors:
@@ -488,60 +514,86 @@ async fn test_async_consumer_fetch_invalid_offset() {
             let msg = e.message();
             let prefix = format!("Fetch position FetchPosition{{offset={out_of_range_pos}, ");
             let suffix = format!("}} is out of range for partition {tp}");
-            assert!(msg.starts_with(&prefix), "message should start with {prefix:?}, got: {msg}");
-            assert!(msg.ends_with(&suffix), "message should end with {suffix:?}, got: {msg}");
+            assert!(
+                msg.starts_with(&prefix),
+                "message should start with {prefix:?}, got: {msg} ({backend} backend)"
+            );
+            assert!(
+                msg.ends_with(&suffix),
+                "message should end with {suffix:?}, got: {msg} ({backend} backend)"
+            );
         },
-        other => panic!("expected Error::ConsumerOffsetOutOfRange, got: {other:?}"),
+        other => panic!("{backend} backend: expected Error::ConsumerOffsetOutOfRange, got: {other:?}"),
     }
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_invalid_offset,
+    async_consumer_fetch_invalid_offset,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigEarliest`.
 /// After consuming all records and seeking past the end,
 /// the next `poll()` resets to position 0 (`auto.offset.reset=earliest`)
 /// and reads from offset 0 again.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_fetch_out_of_range_offset_reset_config_earliest<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id("g_fetch_oor_earliest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(
-            &ctx,
-            &group_id,
-            // ensure no in-flight fetch request so that the offset can be
-            // reset immediately
-            &[("fetch.max.wait.ms", "0")],
-        ),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
+    let mut consumer = create_consumer(
+        ctx,
+        factory,
+        &group_id,
+        // ensure no in-flight fetch request so that the offset can be
+        // reset immediately
+        &[("fetch.max.wait.ms", "0")],
     )
-    .expect("KafkaConsumer::new should succeed");
+    .await;
 
     let total_records: usize = 10;
     let starting_timestamp: i64 = 0;
-    send_records_bytes(&ctx, &tp, total_records, starting_timestamp).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consume_and_verify_records_bytes(&mut consumer, &tp, total_records, 0, 0, starting_timestamp, -1).await;
+    send_records_bytes(ctx, &tp, total_records, starting_timestamp).await;
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    consume_and_verify_records_bytes(&mut *consumer, &tp, total_records, 0, 0, starting_timestamp, -1, backend).await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
     consumer
         .seek_with_offset(tp.clone(), out_of_range_pos)
         .await
-        .expect("seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
     // assert that poll resets to the beginning position — only one
     // record needed to prove the reset (the last `consumeAndVerifyRecords` of
     // org.apache.kafka.clients.consumer.PlaintextConsumerFetchTest#testFetchOutOfRangeOffsetResetConfigEarliest).
-    consume_and_verify_records_bytes(&mut consumer, &tp, 1, 0, 0, starting_timestamp, -1).await;
+    consume_and_verify_records_bytes(&mut *consumer, &tp, 1, 0, 0, starting_timestamp, -1, backend).await;
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_out_of_range_offset_reset_config_earliest,
+    async_consumer_fetch_out_of_range_offset_reset_config_earliest,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigLatest`.
@@ -550,46 +602,52 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
 /// available); after producing 10 more records, the next `poll()`
 /// surfaces the first newly-produced record at offset
 /// `totalRecords`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_fetch_out_of_range_offset_reset_config_latest<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id("g_fetch_oor_latest");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(
-            &ctx,
-            &group_id,
-            &[
-                ("auto.offset.reset", "latest"),
-                // ensure no in-flight fetch request so that the offset
-                // can be reset immediately
-                ("fetch.max.wait.ms", "0"),
-            ],
-        ),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
+    let mut consumer = create_consumer(
+        ctx,
+        factory,
+        &group_id,
+        &[
+            ("auto.offset.reset", "latest"),
+            // ensure no in-flight fetch request so that the offset
+            // can be reset immediately
+            ("fetch.max.wait.ms", "0"),
+        ],
     )
-    .expect("KafkaConsumer::new should succeed");
+    .await;
 
-    let producer = build_producer_bytes(&ctx);
+    let producer = build_producer_bytes(ctx);
     let total_records: usize = 10;
     let starting_timestamp: i64 = 0;
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp, -1).await;
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek_with_offset(tp.clone(), 0).await.expect("seek should succeed");
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    consumer
+        .seek_with_offset(tp.clone(), 0)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
 
     // consume some, but not all the records
-    consume_and_verify_records_bytes(&mut consumer, &tp, total_records / 2, 0, 0, starting_timestamp, -1).await;
+    consume_and_verify_records_bytes(&mut *consumer, &tp, total_records / 2, 0, 0, starting_timestamp, -1, backend)
+        .await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 17; // arbitrary, much higher offset
     consumer
         .seek_with_offset(tp.clone(), out_of_range_pos)
         .await
-        .expect("seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
 
     // assert that poll resets to the ending position. Java uses a 50ms
     // timeout — we use the same. The reset issues an OffsetReset to
@@ -606,32 +664,44 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
         let records = consumer
             .poll(Duration::from_millis(50))
             .await
-            .expect("poll should not fatally fail during reset-to-latest");
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should not fatally fail during reset-to-latest: {e}"));
         if records.is_empty() && consumer.position(&tp).await.unwrap_or(-1) == total_records as i64 {
             break;
         }
     }
     assert_eq!(
-        consumer.position(&tp).await.expect("position should succeed"),
+        consumer
+            .position(&tp)
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: position should succeed: {e}")),
         total_records as i64,
-        "after reset-to-latest, position should be at the high watermark"
+        "after reset-to-latest, position should be at the high watermark ({backend} backend)"
     );
 
     send_records_with_producer(&producer, &tp, total_records, total_records as i64, -1).await;
 
     // After the new records land, the next poll should surface the
     // first one at offset = total_records.
-    let next_records = consume_records_bytes(&mut consumer, 1).await;
+    let next_records = consume_records_bytes(&mut *consumer, 1, backend).await;
     let next_record = &next_records[0];
     assert_eq!(
         next_record.offset(),
         total_records as i64,
-        "ensure the seek went to the last known record at the time of the previous poll"
+        "ensure the seek went to the last known record at the time of the previous poll ({backend} backend)"
     );
 
     producer.close().await.expect("producer close should succeed");
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_out_of_range_offset_reset_config_latest,
+    async_consumer_fetch_out_of_range_offset_reset_config_latest,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigByDuration`.
@@ -644,9 +714,11 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 ///    the last one (at offset 24) is within the duration window; the
 ///    consumer's first read and the post-out-of-range reset both land
 ///    on that record.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_fetch_out_of_range_offset_reset_config_by_duration<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id_1 = ctx.group_id("g_fetch_oor_by_duration_1");
@@ -654,72 +726,71 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp2 = TopicPartition::new(topic.clone(), 1);
 
-    let mut consumer1 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(
-            &ctx,
-            &group_id_1,
-            &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
-        ),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
+    let mut consumer1 = create_consumer(
+        ctx,
+        factory,
+        &group_id_1,
+        &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
     )
-    .expect("KafkaConsumer::new (consumer1) should succeed");
+    .await;
 
     let total_records: usize = 10;
     let starting_timestamp_1 = current_time_ms();
-    send_records_bytes(&ctx, &tp, total_records, starting_timestamp_1).await;
+    send_records_bytes(ctx, &tp, total_records, starting_timestamp_1).await;
     consumer1
         .assign(vec![tp.clone()])
         .await
-        .expect("consumer1 assign should succeed");
-    consume_and_verify_records_bytes(&mut consumer1, &tp, total_records, 0, 0, starting_timestamp_1, -1).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 assign should succeed: {e}"));
+    consume_and_verify_records_bytes(&mut *consumer1, &tp, total_records, 0, 0, starting_timestamp_1, -1, backend)
+        .await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
     consumer1
         .seek_with_offset(tp.clone(), out_of_range_pos)
         .await
-        .expect("consumer1 seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 seek should succeed: {e}"));
     // assert that poll resets to the beginning position (everything is
     // within the 1h duration window)
-    consume_and_verify_records_bytes(&mut consumer1, &tp, 1, 0, 0, starting_timestamp_1, -1).await;
+    consume_and_verify_records_bytes(&mut *consumer1, &tp, 1, 0, 0, starting_timestamp_1, -1, backend).await;
 
-    consumer1.close().await.expect("consumer1 close should succeed");
+    consumer1
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer1 close should succeed: {e}"));
 
     // Second scenario: starting offset is earlier than the requested
     // duration. Generate records with 1 hour interval for 1 day.
-    let mut consumer2 = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(
-            &ctx,
-            &group_id_2,
-            &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
-        ),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
+    let mut consumer2 = create_consumer(
+        ctx,
+        factory,
+        &group_id_2,
+        &[("auto.offset.reset", "by_duration:PT1H"), ("fetch.max.wait.ms", "0")],
     )
-    .expect("KafkaConsumer::new (consumer2) should succeed");
+    .await;
 
     let total_records_2: usize = 25;
     let starting_timestamp_2 = current_time_ms() - Duration::from_secs(24 * 60 * 60).as_millis() as i64;
     let hour_millis = Duration::from_secs(60 * 60).as_millis() as i64;
 
-    let producer = build_producer_bytes(&ctx);
+    let producer = build_producer_bytes(ctx);
     send_records_with_producer(&producer, &tp2, total_records_2, starting_timestamp_2, hour_millis).await;
     producer.close().await.expect("producer close should succeed");
 
     consumer2
         .assign(vec![tp2.clone()])
         .await
-        .expect("consumer2 assign should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 assign should succeed: {e}"));
     // consumer should read one record from last one hour
     consume_and_verify_records_bytes(
-        &mut consumer2,
+        &mut *consumer2,
         &tp2,
         1,
         24,
         24,
         starting_timestamp_2 + 24 * hour_millis,
         hour_millis,
+        backend,
     )
     .await;
 
@@ -728,31 +799,45 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     consumer2
         .seek_with_offset(tp2.clone(), out_of_range_pos_2)
         .await
-        .expect("consumer2 seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 seek should succeed: {e}"));
     // assert that poll resets to the duration offset. consumer should
     // read one record from last one hour
     consume_and_verify_records_bytes(
-        &mut consumer2,
+        &mut *consumer2,
         &tp2,
         1,
         24,
         24,
         starting_timestamp_2 + 24 * hour_millis,
         hour_millis,
+        backend,
     )
     .await;
 
-    consumer2.close().await.expect("consumer2 close should succeed");
+    consumer2
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer2 close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration,
+    async_consumer_fetch_out_of_range_offset_reset_config_by_duration,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerFetchRecordLargerThanFetchMaxBytes`.
 /// A single record larger than `fetch.max.bytes` should still be
 /// fetched (KIP-74 guarantee).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_record_larger_than_fetch_max_bytes() {
+async fn async_consumer_fetch_record_larger_than_fetch_max_bytes<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let max_fetch_bytes = 10 * 1024;
     check_large_record(
+        ctx,
+        factory,
         &[("fetch.max.bytes", &max_fetch_bytes.to_string())],
         max_fetch_bytes + 1,
         "g_large_fetch_max_bytes",
@@ -760,14 +845,24 @@ async fn test_async_consumer_fetch_record_larger_than_fetch_max_bytes() {
     .await;
 }
 
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_record_larger_than_fetch_max_bytes,
+    async_consumer_fetch_record_larger_than_fetch_max_bytes,
+    cluster_config_with_kip848_3brokers()
+);
+
 /// Translates Java's
 /// `testAsyncConsumerFetchRecordLargerThanMaxPartitionFetchBytes`.
 /// A single record larger than `max.partition.fetch.bytes`
 /// should still be fetched (KIP-74 guarantee).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_record_larger_than_max_partition_fetch_bytes() {
+async fn async_consumer_fetch_record_larger_than_max_partition_fetch_bytes<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let max_fetch_bytes = 10 * 1024;
     check_large_record(
+        ctx,
+        factory,
         &[("max.partition.fetch.bytes", &max_fetch_bytes.to_string())],
         max_fetch_bytes + 1,
         "g_large_max_part_fetch_bytes",
@@ -775,24 +870,31 @@ async fn test_async_consumer_fetch_record_larger_than_max_partition_fetch_bytes(
     .await;
 }
 
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_record_larger_than_max_partition_fetch_bytes,
+    async_consumer_fetch_record_larger_than_max_partition_fetch_bytes,
+    cluster_config_with_kip848_3brokers()
+);
+
 /// Translates Java's `checkLargeRecord(config, producerRecordSize)`.
 /// Produces one record of `producer_record_size` bytes,
 /// then consumes 1 record and asserts key/value/topic/partition/offset.
-async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record_size: usize, group_base_name: &str) {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn check_large_record<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    consumer_overrides: &[(&str, &str)],
+    producer_record_size: usize,
+    group_base_name: &str,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, consumer_overrides).await;
 
-    let producer = build_producer_bytes(&ctx);
+    let producer = build_producer_bytes(ctx);
     // produce a record that is larger than the configured fetch size
     let expected_key = b"key".to_vec();
     let expected_value = vec![0u8; producer_record_size];
@@ -812,18 +914,37 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
         .expect("send should succeed");
 
     // consuming a record that is too large should succeed since KIP-74
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    let records = consume_records_bytes(&mut consumer, 1).await;
-    assert_eq!(records.len(), 1, "should consume exactly one record (got {})", records.len());
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
+    let records = consume_records_bytes(&mut *consumer, 1, backend).await;
+    assert_eq!(
+        records.len(),
+        1,
+        "should consume exactly one record (got {}) ({backend} backend)",
+        records.len()
+    );
     let consumer_record = &records[0];
-    assert_eq!(consumer_record.offset(), 0);
-    assert_eq!(consumer_record.topic(), tp.topic());
-    assert_eq!(consumer_record.partition(), tp.partition());
-    assert_eq!(consumer_record.key().expect("key should be present"), &expected_key);
-    assert_eq!(consumer_record.value().expect("value should be present"), &expected_value);
+    assert_eq!(consumer_record.offset(), 0, "offset ({backend} backend)");
+    assert_eq!(consumer_record.topic(), tp.topic(), "topic ({backend} backend)");
+    assert_eq!(consumer_record.partition(), tp.partition(), "partition ({backend} backend)");
+    assert_eq!(
+        consumer_record.key().expect("key should be present"),
+        &expected_key,
+        "key ({backend} backend)"
+    );
+    assert_eq!(
+        consumer_record.value().expect("value should be present"),
+        &expected_value,
+        "value ({backend} backend)"
+    );
 
     producer.close().await.expect("producer close should succeed");
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
 /// Translates Java's
@@ -831,10 +952,14 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
 /// When a small record precedes a large one in the log,
 /// the consumer only returns the small one on the first poll —
 /// honoring `fetch.max.bytes`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_honours_fetch_size_if_large_record_not_first() {
+async fn async_consumer_fetch_honours_fetch_size_if_large_record_not_first<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let max_fetch_bytes = 10 * 1024;
     check_fetch_honours_size_if_large_record_not_first(
+        ctx,
+        factory,
         &[("fetch.max.bytes", &max_fetch_bytes.to_string())],
         max_fetch_bytes,
         "g_honours_fetch_max_bytes",
@@ -842,13 +967,23 @@ async fn test_async_consumer_fetch_honours_fetch_size_if_large_record_not_first(
     .await;
 }
 
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_honours_fetch_size_if_large_record_not_first,
+    async_consumer_fetch_honours_fetch_size_if_large_record_not_first,
+    cluster_config_with_kip848_3brokers()
+);
+
 /// Translates Java's
 /// `testAsyncConsumerFetchHonoursMaxPartitionFetchBytesIfLargeRecordNotFirst`.
 /// Same as above but for `max.partition.fetch.bytes`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_record_not_first() {
+async fn async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_record_not_first<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let max_fetch_bytes = 10 * 1024;
     check_fetch_honours_size_if_large_record_not_first(
+        ctx,
+        factory,
         &[("max.partition.fetch.bytes", &max_fetch_bytes.to_string())],
         max_fetch_bytes,
         "g_honours_max_part_fetch_bytes",
@@ -856,28 +991,31 @@ async fn test_async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_re
     .await;
 }
 
+multilanguage_consumer_test!(
+    test_async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_record_not_first,
+    async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_record_not_first,
+    cluster_config_with_kip848_3brokers()
+);
+
 /// Translates Java's
 /// `checkFetchHonoursSizeIfLargeRecordNotFirst(config,
 /// largeProducerRecordSize)`.
-async fn check_fetch_honours_size_if_large_record_not_first(
+async fn check_fetch_honours_size_if_large_record_not_first<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
     consumer_overrides: &[(&str, &str)],
     large_producer_record_size: usize,
     group_base_name: &str,
 ) {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     create_test_topic(ctx.bootstrap_servers(), &topic, 2).await;
     let group_id = ctx.group_id(group_base_name);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(&ctx, &group_id, consumer_overrides),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed");
+    let mut consumer = create_consumer(ctx, factory, &group_id, consumer_overrides).await;
 
-    let producer = build_producer_bytes(&ctx);
+    let producer = build_producer_bytes(ctx);
 
     let small_key = b"small".to_vec();
     let small_value = b"value".to_vec();
@@ -915,19 +1053,38 @@ async fn check_fetch_honours_size_if_large_record_not_first(
         .expect("large send should succeed");
 
     // we should only get the small record in the first `poll`
-    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+    consumer
+        .assign(vec![tp.clone()])
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
 
-    let records = consume_records_bytes(&mut consumer, 1).await;
-    assert_eq!(records.len(), 1, "should consume exactly one record (got {})", records.len());
+    let records = consume_records_bytes(&mut *consumer, 1, backend).await;
+    assert_eq!(
+        records.len(),
+        1,
+        "should consume exactly one record (got {}) ({backend} backend)",
+        records.len()
+    );
     let consumer_record = &records[0];
-    assert_eq!(consumer_record.offset(), 0);
-    assert_eq!(consumer_record.topic(), tp.topic());
-    assert_eq!(consumer_record.partition(), tp.partition());
-    assert_eq!(consumer_record.key().expect("key should be present"), &small_key);
-    assert_eq!(consumer_record.value().expect("value should be present"), &small_value);
+    assert_eq!(consumer_record.offset(), 0, "offset ({backend} backend)");
+    assert_eq!(consumer_record.topic(), tp.topic(), "topic ({backend} backend)");
+    assert_eq!(consumer_record.partition(), tp.partition(), "partition ({backend} backend)");
+    assert_eq!(
+        consumer_record.key().expect("key should be present"),
+        &small_key,
+        "key ({backend} backend)"
+    );
+    assert_eq!(
+        consumer_record.value().expect("value should be present"),
+        &small_value,
+        "value ({backend} backend)"
+    );
 
     producer.close().await.expect("producer close should succeed");
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
 /// Translates Java's
@@ -937,9 +1094,11 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 /// (3 topics × 30 partitions), the consumer must still eventually
 /// deliver every record. This exercises the small-fetch + multi-poll
 /// fairness path.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn async_consumer_low_max_fetch_size_for_request_and_partition<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let group_id = ctx.group_id("g_low_max_fetch_size");
 
     // Three distinct topics, each with 30 partitions. Java's
@@ -961,37 +1120,38 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
         }
     }
 
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_consumer_config_bytes(
-            &ctx,
-            &group_id,
-            &[
-                // one of the effects of this is that there will be some
-                // log reads where `0 > remaining limit bytes < message
-                // size` and we don't return the message because it's
-                // not the first message in the first non-empty
-                // partition of the fetch
-                ("fetch.max.bytes", "500"),
-                ("max.partition.fetch.bytes", "100"),
-                // Avoid a rebalance while the records are being sent
-                // (the default is 6 seconds)
-                ("max.poll.interval.ms", "20000"),
-            ],
-        ),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
+    let mut consumer = create_consumer(
+        ctx,
+        factory,
+        &group_id,
+        &[
+            // one of the effects of this is that there will be some
+            // log reads where `0 > remaining limit bytes < message
+            // size` and we don't return the message because it's
+            // not the first message in the first non-empty
+            // partition of the fetch
+            ("fetch.max.bytes", "500"),
+            ("max.partition.fetch.bytes", "100"),
+            // Avoid a rebalance while the records are being sent
+            // (the default is 6 seconds)
+            ("max.poll.interval.ms", "20000"),
+        ],
     )
-    .expect("KafkaConsumer::new should succeed");
+    .await;
 
-    assert_eq!(consumer.assignment().len(), 0, "initial assignment should be empty");
+    assert_eq!(
+        consumer.assignment().len(),
+        0,
+        "initial assignment should be empty ({backend} backend)"
+    );
     consumer
         .subscribe_with_topics(topics.clone())
         .await
-        .expect("subscribe should succeed");
-    await_assignment(&mut consumer, &partitions).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    await_assignment(&mut *consumer, &partitions, backend).await;
 
     // Produce `partition_count` records per partition.
-    let producer = build_producer_bytes(&ctx);
+    let producer = build_producer_bytes(ctx);
     let now = current_time_ms();
     // Java iterates `partitions` (a HashSet) and produces 30 records
     // per partition. The total record count is partition_count * 90.
@@ -1011,11 +1171,12 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     // producer's per-partition `flush()` (90 sequential flushes total)
     // pushes total wall-clock past the default 60s budget; bump to 180s
     // for parity with Java's eventual-completion outcome.
-    let consumed = consume_records_bytes_with_deadline(&mut consumer, total_produced, Duration::from_secs(180)).await;
+    let consumed =
+        consume_records_bytes_with_deadline(&mut *consumer, total_produced, Duration::from_secs(180), backend).await;
     assert_eq!(
         consumed.len(),
         total_produced,
-        "should consume exactly {total_produced} records (got {})",
+        "should consume exactly {total_produced} records (got {}) ({backend} backend)",
         consumed.len()
     );
 
@@ -1033,34 +1194,47 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
         assert_eq!(
             consumed_for_partition.len(),
             partition_count as usize,
-            "Records count mismatch for {partition}"
+            "Records count mismatch for {partition} ({backend} backend)"
         );
         for (i, record) in consumed_for_partition.iter().enumerate() {
-            assert_eq!(record.topic(), partition.topic());
-            assert_eq!(record.partition(), partition.partition());
+            assert_eq!(record.topic(), partition.topic(), "topic ({backend} backend)");
+            assert_eq!(record.partition(), partition.partition(), "partition ({backend} backend)");
             let expected_key = format!("key {i}").into_bytes();
             let expected_value = format!("value {i}").into_bytes();
             assert_eq!(
                 record.key().expect("key should be present"),
                 &expected_key,
-                "key mismatch for {partition}[{i}]"
+                "key mismatch for {partition}[{i}] ({backend} backend)"
             );
             assert_eq!(
                 record.value().expect("value should be present"),
                 &expected_value,
-                "value mismatch for {partition}[{i}]"
+                "value mismatch for {partition}[{i}] ({backend} backend)"
             );
             // Java asserts the *exact* producer-record timestamp matches
             // the consumed-record timestamp; with `timestampIncrement=-1`
             // and all sends from the same `now`, every record on the
             // same partition shares a 1ms-stepped timestamp starting at
             // `now`.
-            assert_eq!(record.timestamp(), now + i as i64, "timestamp mismatch for {partition}[{i}]");
+            assert_eq!(
+                record.timestamp(),
+                now + i as i64,
+                "timestamp mismatch for {partition}[{i}] ({backend} backend)"
+            );
         }
     }
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_low_max_fetch_size_for_request_and_partition,
+    async_consumer_low_max_fetch_size_for_request_and_partition,
+    cluster_config_with_kip848_3brokers()
+);
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
