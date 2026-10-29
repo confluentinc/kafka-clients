@@ -13,7 +13,18 @@ breaking changes.
 - The FFI layer (the `ffi` feature) is experimental right now.
 - Windows is not supported yet.
 
-## 1.0.0-rc.1
+### Common
+
+- **Breaking:** Mozilla's root certificates, trusted without
+  `ssl.truststore.location` or `ssl.truststore.certificates`, now come from the
+  default feature `webpki-roots`. With default features on nothing changes. A
+  build with `default-features = false` must add `features = ["webpki-roots"]`;
+  without it the build stops with "confluent-kafka needs a default trust
+  store", since no other default trust store exists yet. A later one is then a
+  feature of its own, and `default-features = false` selects it without the
+  bundle.
+
+## [1.0.0-rc.1] - 2026-10-28
 
 ### Consumer
 
