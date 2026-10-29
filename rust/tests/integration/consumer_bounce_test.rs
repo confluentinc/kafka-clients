@@ -68,7 +68,8 @@
 //!   and every fixture stay native. Its name gains the backend suffix
 //!   (`__rust`, `__grpc_python`, `__grpc_python_async`, `__grpc_c`).
 //! - `testAsyncConsumerSeekAndCommitWithBrokerFailures`
-//!   → `test_async_consumer_seek_and_commit_with_broker_failures`
+//!   → `test_async_consumer_seek_and_commit_with_broker_failures`, a
+//!   multilanguage scenario like the previous one.
 //! - `testAsyncSubscribeWhenTopicUnavailable`
 //!   → `test_async_subscribe_when_topic_unavailable`
 //! - `testAsyncClose`, including its coordinator-failure and
@@ -945,25 +946,31 @@ async fn wait_for_high_watermark(admin: &dyn Admin, tp: &TopicPartition, num_rec
 
 /// Java's `seekAndCommitWithBrokerFailures(numIters, CONSUMER)`:
 /// with a manually assigned partition, randomly seek to the end, seek to a
-/// random offset, or commit, while brokers are killed and restarted.
-async fn seek_and_commit_with_broker_failures(num_iters: usize) {
-    let mut ctx = TestContext::new(bounce_cluster_config()).await;
-    let topic = set_up(&mut ctx).await;
+/// random offset, or commit, while brokers are killed and restarted. The
+/// consumer is the backend's under test; the producer and the admin are native
+/// fixtures.
+async fn seek_and_commit_with_broker_failures<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    num_iters: usize,
+) {
+    let backend = factory.name();
+    let topic = set_up(ctx).await;
     let topic_partition = TopicPartition::new(topic.clone(), 0);
     let num_records: usize = 1000;
-    send_records(&ctx, &topic_partition, num_records).await;
+    send_records(ctx, &topic_partition, num_records).await;
 
-    let mut consumer = create_consumer(&ctx, &HashMap::new());
+    let mut consumer = create_consumer_for(ctx, factory, &HashMap::new()).await;
     consumer
         .assign(vec![topic_partition.clone()])
         .await
-        .expect("assign should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: assign should succeed: {e}"));
     consumer
         .seek_with_offset(topic_partition.clone(), 0)
         .await
-        .expect("seek should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: seek should succeed: {e}"));
 
-    let admin = create_admin(&ctx);
+    let admin = create_admin(ctx);
     wait_for_high_watermark(admin.as_ref(), &topic_partition, num_records as i64).await;
     admin.close_with_timeout(Duration::from_secs(5)).await;
 
@@ -976,26 +983,46 @@ async fn seek_and_commit_with_broker_failures(num_iters: usize) {
 
             if coin == 0 {
                 eprintln!("Seeking to end of log.");
-                consumer.seek_to_end(&[]).await.expect("seekToEnd");
-                assert_eq!(num_records as i64, consumer.position(&topic_partition).await.expect("position"));
+                consumer
+                    .seek_to_end(&[])
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: seekToEnd: {e}"));
+                let position = consumer
+                    .position(&topic_partition)
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: position: {e}"));
+                assert_eq!(num_records as i64, position, "{backend} backend");
             } else if coin == 1 {
                 let pos = random.random_range(0..num_records as i64);
                 eprintln!("Seeking to {pos}");
-                consumer.seek_with_offset(topic_partition.clone(), pos).await.expect("seek");
-                assert_eq!(pos, consumer.position(&topic_partition).await.expect("position"));
+                consumer
+                    .seek_with_offset(topic_partition.clone(), pos)
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: seek: {e}"));
+                let position = consumer
+                    .position(&topic_partition)
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: position: {e}"));
+                assert_eq!(pos, position, "{backend} backend");
             } else {
                 eprintln!("Committing offset.");
-                consumer.commit_sync().await.expect("commitSync should succeed");
-                let position = consumer.position(&topic_partition).await.expect("position");
+                consumer
+                    .commit_sync()
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: commitSync should succeed: {e}"));
+                let position = consumer
+                    .position(&topic_partition)
+                    .await
+                    .unwrap_or_else(|e| panic!("{backend} backend: position: {e}"));
                 let committed = consumer
                     .committed(std::slice::from_ref(&topic_partition))
                     .await
-                    .expect("committed")
+                    .unwrap_or_else(|e| panic!("{backend} backend: committed: {e}"))
                     .get(&topic_partition)
                     .and_then(Option::as_ref)
-                    .expect("a committed offset for the partition")
+                    .unwrap_or_else(|| panic!("{backend} backend: a committed offset for the partition"))
                     .offset();
-                assert_eq!(position, committed);
+                assert_eq!(position, committed, "{backend} backend");
             }
         }
     };
@@ -1005,10 +1032,18 @@ async fn seek_and_commit_with_broker_failures(num_iters: usize) {
 }
 
 /// Translates `ConsumerBounceTest#testAsyncConsumerSeekAndCommitWithBrokerFailures`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_seek_and_commit_with_broker_failures() {
-    seek_and_commit_with_broker_failures(5).await;
+async fn async_consumer_seek_and_commit_with_broker_failures<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    seek_and_commit_with_broker_failures(ctx, factory, 5).await;
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_seek_and_commit_with_broker_failures,
+    async_consumer_seek_and_commit_with_broker_failures,
+    bounce_cluster_config()
+);
 
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)`:
 /// wait until the poller has received exactly `num_records` records.
