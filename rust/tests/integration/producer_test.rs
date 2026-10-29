@@ -482,14 +482,10 @@ struct SendOffsetCallbackState {
     failures: Vec<String>,
 }
 
-/// `check_serialized_sizes` gates the size assertions (and the null-value
-/// check derived from them) to backends that report real serialized sizes; see
-/// [`send_offset_inner`] for the binding gap.
 fn send_offset_callback(
     state: Arc<Mutex<SendOffsetCallbackState>>,
     topic: String,
     partition: i32,
-    check_serialized_sizes: bool,
 ) -> Box<dyn Callback> {
     Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
         let mut st = state.lock().unwrap();
@@ -527,7 +523,7 @@ fn send_offset_callback(
             2 => m.serialized_value_size() == value_len,
             _ => m.serialized_value_size() > 0,
         };
-        if check_serialized_sizes && !size_ok {
+        if !size_ok {
             st.failures.push(format!(
                 "offset {offset}: unexpected serialized sizes key={} value={}",
                 m.serialized_key_size(),
@@ -564,22 +560,7 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
         .expect("Failed to create producer");
     let partition = 0;
     let state = Arc::new(Mutex::new(SendOffsetCallbackState::default()));
-    // Binding gap: both gRPC servers hardcode the serialized sizes in the
-    // returned metadata to -1 (`bindings/python/grpc_translate.py`
-    // `_record_metadata_to_proto`, `bindings/c/grpc_server/server.cc` ~704), and
-    // the Python servers turn an absent value into `b""`
-    // (`_proto_to_producer_record`), so record1 is not a null-value send there.
-    // The size and null-value checks therefore run only on the native backend.
-    // Everything else runs on every backend.
-    let check_serialized_sizes = factory.name() == "rust";
-    let callback = || {
-        Some(send_offset_callback(
-            state.clone(),
-            topic.clone(),
-            partition,
-            check_serialized_sizes,
-        ))
-    };
+    let callback = || Some(send_offset_callback(state.clone(), topic.clone(), partition));
 
     let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
@@ -637,7 +618,12 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
 
     {
         let st = state.lock().unwrap();
-        assert!(st.failures.is_empty(), "callback assertions failed: {:?}", st.failures);
+        assert!(
+            st.failures.is_empty(),
+            "callback assertions failed on the {} backend: {:?}",
+            factory.name(),
+            st.failures
+        );
         assert_eq!(st.invocations, NUM_RECORDS + 5, "every send's callback must fire exactly once");
         assert_eq!(st.offset, NUM_RECORDS as i64 + 5);
     }
@@ -2258,10 +2244,6 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
 /// the broker's default `max.message.bytes` is accepted, and one byte more is
 /// rejected with `RecordTooLarge` (the client's `max.request.size` bound, which
 /// the estimated batch then exceeds by one byte).
-///
-/// `serializedValueSize` and the error message are checked on the native
-/// backend only: the gRPC servers report serialized sizes as -1 and surface
-/// only the error code.
 async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2294,9 +2276,12 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
         .await
         .expect("a record of exactly the maximum size should be accepted");
-    if factory.name() == "rust" {
-        assert_eq!(value_size, metadata.serialized_value_size());
-    }
+    assert_eq!(
+        value_size,
+        metadata.serialized_value_size(),
+        "serializedValueSize on the {} backend",
+        factory.name()
+    );
 
     let record1 = ProducerRecord::with_key(topic, Some(Vec::new()), Some(vec![0u8; (value_size + 1) as usize]));
     let err = producer
@@ -2307,16 +2292,14 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
         .await
         .expect_err("a record one byte over the maximum size should be rejected");
     match &err {
-        Error::RecordTooLarge(e) => {
-            if factory.name() == "rust" {
-                assert_eq!(
-                    "The message is 1048577 bytes when serialized which is larger than 1048576, which is the value \
-                     of the max.request.size configuration.",
-                    e.message()
-                );
-            }
-        },
-        _ => panic!("Expected RecordTooLarge, got: {err:?}"),
+        Error::RecordTooLarge(e) => assert_eq!(
+            "The message is 1048577 bytes when serialized which is larger than 1048576, which is the value \
+             of the max.request.size configuration.",
+            e.message(),
+            "RecordTooLarge message on the {} backend",
+            factory.name()
+        ),
+        _ => panic!("Expected RecordTooLarge on the {} backend, got: {err:?}", factory.name()),
     }
     producer.close().await.expect("close should succeed");
 }
