@@ -104,16 +104,27 @@ state:
   binding's `ListenerCtx` comment already says this for `unsubscribe()` ("an unsubscribe leaves
   the Java listener registered"); the binding, the C header texts and the comments above should
   all say it in one text.
-- **State**: fixed on this branch, in the `finding-1: ` commits; a separate PR is to follow (owner
-  ruling 1). The binding keeps the earlier `ListenerCtx` after a `KafkaConsumer`'s `subscribe([])`
-  and drops the new one; the C header texts and the Python `subscribe` docstring state the target
-  release point. A `MockConsumer` is unchanged: Java's mock registers the listener on every
-  `subscribe`, empty topics included (`SubscriptionState#subscribe`), so its `subscribe([])` does
-  replace it. Regression tests: `python/test/integration/test_listener_release_broker.py` and
-  `test_empty_subscribe_keeps_the_listener_until_destroy` in `c/tests/test_consumer_callbacks.c`.
-  The scenario's un-revert is Actor 121's. Found by the Java-parity change of COMMENTS.121 item 5
-  (owner decision 4, approved); the previous form of the test registered no listener and so never
-  reached it.
+- **State**: fixed on this branch, in the `finding-1: ` commits and their fixups; a separate PR is
+  to follow (owner ruling 1). The binding keeps the earlier `ListenerCtx` after a `KafkaConsumer`'s
+  `subscribe([])` and drops the new one, and parks the context of a failed subscribe until the
+  consumer is destroyed (the core may hold it, see finding #2). The C header texts, the `fire`
+  SAFETY comment and the Python `subscribe` docstring state the target release point, with two
+  differences for a `MockConsumer`, which follows Java's mock: its `subscribe([])` replaces the
+  listener (`SubscriptionState#subscribe` registers it whatever the topics), and its `close()` does
+  not release it (`rebalance` and `losePartitions` still call it).
+  - Tests: `python/test/integration/test_listener_release_broker.py` (the broker cases, and a
+    broker-free FFI-mock case for the failed subscribe; both fail on the binding before the fix)
+    and `test_empty_subscribe_keeps_the_listener_until_destroy` in
+    `c/tests/test_consumer_callbacks.c`, which shows the C sequence but cannot catch the defect:
+    without a broker no listener method runs, and the defect was in the Python binding.
+  - The test servers' comments are corrected in a harness commit.
+  - Left for the owner: the core comment in `AsyncKafkaConsumer::unsubscribe` ("The retained
+    listener is released by the next `subscribe(...)` ... or when the consumer is dropped") misses
+    `subscribe([])`, which keeps it, and `close()`, which releases it. It is shipped code outside
+    ruling 1's files, so it stays as it is.
+  - The scenario is back on every backend (Actor 121's un-revert). Found by the Java-parity change
+    of COMMENTS.121 item 5 (owner decision 4, approved); the previous form of the test registered
+    no listener and so never reached it.
 
 ### 2. Rust core: after a failed `subscribe`, a `KafkaConsumer` keeps calling the previous listener
 
