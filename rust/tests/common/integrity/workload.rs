@@ -839,10 +839,10 @@ async fn run_member(
 async fn rewind(
     consumer: &mut KafkaConsumer<Vec<u8>, Vec<u8>>,
     partitions: &[TopicPartition],
-) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
     let committed = consumer.committed(partitions).await?;
     for tp in partitions {
-        let offset = committed.get(tp).map_or(0, OffsetAndMetadata::offset);
+        let offset = committed.get(tp).and_then(Option::as_ref).map_or(0, OffsetAndMetadata::offset);
         consumer.seek_with_offset(tp.clone(), offset).await?;
     }
     Ok(committed)
@@ -945,7 +945,7 @@ async fn rewind_owned(
     partitions: &[TopicPartition],
     ledger: &Ledger,
     stop: &AtomicBool,
-) -> Option<HashMap<TopicPartition, OffsetAndMetadata>> {
+) -> Option<HashMap<TopicPartition, Option<OffsetAndMetadata>>> {
     loop {
         let assigned = consumer.assignment();
         let owned: Vec<TopicPartition> = partitions.iter().filter(|tp| assigned.contains(tp)).cloned().collect();
@@ -1098,7 +1098,10 @@ async fn run_copier(
                 // A failed transaction may still have committed (a replacement
                 // producer completes a commit in flight): what was read back
                 // says whether it did.
-                expected.extend(read.iter().map(|(tp, o)| (tp.clone(), o.offset())));
+                expected.extend(
+                    read.iter()
+                        .map(|(tp, o)| (tp.clone(), o.as_ref().map_or(0, OffsetAndMetadata::offset))),
+                );
             }
         }
     }

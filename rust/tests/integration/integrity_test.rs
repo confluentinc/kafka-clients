@@ -788,10 +788,10 @@ mod self_tests {
         let ours = HashMap::from([(tp.clone(), OffsetAndMetadata::new(4).unwrap())]);
         ledger.live_committed(&ours);
         // Read back lower than what was committed, then past what was read.
-        ledger.readback(&ours, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(2).unwrap())]));
-        ledger.readback(&ours, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(9).unwrap())]));
+        ledger.readback(&ours, &HashMap::from([(tp.clone(), Some(OffsetAndMetadata::new(2).unwrap()))]));
+        ledger.readback(&ours, &HashMap::from([(tp.clone(), Some(OffsetAndMetadata::new(9).unwrap()))]));
         // Within reach: neither.
-        ledger.readback(&ours, &HashMap::from([(tp, OffsetAndMetadata::new(4).unwrap())]));
+        ledger.readback(&ours, &HashMap::from([(tp, Some(OffsetAndMetadata::new(4).unwrap()))]));
         // A new owner re-reads from offset 1, below the committed 4.
         ledger.live_record(&unchanged(&records[1], 0, 1));
         let verdict = ledger.verdict(true, true, &Requirements::default());
@@ -896,11 +896,17 @@ mod self_tests {
         let ledger = ledger();
         let tp = TopicPartition::new(TOPIC.to_string(), 0);
         let expected = HashMap::from([(tp.clone(), 4)]);
-        ledger.copier_readback(&expected, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(4).unwrap())]));
-        ledger.copier_readback(&expected, &HashMap::from([(tp.clone(), OffsetAndMetadata::new(5).unwrap())]));
+        ledger.copier_readback(
+            &expected,
+            &HashMap::from([(tp.clone(), Some(OffsetAndMetadata::new(4).unwrap()))]),
+        );
+        ledger.copier_readback(
+            &expected,
+            &HashMap::from([(tp.clone(), Some(OffsetAndMetadata::new(5).unwrap()))]),
+        );
         // A partition it never committed holds its seeded 0.
         let other = TopicPartition::new(TOPIC.to_string(), 1);
-        ledger.copier_readback(&expected, &HashMap::from([(other, OffsetAndMetadata::new(0).unwrap())]));
+        ledger.copier_readback(&expected, &HashMap::from([(other, Some(OffsetAndMetadata::new(0).unwrap()))]));
         ledger.copier_failed_in_committed_txn("m", "t-0@3", &Error::timeout("expired"));
         let verdict = ledger.verdict(false, true, &Requirements::default());
         assert_eq!(failure_count(&verdict, "committed offset read-back violations"), 1, "{verdict}");

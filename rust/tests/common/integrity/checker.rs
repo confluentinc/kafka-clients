@@ -610,14 +610,14 @@ impl Ledger {
     pub fn readback(
         &self,
         ours: &HashMap<TopicPartition, OffsetAndMetadata>,
-        theirs: &HashMap<TopicPartition, OffsetAndMetadata>,
+        theirs: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
     ) {
         let mut st = self.lock();
         st.counts.readbacks_checked += 1;
         for (tp, offset) in ours {
             let t = st.stream(tp.topic());
             let read_up_to = st.live.max_offset.get(&(t, tp.partition())).map_or(0, |max| max + 1);
-            let read = theirs.get(tp).map(OffsetAndMetadata::offset);
+            let read = theirs.get(tp).and_then(Option::as_ref).map(OffsetAndMetadata::offset);
             if read.is_none_or(|read| read < offset.offset() || read > read_up_to) {
                 st.counts.readback_violations += 1;
                 st.sample(
@@ -633,21 +633,23 @@ impl Ledger {
 
     /// A copier's committed offsets, read back: the copier is its group's only
     /// member, so they must be exactly what it last committed (`expected`; a
-    /// partition it never committed holds its seeded 0).
+    /// partition it never committed holds its seeded 0, and no committed
+    /// offset reads as 0).
     pub fn copier_readback(
         &self,
         expected: &HashMap<TopicPartition, i64>,
-        read: &HashMap<TopicPartition, OffsetAndMetadata>,
+        read: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
     ) {
         let mut st = self.lock();
         st.counts.readbacks_checked += 1;
         for (tp, offset) in read {
             let expected = expected.get(tp).copied().unwrap_or(0);
-            if offset.offset() != expected {
+            let read = offset.as_ref().map_or(0, OffsetAndMetadata::offset);
+            if read != expected {
                 st.counts.readback_violations += 1;
                 st.sample(
                     "committed offset read-back violations",
-                    format!("copier {tp}: committed {expected}, read back {}", offset.offset()),
+                    format!("copier {tp}: committed {expected}, read back {read}"),
                 );
             }
         }
