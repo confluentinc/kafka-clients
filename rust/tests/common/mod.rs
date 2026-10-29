@@ -51,8 +51,6 @@ pub mod test_utils;
 #[cfg(feature = "integration-tests")]
 pub mod admin_backend;
 #[cfg(feature = "integration-tests")]
-// Fully used only once `multilanguage-tests` adds the gRPC backends.
-#[cfg_attr(not(feature = "multilanguage-tests"), expect(dead_code))]
 pub mod backend_factory;
 
 // Backend-agnostic observation of the user callbacks (delivery / commit /
