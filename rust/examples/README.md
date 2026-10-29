@@ -29,11 +29,18 @@ Tear down with `docker rm -f kafka-examples`. This also deletes all topic data.
 
 ## Start a Schema Registry
 
-`avro_producer` and `avro_consumer` also need a Confluent Schema Registry:
-the producer registers the Avro schema of its records there and the
-consumer fetches it back by the id each record carries. The registry's own
-Kafka client has to reach the broker above, which advertises
-`localhost:9092`, so the container shares the host network:
+The Schema Registry examples need a Confluent Schema Registry: each
+producer registers the schema of its records there and its consumer fetches
+it back by the id each record carries. There is one pair per schema format:
+
+| Format | Producer | Consumer | Topic |
+|---|---|---|---|
+| Avro | `avro_producer` | `avro_consumer` | `avro-users` |
+| Protobuf | `protobuf_producer` | `protobuf_consumer` | `protobuf-users` |
+| JSON Schema | `json_schema_producer` | `json_schema_consumer` | `json-users` |
+
+The registry's own Kafka client has to reach the broker above, which
+advertises `localhost:9092`, so the container shares the host network:
 
 ```
 docker run -d --name schema-registry-examples --network host \
@@ -46,7 +53,7 @@ docker run -d --name schema-registry-examples --network host \
 Tear down with `docker rm -f schema-registry-examples`. (`--network host`
 needs Docker on Linux, or Docker Desktop 4.34 or later.)
 
-These two examples use Robert Yokota's
+These examples use Robert Yokota's
 [`schema-registry-client`](https://crates.io/crates/schema-registry-client)
 crate for the registry round trip, wrapped in implementations of this
 client's `Serializer` and `Deserializer` traits: the producer is a
@@ -54,6 +61,11 @@ client's `Serializer` and `Deserializer` traits: the producer is a
 `User` records. The crate's serializers are `async`, like the traits, so the
 wrappers await them directly. Only the first record of a schema reaches the
 registry; the registry client caches the schema and its id after that.
+
+The Protobuf examples write by hand the `prost` message and its descriptor
+that `prost-build` and `prost-reflect-build` would generate from a `.proto`
+file, so they need no `protoc`. The JSON Schema examples validate each
+record against the schema when writing and reading it.
 
 ## Run an example
 
@@ -70,7 +82,7 @@ Every example connects to `localhost:9092` by default. Set
 KAFKA_BOOTSTRAP_SERVERS=broker:9092 cargo run --example <name>
 ```
 
-The Avro examples connect to the Schema Registry at `http://localhost:8081`
+The Schema Registry examples connect to the Schema Registry at `http://localhost:8081`
 by default. Set `SCHEMA_REGISTRY_URL` to use another one:
 
 ```

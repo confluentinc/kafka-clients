@@ -128,11 +128,14 @@ tokio = { version = "1", features = ["signal"] }
 # Used by the multilanguage consumer client (impl Consumer is #[async_trait])
 # and to build ConsumerRecords.
 async-trait = "0.1"
-# The Schema Registry examples (`avro_producer`, `avro_consumer`): Robert
-# Yokota's client and the Avro crate it serializes with. The library itself
-# does not depend on either.
+# The Schema Registry examples (`avro_*`, `protobuf_*`, `json_schema_*`):
+# Robert Yokota's client, the Avro crate it serializes with, and
+# `prost-reflect` (with the `prost_types` it re-exports) for the Protobuf
+# message descriptor, the version the client uses. The library itself depends
+# on none of them.
 schema-registry-client = "0.4"
 apache-avro = "0.21"
+prost-reflect = "0.15"
 indexmap = "2"
 # Used only when --features multilanguage-tests is enabled.
 tonic = "0.12"

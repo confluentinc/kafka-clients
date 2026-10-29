@@ -685,6 +685,7 @@ dependencies = [
  "multilanguage-test-server",
  "paste",
  "prost 0.13.5",
+ "prost-reflect",
  "rand 0.9.4",
  "rcgen",
  "regex",
