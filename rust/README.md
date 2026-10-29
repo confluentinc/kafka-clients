@@ -11,11 +11,13 @@ sources are the `kafka/` submodule at the repository root).
 - **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
 - **C FFI:** Behind the `ffi` feature, the crate exports the C API that the
   bindings in `../c/` and `../python/` are built on; the build writes its header
-  to `target/include/confluent_kafka.h`
+  to `target/include/confluent_kafka.h`. The FFI layer is experimental right now.
 
 ## Status
 
-**Preview:** the Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open.
+**Generally Available:** this is the first GA release of the Rust client, version 1.0.0. We welcome your feedback, see [RFCs and feedback](../README.md#rfcs-and-feedback).
+
+Windows is not supported yet.
 
 
 ## Directory Structure

@@ -1,7 +1,7 @@
 # Rust-Based Kafka Clients
 
 > [!WARNING]
-> **Preview:** The Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open, see [RFCs and feedback](#rfcs-and-feedback).
+> **Rust client: Generally Available. Python client: Preview.** The Python client is not yet recommended for production use, and its public API is not stable before its GA release and may change. We welcome your feedback while the design is still open, see [RFCs and feedback](#rfcs-and-feedback).
 
 A high-fidelity, architecture-preserving Rust translation of the Apache Kafka Java client (client only), generated instruction-by-instruction from the original Java sources. This project aims to provide a native Rust Kafka client with the same API, structure, and semantics as the official Java client, following Rust idioms and conventions where appropriate.
 
@@ -9,11 +9,13 @@ It also contains bindings for multiple languages, automatically generated follow
 
 ## Status
 
-**Rust Client: Preview**. The Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open.
+**Rust Client: Generally Available**. This is the first GA release of the Rust client, version 1.0.0. We welcome your feedback, see [RFCs and feedback](#rfcs-and-feedback).
 
 **Python Client: Preview**. The Python client is in preview and not yet recommended for production use. The public API is not stable before the GA release and may change. We welcome your feedback while the design is still open.
 
 **C and .NET Clients: In Development**. The API is subject to large changes and the stability is not guaranteed.
+
+Windows is not supported yet.
 
 ## Repository Structure
 
