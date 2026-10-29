@@ -129,6 +129,8 @@ use rand::seq::IndexedRandom;
 
 use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
+use crate::common::cluster_config::broker_has_assignment_interval;
+use crate::common::cluster_config::with_assignment_interval;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::consumer_assignment_poller::ConsumerAssignmentPoller;
 use crate::common::kafka_cluster;
@@ -171,17 +173,6 @@ fn cluster_config() -> ClusterConfig {
     ] {
         cfg.server_properties.insert(key.to_string(), value.to_string());
     }
-    cfg
-}
-
-/// [`cluster_config`] plus one `@ClusterTest(serverProperties = ...)` arm of
-/// `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
-fn cluster_config_with_assignment_interval(interval_ms: &str) -> ClusterConfig {
-    let mut cfg = cluster_config();
-    cfg.server_properties.insert(
-        "KAFKA_GROUP_CONSUMER_ASSIGNMENT_INTERVAL_MS".to_string(),
-        interval_ms.to_string(),
-    );
     cfg
 }
 
@@ -481,16 +472,6 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
     ctx.cleanup().await;
 }
 
-/// The first broker release with `group.consumer.assignment.interval.ms`
-/// (KIP-1263).
-const ASSIGNMENT_INTERVAL_RELEASE: (u32, u32) = (4, 3);
-
-/// Whether this run's broker has `group.consumer.assignment.interval.ms`; the
-/// three arms below pick themselves from it (see the module docs).
-fn broker_has_assignment_interval() -> bool {
-    kafka_cluster::broker_release() >= ASSIGNMENT_INTERVAL_RELEASE
-}
-
 /// Translates `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
 /// with the broker's default assignment
 /// behaviour, on a broker older than 4.3 only: there the broker has no
@@ -522,7 +503,7 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
         );
         return;
     }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config_with_assignment_interval("0"))
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(with_assignment_interval(cluster_config(), 0))
         .await;
 }
 
@@ -539,7 +520,7 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
         );
         return;
     }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config_with_assignment_interval("1000"))
+    test_consumer_receives_fatal_exception_when_group_passes_max_size(with_assignment_interval(cluster_config(), 1000))
         .await;
 }
 
