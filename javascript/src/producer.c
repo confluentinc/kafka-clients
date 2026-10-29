@@ -34,8 +34,9 @@
 // garbage collection by a strong reference, while sends, flushes or a close are
 // outstanding (`pending`), and unref'd when idle.
 //
-// Teardown: close's completion only marks the producer; call_js destroys it
-// after its drain loop (never inside a drain), on the JS thread, then releases
+// Teardown: close's completion only marks the producer; the drain that ran it
+// (producer_drain, from call_js or from send()'s pump) destroys it after its
+// loop (never inside a drain), on the JS thread, then releases
 // the threadsafe function, whose finalizer frees this struct together with the
 // handle object's finalizer (two owners). `KafkaProducer_destroy_err` runs the
 // callbacks still pending, inline, exactly once each.
@@ -559,8 +560,8 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     }
     p->close_error = error;
     p->destroy_requested = 1;
-    // call_js destroys it once its drain loop ended; this may also have fired
-    // outside a drain, so schedule one.
+    // producer_drain (run by call_js or by send()'s pump) destroys it once its
+    // loop ended; this may also have fired outside a drain, so schedule one.
     if (p->tsfn_alive) napi_call_threadsafe_function(p->tsfn, NULL, napi_tsfn_nonblocking);
 }
 
