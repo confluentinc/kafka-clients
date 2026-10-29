@@ -1069,10 +1069,12 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // send cloned the record.
     kafka_producer_ProducerRecord_destroy(record);
     if (send_err != nullptr) {
-      // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
-      // FFI stores the error in `send_err`, which we forward verbatim. A pre-accumulator
-      // rejection also queued the delivery callback (with placeholder
-      // metadata beside the error, as Java does), so pump it into the log.
+      // send itself failed, Java's send throwing (LocalIllegalState, a
+      // serialization error, ...). The FFI stores the error in `send_err`,
+      // which we forward verbatim. An ApiException such as RecordTooLarge
+      // does not come here: as Java's doSend, the producer hands it to the
+      // callback and returns a failed future, which the get() below reports.
+      // Pump any callback queued meanwhile into the log.
       pump_callbacks(producer);
       fill_proto_error(resp->mutable_error(), send_err);
       // NULL with `out_err`: send itself failed (Java's send throwing), as
