@@ -15,6 +15,8 @@ It also contains bindings for multiple languages, automatically generated follow
 
 **C and .NET Clients: In Development**. The API is subject to large changes and the stability is not guaranteed.
 
+Windows is not supported yet.
+
 ## Repository Structure
 
 ```

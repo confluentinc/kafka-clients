@@ -5,11 +5,15 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 Before 1.0 the public API is not stable, and any minor release may contain
 breaking changes.
 
-## 1.0.0-rc.1
+## [Unreleased]
 
 ### General availability
 
 - First generally available (GA) release of the Rust client, version 1.0.0.
+- The FFI layer (the `ffi` feature) is experimental right now.
+- Windows is not supported yet.
+
+## 1.0.0-rc.1
 
 ### Consumer
 
