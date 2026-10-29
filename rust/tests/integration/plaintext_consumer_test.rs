@@ -1167,6 +1167,16 @@ async fn async_consumer_consume_messages_with_log_append_time<F: ConsumerBackend
             &expected_value,
             "values ({backend} backend)"
         );
+        assert_eq!(
+            record.serialized_key_size,
+            expected_key.len() as i32,
+            "serialized key size at {i} ({backend} backend)"
+        );
+        assert_eq!(
+            record.serialized_value_size,
+            expected_value.len() as i32,
+            "serialized value size at {i} ({backend} backend)"
+        );
     }
 
     consumer
