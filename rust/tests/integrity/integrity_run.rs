@@ -130,15 +130,19 @@ impl LongRunConfig {
         if let Some(protocol) = &self.security_protocol {
             props.insert("security.protocol".to_string(), protocol.clone());
         }
-        if let (Some(mechanism), Some(user), Some(pass)) =
-            (&self.sasl_mechanism, &self.sasl_username, &self.sasl_password)
-        {
+        if let Some(mechanism) = &self.sasl_mechanism {
+            props.insert("sasl.mechanism".to_string(), mechanism.clone());
+        }
+        // Credentials build the login line for whichever mechanism is set, by
+        // the variable or by the file.
+        if let (Some(user), Some(pass)) = (&self.sasl_username, &self.sasl_password) {
+            let mechanism = props.get("sasl.mechanism").cloned().unwrap_or_else(|| "PLAIN".to_string());
             let module = if mechanism.starts_with("SCRAM") {
                 "org.apache.kafka.common.security.scram.ScramLoginModule"
             } else {
                 "org.apache.kafka.common.security.plain.PlainLoginModule"
             };
-            props.insert("sasl.mechanism".to_string(), mechanism.clone());
+            props.insert("sasl.mechanism".to_string(), mechanism);
             let quoted = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
             props.insert(
                 "sasl.jaas.config".to_string(),

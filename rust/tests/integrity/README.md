@@ -158,7 +158,7 @@ permissions:
 |---|---|---|
 | `BOOTSTRAP_SERVERS` | unset (local cluster) | The cluster to run against |
 | `SECURITY_PROTOCOL` | unset | `security.protocol` |
-| `SASL_MECHANISM` | unset | `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512` |
+| `SASL_MECHANISM` | unset | `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512`; `PLAIN` when only the credentials are set |
 | `SASL_USERNAME`, `SASL_PASSWORD` | unset | The SASL credentials |
 | `CLIENT_CONFIG_FILE` | unset | A properties file of extra client settings |
 | `DURATION_S` | 1800 | How long the writers run |
