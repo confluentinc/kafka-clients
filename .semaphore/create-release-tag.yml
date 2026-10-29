@@ -8,9 +8,10 @@ name: create-release-tag
 #   - RUST_VERSION: the tag is rust/v<RUST_VERSION>, and "Release (Rust):"
 #     publishes ${CRATE} to crates.io.
 #   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
-#     (Python):" publishes ${PYPI_PACKAGE} to Test PyPI. For a final version,
-#     the "Publish to PyPI" promotion of the tag build (publish-pypi.yml) then
-#     publishes it to PyPI.
+#     (Python):" builds and tests the ${PYPI_PACKAGE} wheels. The "Publish to
+#     Test PyPI" promotion of the tag build (publish-testpypi.yml) publishes
+#     them to Test PyPI and, for a final version, its "Publish to PyPI"
+#     promotion (publish-pypi.yml) then publishes them to PyPI.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
 #     like any other. A rust dev version is tested and packaged, never
 #     published; a python dev version is published to Test PyPI only.
@@ -297,11 +298,11 @@ blocks:
                   continue
                 fi
                 if [ -n "${dev}" ]; then
-                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI; a dev version is never published to PyPI."
+                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI; a dev version is never published to PyPI."
                   continue
                 fi
                 case "${client}" in
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
-                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI. For a final version, then run its \"Publish to PyPI\" promotion to publish to PyPI." ;;
+                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI and, for a final version, that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
                 esac
               done
