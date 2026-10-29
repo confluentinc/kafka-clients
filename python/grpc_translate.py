@@ -437,12 +437,34 @@ def _group_metadata_to_proto(group_metadata):
     )
 
 
+# The largest whole-millisecond count a ``timedelta`` holds (about 2.7 million
+# years); Java's ``Long.MAX_VALUE`` ms is beyond it.
+_TIMEDELTA_MAX_MS = _dt.timedelta.max // _dt.timedelta(milliseconds=1)
+
+
+def _duration_of_ms(ms):
+    """Java's ``Duration.ofMillis(ms)`` as the ``timedelta`` the binding takes.
+
+    A ``timedelta`` of whole milliseconds, which the binding reads exactly; a
+    float of seconds would round a large count (``Long.MAX_VALUE`` ms becomes
+    2^63 ms, which the binding rejects with ``OverflowError``). A count beyond
+    what a ``timedelta`` holds, such as ``Long.MAX_VALUE`` ms (Java's unbounded
+    wait), becomes ``timedelta.max`` (``timedelta.min`` for a negative one): an
+    equally unbounded wait that still fits a signed 64-bit millisecond count."""
+    if ms > _TIMEDELTA_MAX_MS:
+        return _dt.timedelta.max
+    if ms < -_TIMEDELTA_MAX_MS:
+        return _dt.timedelta.min
+    return _dt.timedelta(milliseconds=ms)
+
+
 def _consumer_timeout(request):
     """The optional ``timeout_ms`` of a ConsumerService request as the keyword
-    arguments of the binding's timed overload: ``{"timeout": seconds}``, or ``{}``
-    when absent, which leaves the argument out and selects the Java overload
-    without a ``Duration`` (a ``None`` would be Java's null ``Duration``)."""
-    return {"timeout": request.timeout_ms / 1000.0} if request.HasField("timeout_ms") else {}
+    arguments of the binding's timed overload: ``{"timeout": Duration}`` (see
+    ``_duration_of_ms``), or ``{}`` when absent, which leaves the argument out
+    and selects the Java overload without a ``Duration`` (a ``None`` would be
+    Java's null ``Duration``)."""
+    return {"timeout": _duration_of_ms(request.timeout_ms)} if request.HasField("timeout_ms") else {}
 
 
 def _consumer_subscribe_kwargs(request, listener):
@@ -468,7 +490,7 @@ def _consumer_close_options(request):
     operation = CloseOptions.GroupMembershipOperation[request.group_membership_operation]
     if request.HasField("close_timeout_ms"):
         return {"option": CloseOptions(operation=operation,
-                                       timeout=request.close_timeout_ms / 1000.0)}
+                                       timeout=_duration_of_ms(request.close_timeout_ms))}
     return {"option": CloseOptions(operation=operation)}
 
 
@@ -1034,7 +1056,8 @@ def _admin_timeout(request):
     Python backends while the C++ server passed the value verbatim — a latent
     2-vs-2 split on a field every admin request type already populates.
     ``_ms``/``_close_ms`` divide a ``timedelta`` by ``timedelta(milliseconds=1)``,
-    which is exact integer arithmetic, so this round-trips."""
+    which is exact integer arithmetic, so this round-trips. (An ``Integer``
+    ``timeoutMs`` always fits a ``timedelta``.)"""
     return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
 
 
@@ -1045,7 +1068,7 @@ def _admin_close_timeout(request):
     facades' close() turns into a call without the argument. Shared by both servers' Close
     handlers, which previously each divided by 1000.0 inline and inherited the
     same 1 ms truncation as `_admin_timeout`."""
-    return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
+    return _duration_of_ms(request.timeout_ms) if request.HasField("timeout_ms") else None
 
 
 def _admin_retry_on_quota(request):
@@ -2096,10 +2119,11 @@ def _admin_scram_alterations(protos):
 
     `is_deletion` is the discriminant and cannot be inferred: both forms carry a
     user and a mechanism, so "password is absent" would conflate a deletion with
-    a malformed upsertion. A None salt selects the admin facade's (and Java's)
-    salt-generating constructor, while a present-but-empty one selects the
-    salt-supplying constructor with a zero-length salt -- so `HasField("salt")`
-    is the test, not truthiness.
+    a malformed upsertion. An absent salt leaves the `salt` keyword out, which
+    selects Java's salt-generating constructor (an explicit `salt=None` is
+    Java's null salt and raises `TypeError`), while a present-but-empty one
+    selects the salt-supplying constructor with a zero-length salt -- so
+    `HasField("salt")` is the test, not truthiness.
     """
     out = []
     for p in protos:

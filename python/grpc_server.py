@@ -40,7 +40,6 @@ the future fires; KafkaConsumer's waiting calls drain their completions and
 callbacks on the handler thread itself.
 """
 
-import datetime as _dt
 import logging
 import os
 import sys
@@ -85,6 +84,7 @@ from grpc_translate import (  # noqa: E402
     ListenerAction,
     LoggingRebalanceListener,
     _binding_error,
+    _duration_of_ms,
     _consumer_close_options,
     _consumer_subscribe_kwargs,
     _consumer_timeout,
@@ -403,7 +403,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # KafkaProducer.close(*, timeout=...) is Java's close(Duration), the
         # FFI's close_with_timeout. timeout_ms is milliseconds; Duration is
         # seconds / timedelta.
-        timeout = _dt.timedelta(milliseconds=request.timeout_ms)
+        timeout = _duration_of_ms(request.timeout_ms)
         return self._close(request.producer_id, timeout)
 
     def GetCallbackLog(self, request, context):
@@ -521,7 +521,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            records = consumer.poll(timeout=request.timeout_ms / 1000.0)
+            records = consumer.poll(timeout=_duration_of_ms(request.timeout_ms))
         except Exception as e:  # noqa: BLE001
             # As in _run_status: a binding error is the reply's, anything else
             # is re-raised.
