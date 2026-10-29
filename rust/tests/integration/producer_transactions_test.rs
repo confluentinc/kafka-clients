@@ -24,8 +24,7 @@
 //! native: the admin client, the seed producers and the verifying consumers,
 //! except where the consumer is itself what the Java test checks
 //! ([`read_committed_consumer_should_not_see_undecided_data`],
-//! [`delayed_fetch_includes_aborted_transaction`]). The one scenario that stays
-//! Rust-only is listed at its definition with the reason.
+//! [`delayed_fetch_includes_aborted_transaction`]).
 //!
 //! These are the four scenarios §Phase-8 specifies, against the pooled
 //! testcontainers cluster:
@@ -67,7 +66,7 @@
 //!   `testBumpTransactionalEpochWithTV2Enabled` (CONSUMER row) →
 //!   `test_bump_transactional_epoch_with_tv2_enabled` and
 //!   `testBumpTransactionalEpochWithTV2Disabled` (CONSUMER row) →
-//!   [`test_bump_transactional_epoch_with_tv2_disabled`]
+//!   `test_bump_transactional_epoch_with_tv2_disabled`
 //!   (each on a dedicated cluster, since they stop brokers — see
 //!   [`transactions_test_dedicated_cluster`])
 //!
@@ -173,7 +172,7 @@ use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::RecordMetadata;
 use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptionsBuilder};
 
-use crate::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory, RustNativeFactory};
+use crate::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker, txn_single_broker};
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
@@ -3662,9 +3661,8 @@ crate::multilanguage_test!(
 // (`TransactionsTest.scala:47`) plus one isolated controller — carrying the full
 // `overridingProps` (`TransactionsTest.scala:61-76`), one per backend arm. A
 // gRPC backend's container reaches the restarted brokers as the native client
-// does (each broker's advertised ports survive a restart). Every one but
-// `testBumpTransactionalEpochWithTV2Disabled` runs on every backend; that one's
-// reason is at its definition.
+// does (each broker's advertised ports survive a restart). Each runs on every
+// backend.
 
 /// `TransactionsTest.overridingProps` (`TransactionsTest.scala:61-76`) on a
 /// dedicated `Type::Kraft` cluster of `brokerCount = 3` brokers and one
@@ -4157,14 +4155,28 @@ async fn bump_transactional_epoch_with_tv2_enabled<F: ProducerBackendFactory>(ct
     let previous_producer_epoch = producer_state_entry.producer_epoch();
 
     ctx.cluster().shutdown_broker(partition_leader).await; // kill the partition leader to prevent the batch from being submitted
-    let failed_future = send_record(
-        &producer,
-        producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
-    )
-    .await
-    .expect("send");
-    tokio::time::sleep(Duration::from_millis(6000)).await; // Wait for the record to time out
-    ctx.cluster().start_broker(partition_leader).await;
+    // Java sends, sleeps 6 s and restarts the broker, the send returning at once.
+    // A gRPC backend's `send` returns only once the record's future is done, so
+    // the sleep and the restart run beside the send rather than after it: run in
+    // sequence, the broker would stay down until the future completes. When the
+    // stopped broker is also the transaction coordinator, a pending transactional
+    // request (the test-topic partition's `AddPartitionsToTxn` at TV1) keeps the
+    // Sender in `maybeSendAndPollTransactionalRequest`, which returns before
+    // batches are expired (`Sender#runOnce`, as the core does), so the record
+    // would then fail only when the coordinator aborts the transaction, with
+    // `ProducerFenced`, rather than at `delivery.timeout.ms`. On the native arm
+    // `send` returns at once, so the order is Java's.
+    let (sent, ()) = tokio::join!(
+        send_record(
+            &producer,
+            producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(6000)).await; // Wait for the record to time out
+            ctx.cluster().start_broker(partition_leader).await;
+        }
+    );
+    let failed_future = sent.expect("send");
 
     // `assertFutureThrows(classOf[TimeoutException], failedFuture)`: the class is
     // Java's contract; the message prefix `ProducerBatch` builds is asserted too.
@@ -4263,23 +4275,15 @@ crate::multilanguage_test!(
 /// Deviation: Java reads the partition leader's `producerStateManager` in
 /// process; here the same active-producer entries (id and epoch) come from
 /// `Admin.describeProducers` on `test-topic-0`, which reports that state.
-///
-/// Rust-only: the test asserts that `send` itself fails (Java's
-/// `assertThrows(classOf[KafkaException], () => producer.send(...))`), and the
-/// gRPC harness cannot tell a `send` that fails from a `send` whose future
-/// fails — its `Send` reply carries one error either way, which
-/// `MultilanguageProducer` returns through the future.
-// MULTILANGUAGE: blocked by a harness gap (the gRPC `SendResponse` does not
-// distinguish an error `send` returns from one its future completes with).
-async fn bump_transactional_epoch_with_tv2_disabled() {
-    let mut ctx = TestContext::new(transactions_test_dedicated_cluster()).await;
-    downgrade_transaction_version_to_1(&ctx).await;
-    let (topic1, topic2) = create_txn_test_topics(&mut ctx).await;
+async fn bump_transactional_epoch_with_tv2_disabled<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
+    downgrade_transaction_version_to_1(ctx).await;
+    let (topic1, topic2) = create_txn_test_topics(ctx).await;
     let bootstrap = ctx.bootstrap_servers().to_string();
     let default_linger: u64 = 5;
     let producer = create_transactional_producer_with_delivery_timeout_ms_request_timeout_ms(
-        &RustNativeFactory,
-        &ctx,
+        factory,
+        ctx,
         &ctx.group_id("transactionalProducer"),
         5000 + default_linger,
         5000,
@@ -4290,11 +4294,11 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
     // Create a topic with RF=1 so that a single broker failure will render it unavailable
     let test_topic = ctx.topic("test-topic");
     {
-        let admin = txn_test_admin(&ctx);
+        let admin = txn_test_admin(ctx);
         test_utils::create_topic(admin.as_ref(), &test_topic, TXN_TEST_NUM_PARTITIONS, 1).await;
         admin.close().await;
     }
-    let partition_leader = partition_zero_leader(&ctx, &test_topic).await;
+    let partition_leader = partition_zero_leader(ctx, &test_topic).await;
     let test_tp = TopicPartition::new(test_topic.clone(), 0);
 
     producer.init_transactions().await.expect("initTransactions");
@@ -4309,7 +4313,7 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
     producer.commit_transaction().await.expect("commitTransaction");
 
     // Java's `activeProducers` iterator (`assertTrue(activeProducersIter.hasNext)`).
-    let producer_state_entry = wait_for_single_producer_state(&ctx, &test_tp).await;
+    let producer_state_entry = wait_for_single_producer_state(ctx, &test_tp).await;
     let producer_id = producer_state_entry.producer_id();
     let initial_producer_epoch = producer_state_entry.producer_epoch();
 
@@ -4326,22 +4330,39 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
         .expect("successfulFuture.get(20, SECONDS)");
 
     ctx.cluster().shutdown_broker(partition_leader).await; // kill the partition leader to prevent the batch from being submitted
-    let failed_future = send_record(
-        &producer,
-        producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
-    )
-    .await
-    .expect("send");
-    tokio::time::sleep(Duration::from_millis(6000)).await; // Wait for the record to time out
-    ctx.cluster().start_broker(partition_leader).await;
+    // Java sends, sleeps 6 s and restarts the broker, the send returning at once.
+    // A gRPC backend's `send` returns only once the record's future is done, so
+    // the sleep and the restart run beside the send rather than after it: run in
+    // sequence, the broker would stay down until the future completes. When the
+    // stopped broker is also the transaction coordinator, a pending transactional
+    // request (the test-topic partition's `AddPartitionsToTxn` at TV1) keeps the
+    // Sender in `maybeSendAndPollTransactionalRequest`, which returns before
+    // batches are expired (`Sender#runOnce`, as the core does), so the record
+    // would then fail only when the coordinator aborts the transaction, with
+    // `ProducerFenced`, rather than at `delivery.timeout.ms`. On the native arm
+    // `send` returns at once, so the order is Java's.
+    let (sent, ()) = tokio::join!(
+        send_record(
+            &producer,
+            producer_record_with_expected_transaction_status(&test_topic, Some(0), "3", "3", false),
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(6000)).await; // Wait for the record to time out
+            ctx.cluster().start_broker(partition_leader).await;
+        }
+    );
+    let failed_future = sent.expect("send");
 
     // `assertFutureThrows(classOf[TimeoutException], failedFuture)`: the class is
     // Java's contract; the message prefix `ProducerBatch` builds is asserted too.
     let e = failed_future.get().await.expect_err("the batch must expire");
-    assert!(matches!(e, Error::Timeout(_)), "expected TimeoutException, got {e:?}");
+    assert!(
+        matches!(e, Error::Timeout(_)),
+        "expected TimeoutException on the {backend} backend, got {e:?}"
+    );
     assert!(
         e.message().starts_with(&format!("Expiring 1 record(s) for {test_topic}-0:")),
-        "unexpected expiry message: {}",
+        "unexpected expiry message on the {backend} backend: {}",
         e.message()
     );
     // Ensure the producer transitions to abortable_error state.
@@ -4355,7 +4376,7 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
             .await
             .is_err_and(|e| e.is_kafka_error())
         },
-        "The send request never failed as expected.",
+        &format!("The send request never failed as expected ({backend} backend)."),
         test_utils::DEFAULT_MAX_WAIT_MS,
         test_utils::DEFAULT_PAUSE_MS,
     )
@@ -4367,7 +4388,10 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
     )
     .await
     .expect_err("send must fail while the transaction is in an abortable error state");
-    assert!(e.is_kafka_error(), "expected a KafkaException, got {e:?}");
+    assert!(
+        e.is_kafka_error(),
+        "expected a KafkaException on the {backend} backend, got {e:?}"
+    );
     producer.abort_transaction().await.expect("abortTransaction");
 
     producer.begin_transaction().expect("beginTransaction");
@@ -4399,7 +4423,7 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
     // Producers can safely abort and continue after the last record of a transaction timing out, so it's possible to
     // get here without having bumped the epoch. If bumping the epoch is possible, the producer will attempt to, so
     // check there that the epoch has actually increased
-    let admin = txn_test_admin(&ctx);
+    let admin = txn_test_admin(ctx);
     let producer_state_entry = producer_states(admin.as_ref(), &test_tp)
         .await
         .expect("describeProducers")
@@ -4409,22 +4433,24 @@ async fn bump_transactional_epoch_with_tv2_disabled() {
     let producer_state_entry = producer_state_entry.expect("assertNotNull(producerStateEntry)");
     assert!(
         producer_state_entry.producer_epoch() > initial_producer_epoch,
-        "InitialProduceEpoch: {initial_producer_epoch} ProducerStateEntry: {producer_state_entry:?}"
+        "InitialProduceEpoch: {initial_producer_epoch} ProducerStateEntry: {producer_state_entry:?} ({backend} backend)"
     );
 
     consumer.close().await.expect("consumer close");
-    <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::close_with_timeout(&producer, Duration::ZERO)
+    producer
+        .close_with_timeout(Duration::ZERO)
         .await
         .expect("producer close(Duration.ZERO)");
     ctx.cleanup().await;
 }
 
-/// `testBumpTransactionalEpochWithTV2Disabled`, row `consumer,false`
-/// (`TransactionsTest.scala:818`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_bump_transactional_epoch_with_tv2_disabled() {
-    bump_transactional_epoch_with_tv2_disabled().await;
-}
+// `testBumpTransactionalEpochWithTV2Disabled`, row `consumer,false`
+// (`TransactionsTest.scala:818`).
+crate::multilanguage_test!(
+    test_bump_transactional_epoch_with_tv2_disabled,
+    bump_transactional_epoch_with_tv2_disabled,
+    transactions_test_dedicated_cluster()
+);
 
 // ---------------------------------------------------------------------------
 // Multilanguage instantiations of scenarios 2-4 (Milestone 11 CFFI)
