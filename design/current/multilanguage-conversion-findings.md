@@ -142,8 +142,8 @@ state:
   The reverse order fails the same way: after `subscribe([t1], L1)`, `subscribe(pattern, L2)` (or
   `subscribe(pattern)`) fails the type check by itself and the consumer keeps `[t1]` and its
   membership (`SubscriptionState#subscribe(SubscriptionPattern,Optional)` and the core's
-  `subscribe_with_pattern` also register first, and `subscribe_to_regex` writes the mirror only
-  after `Ok`). The table holds with that call as the failed call. A `subscribe` whose event times
+  `SubscriptionState::subscribe_with_pattern`, which `process_topic_re2j_pattern_subscription_change`
+  calls, also register first, and `subscribe_to_regex` writes the mirror only after `Ok`). The table holds with that call as the failed call. A `subscribe` whose event times
   out while the background thread still processes it lands the same way. Only an `assign` in
   between needs an `unsubscribe()` first, which leaves the group; even then `close()` runs Java
   4.4's stale-snapshot `onPartitionsLost` (finding #1), Java on the slot, the core on the mirror,
