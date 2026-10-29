@@ -47,7 +47,7 @@ The binding-agnostic rules below come from root `CLAUDE.md` "Python Binding Conv
 5. **Never call `KafkaFuture_get`.** The `KafkaFuture_t*` handed to a send's completion is destroyed unread. The delivery result comes from the per-record `Callback_t`.
 6. **One `Callback_t` per record.** In `on_completion` the order is:
    1. run the user callback;
-   2. settle the record's Promise;
+   2. complete the record's `KafkaFuture` (D8; the `send()` Promise settles earlier, at hand-over);
    3. call `__set_callback_result(view, id, NULL, err)` exactly once.
 
    No reports are sent once destroy has begun.
@@ -121,7 +121,7 @@ Every file carries the Apache 2.0 header with Confluent Inc. as copyright holder
 
 **Notify hook.** The hook calls `napi_call_threadsafe_function(tsfn, NULL, napi_tsfn_nonblocking)` and does nothing else. This is the N-API form of what the existing librdkafka JS client does with `uv_async_send`, and of Python's condvar or wake-fd signal.
 
-**Drain.** The tsfn's `call_js` runs on the JS thread and loops `__execute_callbacks_err` while it returns > 0. All delivery callbacks and `_cb` completions therefore run on the JS thread, so JS values can be created there directly with no extra hop.
+**Drain.** The tsfn's `call_js` runs on the JS thread and loops `__execute_callbacks_err` while it returns > 0. `send()` also runs the same drain on entry, periodically (the pump, mirroring Python `AsyncProducer._PUMP_EVERY`), so a loop of sends the producer takes at once still releases delivery callbacks; a drain started inside another drain is a no-op, and a run of such sends periodically yields one event-loop turn (`_FAST_PATH_YIELD_EVERY`). Neither holds a record back. All delivery callbacks and `_cb` completions therefore run on the JS thread, so JS values can be created there directly with no extra hop.
 
 **Keeping Node alive.** The tsfn is `ref`'d while any send, flush or close is outstanding and `unref`'d when the count reaches zero. An idle producer does not keep the process alive; one with pending work does, which is what users expect from a socket-like resource.
 
