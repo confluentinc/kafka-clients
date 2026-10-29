@@ -106,6 +106,7 @@ using confluent::kafka::test::CurrentLagResponse;
 using confluent::kafka::test::GroupMetadataResponse;
 using confluent::kafka::test::ListTopicsResponse;
 using confluent::kafka::test::LongOffsetMap;
+using confluent::kafka::test::ListenerActionRequest;
 using confluent::kafka::test::LongOffsetsResponse;
 using confluent::kafka::test::OffsetAndTimestampMap;
 using confluent::kafka::test::OffsetAndTimestampResponse;
@@ -494,6 +495,7 @@ constexpr const char* KIND_REVOKED = "revoked";
 constexpr const char* KIND_LOST = "lost";
 constexpr const char* KIND_COMMIT = "commit";
 constexpr const char* KIND_DELIVERY = "delivery";
+constexpr const char* KIND_LISTENER_ACTION = "listener_action";
 
 // The CallbackLogEntry.offsets key for a partition.
 std::string offset_key(const std::string& topic, int32_t partition) {
@@ -602,22 +604,33 @@ struct LogState {
 // thread that is inside the consumer's poll() / close() / unsubscribe(), and
 // the membership state machine does not advance until the report
 // (consumer-threading.md §31).
+// Copies a BORROWED list of `kafka_common_TopicPartition_t *` into a repeated
+// CallbackLogPartition field; nothing is destroyed.
+void copy_partitions_into(::google::protobuf::RepeatedPtrField<CallbackLogPartition>* dst,
+                          const kafka_List_t* partitions) {
+  if (partitions == nullptr) return;
+  const int32_t n = kafka_List_size(partitions);
+  for (int32_t i = 0; i < n; i++) {
+    const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
+    CallbackLogPartition* p = dst->Add();
+    const char* topic = kafka_common_TopicPartition_topic(tp);
+    p->set_topic(topic ? topic : "");
+    p->set_partition(kafka_common_TopicPartition_partition(tp));
+  }
+}
+
+// Appends the `kind` entry of one rebalance-listener invocation.
+void append_rebalance(LogState* state, const kafka_List_t* partitions, const char* kind) {
+  CallbackLogEntry entry;
+  entry.set_kind(kind);
+  copy_partitions_into(entry.mutable_partitions(), partitions);
+  state->log->append(state->client_id, std::move(entry));
+}
+
 void log_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_id,
                    const char* kind) {
   auto* state = static_cast<LogState*>(self);
-  CallbackLogEntry entry;
-  entry.set_kind(kind);
-  if (partitions != nullptr) {
-    const int32_t n = kafka_List_size(partitions);
-    for (int32_t i = 0; i < n; i++) {
-      const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
-      CallbackLogPartition* p = entry.add_partitions();
-      const char* topic = kafka_common_TopicPartition_topic(tp);
-      p->set_topic(topic ? topic : "");
-      p->set_partition(kafka_common_TopicPartition_partition(tp));
-    }
-  }
-  state->log->append(state->client_id, std::move(entry));
+  append_rebalance(state, partitions, kind);
   kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
@@ -637,6 +650,140 @@ extern "C" void log_partitions_revoked(void* self, const kafka_List_t* partition
 extern "C" void log_partitions_lost(void* self, const kafka_List_t* partitions,
                                     int64_t callback_id) {
   log_rebalance(self, partitions, callback_id, KIND_LOST);
+}
+
+// ---------------------------------------------------------------------------
+// Listener actions (ConsumerService.SetListenerAction)
+//
+// The `self` of a logging listener that also calls back into its consumer from
+// inside one method, once, the first time that method's partitions contain
+// `partition`, and logs the result as a KIND_LISTENER_ACTION entry (encoding in
+// producer_service.proto's CallbackLogEntry; grpc_translate.py's
+// ListenerAction runs the same calls through the Python binding). The calls go
+// through the consumer's reentrancy handle, `kafka_consumer_Consumer_handle`:
+// the consumer itself is held by the blocking call (poll / unsubscribe / close)
+// that is running the listener on this thread.
+//
+// One heap instance per registration, owned by the service's
+// `action_states_` for the whole session, like LogState: a registration's
+// `self` must outlive its release point (the next subscribe_*, unsubscribe or
+// the consumer's destruction), and there is no destroy hook. Its handle is
+// released at Close, after the consumer is destroyed (the C API lets the
+// handle outlive the consumer, so nothing the consumer runs can find it gone).
+// ---------------------------------------------------------------------------
+
+struct ListenerActionSpec {
+  confluent::kafka::test::ListenerAction action = confluent::kafka::test::LISTENER_ACTION_NONE;
+  std::string method;
+  std::string topic;
+  int32_t partition = 0;
+  int64_t offset = 0;
+};
+
+struct ActionListenerState {
+  LogState* log;
+  ListenerActionSpec spec;
+  kafka_consumer_ConsumerHandle_t* handle;
+  bool done = false;
+};
+
+void copy_error_into(CallbackLogEntry* entry, const kafka_common_Error_t* error);
+
+bool list_contains(const kafka_List_t* partitions, const std::string& topic, int32_t partition) {
+  if (partitions == nullptr) return false;
+  const int32_t n = kafka_List_size(partitions);
+  for (int32_t i = 0; i < n; i++) {
+    const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
+    const char* t = kafka_common_TopicPartition_topic(tp);
+    if (kafka_common_TopicPartition_partition(tp) == partition && t != nullptr && topic == t) return true;
+  }
+  return false;
+}
+
+// Runs the action if this invocation (`method`, `partitions`) is its trigger
+// and it has not run yet, then logs it. The listener still reports success: a
+// failed call is logged, it does not fail the rebalance.
+void maybe_run_listener_action(ActionListenerState* state, const kafka_List_t* partitions,
+                               const char* method) {
+  const ListenerActionSpec& spec = state->spec;
+  if (state->done || spec.method != method || !list_contains(partitions, spec.topic, spec.partition)) {
+    return;
+  }
+  state->done = true;
+  CallbackLogEntry entry;
+  entry.set_kind(KIND_LISTENER_ACTION);
+  entry.set_method(method);
+  copy_partitions_into(entry.mutable_partitions(), partitions);
+  kafka_common_TopicPartition_t* tp = kafka_common_TopicPartition_new(spec.topic.c_str(), spec.partition);
+  kafka_List_t* tps = kafka_List_new();
+  kafka_List_add(tps, tp);
+  kafka_common_Error_t* err = nullptr;
+  switch (spec.action) {
+    case confluent::kafka::test::LISTENER_ACTION_ASSIGNMENT: {
+      // Owned list of owned handles, sorted; destroying it frees both.
+      kafka_List_t* assignment = kafka_consumer_ConsumerHandle_assignment(state->handle);
+      copy_partitions_into(entry.mutable_result_partitions(), assignment);
+      kafka_List_destroy(assignment);
+      break;
+    }
+    case confluent::kafka::test::LISTENER_ACTION_BEGINNING_OFFSETS: {
+      // Owned map of owned TopicPartition -> owned `int64_t *`.
+      kafka_Map_t* offsets = kafka_consumer_ConsumerHandle_beginning_offsets(state->handle, tps, &err);
+      if (err == nullptr) {
+        const int32_t n = kafka_Map_size(offsets);
+        for (int32_t i = 0; i < n; i++) {
+          const auto* key = static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(offsets, i));
+          const char* topic = kafka_common_TopicPartition_topic(key);
+          (*entry.mutable_offsets())[offset_key(topic ? topic : "", kafka_common_TopicPartition_partition(key))] =
+              *static_cast<const int64_t*>(kafka_Map_value(offsets, i));
+        }
+        kafka_Map_destroy(offsets);
+      }
+      break;
+    }
+    case confluent::kafka::test::LISTENER_ACTION_POSITION: {
+      const int64_t position = kafka_consumer_ConsumerHandle_position(state->handle, tp, &err);
+      if (err == nullptr) (*entry.mutable_offsets())[offset_key(spec.topic, spec.partition)] = position;
+      break;
+    }
+    case confluent::kafka::test::LISTENER_ACTION_SEEK_AND_PAUSE:
+      kafka_consumer_ConsumerHandle_seek_with_offset(state->handle, tp, spec.offset, &err);
+      if (err == nullptr) kafka_consumer_ConsumerHandle_pause(state->handle, tps, &err);
+      break;
+    default:
+      entry.set_error("c server: unknown listener action " + std::to_string(spec.action));
+      break;
+  }
+  if (err != nullptr) {
+    copy_error_into(&entry, err);
+    kafka_common_Error_destroy(err);
+  }
+  kafka_List_destroy(tps);
+  kafka_common_TopicPartition_destroy(tp);
+  state->log->log->append(state->log->client_id, std::move(entry));
+}
+
+void action_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_id,
+                      const char* kind) {
+  auto* state = static_cast<ActionListenerState*>(self);
+  append_rebalance(state->log, partitions, kind);
+  if (std::strcmp(kind, KIND_LOST) != 0) maybe_run_listener_action(state, partitions, kind);
+  kafka_consumer_Consumer__set_callback_result(state->log->consumer, callback_id, nullptr, nullptr);
+}
+
+extern "C" void action_partitions_assigned(void* self, const kafka_List_t* partitions,
+                                           int64_t callback_id) {
+  action_rebalance(self, partitions, callback_id, KIND_ASSIGNED);
+}
+
+extern "C" void action_partitions_revoked(void* self, const kafka_List_t* partitions,
+                                          int64_t callback_id) {
+  action_rebalance(self, partitions, callback_id, KIND_REVOKED);
+}
+
+extern "C" void action_partitions_lost(void* self, const kafka_List_t* partitions,
+                                       int64_t callback_id) {
+  action_rebalance(self, partitions, callback_id, KIND_LOST);
 }
 
 // Copies a BORROWED error's message into `entry`; nothing is destroyed.
@@ -1639,10 +1786,19 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       // next subscribe_*, unsubscribe, or the consumer's destruction). The
       // registration is COPIED by subscribe, success or failure, so the handle
       // is destroyed right after.
+      //
+      // A pending SetListenerAction belongs to this registration: its
+      // listener's `self` is an ActionListenerState instead, holding the
+      // consumer's reentrancy handle (session-lifetime too, see the struct).
+      ActionListenerState* action_state = take_action_state(req->consumer_id(), c);
       kafka_consumer_ConsumerRebalanceListener_t* listener =
-          kafka_consumer_ConsumerRebalanceListener_new(
-              log_state_for(req->consumer_id()), log_partitions_revoked,
-              log_partitions_assigned, log_partitions_lost);
+          action_state == nullptr
+              ? kafka_consumer_ConsumerRebalanceListener_new(
+                    log_state_for(req->consumer_id()), log_partitions_revoked,
+                    log_partitions_assigned, log_partitions_lost)
+              : kafka_consumer_ConsumerRebalanceListener_new(
+                    action_state, action_partitions_revoked, action_partitions_assigned,
+                    action_partitions_lost);
       if (pattern != nullptr) {
         kafka_consumer_Consumer_subscribe_with_pattern_listener(c, pattern, listener, &err);
       } else {
@@ -2177,6 +2333,20 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // afterwards. The log entries stay in callback_log_ and the
     // LogState stays in log_states_, so GetCallbackLog still works post-close.
     entry.destroy();
+    // The action listeners' handles go last: the C API lets a handle outlive
+    // its consumer, so nothing the consumer ran up to its `_destroy` found
+    // one released. Their states stay, like LogState.
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      pending_actions_.erase(req->consumer_id());
+      auto it = action_states_.find(req->consumer_id());
+      if (it != action_states_.end()) {
+        for (auto& state : it->second) {
+          kafka_consumer_ConsumerHandle_destroy(state->handle);
+          state->handle = nullptr;
+        }
+      }
+    }
     return grpc::Status::OK;
   }
 
@@ -2215,7 +2385,47 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status SetListenerAction(grpc::ServerContext*, const ListenerActionRequest* req,
+                                 StatusResponse* resp) override {
+    if (consumer_for(req->consumer_id()) == nullptr) return unknown(resp, req->consumer_id());
+    std::lock_guard<std::mutex> lock(mu_);
+    if (req->action() == confluent::kafka::test::LISTENER_ACTION_NONE) {
+      pending_actions_.erase(req->consumer_id());
+      return grpc::Status::OK;
+    }
+    if (req->method() != KIND_ASSIGNED && req->method() != KIND_REVOKED) {
+      *resp->mutable_error() = make_synthetic_error(
+          "listener action method must be 'assigned' or 'revoked', got '" + req->method() + "'",
+          kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
+      return grpc::Status::OK;
+    }
+    ListenerActionSpec spec;
+    spec.action = req->action();
+    spec.method = req->method();
+    spec.topic = req->partition().topic();
+    spec.partition = req->partition().partition();
+    spec.offset = req->offset();
+    pending_actions_[req->consumer_id()] = std::move(spec);
+    return grpc::Status::OK;
+  }
+
  private:
+  // Takes the consumer's pending SetListenerAction, if any, into a new
+  // session-lifetime ActionListenerState with a fresh reentrancy handle of
+  // `consumer`; nullptr when there is none.
+  ActionListenerState* take_action_state(uint64_t id, kafka_consumer_Consumer_t* consumer) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto pending = pending_actions_.find(id);
+    if (pending == pending_actions_.end()) return nullptr;
+    auto log_state = log_states_.find(id);
+    if (log_state == log_states_.end()) return nullptr;
+    auto* state = new ActionListenerState{log_state->second.get(), std::move(pending->second),
+                                          kafka_consumer_Consumer_handle(consumer)};
+    pending_actions_.erase(pending);
+    action_states_[id].push_back(std::unique_ptr<ActionListenerState>(state));
+    return state;
+  }
+
   // The consumer's `Consumer` view, or nullptr for an unknown (or closed) id.
   kafka_consumer_Consumer_t* consumer_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -2361,6 +2571,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   // `self` for the rebalance-listener and commit callbacks; owned here, one
   // per consumer, for the whole session (never erased by Close — see LogState).
   std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
+  // SetListenerAction's pending actions, each taken by the consumer's next
+  // Subscribe with with_listener.
+  std::unordered_map<uint64_t, ListenerActionSpec> pending_actions_;
+  // `self` of the action listeners Subscribe registered; owned here for the
+  // session (see ActionListenerState). Their handles are released at Close.
+  std::unordered_map<uint64_t, std::vector<std::unique_ptr<ActionListenerState>>> action_states_;
   // Has its own mutex; see CallbackLog.
   CallbackLog callback_log_;
   std::atomic<uint64_t> next_id_{1};
