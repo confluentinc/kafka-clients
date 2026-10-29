@@ -344,6 +344,10 @@ message CallbackLogEntry {
   // "listener_action" only: the partition set the ASSIGNMENT action read.
   // Empty for every other kind and action.
   repeated CallbackLogPartition result_partitions = 6;
+  // The class of the error `error` describes, as KafkaError.code: the FFI
+  // error code (kafka_common_Error_e), so the reader rebuilds the error's class
+  // without parsing text. 0 (NONE) when the callback saw no error.
+  int32 error_code = 7;
 }
 
 message CallbackLogResponse {
