@@ -13,6 +13,8 @@ breaking changes.
 - The FFI layer (the `ffi` feature) is experimental right now.
 - Windows is not supported yet.
 
+## [1.0.0-rc.2] - 2026-10-29
+
 ### Common
 
 - **Breaking:** the compression codecs, TLS and SCRAM credential salting are

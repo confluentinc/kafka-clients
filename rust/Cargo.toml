@@ -3,7 +3,7 @@ members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test
 
 [package]
 name = "confluent-kafka"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"

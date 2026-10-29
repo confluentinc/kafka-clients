@@ -182,7 +182,7 @@ and TLS only:
 
 ```toml
 [dependencies]
-confluent-kafka = { version = "1.0.0-rc.1", default-features = false, features = ["lz4", "webpki-roots"] }
+confluent-kafka = { version = "1.0.0-rc.2", default-features = false, features = ["lz4", "webpki-roots"] }
 ```
 
 ## Examples
