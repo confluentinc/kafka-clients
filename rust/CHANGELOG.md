@@ -23,6 +23,12 @@ breaking changes.
   store", since no other default trust store exists yet. A later one is then a
   feature of its own, and `default-features = false` selects it without the
   bundle.
+- **Breaking:** `Uuid::from_string` applies Java's `Base64.getUrlDecoder()` rules to `=`
+  padding: a `=` that starts a 4-character unit, a single `=` after two
+  characters, or anything after the padding is an `IllegalArgumentError` with
+  Java's message, where it was accepted or reported as a wrong decoded length.
+  A one-character input and a last unit of one character also report Java's
+  messages (#269).
 
 ## [1.0.0-rc.1] - 2026-10-28
 
