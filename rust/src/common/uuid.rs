@@ -208,55 +208,88 @@ fn base64_url_encode(data: &[u8]) -> String {
     result
 }
 
-/// Base64 URL decode (matches Java's Base64.getUrlDecoder())
+/// Base64 URL decode (matches Java's Base64.getUrlDecoder().decode(String), errors included)
+///
+/// Padding is optional, but a `=` ends the data and must complete the last 4-character unit:
+/// one `=` after three characters, two after two. Nothing may follow it.
 fn base64_url_decode(s: &str) -> Result<Vec<u8>, String> {
-    let mut result = Vec::new();
     // `Base64.Decoder.decode(String)` reads the string as ISO-8859-1 (`src.getBytes(ISO_8859_1)`):
     // a char it cannot encode, above U+00FF, becomes `?`.
     let bytes: Vec<u8> = s.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect();
+    // Java sizes the output first, and that rejects a single character before any is decoded.
+    if bytes.len() == 1 {
+        return Err("Input byte[] should at least have 2 bytes for base64 bytes".to_string());
+    }
+
+    let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut unit = [0u8; 4];
+    // How many characters of the current 4-character unit have been read.
+    let mut unit_len = 0;
     let mut i = 0;
 
     while i < bytes.len() {
-        let mut buf = [0u8; 4];
-        let mut buf_len = 0;
+        let c = bytes[i];
+        i += 1;
 
-        // Collect up to 4 valid base64 characters
-        while buf_len < 4 && i < bytes.len() {
-            let c = bytes[i];
-            i += 1;
+        let val = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => {
+                // Padding is the end of the data. It may not start a unit, and after two
+                // characters it must be `==`.
+                let complete = match unit_len {
+                    0 => false,
+                    2 => {
+                        let second = bytes.get(i) == Some(&b'=');
+                        i += 1;
+                        second
+                    },
+                    _ => true,
+                };
+                if !complete {
+                    return Err("Input byte array has wrong 4-byte ending unit".to_string());
+                }
+                break;
+            },
+            // Java: `"Illegal base64 character " + Integer.toString(src[sp - 1], 16)`, where
+            // `src[sp - 1]` is a signed `byte`.
+            _ => {
+                let signed = c as i8;
+                return Err(if signed < 0 {
+                    format!("Illegal base64 character -{:x}", -i32::from(signed))
+                } else {
+                    format!("Illegal base64 character {signed:x}")
+                });
+            },
+        };
 
-            let val = match c {
-                b'A'..=b'Z' => c - b'A',
-                b'a'..=b'z' => c - b'a' + 26,
-                b'0'..=b'9' => c - b'0' + 52,
-                b'-' => 62,
-                b'_' => 63,
-                b'=' => break, // Padding character (though we don't use it)
-                // Java: `"Illegal base64 character " + Integer.toString(src[sp - 1], 16)`, where
-                // `src[sp - 1]` is a signed `byte`.
-                _ => {
-                    let signed = c as i8;
-                    return Err(if signed < 0 {
-                        format!("Illegal base64 character -{:x}", -i32::from(signed))
-                    } else {
-                        format!("Illegal base64 character {signed:x}")
-                    });
-                },
-            };
+        unit[unit_len] = val;
+        unit_len += 1;
+        if unit_len == 4 {
+            result.push((unit[0] << 2) | (unit[1] >> 4));
+            result.push((unit[1] << 4) | (unit[2] >> 2));
+            result.push((unit[2] << 6) | unit[3]);
+            unit_len = 0;
+        }
+    }
 
-            buf[buf_len] = val;
-            buf_len += 1;
-        }
+    // The data ended, at the end of the input or at its padding, inside a unit.
+    match unit_len {
+        1 => return Err("Last unit does not have enough valid bits".to_string()),
+        2 => result.push((unit[0] << 2) | (unit[1] >> 4)),
+        3 => {
+            result.push((unit[0] << 2) | (unit[1] >> 4));
+            result.push((unit[1] << 4) | (unit[2] >> 2));
+        },
+        _ => {},
+    }
 
-        if buf_len >= 2 {
-            result.push((buf[0] << 2) | (buf[1] >> 4));
-        }
-        if buf_len >= 3 {
-            result.push((buf[1] << 4) | (buf[2] >> 2));
-        }
-        if buf_len >= 4 {
-            result.push((buf[2] << 6) | buf[3]);
-        }
+    // Only padding ends the loop early, and nothing may follow it.
+    if i < bytes.len() {
+        return Err(format!("Input byte array has incorrect ending byte at {i}"));
     }
 
     Ok(result)
@@ -562,5 +595,79 @@ mod tests {
     #[test]
     fn test_from_string_illegal_base64_character() {
         assert_eq!("Illegal base64 character 2b", from_string_message("+AAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    /// Padding must complete the last 4-character unit, as `Base64.getUrlDecoder()` requires:
+    /// a `=` cannot start a unit, and after two characters it must be `==` (issue #269).
+    #[test]
+    fn test_from_string_padding_with_a_wrong_ending_unit() {
+        let a = |n: usize| "A".repeat(n);
+        for s in [
+            format!("{}=", a(22)),
+            format!("{}=A", a(22)),
+            format!("={}", a(21)),
+            format!("{}=", a(20)),
+            format!("{}==", a(20)),
+            format!("{}=A", a(20)),
+            format!("{}==A", a(20)),
+            format!("{}={}", a(8), a(8)),
+        ] {
+            assert_eq!("Input byte array has wrong 4-byte ending unit", from_string_message(&s), "{s}");
+        }
+    }
+
+    /// A last unit of one character holds 6 bits, less than a byte, with or without padding.
+    #[test]
+    fn test_from_string_last_unit_without_enough_bits() {
+        for s in [
+            "A".repeat(21),
+            format!("{}=", "A".repeat(21)),
+            format!("{}==", "A".repeat(21)),
+        ] {
+            assert_eq!("Last unit does not have enough valid bits", from_string_message(&s), "{s}");
+        }
+    }
+
+    /// Nothing may follow complete padding; Java reports the index of the first byte after it.
+    #[test]
+    fn test_from_string_bytes_after_padding() {
+        assert_eq!(
+            "Input byte array has incorrect ending byte at 20",
+            from_string_message(&format!("{}==AA", "A".repeat(18)))
+        );
+        assert_eq!("Input byte array has incorrect ending byte at 4", from_string_message("AAA=A"));
+    }
+
+    /// Java rejects a single character before decoding it, even an illegal one.
+    #[test]
+    fn test_from_string_single_character() {
+        assert_eq!(
+            "Input byte[] should at least have 2 bytes for base64 bytes",
+            from_string_message("A")
+        );
+        assert_eq!(
+            "Input byte[] should at least have 2 bytes for base64 bytes",
+            from_string_message("+")
+        );
+    }
+
+    /// Padding is optional; the 22 characters of a UUID decode the same with `==`, and a
+    /// well-padded string of the wrong size is still reported by its decoded length.
+    #[test]
+    fn test_from_string_valid_padding() {
+        let uuid = Uuid::new(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        let s = uuid.to_string();
+        assert_eq!(22, s.len());
+        assert_eq!(uuid, Uuid::from_string(&s).unwrap());
+        assert_eq!(uuid, Uuid::from_string(&format!("{s}==")).unwrap());
+        assert_eq!(Uuid::zero(), Uuid::from_string(&"A".repeat(22)).unwrap());
+        assert_eq!(
+            "Input string `AAAAAAAAAAAAAAAAAAAAAAA=` decoded as 17 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
+            from_string_message(&format!("{}=", "A".repeat(23)))
+        );
+        assert_eq!(
+            "Input string `` decoded as 0 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
+            from_string_message("")
+        );
     }
 }

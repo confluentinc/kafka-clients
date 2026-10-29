@@ -228,6 +228,15 @@ pub fn txn_single_broker() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
+/// A single broker with two log directories, so an actual cross-directory
+/// replica move is possible.
+pub fn two_log_dir_cluster() -> ClusterConfig {
+    ClusterConfig::with_properties(BTreeMap::from([(
+        "KAFKA_LOG_DIRS".to_string(),
+        "/tmp/kafka-logs-0,/tmp/kafka-logs-1".to_string(),
+    )]))
+}
+
 pub fn kip848_3_broker(num_partitions: u16) -> ClusterConfig {
     let mut props = BTreeMap::new();
     props.insert(

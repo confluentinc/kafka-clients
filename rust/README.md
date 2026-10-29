@@ -6,19 +6,17 @@ translation of the Apache Kafka Java client (client only), translated from
 sources are the `kafka/` submodule at the repository root).
 
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
-- **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
 - **Schema:** All Kafka message schemas are generated from the official JSON definitions
 - **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
-- **C FFI:** Behind the `ffi` feature, the crate exports the C API that the
+- **C FFI: (experimental)** Behind the `ffi` feature, the crate exports the C API that the
   bindings in `../c/` and `../python/` are built on; the build writes its header
-  to `target/include/confluent_kafka.h`. The FFI layer is experimental right now.
+  to `target/include/confluent_kafka.h` for C users or to `target/include/confluent_kafka_bindings.h` for usage by other bindings. The FFI layer is experimental right now, it means it's not supported and its API is not stable yet.
 
 ## Status
 
 **Generally Available:** this is the first GA release of the Rust client, version 1.0.0. We welcome your feedback, see [RFCs and feedback](../README.md#rfcs-and-feedback).
 
-Windows is not supported yet.
-
+See [Known limitations](#known-limitations) for what this release does not support yet.
 
 ## Directory Structure
 
@@ -47,13 +45,6 @@ Makefile                # Targets the repository root's Makefile delegates to
 ```
 
 `../design/current/structure.md` describes every module in detail.
-
-## Where commands run
-
-Run every `cargo` command **from this directory**. `rust-toolchain.toml` and
-`.cargo/config.toml` (which defines the `cargo xtask` alias) are looked up from
-the current directory, so `cargo --manifest-path rust/Cargo.toml` from the
-repository root would use a different toolchain and lose `cargo xtask`.
 
 ## Install development tools
 
@@ -156,6 +147,67 @@ Generated code is automatically updated on build. To force regeneration:
 ```bash
 cargo clean && cargo build
 ```
+
+## Cargo features
+
+Every optional dependency is a default feature, so a default build supports
+every compression type, TLS and SCRAM credential salting:
+
+| Feature | Default | What it enables |
+|---|---|---|
+| `gzip` | yes | `compression.type=gzip`, and reading gzip batches (`flate2`) |
+| `snappy` | yes | `compression.type=snappy`, and reading snappy batches (`snap`) |
+| `lz4` | yes | `compression.type=lz4`, and reading lz4 batches (`lz4_flex`) |
+| `zstd` | yes | `compression.type=zstd`, and reading zstd batches (`zstd`) |
+| `aws-lc-rs` | yes | PBKDF2 for `Admin::alter_user_scram_credentials` upsertions, and the crypto provider of `rustls` |
+| `rustls` | yes | `security.protocol` `SSL` and `SASL_SSL`; implies `aws-lc-rs` |
+| `webpki-roots` | yes | Mozilla's root certificates, trusted without `ssl.truststore.location` or `ssl.truststore.certificates`; implies `rustls` |
+| `ffi` | no | the C API |
+| `integration-tests` | no | the broker-backed test suites; implies every codec and `webpki-roots` |
+
+With a feature off, the client fails with an explicit error where it would
+need it:
+
+- a disabled `compression.type` fails the producer's configuration with a
+  `ConfigError`, and a fetched batch in a disabled codec fails with an
+  `InvalidRecordError`;
+- `SSL` and `SASL_SSL` fail the client's construction with a `ConfigError`;
+- a SCRAM upsertion without `aws-lc-rs` fails its user's future with a
+  `LocalUnsupportedOperationError`, while deletions still work.
+
+`rustls` needs a default trust store, and `webpki-roots` is the only one so
+far, so TLS is enabled through `webpki-roots`. For example, a client with lz4
+and TLS only:
+
+```toml
+[dependencies]
+confluent-kafka = { version = "1.0.0-rc.2", default-features = false, features = ["lz4", "webpki-roots"] }
+```
+
+## Examples
+
+See [./examples/README.md](./examples/README.md).
+
+## Known limitations
+
+The 1.0 release does not include the following Java client features:
+
+- **Consumer groups:** only the KIP-848 group protocol
+  (`group.protocol=consumer`). The classic protocol (`group.protocol=classic`)
+  and client-side partition assignors are not supported, and
+  `KafkaConsumer::new` returns `LocalUnsupportedOperationError` for them.
+- **Share groups:** KIP-932 share groups and the share consumer are not
+  included.
+- **SASL:** only `PLAIN`, over `SASL_PLAINTEXT` and `SASL_SSL`. SCRAM, GSSAPI
+  (Kerberos) and OAUTHBEARER are not supported, and any other `sasl.mechanism`
+  fails the configuration.
+- **TLS stores:** PEM only, as files or inline in the configuration. JKS and
+  PKCS12 keystores and truststores are not supported, so convert them to PEM.
+  Encrypted private keys are rejected.
+- **Client telemetry:** KIP-714 is not implemented, so `enable.metrics.push`
+  is not a defined configuration.
+- **Interceptors:** producer and consumer interceptors cannot be registered.
+- **Windows:** it's not supported yet.
 
 ## License
 

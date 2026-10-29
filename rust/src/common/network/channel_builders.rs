@@ -35,8 +35,10 @@ use crate::common::network::ChannelBuilder;
 use crate::common::network::ListenerName;
 use crate::common::network::PlaintextChannelBuilder;
 use crate::common::network::SaslChannelBuilder;
+#[cfg(feature = "rustls")]
 use crate::common::network::SslChannelBuilder;
 use crate::common::security::auth::SecurityProtocol;
+#[cfg(feature = "rustls")]
 use crate::common::security::ssl::SslFactory;
 use crate::common::utils::internals::LogContext;
 
@@ -75,6 +77,7 @@ impl ChannelBuilders {
     ) -> io::Result<Box<dyn ChannelBuilder>> {
         match security_protocol {
             SecurityProtocol::Plaintext => Ok(Box::new(PlaintextChannelBuilder::new(listener_name))),
+            #[cfg(feature = "rustls")]
             SecurityProtocol::Ssl => {
                 let ssl_config = ssl_config
                     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SSL protocol requires ssl_config"))?;
@@ -94,6 +97,7 @@ impl ChannelBuilders {
                     log_context,
                 )?))
             },
+            #[cfg(feature = "rustls")]
             SecurityProtocol::SaslSsl => {
                 let ssl_config = ssl_config.ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires ssl_config")
@@ -111,7 +115,25 @@ impl ChannelBuilders {
                     log_context,
                 )?))
             },
+            #[cfg(not(feature = "rustls"))]
+            SecurityProtocol::Ssl | SecurityProtocol::SaslSsl => {
+                let _ = ssl_config;
+                Err(Self::tls_disabled_error(security_protocol))
+            },
         }
+    }
+
+    /// The error a TLS security protocol fails with on a client built without
+    /// the `rustls` feature.
+    #[cfg(not(feature = "rustls"))]
+    pub(crate) fn tls_disabled_error(security_protocol: SecurityProtocol) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "Security protocol {} is not available: the client was built without the `rustls` feature",
+                security_protocol.name()
+            ),
+        )
     }
 }
 
@@ -133,6 +155,7 @@ mod tests {
         assert!(result.is_ok(), "Plaintext should not require any configs");
     }
 
+    #[cfg(feature = "rustls")]
     #[test]
     fn test_ssl_builder() {
         let ssl_config = SslConfigs::default();
@@ -147,6 +170,7 @@ mod tests {
         assert!(result.is_ok(), "SSL with valid config should succeed");
     }
 
+    #[cfg(feature = "rustls")]
     #[test]
     fn test_ssl_missing_config() {
         let result = ChannelBuilders::client_channel_builder(
@@ -184,6 +208,7 @@ mod tests {
         assert!(result.is_ok(), "SASL_PLAINTEXT with valid config should succeed");
     }
 
+    #[cfg(feature = "rustls")]
     #[test]
     fn test_sasl_ssl_builder() {
         let ssl_config = SslConfigs::default();
@@ -204,6 +229,7 @@ mod tests {
         assert!(result.is_ok(), "SASL_SSL with both configs should succeed");
     }
 
+    #[cfg(feature = "rustls")]
     #[test]
     fn test_sasl_ssl_missing_ssl_config() {
         let sasl_config = SaslConfigs {
@@ -244,5 +270,34 @@ mod tests {
             "Error should mention sasl_config: {}",
             err
         );
+    }
+
+    #[cfg(not(feature = "rustls"))]
+    #[test]
+    fn test_tls_protocols_need_rustls() {
+        let ssl_config = SslConfigs::default();
+        let sasl_config = SaslConfigs {
+            mechanism: "PLAIN".to_string(),
+            username: Some("alice".to_string()),
+            password: Some(Password::new("secret")),
+            ..SaslConfigs::default()
+        };
+        for (protocol, name) in [(SecurityProtocol::Ssl, "SSL"), (SecurityProtocol::SaslSsl, "SASL_SSL")] {
+            let err = ChannelBuilders::client_channel_builder(
+                protocol,
+                Some(&ssl_config),
+                Some(&sasl_config),
+                None,
+                "test",
+                LogContext::empty(),
+            )
+            .err()
+            .expect("TLS needs the rustls feature");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert_eq!(
+                err.to_string(),
+                format!("Security protocol {name} is not available: the client was built without the `rustls` feature")
+            );
+        }
     }
 }

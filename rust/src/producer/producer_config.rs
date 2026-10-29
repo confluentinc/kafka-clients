@@ -52,6 +52,7 @@ use log::info;
 
 use crate::MetadataRecoveryStrategy;
 use crate::common::Error;
+use crate::common::compress::Compression;
 use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
 use crate::common::config::config_def::{
     CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, LambdaValidator, NonEmptyString, ParsedValue,
@@ -834,6 +835,15 @@ impl ProducerConfig {
         let max_in_flight_requests_per_connection = values.int(Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION)?;
         // The validator accepted only the compression type names.
         let compression_type = CompressionType::for_name(values.string(Self::COMPRESSION_TYPE_CONFIG)?)?;
+        // A codec left out of the build (its Cargo feature off) would fail every
+        // batch, so the producer is refused at construction instead.
+        if !Compression::is_enabled(compression_type) {
+            return Err(Error::config_name_value_message(
+                Self::COMPRESSION_TYPE_CONFIG,
+                compression_type.name(),
+                Compression::disabled_message(compression_type),
+            ));
+        }
         let compression_gzip_level = values.int(Self::COMPRESSION_GZIP_LEVEL_CONFIG)?;
         let compression_lz4_level = values.int(Self::COMPRESSION_LZ4_LEVEL_CONFIG)?;
         let compression_zstd_level = values.int(Self::COMPRESSION_ZSTD_LEVEL_CONFIG)?;
@@ -1985,6 +1995,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_new_basic() {
         let mut props = base_props();
@@ -2538,13 +2549,40 @@ mod tests {
     /// Every valid `compression.type` name still parses.
     #[test]
     fn test_valid_compression_types_parse() {
-        for name in CompressionType::names() {
+        for name in CompressionType::names()
+            .iter()
+            .filter(|name| Compression::is_enabled(CompressionType::for_name(name).unwrap()))
+        {
             let mut props = base_props();
             props.insert("compression.type".to_string(), name.to_string());
             props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
             let config = ProducerConfig::new(&props)
                 .unwrap_or_else(|e| panic!("compression.type={name} should be valid: {e:?}"));
-            assert_eq!(config.compression_type.name(), name);
+            assert_eq!(config.compression_type.name(), *name);
+        }
+    }
+
+    /// A compression type whose feature is off is refused when the config is
+    /// parsed, so the producer fails at construction rather than at its first
+    /// batch.
+    #[test]
+    fn test_disabled_compression_type_is_rejected() {
+        for name in CompressionType::names()
+            .iter()
+            .filter(|name| !Compression::is_enabled(CompressionType::for_name(name).unwrap()))
+        {
+            let mut props = base_props();
+            props.insert("compression.type".to_string(), name.to_string());
+            props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+            let error = ProducerConfig::new(&props).unwrap_err();
+            assert!(error.is_config_error(), "{error:?}");
+            assert_eq!(
+                format!(
+                    "Invalid value {name} for configuration compression.type: Compression type {name} is not \
+                     available: the client was built without the `{name}` feature"
+                ),
+                error.message()
+            );
         }
     }
 
