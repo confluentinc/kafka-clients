@@ -47,7 +47,7 @@ The binding-agnostic rules below come from root `CLAUDE.md` "Python Binding Conv
 5. **Never call `KafkaFuture_get`.** The `KafkaFuture_t*` handed to a send's completion is destroyed unread. The delivery result comes from the per-record `Callback_t`.
 6. **One `Callback_t` per record.** In `on_completion` the order is:
    1. run the user callback;
-   2. complete the record's `KafkaFuture` (D8; the `send()` Promise settles earlier, at hand-over);
+   2. complete the record's `KafkaFuture` (D8; the `send()` Promise settles at hand-over, or one event-loop turn later when the fast-path yield defers it, so it can settle after the callback);
    3. call `__set_callback_result(view, id, NULL, err)` exactly once.
 
    No reports are sent once destroy has begun.
