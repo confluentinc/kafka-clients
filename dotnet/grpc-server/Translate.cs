@@ -359,8 +359,8 @@ internal static class Translate
         int? partition = proto.HasPartition ? proto.Partition : (int?)null;
         long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
 
-        // The headers are sent, as C's server sends them; Python's drops them. A proto header's value is never null, so
-        // an empty value is sent empty.
+        // The headers are sent, as the Python and C servers send them. A proto header's value is never null, so an
+        // empty value is sent empty.
         Header[]? headers = null;
         if (proto.Headers.Count > 0)
         {
