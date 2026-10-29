@@ -201,3 +201,31 @@ test('a pending send keeps the process alive until it completes', () => {
   assert.equal(r.stdout, 'callback: Topic alive not present in metadata after 1500 ms.\n');
   assert.ok(r.ms >= 1400, `exited after ${r.ms} ms`);
 });
+
+test('terminating a worker with records in flight tears its producer down cleanly', () => {
+  // Environment teardown finalizes the threadsafe function while the producer
+  // still runs and its tasks still fire the notify hook (COMMENTS.100 item 5).
+  const r = runNode(`
+    const { Worker } = require('node:worker_threads');
+    const body = \`
+      const { parentPort } = require('node:worker_threads');
+      const { KafkaProducer, ProducerRecord } = require(\${JSON.stringify(process.cwd())});
+      const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 50, 'linger.ms': 0 });
+      for (let i = 0; i < 200; i++) {
+        p.send(new ProducerRecord({ topic: 'teardown', value: String(i) }), () => {}).catch(() => {});
+      }
+      parentPort.postMessage('sent');
+    \`;
+    (async () => {
+      for (let round = 0; round < 20; round++) {
+        const w = new Worker(body, { eval: true });
+        await new Promise((res, rej) => { w.once('message', res); w.once('error', rej); });
+        await new Promise((res) => setTimeout(res, round % 4 * 20));
+        await w.terminate();
+      }
+      console.log('done');
+    })().catch((e) => { console.error(e); process.exit(1); });
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'done\n');
+});

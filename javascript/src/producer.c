@@ -37,7 +37,17 @@
 // the threadsafe function, whose finalizer frees this struct together with the
 // handle object's finalizer (two owners). `KafkaProducer_destroy_err` runs the
 // callbacks still pending, inline, exactly once each.
+//
+// The notify hook and the threadsafe function's end: replacing the hook with
+// __set_callbacks_notify does not wait for a call of the old one in flight on
+// another thread, so swapping in a no-op before the tsfn goes away would not
+// keep such a call off a deleted tsfn (environment teardown deletes it while
+// the producer still runs). The hook therefore calls the tsfn only under
+// `notify_mtx` and only while `notify_open`, which the JS thread clears under
+// the same lock before the tsfn is released or once it is finalized: a hook
+// call in flight then either finished its tsfn call or sees it closed.
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,6 +61,8 @@ typedef struct {
     const kafka_producer_Producer_t* view;     // borrowed __as_Producer view of kp
     napi_threadsafe_function tsfn;
     int tsfn_alive;                            // not released yet
+    pthread_mutex_t notify_mtx;                // guards notify_open and the hook's tsfn call
+    int notify_open;                           // the hook may call the tsfn
     napi_ref self_ref;                         // the handle object; strong while busy
     int64_t pending;                           // outstanding sends, flushes and close
     int busy;                                  // tsfn and self_ref currently ref'd
@@ -87,8 +99,21 @@ typedef struct {
     napi_ref done;                             // JS (error | null) => void
 } FlushCtx;
 
+static void producer_free(Producer* p) {
+    pthread_mutex_destroy(&p->notify_mtx);
+    free(p);
+}
+
 static void producer_release(Producer* p) {
-    if (--p->owners == 0) free(p);
+    if (--p->owners == 0) producer_free(p);
+}
+
+// Stops the notify hook from reaching the tsfn; once this returns, no hook
+// call is inside napi_call_threadsafe_function. JS thread.
+static void notify_close(Producer* p) {
+    pthread_mutex_lock(&p->notify_mtx);
+    p->notify_open = 0;
+    pthread_mutex_unlock(&p->notify_mtx);
 }
 
 // Refs the tsfn and the handle object while there is pending work, unrefs them
@@ -492,6 +517,7 @@ static void producer_destroy(napi_env env, Producer* p) {
     p->view = NULL;
     // No callback can fire past this point.
     free_orphans(env, p);
+    notify_close(p);
     if (p->tsfn_alive) {
         if (p->busy) napi_unref_threadsafe_function(env, p->tsfn);
         p->tsfn_alive = 0;
@@ -581,10 +607,13 @@ static napi_value js_close(napi_env env, napi_callback_info info) {
 // ---- the pump ---------------------------------------------------------------
 
 // Fired by the core once per empty -> non-empty transition of the callback
-// vector, from any thread. It only signals.
+// vector, from any thread. It only signals, under `notify_mtx` while the tsfn
+// is open (see the top of this file).
 static void producer_callbacks_notify(void* opaque) {
     Producer* p = (Producer*)opaque;
-    napi_call_threadsafe_function(p->tsfn, NULL, napi_tsfn_nonblocking);
+    pthread_mutex_lock(&p->notify_mtx);
+    if (p->notify_open) napi_call_threadsafe_function(p->tsfn, NULL, napi_tsfn_nonblocking);
+    pthread_mutex_unlock(&p->notify_mtx);
 }
 
 // The tsfn's call_js, on the JS thread: the one drainer.
@@ -606,10 +635,12 @@ static void producer_tsfn_finalize(napi_env env, void* data, void* hint) {
     (void)env;
     (void)hint;
     Producer* p = (Producer*)data;
+    // A hook call in flight finishes its tsfn call before Node deletes the tsfn.
+    notify_close(p);
     p->tsfn_alive = 0;
     if (p->kp != NULL && !p->destroying) {
         // Environment teardown finalized the tsfn before the handle object: a
-        // later hook call must not reach it.
+        // later hook call need not even take the lock.
         kafka_common_Error_t* ffi_err = NULL;
         error_discard((kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err),
                        ffi_take(&ffi_err)));
@@ -698,6 +729,12 @@ static napi_value js_create(napi_env env, napi_callback_info info) {
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
+    if (pthread_mutex_init(&p->notify_mtx, NULL) != 0) {
+        free(p);
+        error_discard((kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err), ffi_take(&ffi_err)));
+        napi_throw_error(env, NULL, "pthread_mutex_init failed");
+        return NULL;
+    }
     p->env = env;
     p->kp = kp;
     err = (p->view = kafka_producer_KafkaProducer__as_Producer_err(kp, &ffi_err), ffi_take(&ffi_err));
@@ -711,6 +748,7 @@ static napi_value js_create(napi_env env, napi_callback_info info) {
     }
     if (err == NULL && !thrown) {
         p->tsfn_alive = 1;
+        p->notify_open = 1;
         p->owners = 1;  // the tsfn
         // Idle until something is pending.
         napi_unref_threadsafe_function(env, p->tsfn);
@@ -732,11 +770,12 @@ static napi_value js_create(napi_env env, napi_callback_info info) {
         error_discard((kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err), ffi_take(&ffi_err)));
         p->kp = NULL;
         p->destroying = 1;
+        notify_close(p);
         if (p->tsfn_alive) {
             p->tsfn_alive = 0;
             napi_release_threadsafe_function(p->tsfn, napi_tsfn_release);  // frees p when it was the only owner
         } else {
-            free(p);
+            producer_free(p);
         }
         if (err != NULL) error_throw_owned(env, err);
         return NULL;
