@@ -19,8 +19,8 @@
 # to one index, for the "Release (Python): packaging" block of semaphore.yml
 # and the "Release (Python): publish to ..." blocks of publish-testpypi.yml
 # and publish-pypi.yml, the tag build's manual promotions. Every version goes
-# to Test PyPI first; a final version then goes to PyPI, after its wheels have
-# passed the post-publish checks on Test PyPI.
+# to Test PyPI first, then to PyPI, after its wheels have passed the
+# post-publish checks on Test PyPI.
 #
 # Usage, from the repository root of a python/v<version> tag build:
 #   .semaphore/publish-wheels.sh package
@@ -41,8 +41,6 @@
 #       each to /tmp/pypi-publish/upload.sha256. It loads no token.
 #         - the tag still points at the commit the build checked out, and that
 #           commit is part of master (checked again, right before the upload);
-#         - the index takes the version: Test PyPI takes every version, PyPI
-#           only a final one (no aN, bN, rcN or .devN suffix);
 #         - the version is not yet on the index. The only exception is
 #           completing an interrupted publish of the same version from this
 #           workflow (see `upload`);
@@ -135,16 +133,9 @@ index_settings() {
         https://pypi.org)
             upload_url=https://upload.pypi.org/legacy/
             token_key=pypi_token
-            # A pre-release or a dev version stops at Test PyPI, whose
-            # versions never reach users of PyPI. The promotion's `run`
-            # condition already skips their tags; the check is repeated here,
-            # before the token is loaded.
-            if [[ "${PACKAGE_VERSION}" =~ \.dev[0-9]+$ ]]; then
-                refuse "${PACKAGE_VERSION} is a dev version, which is published to Test PyPI only"
-            fi
-            if [[ "${PACKAGE_VERSION}" =~ (a|b|rc)[0-9]+$ ]]; then
-                refuse "${PACKAGE_VERSION} is a pre-release, which is published to Test PyPI only"
-            fi
+            # Every version goes to PyPI, a pre-release or a dev one included:
+            # pip installs those only on request (`--pre`, or the version
+            # itself), and the publish is a manual promotion.
             ;;
         *)
             refuse "PYPI_INDEX is '${PYPI_INDEX:-}', not https://test.pypi.org or https://pypi.org"

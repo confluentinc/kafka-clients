@@ -10,11 +10,12 @@ name: create-release-tag
 #   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
 #     (Python):" builds and tests the ${PYPI_PACKAGE} wheels. The "Publish to
 #     Test PyPI" promotion of the tag build (publish-testpypi.yml) publishes
-#     them to Test PyPI and, for a final version, its "Publish to PyPI"
-#     promotion (publish-pypi.yml) then publishes them to PyPI.
+#     them to Test PyPI, and its "Publish to PyPI" promotion (publish-pypi.yml)
+#     then publishes them to PyPI.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
 #     like any other. A rust dev version is tested and packaged, never
-#     published; a python dev version is published to Test PyPI only.
+#     published; a python dev version is released like any other, through the
+#     two manual promotions.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
@@ -27,8 +28,7 @@ name: create-release-tag
 #     optionally by .devN);
 #   - the tag does not yet exist, and the version is new: for rust, unless it
 #     is a dev version, higher than every version on crates.io; for python, not
-#     yet on any index it is published to (Test PyPI, and PyPI for a final
-#     version that is not a dev version);
+#     yet on Test PyPI or PyPI;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
@@ -99,7 +99,7 @@ blocks:
                 esac
                 tag="${client}/v${version}"
                 # A rust dev version is never published; a python one is
-                # published to Test PyPI only.
+                # released like any other version.
                 dev=""
                 [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
                 return 0
@@ -156,8 +156,7 @@ blocks:
             # not, cannot be published again. A crate version must also be
             # higher than every published version, by Semantic Versioning
             # precedence (0.2.0-alpha.1 < 0.2.0 < 0.10.0). A Python version
-            # need only be new on each index it is published to, Test PyPI and,
-            # for a final version, PyPI: as with Apache Kafka, a patch of an
+            # need only be new on Test PyPI and PyPI: as with Apache Kafka, a patch of an
             # older minor version can follow a newer minor version (4.4.101
             # after 4.5.0). A rust dev version is never published, so it is
             # not compared with crates.io; a python dev version only with Test
@@ -211,8 +210,7 @@ blocks:
                     fi
                     ;;
                   python)
-                    indexes=(https://test.pypi.org)
-                    [[ "${version}" =~ (a|b|rc)[0-9]+$ ]] || [ -n "${dev}" ] || indexes+=(https://pypi.org)
+                    indexes=(https://test.pypi.org https://pypi.org)
                     for index in "${indexes[@]}"; do
                       fetch "${index}/simple/${PYPI_PACKAGE}/" "${body}" -H 'Accept: application/vnd.pypi.simple.v1+json' \
                         || refuse "could not read ${index} to confirm that ${PYPI_PACKAGE} ${version} is new"
@@ -297,12 +295,8 @@ blocks:
                   echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${CRATE} ${version}; a dev version publishes nothing."
                   continue
                 fi
-                if [ -n "${dev}" ]; then
-                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI; a dev version is never published to PyPI."
-                  continue
-                fi
                 case "${client}" in
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
-                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI and, for a final version, that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
+                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI, then that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
                 esac
               done
