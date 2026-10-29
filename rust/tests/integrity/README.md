@@ -3,8 +3,8 @@
 These tests check that what the Rust client writes is what it reads back. Each
 record must come back byte for byte. No acknowledged record may be lost, and no
 record may be duplicated, reordered, or visible when its transaction aborted.
-Only the Rust client is exercised: nothing but the brokers (Apache Kafka on a
-local cluster) touches the data.
+Apart from two cross-language tests, only the Rust client is exercised:
+nothing but the brokers (Apache Kafka on a local cluster) touches the data.
 
 There are two forms, on one harness (`tests/common/integrity/`):
 
@@ -17,6 +17,20 @@ There are two forms, on one harness (`tests/common/integrity/`):
   ```
 
   Its `self_tests` module checks the harness itself and needs no broker.
+
+  Two of them check compatibility with the Java client, using Apache Kafka's
+  own tools in the broker container:
+
+  - Rust writers, and `kafka-console-consumer.sh` (read_committed) as the
+    final read-back (`tests/common/integrity/java.rs`). Every check below
+    applies: binary records of every shape and size, every codec, committed
+    and aborted transactions. The tool prints each field through Kafka's
+    `BytesDeserializer`, which escapes every non-printable byte, and the
+    exact bytes are decoded back.
+  - `kafka-verifiable-producer.sh` writes, with every codec, and a Rust
+    consumer must read exactly the records Java acked, at their partition and
+    offset. Java's only writing tools read text, so these records are text
+    (`"0"` to `"N"`, with repeating keys), not self-checking records.
 
 - **The long run** (`tests/integrity/`). Every stream at once for half an hour
   by default, against a local three-broker cluster or an external one.
@@ -115,8 +129,11 @@ Every writer replaces its producer every `PRODUCER_RESTART_S`. One consumer
 group of `CONSUMERS` members reads every topic. A
 member restarts every `CONSUMER_RESTART_S`, alternately cleanly and hard:
 
-- A clean restart commits what was read (a failed commit is reported, and the
-  next owner reads those records again) and calls `close()`.
+- A clean restart commits what was read and calls `close()`. A failed commit
+  (`STALE_MEMBER_EPOCH` while a rebalance bumps the member's epoch) is retried
+  with the next commit, or from the revocation listener before the partitions
+  move. Only a retry that fails too is reported, and the next owner reads
+  those records again.
 - A hard restart reads one more batch without committing it and stops polling,
   as a stuck or crashed application would. Its partitions move to another
   member once `MAX_POLL_INTERVAL_S` expires, and that member must read the

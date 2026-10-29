@@ -20,6 +20,8 @@
 //! - [`checker`]: the [`Ledger`](checker::Ledger) of outcomes and the verdict.
 //! - [`workload`]: the writers, the live group, the copiers, the final
 //!   read-back, and the [`run`](workload::run) that drives them.
+//! - [`java`]: the final read-back done by Apache Kafka's Java console
+//!   consumer instead.
 //!
 //! Used by the `integrity_test` integration tests (seconds each, in CI) and by
 //! the long-running `integrity` target (`cargo xtask integrity-test`), against
@@ -31,5 +33,6 @@
 //! leave unfulfilled. Each target that uses it includes it by path.
 
 pub mod checker;
+pub mod java;
 pub mod record;
 pub mod workload;

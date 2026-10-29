@@ -31,6 +31,13 @@
 //! (`TransactionalMessageCopier`), and offsets committed and read back around
 //! consumer restarts (`OffsetValidationTest`).
 //!
+//! Two tests check compatibility with the Java client through Apache Kafka's
+//! own tools, run in the broker container. `kafka-console-consumer.sh` does
+//! the final read-back of a run, held to all of its checks
+//! (`integrity::java`). `kafka-verifiable-producer.sh` writes for a Rust
+//! consumer; it writes text, so those records are checked against the
+//! partition, offset, key and value Java acked instead.
+//!
 //! `self_tests` checks the checker itself, without a broker: failures are
 //! produced on purpose and must be reported.
 //!
@@ -40,7 +47,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
+use confluent_kafka::common::header::{Header, Headers};
+use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer, Deserializer};
 use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig};
@@ -48,6 +56,7 @@ use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig};
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::integrity::checker::{Ledger, Requirements, StreamKind, Verdict};
+use crate::integrity::java::JavaReader;
 use crate::integrity::record::{Identity, PayloadProfile, RecordId, TxnIntent, build_record};
 use crate::integrity::workload::{
     GroupSpec, Props, Restart, RestartMode, RunSpec, TopicSpec, WriterSpec, create_topics, now_ms, run,
@@ -239,7 +248,9 @@ async fn test_integrity_many_partitions() {
 }
 
 /// Members close cleanly and rejoin while records keep coming. Each commits
-/// everything it read before its partitions move, so nothing is read twice.
+/// everything it read before its partitions move, retrying a commit the
+/// rebalance failed (`STALE_MEMBER_EPOCH`) from its revocation listener, so
+/// nothing is read twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_integrity_consumer_restart_clean() {
     let (mut ctx, base) = context().await;
@@ -370,7 +381,7 @@ async fn test_integrity_detects_tampering() {
     props.insert("group.protocol".to_string(), "consumer".to_string());
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("valid consumer config"),
-        confluent_kafka::common::serialization::ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
         FlipLastByte,
     )
     .expect("consumer");
@@ -395,6 +406,167 @@ async fn test_integrity_detects_tampering() {
         "the sample does not locate the changed byte: {}",
         samples[0]
     );
+}
+
+/// Records each cross-language test writes per codec.
+const CROSS_LANGUAGE_RECORDS: usize = 2000;
+
+/// Runs `script` with bash in the broker container, where Apache Kafka's Java
+/// tools are, and returns its standard output.
+async fn broker_exec(ctx: &TestContext, script: String) -> String {
+    let container = ctx.cluster().container_ids()[0].clone();
+    let output = tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("docker")
+            .args(["exec", &container, "bash", "-c", &script])
+            .output()
+            .expect("docker exec");
+        assert!(
+            output.status.success(),
+            "`{script}` failed: {:?}\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    })
+    .await
+    .expect("docker exec task");
+    String::from_utf8(output).expect("the tool prints UTF-8")
+}
+
+/// One record as both sides see it: key, value and headers, as text.
+#[derive(Debug, PartialEq, Eq)]
+struct TextRecord {
+    key: Option<String>,
+    value: String,
+    headers: Vec<(String, String)>,
+}
+
+/// Every record of `topic`'s `partitions`, read from the start by a Rust
+/// consumer, by `(partition, offset)`; a record read twice fails the test.
+async fn rust_read_all(base: &Props, topic: &str, partitions: i32, count: usize) -> BTreeMap<(i32, i64), TextRecord> {
+    let mut props = base.clone();
+    props.insert("group.protocol".to_string(), "consumer".to_string());
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+        ConsumerConfig::new(&props).expect("valid consumer config"),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
+    )
+    .expect("consumer");
+    let tps: Vec<TopicPartition> = (0..partitions).map(|p| TopicPartition::new(topic.to_string(), p)).collect();
+    consumer.assign(tps.clone()).await.expect("assign");
+    consumer.seek_to_beginning(&tps).await.expect("seek");
+    let text = |bytes: &[u8]| String::from_utf8(bytes.to_vec()).expect("a text record");
+    let mut read = BTreeMap::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while read.len() < count && std::time::Instant::now() < deadline {
+        for record in consumer.poll(Duration::from_millis(200)).await.expect("poll") {
+            let headers = record.headers().to_array();
+            let parsed = TextRecord {
+                key: record.key().map(|k| text(k)),
+                value: text(record.value().expect("a value")),
+                headers: headers
+                    .iter()
+                    .map(|h| (h.key().to_string(), text(h.value().unwrap_or_default())))
+                    .collect(),
+            };
+            let at = (record.partition(), record.offset());
+            assert!(read.insert(at, parsed).is_none(), "{topic} {at:?} read twice");
+        }
+    }
+    let end = consumer.end_offsets(&tps).await.expect("end offsets");
+    assert_eq!(end.values().sum::<i64>(), count as i64, "{topic} holds other records: {end:?}");
+    consumer.close().await.expect("close");
+    read
+}
+
+/// Apache Kafka's Java producer (`kafka-verifiable-producer.sh`) writes, with
+/// every codec, and a Rust consumer must read exactly the records it acked, at
+/// the partition and offset it was told.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_integrity_java_producer_rust_consumer() {
+    let (mut ctx, base) = context().await;
+    for codec in CODECS {
+        let topic = ctx.topic(&format!("from_java_{codec}"));
+        create_topics(&base, &[TopicSpec::source(&topic, 3, 1)]).await;
+        // The tool sets `retries=0`, which idempotence rejects: restore
+        // Java's default.
+        let script = format!(
+            "printf 'compression.type={codec}\\nlinger.ms=20\\nenable.idempotence=true\\nretries=2147483647\\n' > /tmp/{topic}.properties \
+             && timeout 120 /opt/kafka/bin/kafka-verifiable-producer.sh --bootstrap-server {bootstrap} \
+             --topic {topic} --max-messages {CROSS_LANGUAGE_RECORDS} --acks -1 --repeating-keys 100 \
+             --producer.config /tmp/{topic}.properties",
+            bootstrap = ctx.container_bootstrap_servers()
+        );
+        let mut acked = BTreeMap::new();
+        for line in broker_exec(&ctx, script).await.lines() {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            match event["name"].as_str() {
+                Some("producer_send_success") => {
+                    let at = (event["partition"].as_i64().unwrap() as i32, event["offset"].as_i64().unwrap());
+                    let record = TextRecord {
+                        key: event["key"].as_str().map(str::to_string),
+                        value: event["value"].as_str().expect("a value").to_string(),
+                        headers: Vec::new(),
+                    };
+                    assert!(acked.insert(at, record).is_none(), "Java acked {at:?} twice");
+                },
+                Some("producer_send_error") => panic!("the Java producer failed a send: {line}"),
+                _ => {},
+            }
+        }
+        assert_eq!(acked.len(), CROSS_LANGUAGE_RECORDS, "{codec}: Java acked too few records");
+        let read = rust_read_all(&base, &topic, 3, CROSS_LANGUAGE_RECORDS).await;
+        assert!(read == acked, "{codec}: Rust read other records than Java wrote");
+    }
+}
+
+/// Rust writers, Apache Kafka's Java consumer (`kafka-console-consumer.sh`,
+/// read_committed) as the final read-back, held to every check of the Rust
+/// runs: binary records of every shape and size, every codec, committed and
+/// aborted transactions, each read exactly once, byte for byte, in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_integrity_rust_producer_java_consumer() {
+    let (mut ctx, base) = context().await;
+    let mut spec = spec();
+    // One topic for every writer, so the Java tool starts once.
+    let topic = ctx.topic("to_java");
+    spec.topics.push(TopicSpec::source(&topic, 6, 1));
+    for (writer, codec) in CODECS.iter().enumerate() {
+        spec.writers.push(
+            WriterSpec::new(writer as u32, &topic)
+                .records(1000)
+                .prop("compression.type", codec)
+                .prop("linger.ms", "20"),
+        );
+    }
+    spec.writers
+        .push(WriterSpec::new(5, &topic).profile(PayloadProfile::edge_shapes()).records(1000));
+    let boundaries = vec![0, 1, 127, 128, 16383, 16384, 65536, 262_144, 900_000];
+    spec.writers.push(
+        WriterSpec::new(6, &topic)
+            .profile(PayloadProfile::sizes(boundaries))
+            .records(100),
+    );
+    spec.writers.push(
+        WriterSpec::new(7, &topic)
+            .transactions(&ctx.group_id("to-java-txn"), 20, 3)
+            .records(1000),
+    );
+    spec.java_reader = Some(JavaReader {
+        container: ctx.cluster().container_ids()[0].clone(),
+        bootstrap: ctx.container_bootstrap_servers().to_string(),
+    });
+    spec.requirements = Requirements {
+        min_records_per_stream: 6000,
+        min_txns_committed: 5,
+        min_txns_aborted: 2,
+        every_partition_read: true,
+        ..Default::default()
+    };
+    assert_pass(&run(spec, base).await);
 }
 
 /// The checker itself, without a broker: failures are produced on purpose and

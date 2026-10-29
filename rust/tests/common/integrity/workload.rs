@@ -31,8 +31,8 @@
 //! one.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -40,12 +40,13 @@ use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
 use confluent_kafka::common::{Error, KafkaFuture, TopicPartition};
 use confluent_kafka::consumer::{
-    Consumer, ConsumerConfig, ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata,
+    Consumer, ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata,
 };
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, RecordMetadata};
 use tokio::task::JoinHandle;
 
 use super::checker::{Event, Ledger, Requirements, StreamKind, TxnOutcome, Verdict};
+use super::java::{JavaReader, java_final_read_back};
 use super::record::{
     Identity, PayloadProfile, RecordGenerator, RecordId, SplitMix64, TxnIntent, build_record, copy_record,
 };
@@ -178,7 +179,9 @@ impl WriterSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartMode {
     /// `close()`, after committing everything it read (a commit that fails is
-    /// reported, and the next owner reads those records again).
+    /// retried with the next one, or by the listener before the partitions
+    /// move; only a retry that fails too leaves records the next owner reads
+    /// again).
     Clean,
     /// Read one more batch, do not commit it, and stop polling without
     /// `close()`, as a stuck or crashed application does. Its partitions move
@@ -305,6 +308,9 @@ pub struct RunSpec {
     pub watchdog: Duration,
     /// Print a status line this often.
     pub status_every: Option<Duration>,
+    /// When set, Apache Kafka's Java console consumer does the final
+    /// read-back instead of the Rust consumer.
+    pub java_reader: Option<JavaReader>,
     pub requirements: Requirements,
 }
 
@@ -322,6 +328,7 @@ impl RunSpec {
             final_timeout: Duration::from_secs(120),
             watchdog: Duration::from_secs(120),
             status_every: None,
+            java_reader: None,
             requirements: Requirements::default(),
         }
     }
@@ -682,6 +689,55 @@ impl ConsumerRebalanceListener for WaitForPoll {
     }
 }
 
+/// Offsets a member has read but not yet committed: what its last commit
+/// failed to commit (`STALE_MEMBER_EPOCH` while a rebalance bumps its epoch:
+/// "the member must retry after receiving its updated member epoch").
+type Pending = Arc<Mutex<HashMap<TopicPartition, OffsetAndMetadata>>>;
+
+/// A live-group member's listener: before a partition moves, it commits what
+/// a failed commit left pending on it, as Java applications commit in
+/// `onPartitionsRevoked`, so the next owner does not read it again. Like
+/// [`WaitForPoll`], it also makes the revocation wait for the member's poll.
+struct CommitOnRevoke {
+    member: usize,
+    handle: ConsumerHandle,
+    pending: Pending,
+    ledger: Arc<Ledger>,
+}
+
+#[async_trait]
+impl ConsumerRebalanceListener for CommitOnRevoke {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        let offsets: HashMap<TopicPartition, OffsetAndMetadata> = {
+            let mut pending = self.pending.lock().unwrap();
+            partitions.iter().filter_map(|tp| pending.remove_entry(tp)).collect()
+        };
+        if offsets.is_empty() {
+            return Ok(());
+        }
+        match self.handle.commit_sync_with_offsets(offsets.clone()).await {
+            Ok(()) => self.ledger.live_committed(&offsets),
+            Err(e) => self
+                .ledger
+                .event(Event::CommitError, format!("member {} on revoke: {e}", self.member)),
+        }
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Lost partitions already have another owner: nothing can be committed.
+    async fn on_partitions_lost(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+        let mut pending = self.pending.lock().unwrap();
+        for tp in partitions {
+            pending.remove(tp);
+        }
+        Ok(())
+    }
+}
+
 fn create_consumer(
     base: &Props,
     group_id: &str,
@@ -748,8 +804,15 @@ async fn run_member(
                 continue;
             },
         };
+        let pending = Pending::default();
+        let listener = CommitOnRevoke {
+            member,
+            handle: consumer.handle(),
+            pending: pending.clone(),
+            ledger: ledger.clone(),
+        };
         if let Err(e) = consumer
-            .subscribe_with_topics_listener(spec.topics.clone(), Arc::new(WaitForPoll))
+            .subscribe_with_topics_listener(spec.topics.clone(), Arc::new(listener))
             .await
         {
             ledger.event(Event::ConsumerError, format!("member {member} subscribe: {e}"));
@@ -781,9 +844,14 @@ async fn run_member(
             };
             let records: Vec<_> = records.into_iter().collect();
             ledger.live_batch(&records);
-            let offsets = next_offsets(&records);
+            let mut offsets = next_offsets(&records);
             if offsets.is_empty() {
                 continue;
+            }
+            // Retry what the last commit failed to commit, on partitions this
+            // batch did not reach.
+            for (tp, offset) in pending.lock().unwrap().drain() {
+                offsets.entry(tp).or_insert(offset);
             }
             match consumer.commit_sync_with_offsets(offsets.clone()).await {
                 Ok(()) => {
@@ -797,7 +865,10 @@ async fn run_member(
                         }
                     }
                 },
-                Err(e) => ledger.event(Event::CommitError, format!("member {member}: {e}")),
+                Err(e) => {
+                    ledger.event(Event::CommitError, format!("member {member}: {e}"));
+                    pending.lock().unwrap().extend(offsets);
+                },
             }
         }
         if stop.load(Ordering::SeqCst) {
@@ -817,6 +888,8 @@ async fn run_member(
             if let Err(e) = consumer.poll(POLL_TIMEOUT).await {
                 ledger.event(Event::ConsumerError, format!("member {member} poll: {e}"));
             }
+            // A crash commits nothing more, not even at the final close.
+            pending.lock().unwrap().clear();
             abandoned.push(consumer);
             ledger.event(Event::HardStop, format!("member {member}"));
         } else {
@@ -1377,7 +1450,10 @@ pub async fn run(spec: RunSpec, base: Props) -> Verdict {
         }
     }
     eprintln!("integrity: final read-back");
-    let complete = final_read_back(&base, &spec.topics, &ledger, spec.final_timeout).await;
+    let complete = match &spec.java_reader {
+        Some(reader) => java_final_read_back(reader, &spec.topics, &ledger).await,
+        None => final_read_back(&base, &spec.topics, &ledger, spec.final_timeout).await,
+    };
     let mut verdict = ledger.verdict(spec.group.is_some(), complete, &spec.requirements);
     verdict.aborted = aborted;
     verdict
