@@ -192,6 +192,26 @@ impl TestContext {
         self.cluster.container_sasl_ssl_bootstrap_servers()
     }
 
+    /// Container-network bootstrap servers for the SASL_PLAINTEXT listener
+    /// (CSASLPLAIN, port 9102): the container twin of
+    /// [`sasl_plaintext_bootstrap_servers`](Self::sasl_plaintext_bootstrap_servers),
+    /// for a containerized backend of a test Java runs on SASL_PLAINTEXT.
+    pub fn container_sasl_plaintext_bootstrap_servers(&self) -> &str {
+        self.cluster.container_sasl_plaintext_bootstrap_servers()
+    }
+
+    /// The `bootstrap.controllers` addresses a backend reaches: the
+    /// container-network CONTROLLERCONTAINER listener (port 9103) when
+    /// `needs_container_bootstrap`, else the host CONTROLLERHOST one.
+    /// `None` for a cluster whose controllers publish neither (`Type::Kraft`).
+    pub fn bootstrap_controllers_for(&self, needs_container_bootstrap: bool) -> Option<&str> {
+        if needs_container_bootstrap {
+            self.cluster.container_bootstrap_controllers()
+        } else {
+            self.cluster.bootstrap_controllers()
+        }
+    }
+
     /// Container-network bootstrap servers for the [`protocol`](Self::protocol)
     /// selected this run: PLAINTEXT -> port 9099, SSL -> port 9100,
     /// SASL_SSL -> port 9101.
@@ -347,7 +367,7 @@ impl Drop for TestContext {
             // containers synchronously, one extra strong reference is leaked
             // so the `KafkaCluster` (and its `ContainerAsync`s) is never
             // dropped; that is a few hundred bytes per dedicated test.
-            cluster_pool::teardown(&self.cluster);
+            cluster_pool::teardown_dedicated(&self.cluster);
             std::mem::forget(Arc::clone(&self.cluster));
         }
         if !self.created_topics.is_empty() {

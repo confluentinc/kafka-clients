@@ -315,9 +315,20 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>, timeout: Option<Duration>) -> Result<(), Error> {
+    /// `CommitSync`: `offsets` `None` is Java's `commitSync([Duration])`,
+    /// `Some` its `commitSync(Map[, Duration])`, an empty map included.
+    async fn commit_rpc(
+        &self,
+        offsets: Option<Vec<proto::OffsetMapEntry>>,
+        timeout: Option<Duration>,
+    ) -> Result<(), Error> {
         let mut client = self.client.clone();
-        let req = proto::CommitSyncRequest { consumer_id: self.consumer_id, offsets, timeout_ms: timeout_ms(timeout) };
+        let req = proto::CommitSyncRequest {
+            consumer_id: self.consumer_id,
+            with_offsets: offsets.is_some(),
+            offsets: offsets.unwrap_or_default(),
+            timeout_ms: timeout_ms(timeout),
+        };
         self.status_rpc(client.commit_sync(req)).await
     }
 
@@ -478,7 +489,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 Some(proto::topic_partition_list_response::Result::Partitions(list)) => {
                     list.partitions.into_iter().map(tp_from_proto).collect()
                 },
-                _ => HashSet::new(),
+                Some(proto::topic_partition_list_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed assignment: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -496,7 +510,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 .into_inner();
             match resp.result {
                 Some(proto::subscription_response::Result::Topics(list)) => list.values.into_iter().collect(),
-                _ => HashSet::new(),
+                Some(proto::subscription_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed subscription: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -516,7 +533,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 Some(proto::topic_partition_list_response::Result::Partitions(list)) => {
                     list.partitions.into_iter().map(tp_from_proto).collect()
                 },
-                _ => HashSet::new(),
+                Some(proto::topic_partition_list_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed paused: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -657,18 +677,18 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── commit ──
     async fn commit_sync(&mut self) -> Result<(), Error> {
-        self.commit_rpc(Vec::new(), None).await
+        self.commit_rpc(None, None).await
     }
 
     async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        self.commit_rpc(Vec::new(), Some(timeout)).await
+        self.commit_rpc(None, Some(timeout)).await
     }
 
     async fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets), None).await
+        self.commit_rpc(Some(offset_map_to_proto(&offsets)), None).await
     }
 
     async fn commit_sync_with_offsets_timeout(
@@ -676,14 +696,14 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets), Some(timeout)).await
+        self.commit_rpc(Some(offset_map_to_proto(&offsets)), Some(timeout)).await
     }
 
     async fn commit_async(&mut self) -> Result<(), Error> {
         // Mapped to a synchronous commit server-side; the offset ends up
         // committed. Tests that depend on async-not-yet-committed timing are
         // native-Rust-only and never reach this backend.
-        self.commit_rpc(Vec::new(), None).await
+        self.commit_rpc(None, None).await
     }
 
     async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
@@ -886,7 +906,7 @@ fn group_membership_operation_name(operation: GroupMembershipOperation) -> &'sta
     }
 }
 
-fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
+pub(crate) fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
     proto::TopicPartition { topic: tp.topic().to_string(), partition: tp.partition() }
 }
 
@@ -1005,8 +1025,14 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
     let headers =
         RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
-    let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
-    let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
+    // The binding's own sizes, as it reports them: computing them here from the
+    // key and value would make every size assertion pass on the gRPC arms.
+    let serialized_key_size = r
+        .serialized_key_size
+        .expect("the gRPC server sent a ConsumerRecord without serialized_key_size (a stale image?)");
+    let serialized_value_size = r
+        .serialized_value_size
+        .expect("the gRPC server sent a ConsumerRecord without serialized_value_size (a stale image?)");
     let options = ConsumerRecordOptionsBuilder::new()
         .set_topic(r.topic)
         .set_partition(r.partition)

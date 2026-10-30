@@ -28,7 +28,8 @@ name: build-test-release
 #   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
 #   2. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
-#      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
+#      and the gRPC multilanguage arm (__grpc_c / __grpc_python) in jobs of
+#      its own, one per binding and protocol.
 #   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
@@ -268,17 +269,24 @@ blocks:
     # as the "Verify Rust" block. The gRPC multilanguage container arm
     # (__grpc_c / __grpc_python) connects to the broker over the CONTAINER
     # listener for the active protocol:
-    #   - PLAINTEXT: `make verify-c` / `make verify-python` — the full binding
-    #     gate (ctest / pytest unit tests, the PLAINTEXT gRPC arm, check-bindings,
-    #     and the Python perf suite).
+    #   - PLAINTEXT: `make verify-c` / `make verify-python` — the binding gate
+    #     without the gRPC arm: ctest for C; for Python the mypy typecheck, the
+    #     pytest unit and broker-backed binding tests, the static checks, the
+    #     soak and verifiable-clients tests, check-bindings and the Python perf
+    #     suite.
+    #   - PLAINTEXT gRPC arm: `make test-integration-c` /
+    #     `make test-integration-python` — only the gRPC container arm over the
+    #     PLAINTEXT CONTAINER listener, in a job of its own so its duration and
+    #     failures are attributable apart from the binding gate.
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
-    #     ctest / pytest unit tests, check-bindings and perf are
+    #     ctest / pytest tests, check-bindings and perf are
     #     protocol-independent, so running them once in the PLAINTEXT job is
     #     enough.
     #
-    # Each job is a separate VM with its own broker, so the six jobs do not
-    # contend for Docker resources.
+    # The local `make verify` still runs the PLAINTEXT gRPC arm, through
+    # test-c / test-python. Each job is a separate VM with its own broker, so
+    # the eight jobs do not contend for Docker resources.
     dependencies: []
     execution_time_limit:
       minutes: 30
@@ -292,6 +300,9 @@ blocks:
         - name: "verify-c (Linux amd64) — plaintext"
           commands:
             - make verify-c
+        - name: "verify-c (Linux amd64) — plaintext gRPC arm"
+          commands:
+            - make test-integration-c
         - name: "verify-c (Linux amd64) — ssl"
           commands:
             - make test-integration-c-ssl
@@ -301,6 +312,9 @@ blocks:
         - name: "verify-python (Linux amd64) — plaintext"
           commands:
             - make verify-python
+        - name: "verify-python (Linux amd64) — plaintext gRPC arm"
+          commands:
+            - make test-integration-python
         - name: "verify-python (Linux amd64) — ssl"
           commands:
             - make test-integration-python-ssl

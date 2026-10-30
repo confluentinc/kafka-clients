@@ -44,6 +44,10 @@ pub(crate) mod backend_pool {
         0
     }
 
+    pub(crate) fn stop_and_forget_handles_on_network(_network: &str) -> usize {
+        0
+    }
+
     pub(crate) fn has_live_handles_on_network(_network: &str) -> bool {
         false
     }

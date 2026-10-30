@@ -19,6 +19,11 @@ endif
 # macOS perf p99 budget (ms), used by test-integration-perf-macos.
 MACOS_P99_LIMIT_MS ?= 150
 
+# The tag of the gRPC images the multilanguage arms run; tests/common/backend_pool.rs
+# reads it from the environment (see the root Makefile).
+MULTILANG_IMAGE_TAG ?= dev
+export MULTILANG_IMAGE_TAG
+
 .PHONY: build build-integration-tests build-all-features \
 	devel-build devel-build-integration-tests devel-build-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
@@ -66,15 +71,16 @@ test: build
 # joining a job that has no image for it.
 #
 # The feature stays ON rather than being dropped, because it is the *compile*
-# that matters: with `multilanguage-tests` off, the whole gRPC harness
-# (`backend_pool`, `backend_factory`, `multilanguage_consumer`, the two test
-# macros) is not built at all, and silently rots whenever the client API
-# changes. Compiling it here catches that immediately, for the cost of one
-# compile and no test runtime.
+# that matters: with `multilanguage-tests` off, the gRPC harness
+# (`backend_pool`, the gRPC factories, `multilanguage_consumer`,
+# `multilanguage_producer`) is not built, and the test macros expand only their
+# `__rust` arms, so the harness silently rots whenever the client API changes.
+# Compiling it here catches that immediately, for the cost of one compile and no
+# test runtime.
 #
 # Only the non-Rust backends are filtered, and only at runtime: they are the
-# ones needing prebuilt gRPC images and a container per test. Each binding's
-# own verify job owns its arm (`test-integration-grpc-python` /
+# ones needing prebuilt gRPC images and a container per test. The CI "gRPC arm"
+# jobs of each binding run them (`test-integration-grpc-python` /
 # `test-integration-grpc-c` below, driven by python/'s and c/'s
 # `test-integration`), so this job never builds Docker images it never starts.
 #

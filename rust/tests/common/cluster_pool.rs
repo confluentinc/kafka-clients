@@ -134,8 +134,8 @@ fn register_cleanup_hook() {
 /// process, and once the pool is exhausted *every* subsequent cluster start
 /// fails.
 ///
-/// Also the teardown path of a dedicated (non-pooled) cluster, run by
-/// [`super::test_context::TestContext`]'s `Drop`.
+/// Also the last step of a dedicated (non-pooled) cluster's teardown,
+/// [`teardown_dedicated`].
 pub(super) fn teardown(cluster: &KafkaCluster) {
     for id in cluster.container_ids() {
         let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", id]).output();
@@ -175,6 +175,28 @@ fn teardown_backends_on(network: &str) -> usize {
 #[cfg(not(feature = "multilanguage-tests"))]
 fn teardown_backends_on(_network: &str) -> usize {
     0
+}
+
+/// [`teardown_backends_on`] for a dedicated cluster's teardown, which may run
+/// with no runtime: the handles are leaked rather than dropped.
+#[cfg(feature = "multilanguage-tests")]
+fn stop_backends_on(network: &str) -> usize {
+    super::backend_pool::stop_and_forget_handles_on_network(network)
+}
+
+#[cfg(not(feature = "multilanguage-tests"))]
+fn stop_backends_on(_network: &str) -> usize {
+    0
+}
+
+/// Removes a dedicated (non-pooled) cluster: first the gRPC backends attached
+/// to its network, which `backend_pool` would otherwise keep until the process
+/// exits, so the network could not be removed and would leak (the atexit hook
+/// tears down pooled clusters only); then the cluster's containers and network
+/// ([`teardown`]). Run by [`super::test_context::TestContext`]'s `Drop`.
+pub(super) fn teardown_dedicated(cluster: &KafkaCluster) {
+    stop_backends_on(cluster.network_name());
+    teardown(cluster);
 }
 
 /// Whether a test still holds, or is starting, a backend container on

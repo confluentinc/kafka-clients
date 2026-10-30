@@ -22,7 +22,7 @@
 //!   `testPartitionTooLargeForReplicationWithAckAll`,
 //!   `testResponseTooLargeForReplicationWithAckAll`,
 //!   `testCannotSendToInternalTopic`,
-//!   `testNotEnoughReplicasAfterBrokerShutdown` (native only, dedicated cluster)
+//!   `testNotEnoughReplicasAfterBrokerShutdown` (dedicated cluster)
 //! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
 //!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
 //!   `testSendToPartition`, `testSendBeforeAndAfterPartitionExpansion`,
@@ -49,15 +49,18 @@
 //!   and `testSendTimeoutErrorWhenPartitionDoesNotExist` pin are asserted by
 //!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
 //! - `kafka.api.SslProducerSendTest` (the `BaseProducerSendTest` bodies over
-//!   the SSL listener, native only): `testSendOffset` (`test_ssl_send_offset`),
+//!   the SSL listener): `testSendOffset` (`test_ssl_send_offset`),
 //!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`).
 //!
-//! When the `multilanguage-tests` feature is enabled, each test is
-//! instantiated three times via [`multilanguage_test!`] — once per
-//! backend (rust / python / c). Test bodies are generic over
+//! Each scenario is instantiated through [`multilanguage_test!`], once per
+//! backend (rust / python / python_async / c). Test bodies are generic over
 //! [`ProducerBackendFactory`] so the same scenario exercises the native
-//! Rust producer, the Python binding, and the C binding through their
-//! gRPC server containers.
+//! Rust producer, the Python binding (sync and asyncio), and the C binding
+//! through their gRPC server containers. The macro gates the three
+//! container-backed arms on `multilanguage-tests`, so under
+//! `integration-tests` alone each scenario runs its `__rust` arm only. The
+//! tests marked native only above are plain `#[tokio::test]`s on the native
+//! backend, each with its reason beside it.
 //!
 //! See `design/history/MILESTONE-6/DESIGN-multilanguage-tests.md`.
 
@@ -292,14 +295,31 @@ enum SendTestSecurity {
 }
 
 impl SendTestSecurity {
-    /// Points `props` at this protocol's listener. For SSL: the SSL bootstrap
-    /// servers, the cluster CA as truststore (Scala's generated
-    /// `trustStoreFile`), and no hostname verification because the tests reach
-    /// the broker via `127.0.0.1` (as in `ssl_sasl_test`).
-    ///
-    fn apply(self, ctx: &TestContext, mut props: HashMap<String, String>) -> HashMap<String, String> {
+    /// Points `props` at this protocol's listener as a client on the host
+    /// reaches it: [`Self::apply_for`] with no container bootstrap.
+    fn apply(self, ctx: &TestContext, props: HashMap<String, String>) -> HashMap<String, String> {
+        self.apply_for(ctx, false, props)
+    }
+
+    /// Points `props` at this protocol's listener as the client reaches it. For
+    /// SSL: the SSL bootstrap servers (the container SSL listener when
+    /// `needs_container_bootstrap`, else the host one), the cluster CA as
+    /// truststore (Scala's generated `trustStoreFile`), and no hostname
+    /// verification, as the native tests reach the broker via `127.0.0.1` (as in
+    /// `ssl_sasl_test`).
+    fn apply_for(
+        self,
+        ctx: &TestContext,
+        needs_container_bootstrap: bool,
+        mut props: HashMap<String, String>,
+    ) -> HashMap<String, String> {
         if self == SendTestSecurity::Ssl {
-            props.insert("bootstrap.servers".to_string(), ctx.ssl_bootstrap_servers().to_string());
+            let bootstrap = if needs_container_bootstrap {
+                ctx.cluster().container_ssl_bootstrap_servers()
+            } else {
+                ctx.ssl_bootstrap_servers()
+            };
+            props.insert("bootstrap.servers".to_string(), bootstrap.to_string());
             props.insert("security.protocol".to_string(), "SSL".to_string());
             props.insert("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string());
             props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
@@ -308,22 +328,19 @@ impl SendTestSecurity {
     }
 
     /// The producer-under-test config for `factory`: [`send_test_producer_config`]
-    /// on this protocol's listener.
-    ///
-    /// SSL runs on the native backend only: the multilanguage gRPC servers
-    /// reach the broker over the container-internal PLAINTEXT listener, and
-    /// Java has no binding-specific variant of `SslProducerSendTest`.
+    /// on this protocol's listener, at the address the factory's backend
+    /// reaches (the container listener for the gRPC backends).
     fn producer_config<F: ProducerBackendFactory>(
         self,
         factory: &F,
         ctx: &TestContext,
         opts: &SendTestProducerOpts,
     ) -> HashMap<String, String> {
-        assert!(
-            self == SendTestSecurity::Plaintext || !factory.needs_container_bootstrap(),
-            "SSL send tests run on the native backend only"
-        );
-        self.apply(ctx, send_test_producer_config(&bootstrap_for(factory, ctx), opts))
+        self.apply_for(
+            ctx,
+            factory.needs_container_bootstrap(),
+            send_test_producer_config(&bootstrap_for(factory, ctx), opts),
+        )
     }
 }
 
@@ -479,14 +496,10 @@ struct SendOffsetCallbackState {
     failures: Vec<String>,
 }
 
-/// `check_serialized_sizes` gates the size assertions (and the null-value
-/// check derived from them) to backends that report real serialized sizes; see
-/// [`send_offset_inner`] for the binding gap.
 fn send_offset_callback(
     state: Arc<Mutex<SendOffsetCallbackState>>,
     topic: String,
     partition: i32,
-    check_serialized_sizes: bool,
 ) -> Box<dyn Callback> {
     Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
         let mut st = state.lock().unwrap();
@@ -524,7 +537,7 @@ fn send_offset_callback(
             2 => m.serialized_value_size() == value_len,
             _ => m.serialized_value_size() > 0,
         };
-        if check_serialized_sizes && !size_ok {
+        if !size_ok {
             st.failures.push(format!(
                 "offset {offset}: unexpected serialized sizes key={} value={}",
                 m.serialized_key_size(),
@@ -561,22 +574,7 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
         .expect("Failed to create producer");
     let partition = 0;
     let state = Arc::new(Mutex::new(SendOffsetCallbackState::default()));
-    // Binding gap: both gRPC servers hardcode the serialized sizes in the
-    // returned metadata to -1 (`bindings/python/grpc_translate.py`
-    // `_record_metadata_to_proto`, `bindings/c/grpc_server/server.cc` ~704), and
-    // the Python servers turn an absent value into `b""`
-    // (`_proto_to_producer_record`), so record1 is not a null-value send there.
-    // The size and null-value checks therefore run only on the native backend.
-    // Everything else runs on every backend.
-    let check_serialized_sizes = factory.name() == "rust";
-    let callback = || {
-        Some(send_offset_callback(
-            state.clone(),
-            topic.clone(),
-            partition,
-            check_serialized_sizes,
-        ))
-    };
+    let callback = || Some(send_offset_callback(state.clone(), topic.clone(), partition));
 
     let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
@@ -634,7 +632,12 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
 
     {
         let st = state.lock().unwrap();
-        assert!(st.failures.is_empty(), "callback assertions failed: {:?}", st.failures);
+        assert!(
+            st.failures.is_empty(),
+            "callback assertions failed on the {} backend: {:?}",
+            factory.name(),
+            st.failures
+        );
         assert_eq!(st.invocations, NUM_RECORDS + 5, "every send's callback must fire exactly once");
         assert_eq!(st.offset, NUM_RECORDS as i64 + 5);
     }
@@ -2255,10 +2258,6 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
 /// the broker's default `max.message.bytes` is accepted, and one byte more is
 /// rejected with `RecordTooLarge` (the client's `max.request.size` bound, which
 /// the estimated batch then exceeds by one byte).
-///
-/// `serializedValueSize` and the error message are checked on the native
-/// backend only: the gRPC servers report serialized sizes as -1 and surface
-/// only the error code.
 async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2291,9 +2290,12 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
         .await
         .expect("a record of exactly the maximum size should be accepted");
-    if factory.name() == "rust" {
-        assert_eq!(value_size, metadata.serialized_value_size());
-    }
+    assert_eq!(
+        value_size,
+        metadata.serialized_value_size(),
+        "serializedValueSize on the {} backend",
+        factory.name()
+    );
 
     let record1 = ProducerRecord::with_key(topic, Some(Vec::new()), Some(vec![0u8; (value_size + 1) as usize]));
     let err = producer
@@ -2304,16 +2306,14 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
         .await
         .expect_err("a record one byte over the maximum size should be rejected");
     match &err {
-        Error::RecordTooLarge(e) => {
-            if factory.name() == "rust" {
-                assert_eq!(
-                    "The message is 1048577 bytes when serialized which is larger than 1048576, which is the value \
-                     of the max.request.size configuration.",
-                    e.message()
-                );
-            }
-        },
-        _ => panic!("Expected RecordTooLarge, got: {err:?}"),
+        Error::RecordTooLarge(e) => assert_eq!(
+            "The message is 1048577 bytes when serialized which is larger than 1048576, which is the value \
+             of the max.request.size configuration.",
+            e.message(),
+            "RecordTooLarge message on the {} backend",
+            factory.name()
+        ),
+        _ => panic!("Expected RecordTooLarge on the {} backend, got: {err:?}", factory.name()),
     }
     producer.close().await.expect("close should succeed");
 }
@@ -2322,29 +2322,22 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
 // Test instantiations
 // ---------------------------------------------------------------------------
 //
-// Under multilanguage-tests, each scenario fans out to rust/python/c via
-// the macro. Otherwise the rust_only_fallback module instantiates each
-// scenario manually against RustNativeFactory.
+// Each scenario fans out to rust / python / python_async / c via the macro.
+// The macro gates its three container-backed arms on `multilanguage-tests`
+// itself, so under `integration-tests` alone an invocation expands to its
+// `__rust` arm only.
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_single_record, produce_single_record_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_with_key, produce_with_key_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_send_offset, send_offset_inner, producer_send_cluster_config());
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_send_to_partition, send_to_partition_inner, producer_send_cluster_config());
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_send_before_and_after_partition_expansion,
     send_before_and_after_partition_expansion_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_with_compression, produce_with_compression_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_to_invalid_topic, produce_to_invalid_topic_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_record_too_large, produce_record_too_large_inner);
 /// Test: partitionsFor returns metadata for an existing topic. Exercises the
 /// producer PartitionsFor RPC across all backends (the C/Python servers now
@@ -2519,63 +2512,45 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
     producer.close().await.expect("close should succeed");
 }
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_and_check_metrics, produce_and_check_metrics_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_flush_sends_pending_records,
     flush_sends_pending_records_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close, close_inner, producer_send_cluster_config());
 
-// `kafka.api.SslProducerSendTest` (`SslProducerSendTest.scala:24-27`): the
-// `BaseProducerSendTest` bodies over the SSL listener. Native backend only under
-// both feature sets — see `SendTestSecurity::producer_config`.
+// `kafka.api.SslProducerSendTest`: the `BaseProducerSendTest` bodies over the
+// SSL listener, on every backend. The gRPC backends reach the broker's container
+// SSL listener (`SendTestSecurity::apply_for`); the verification consumer and the
+// admin stay native.
 
-/// `SslProducerSendTest.testSendOffset` (`BaseProducerSendTest.scala:127-194`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_ssl_send_offset() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    send_offset_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+/// `SslProducerSendTest.testSendOffset`.
+async fn ssl_send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_offset_with_security(ctx, factory, SendTestSecurity::Ssl).await;
 }
 
-/// `SslProducerSendTest.testClose` (`BaseProducerSendTest.scala:296-325`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_ssl_close() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    close_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+/// `SslProducerSendTest.testClose`.
+async fn ssl_close_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    close_with_security(ctx, factory, SendTestSecurity::Ssl).await;
 }
 
-/// `SslProducerSendTest.testFlush` (`BaseProducerSendTest.scala:483-501`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_ssl_flush() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    flush_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+/// `SslProducerSendTest.testFlush`.
+async fn ssl_flush_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    flush_with_security(ctx, factory, SendTestSecurity::Ssl).await;
 }
+
+crate::multilanguage_test!(test_ssl_send_offset, ssl_send_offset_inner, producer_send_cluster_config());
+crate::multilanguage_test!(test_ssl_close, ssl_close_inner, producer_send_cluster_config());
+crate::multilanguage_test!(test_ssl_flush, ssl_flush_inner, producer_send_cluster_config());
 
 // ---------------------------------------------------------------------------
-// Broker fault injection (native only under both feature sets: the scenarios
-// stop brokers of a dedicated cluster, and the bindings add nothing to what the
-// native producer proves here).
+// Broker fault injection: the scenarios stop a broker of a dedicated cluster.
+// The gRPC containers reach a restarted broker through its container listener,
+// so `test_not_enough_replicas_after_broker_shutdown` runs on every backend;
+// `test_send_to_partition_with_follower_shutdown_should_not_timeout` stays native
+// (see its `MULTILANGUAGE:` line).
 // ---------------------------------------------------------------------------
 
 /// [`producer_failure_handling_cluster_config`]'s broker properties on a
@@ -2597,16 +2572,7 @@ fn producer_failure_handling_dedicated_cluster_config() -> ClusterConfig {
 /// awaiting it (the admin's close drains it) and lets the first send wait for
 /// metadata, whereas here the creation is awaited together with the partition
 /// leader (`create_topic_with_admin_config`), so the first send cannot race
-/// the leader election.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_not_enough_replicas_after_broker_shutdown() {
-    let mut ctx = TestContext::new(producer_failure_handling_dedicated_cluster_config()).await;
-    not_enough_replicas_after_broker_shutdown_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
-    ctx.cleanup().await;
-}
-
-/// Body of [`test_not_enough_replicas_after_broker_shutdown`], generic so that
-/// `send` resolves to `Producer::send`.
+/// the leader election. The topic admin stays native.
 async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2623,41 +2589,56 @@ async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFacto
     let record = || ProducerRecord::with_key(topic_name.clone(), Some(b("key")), Some(b("value")));
 
     let producer = factory
-        .create(failure_producer_config(ctx.bootstrap_servers(), -1))
+        .create(failure_producer_config(&bootstrap_for(factory, ctx), -1))
         .await
         .expect("Failed to create producer");
+    let backend = factory.name();
     // this should work with all brokers up and running
     producer
         .send(record())
         .await
-        .expect("send should succeed")
+        .unwrap_or_else(|e| panic!("{backend} backend: send should succeed: {e:?}"))
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
         .await
-        .expect("the send should work with all brokers up and running");
+        .unwrap_or_else(|e| panic!("{backend} backend: the send should work with all brokers up and running: {e:?}"));
 
     // shut down one broker: Java's `clusterInstance.brokers().get(0)` is broker id 0
     let one_broker = 0;
     ctx.cluster().shutdown_broker(one_broker).await;
 
-    let e = producer
+    let result = producer
         .send(record())
         .await
-        .expect("send should accept the request")
+        .unwrap_or_else(|e| panic!("{backend} backend: send should accept the request: {e:?}"))
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
-        .await
-        .expect_err("the send must fail with a broker down and min.insync.replicas = brokers");
+        .await;
+    let Err(e) = result else {
+        panic!(
+            "{backend} backend: the send must fail with a broker down and min.insync.replicas = brokers, got {result:?}"
+        );
+    };
     assert!(
         matches!(
             e,
             Error::NotEnoughReplicas(_) | Error::NotEnoughReplicasAfterAppend(_) | Error::Timeout(_)
         ),
-        "expected NotEnoughReplicas, NotEnoughReplicasAfterAppend or Timeout, got {e:?}"
+        "{backend} backend: expected NotEnoughReplicas, NotEnoughReplicasAfterAppend or Timeout, got {e:?}"
     );
 
     // restart the server
     ctx.cluster().start_broker(one_broker).await;
-    producer.close().await.expect("close should succeed");
+    producer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close should succeed: {e:?}"));
+    ctx.cleanup().await;
 }
+
+crate::multilanguage_test!(
+    test_not_enough_replicas_after_broker_shutdown,
+    not_enough_replicas_after_broker_shutdown_inner,
+    producer_failure_handling_dedicated_cluster_config()
+);
 
 /// [`producer_send_cluster_config`]'s broker shape on a dedicated `Type.KRAFT`
 /// cluster (two brokers plus one isolated controller, as Scala's KRaft
@@ -2678,6 +2659,7 @@ fn producer_send_dedicated_cluster_config() -> ClusterConfig {
 /// Java's `createTopicWithAdmin(.., numPartitions = 1, replicationFactor = 3,
 /// replicaAssignment = Map(0 -> List(0, 1)))` creates the topic from the
 /// assignment alone; [`NewTopic::with_replicas_assignments`] is the same request.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC (every send is acknowledged before the follower stops, so a gRPC arm would test nothing).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
     let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
@@ -2774,51 +2756,40 @@ async fn send_to_partition_with_follower_shutdown_should_not_timeout_inner<F: Pr
 // Tests using the restrictive cluster (no auto-create + small message.max.bytes)
 // pass it as the macro's optional 3rd argument.
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_produce_too_large_record_acks_zero,
     produce_too_large_record_acks_zero_inner,
     small_max_bytes_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_partition_too_large_for_replication_with_ack_all,
     partition_too_large_for_replication_with_ack_all_inner,
     producer_failure_handling_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_response_too_large_for_replication_with_ack_all,
     response_too_large_for_replication_with_ack_all_inner,
     producer_failure_handling_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_cannot_send_to_internal_topic,
     cannot_send_to_internal_topic_inner,
     producer_failure_handling_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_produce_too_large_record_acks_one,
     produce_too_large_record_acks_one_inner,
     small_max_bytes_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_produce_to_non_existent_topic,
     produce_to_non_existent_topic_inner,
     no_auto_create_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_with_wrong_broker_list, produce_with_wrong_broker_list_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_invalid_partition, produce_invalid_partition_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_send_after_closed, send_after_closed_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_batch_size_zero, batch_size_zero_inner, producer_send_cluster_config());
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_batch_size_zero_no_partition_no_record_key,
     batch_size_zero_no_partition_no_record_key_inner,
@@ -2829,18 +2800,18 @@ crate::multilanguage_test!(
 // `delivery.timeout.ms` = Int.MaxValue, default `batch.size`), which relies on
 // `send()` returning an unresolved future so `close(20s)` can drain the
 // lingering batch. The gRPC `Send` RPC is synchronous per record: it blocks
-// until delivery (`bindings/c/grpc_server/server.cc` calls
-// `kafka_producer_FutureRecordMetadata_get`; `bindings/python/grpc_server.py`
-// calls `future.result(timeout=120)`). So the first record's partial batch
+// until delivery (`c/grpc_server/server.cc` calls `kafka_common_KafkaFuture_get`;
+// `python/grpc_server.py` and `python/grpc_server_async.py` call
+// `future.get(timeout=120)`). So the first record's partial batch
 // never ships and `close` is never reached on the python / c backends.
-#[cfg(feature = "multilanguage-tests")]
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_compressed_message_with_create_time__rust() {
     let mut ctx = TestContext::new(producer_send_cluster_config()).await;
     send_compressed_message_with_create_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
-#[cfg(feature = "multilanguage-tests")]
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_non_compressed_message_with_create_time__rust() {
@@ -2848,7 +2819,7 @@ async fn test_send_non_compressed_message_with_create_time__rust() {
     send_non_compressed_message_with_create_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
         .await;
 }
-#[cfg(feature = "multilanguage-tests")]
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_compressed_message_with_log_append_time__rust() {
@@ -2856,7 +2827,7 @@ async fn test_send_compressed_message_with_log_append_time__rust() {
     send_compressed_message_with_log_append_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
         .await;
 }
-#[cfg(feature = "multilanguage-tests")]
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_non_compressed_message_with_log_append_time__rust() {
@@ -2867,39 +2838,32 @@ async fn test_send_non_compressed_message_with_log_append_time__rust() {
     )
     .await;
 }
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_send_with_invalid_before_and_after_timestamp,
     send_with_invalid_before_and_after_timestamp_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_valid_before_and_after_timestamps_at_threshold,
     valid_before_and_after_timestamps_at_threshold_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_valid_before_and_after_timestamps_within_threshold,
     valid_before_and_after_timestamps_within_threshold_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_non_blocking_producer,
     non_blocking_producer_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_send_record_batch_with_max_request_size_and_higher,
     send_record_batch_with_max_request_size_and_higher_inner,
     producer_send_cluster_config()
 );
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_partitions_for, produce_partitions_for_inner);
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_partitions_for_timeout_error_when_topic_does_not_exist,
     partitions_for_timeout_error_when_topic_does_not_exist_inner,
@@ -2907,7 +2871,7 @@ crate::multilanguage_test!(
 );
 // `testCompression` is native-only, also under `multilanguage-tests` — see
 // `compression_inner` for why the gRPC backends cannot run it.
-#[cfg(feature = "multilanguage-tests")]
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_compression__rust() {
@@ -2948,6 +2912,7 @@ impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSeri
 ///
 /// Native only: the gRPC backends' `Send` RPC blocks until delivery, which with
 /// `linger.ms=Int.MaxValue` never happens.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC.
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_with_zero_timeout_aborts_pending() {
@@ -3011,7 +2976,8 @@ async fn close_with_zero_timeout_from_caller_thread_inner<F: ProducerBackendFact
 /// Python `KafkaProducer` record) delivers the record's headers to the broker,
 /// as `KafkaProducer#doSend` appends them:
 /// in order, an empty value and a null value kept apart. It used to append
-/// none. Rust-only: the gRPC producer proto has no headers.
+/// none.
+// MULTILANGUAGE: Rust-only API / null header (the inherent borrowed send; proto `Header.value` cannot carry a null value).
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_borrowed_send_delivers_the_record_headers() {
@@ -3098,6 +3064,7 @@ async fn test_borrowed_send_delivers_the_record_headers() {
 /// `Error::Serialization`. The Producer trait wraps the serializer
 /// in `Box<dyn Serializer>` — that surface only exists in the native
 /// Rust path, hence rust-only.
+// MULTILANGUAGE: Rust-only API (the serializer is the subject; the gRPC producers are bytes in, bytes out).
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wrong_serializer_errors_send() {
@@ -3152,6 +3119,7 @@ async fn test_wrong_serializer_errors_send() {
 ///
 /// Native only: it needs `send_with_callback` closures that call back into the
 /// same producer, which cannot cross the gRPC boundary.
+// MULTILANGUAGE: pending-send shape not expressible over the blocking Send RPC (callbacks call back into the same producer).
 #[cfg(feature = "integration-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_with_zero_timeout_from_sender_thread() {
@@ -3341,7 +3309,6 @@ async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &
     producer.close().await.expect("close should succeed");
 }
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_delivery_callback_logs_metadata, delivery_callback_logs_metadata_inner);
 
 /// Java's guarantee on `send(record, callback)`: "callbacks for records being
@@ -3441,7 +3408,6 @@ async fn send_with_callback_keeps_per_partition_order_inner<F: ProducerBackendFa
     producer.close().await.expect("close should succeed");
 }
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_send_with_callback_keeps_per_partition_order,
     send_with_callback_keeps_per_partition_order_inner
@@ -3498,7 +3464,6 @@ async fn partitions_for_freshly_created_topic_inner<F: ProducerBackendFactory>(c
     admin.close_with_timeout(Duration::from_secs(5)).await;
 }
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_partitions_for_freshly_created_topic,
     partitions_for_freshly_created_topic_inner
@@ -3569,204 +3534,10 @@ async fn metrics_follow_configuration_and_traffic_inner<F: ProducerBackendFactor
     producer.close().await.expect("close");
 }
 
-#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_metrics_follow_configuration_and_traffic,
     metrics_follow_configuration_and_traffic_inner
 );
-
-#[cfg(all(feature = "integration-tests", not(feature = "multilanguage-tests")))]
-mod rust_only_fallback {
-    use super::*;
-    use crate::common::backend_factory::RustNativeFactory;
-
-    async fn ctx() -> TestContext {
-        TestContext::new(ClusterConfig::default()).await
-    }
-
-    async fn no_auto_create_ctx() -> TestContext {
-        TestContext::new(no_auto_create_cluster_config()).await
-    }
-
-    async fn small_max_bytes_ctx() -> TestContext {
-        TestContext::new(small_max_bytes_cluster_config()).await
-    }
-
-    async fn send_ctx() -> TestContext {
-        TestContext::new(producer_send_cluster_config()).await
-    }
-
-    async fn failure_handling_ctx() -> TestContext {
-        TestContext::new(producer_failure_handling_cluster_config()).await
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_single_record() {
-        produce_single_record_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_with_key() {
-        produce_with_key_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_offset() {
-        send_offset_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_to_partition() {
-        send_to_partition_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_before_and_after_partition_expansion() {
-        send_before_and_after_partition_expansion_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_with_compression() {
-        produce_with_compression_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_to_invalid_topic() {
-        produce_to_invalid_topic_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_record_too_large() {
-        produce_record_too_large_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_flush_sends_pending_records() {
-        flush_sends_pending_records_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_partitions_for() {
-        produce_partitions_for_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_partitions_for_timeout_error_when_topic_does_not_exist() {
-        partitions_for_timeout_error_when_topic_does_not_exist_inner(
-            &mut no_auto_create_ctx().await,
-            &RustNativeFactory,
-        )
-        .await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_and_check_metrics() {
-        produce_and_check_metrics_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_close_flushes_pending() {
-        close_flushes_pending_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_close() {
-        close_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-
-    // The 8 newly translated multi-language tests, run rust-only when
-    // the multilanguage-tests feature isn't enabled.
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_too_large_record_acks_zero() {
-        produce_too_large_record_acks_zero_inner(&mut small_max_bytes_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_partition_too_large_for_replication_with_ack_all() {
-        partition_too_large_for_replication_with_ack_all_inner(&mut failure_handling_ctx().await, &RustNativeFactory)
-            .await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_response_too_large_for_replication_with_ack_all() {
-        response_too_large_for_replication_with_ack_all_inner(&mut failure_handling_ctx().await, &RustNativeFactory)
-            .await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_cannot_send_to_internal_topic() {
-        cannot_send_to_internal_topic_inner(&mut failure_handling_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_too_large_record_acks_one() {
-        produce_too_large_record_acks_one_inner(&mut small_max_bytes_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_to_non_existent_topic() {
-        produce_to_non_existent_topic_inner(&mut no_auto_create_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_with_wrong_broker_list() {
-        produce_with_wrong_broker_list_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_produce_invalid_partition() {
-        produce_invalid_partition_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_after_closed() {
-        send_after_closed_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_batch_size_zero() {
-        batch_size_zero_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_batch_size_zero_no_partition_no_record_key() {
-        batch_size_zero_no_partition_no_record_key_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_compressed_message_with_create_time() {
-        send_compressed_message_with_create_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_non_compressed_message_with_create_time() {
-        send_non_compressed_message_with_create_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_compressed_message_with_log_append_time() {
-        send_compressed_message_with_log_append_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_non_compressed_message_with_log_append_time() {
-        send_non_compressed_message_with_log_append_time_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_with_invalid_before_and_after_timestamp() {
-        send_with_invalid_before_and_after_timestamp_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_valid_before_and_after_timestamps_at_threshold() {
-        valid_before_and_after_timestamps_at_threshold_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_valid_before_and_after_timestamps_within_threshold() {
-        valid_before_and_after_timestamps_within_threshold_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_non_blocking_producer() {
-        non_blocking_producer_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_record_batch_with_max_request_size_and_higher() {
-        send_record_batch_with_max_request_size_and_higher_inner(&mut send_ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_compression() {
-        compression_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_delivery_callback_logs_metadata() {
-        delivery_callback_logs_metadata_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_send_with_callback_keeps_per_partition_order() {
-        send_with_callback_keeps_per_partition_order_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_partitions_for_freshly_created_topic() {
-        partitions_for_freshly_created_topic_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_metrics_follow_configuration_and_traffic() {
-        metrics_follow_configuration_and_traffic_inner(&mut ctx().await, &RustNativeFactory).await;
-    }
-}
 
 /// Translated from `kafka.api.IncrementalAllocationProducerSendTest`
 /// (`core/src/test/scala/integration/kafka/api/IncrementalAllocationProducerSendTest.scala`, Apache
@@ -3782,6 +3553,7 @@ mod rust_only_fallback {
 ///
 /// Native only, like Java's suite: the strategy is an internal producer config with no binding
 /// surface, and the suite verifies the producer, not the bindings.
+// MULTILANGUAGE: Rust-internal allocation budget (the incremental buffer.memory strategy, a native suite).
 #[cfg(feature = "integration-tests")]
 mod incremental_allocation_producer_send {
     use super::*;
@@ -3824,6 +3596,7 @@ mod incremental_allocation_producer_send {
         TestContext::new(producer_send_cluster_config()).await
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_offset() {
         send_offset_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
@@ -3834,21 +3607,25 @@ mod incremental_allocation_producer_send {
     // overrides it with an empty body). The construction failure itself is pinned by the unit test
     // `test_incremental_allocation_strategy_rejects_compression`.
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_non_compressed_message_with_create_time() {
         send_non_compressed_message_with_create_time_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close() {
         close_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_to_partition() {
         send_to_partition_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
         let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
@@ -3857,21 +3634,25 @@ mod incremental_allocation_producer_send {
         ctx.cleanup().await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_before_and_after_partition_expansion() {
         send_before_and_after_partition_expansion_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_flush() {
         flush_sends_pending_records_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close_with_zero_timeout_from_caller_thread() {
         close_with_zero_timeout_from_caller_thread_inner(&IncrementalAllocationFactory).await;
     }
 
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close_with_zero_timeout_from_sender_thread() {
         close_with_zero_timeout_from_sender_thread_inner(&IncrementalAllocationFactory).await;
@@ -3884,6 +3665,7 @@ mod incremental_allocation_producer_send {
     /// Translated from `IncrementalAllocationProducerSendTest.testBatchSizeZero`:
     /// `sendAndVerify(createProducer(lingerMs = Int.MaxValue, deliveryTimeoutMs = Int.MaxValue,
     /// batchSize = 0))`, which is `batch_size_zero_inner`'s body.
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_size_zero() {
         batch_size_zero_inner(&mut send_ctx().await, &IncrementalAllocationFactory).await;
@@ -3893,6 +3675,7 @@ mod incremental_allocation_producer_send {
     ///
     /// Java's `TODO: also exercise the compressed codecs here once the incremental strategy
     /// supports compression` is KAFKA-20579; compression is rejected at construction for now.
+    // MULTILANGUAGE: Rust-internal allocation budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_send_large_records_spanning_multiple_chunks() {
         let mut ctx = send_ctx().await;

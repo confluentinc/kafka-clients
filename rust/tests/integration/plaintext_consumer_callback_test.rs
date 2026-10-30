@@ -14,33 +14,34 @@
 
 //! Integration tests translated from
 //! `kafka/clients/clients-integration-tests/src/test/java/org/apache/kafka/clients/consumer/PlaintextConsumerCallbackTest.java`
-//! (Apache Kafka 4.2).
+//! (Apache Kafka 4.2), run as multilanguage scenarios: each one runs against
+//! the native Rust consumer and, through the gRPC backends, the Python (sync
+//! and asyncio) and C consumers ([`multilanguage_consumer_test!`]). The setup
+//! producer is a native fixture; only the consumer is under test.
 //!
 //! These exercise `consumer-threading.md` §31 rebalance-listener
 //! reentrancy: in Java, the rebalance listener runs on the caller's task
 //! and may call back into the consumer API (assign / assignment /
 //! beginningOffsets / position / seek / pause) from inside the callback.
 //!
-//! # Issue 8 closed by Phase 41 (`ConsumerHandle`)
+//! # The listener under test
 //!
-//! A Rust rebalance listener is held as `Arc<dyn ConsumerRebalanceListener>`
-//! and its methods take only `&self`; the consumer ops exercised inside the
-//! Java callbacks (`assign` / `position` / `beginning_offsets` / `seek` /
-//! `pause` / `resume`) are `async fn(&mut self)` on `AsyncKafkaConsumer`,
-//! and `Box<dyn DynConsumer>` is not `Clone`. Phase 41 closes this:
-//!   1. The user captures a `Clone + Send + Sync` [`ConsumerHandle`]
-//!      (`consumer.handle()`) into the listener struct — the Rust
-//!      equivalent of Java capturing the `consumer` variable. The handle
-//!      exposes the reentrant-safe ops; the listener trait stays
-//!      Java-identical (`&self` + partitions).
-//!   2. The bg loop no longer freezes during the callback (Phase 41b), so a
-//!      reentrant op that routes through the bg task completes instead of
-//!      deadlocking.
-//!
-//! Every in-callback-reentrancy test below is therefore now a real test
-//! (the previous `#[ignore]`d stubs are gone), keeping the Java assertion
-//! shape. These are integration tests (Docker-gated like the rest of the
-//! suite; compile-verified locally, run in CI).
+//! A gRPC backend cannot take a Rust listener object, so every scenario
+//! registers the backend's own logging listener
+//! ([`ConsumerCallbackLog`]) and asserts on what it logged. For the
+//! in-callback-reentrancy scenarios the listener is given a
+//! [`ListenerAction`] script: the consumer calls Java's anonymous listener
+//! makes (`assignment()`, `beginningOffsets`, `position`, `seek` then
+//! `pause`), run once from inside the targeted method when its partitions
+//! contain the test partition, each step's result logged as a
+//! `listener_action` entry. The native
+//! listener makes the call through a captured [`ConsumerHandle`] (the Rust
+//! equivalent of Java capturing the `consumer` variable; the listener trait
+//! stays Java-identical, `&self` + partitions); the Python servers through the
+//! consumer object, the C server through the `kafka_consumer_ConsumerHandle_*`
+//! entry points. The bg loop does not freeze during the callback (Phase 41b),
+//! so a reentrant op that routes through the bg task completes instead of
+//! deadlocking.
 //!
 //! # Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
@@ -59,6 +60,9 @@
 //!   → `test_get_position_of_newly_assigned_partition_on_partitions_assigned_callback`
 //! - `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback`
 //!   → `test_seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback`
+//!
+//! Each name gains the macro's backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`).
 //!
 //! # SKIPped (no subject on the Rust side)
 //!
@@ -86,34 +90,31 @@
 //! - SKIP: `testClassicConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback`
 //! - SKIP: `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForClassicCooperative` — classic-protocol-only
 //! - SKIP: `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForClassicEager` — classic-protocol-only
+//!
+//! [`ConsumerHandle`]: confluent_kafka::consumer::ConsumerHandle
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
-use async_trait::async_trait;
-
-use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::ConsumerHandle;
-use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::DynConsumer;
-use confluent_kafka::consumer::KafkaConsumer;
-use confluent_kafka::producer::KafkaProducer;
-use confluent_kafka::producer::Producer;
-use confluent_kafka::producer::ProducerConfig;
-use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
+use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::callback_log::{
+    CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED, KIND_LISTENER_ACTION, KIND_REVOKED, ListenerAction,
+    ListenerStep, ListenerTrigger,
+};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
+use crate::common::consumer_scenario::{consumer_config_for, poll_until_entry, produce};
 use crate::common::test_context::TestContext;
+use crate::multilanguage_consumer_test;
 
-type BytesConsumer = dyn DynConsumer<Vec<u8>, Vec<u8>>;
+type BytesConsumer = Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>;
 
 // ── Cluster config (Java: 3 brokers, KIP-848, no extra serverProperties) ─
 
@@ -124,123 +125,72 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
     kip848_3_broker(1)
 }
 
-// ── Byte-array deserializer ───────────────────────────────────────────
+// ── Fixtures ──────────────────────────────────────────────────────────
 
-struct ByteArrayDeserializer;
-
-impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(data.to_vec())
-    }
+/// Provision a single-partition topic (this suite only cares about
+/// partition 0 of `topic` and `newTopic`) with a native producer.
+async fn ensure_topic(ctx: &TestContext, topic: &str) {
+    produce(ctx, topic, &[("__provisioner__", "__provisioner__")]).await;
 }
 
-// ── Config + producer helpers ─────────────────────────────────────────
+/// Java's `ClientsTestUtils#sendRecords(ClusterInstance,TopicPartition,int,long)`:
+/// a fresh native producer sends `num_records` records `key i` / `value i` to
+/// `tp`, record `i` with timestamp `starting_timestamp + i`, then flushes and
+/// closes.
+async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
+    let mut props = HashMap::from([("acks".to_string(), "all".to_string())]);
+    ctx.configure(&mut props);
+    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
+        ProducerConfig::new(&props).expect("producer config"),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
+    )
+    .expect("create producer");
+    for i in 0..num_records {
+        let record = ProducerRecord::with_partition_timestamp_key(
+            tp.topic().to_string(),
+            Some(tp.partition()),
+            Some(starting_timestamp + i as i64),
+            Some(format!("key {i}").into_bytes()),
+            Some(format!("value {i}").into_bytes()),
+        )
+        .expect("valid producer record");
+        // Fully-qualified trait call: KafkaProducer also has an inherent
+        // 2-arg send(record, callback) that would otherwise shadow this.
+        Producer::send(&producer, record).await.expect("send");
+    }
+    producer.flush().await.expect("producer flush");
+    producer.close().await.expect("producer close");
+}
 
 /// Java's `createConsumer(protocol)` sets `group.protocol=consumer` and
 /// `enable.auto.commit=false` (no `group.id` override in the Java helper,
 /// so a random one is supplied per test). Default
-/// `auto.offset.reset=earliest`.
-fn make_consumer_config_bytes(ctx: &TestContext, group_id: &str) -> ConsumerConfig {
-    let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
-        ("group.protocol".to_string(), "consumer".to_string()),
-        ("auto.offset.reset".to_string(), "earliest".to_string()),
-        ("client.id".to_string(), "integration-test-consumer".to_string()),
-        ("enable.auto.commit".to_string(), "false".to_string()),
-        ("group.id".to_string(), group_id.to_string()),
-    ]);
-    ctx.apply_security(&mut props);
-    ConsumerConfig::new(&props).expect("invalid test config")
-}
-
-fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
-    Box::new(
-        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(config, ByteArrayDeserializer, ByteArrayDeserializer)
-            .expect("KafkaConsumer::new should succeed"),
-    )
-}
-
-fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
-    let mut props = HashMap::from([
-        ("bootstrap.servers".to_string(), ctx.protocol_bootstrap_servers().to_string()),
-        ("client.id".to_string(), "integration-test-producer".to_string()),
-        ("acks".to_string(), "all".to_string()),
-        ("max.block.ms".to_string(), "30000".to_string()),
-        ("linger.ms".to_string(), "5".to_string()),
-    ]);
-    ctx.apply_security(&mut props);
-    ProducerConfig::new(&props).expect("invalid producer test config")
-}
-
-fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    KafkaProducer::new(
-        make_producer_config(ctx),
-        ByteArraySerializer::default(),
-        ByteArraySerializer::default(),
-    )
-    .expect("Failed to build test producer")
-}
-
-/// Provision a single-partition topic (this suite only cares about
-/// partition 0 of `topic` and `newTopic`).
-async fn ensure_topic(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
-    let record = ProducerRecord::with_partition_key(
-        topic.to_string(),
-        Some(0),
-        Some(b"__provisioner__".to_vec()),
-        Some(b"__provisioner__".to_vec()),
-    )
-    .expect("ProducerRecord::with_partition_key should succeed");
-    let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
+/// `auto.offset.reset=earliest`. The consumer comes with its callback log,
+/// since every scenario observes the listener.
+async fn create_consumer<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    group_id: &str,
+) -> (BytesConsumer, ConsumerCallbackLog) {
+    factory
+        .create_with_callback_log(consumer_config_for(factory, ctx, group_id))
         .await
-        .expect("provisioner send should succeed");
-    fut.get_with_timeout(Duration::from_secs(30))
-        .await
-        .expect("provisioner send should ack");
-    producer.flush().await.expect("producer.flush should succeed");
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
-// ── Listener that records the partitions it was handed ────────────────
-
-/// Mirrors the anonymous listener in Java's `subscribeAndExpectOn
-/// PartitionsAssigned`: when `onPartitionsAssigned` is invoked with a set
-/// containing all expected partitions, record the exact set passed and
-/// flag completion. Needs no consumer reentrancy.
-struct RecordingAssignedListener {
-    expected: HashSet<TopicPartition>,
-    captured: Arc<Mutex<Option<Vec<TopicPartition>>>>,
+/// The partitions of `entry` as a set.
+fn partition_set(partitions: &[(String, i32)]) -> HashSet<TopicPartition> {
+    partitions.iter().map(|(t, p)| TopicPartition::new(t.clone(), *p)).collect()
 }
 
-#[async_trait]
-impl ConsumerRebalanceListener for RecordingAssignedListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-        Ok(())
-    }
-
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        let got: HashSet<TopicPartition> = partitions.iter().cloned().collect();
-        // Java: `if (partitions.containsAll(expectedPartitionsInCallback))`.
-        if self.expected.iter().all(|tp| got.contains(tp)) {
-            *self.captured.lock().expect("captured mutex poisoned") = Some(partitions.to_vec());
-        }
-        Ok(())
-    }
-}
-
-/// Drive `poll(100ms)` until `captured` is set or the deadline elapses.
-async fn poll_until_captured(
-    consumer: &mut BytesConsumer,
-    captured: &Arc<Mutex<Option<Vec<TopicPartition>>>>,
-    deadline_duration: Duration,
-) -> Vec<TopicPartition> {
-    let deadline = Instant::now() + deadline_duration;
-    while Instant::now() < deadline {
-        let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
-        if let Some(v) = captured.lock().expect("captured mutex poisoned").clone() {
-            return v;
-        }
-    }
-    panic!("Timed out before expected rebalance completed");
+/// The first `kind` entry of `entries` that `wanted` accepts.
+fn first_entry<'a>(
+    entries: &'a [CallbackLogEntry],
+    kind: &str,
+    wanted: impl Fn(&CallbackLogEntry) -> bool,
+) -> Option<&'a CallbackLogEntry> {
+    entries.iter().find(|e| e.kind == kind && wanted(e))
 }
 
 // ── Runnable test: KIP-848 new-partitions-only ────────────────────────
@@ -253,502 +203,498 @@ async fn poll_until_captured(
 /// KIP-848 (CONSUMER protocol): when the subscription is expanded to add a
 /// new topic, the `onPartitionsAssigned` callback receives ONLY the newly
 /// added partition, not the full assignment. This needs no consumer
-/// reentrancy — the listener only reads its `partitions` argument.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_on_partitions_assigned_called_with_new_partitions_only() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+/// reentrancy — the listener only logs its `partitions` argument. Java's
+/// listener records the invocation whose partitions contain all expected
+/// ones; the scenario takes the first logged `assigned` entry that does.
+async fn on_partitions_assigned_called_with_new_partitions_only<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let new_topic = ctx.topic("newTopic");
     let group_id = ctx.group_id("g_new_partitions_only");
     let tp = TopicPartition::new(topic.clone(), 0);
     let added = TopicPartition::new(new_topic.clone(), 0);
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    ensure_topic(&producer, &new_topic).await;
-    producer.close().await.expect("producer close should succeed");
+    ensure_topic(ctx, &topic).await;
+    ensure_topic(ctx, &new_topic).await;
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
 
     // First subscription: expect `tp` in the callback.
-    let captured1: Arc<Mutex<Option<Vec<TopicPartition>>>> = Arc::new(Mutex::new(None));
-    let listener1: Arc<dyn ConsumerRebalanceListener> = Arc::new(RecordingAssignedListener {
-        expected: [tp.clone()].into_iter().collect(),
-        captured: Arc::clone(&captured1),
-    });
-    consumer
-        .subscribe_with_topics_listener(vec![topic.clone()], listener1)
+    log.subscribe_with_logging_listener(&mut consumer, vec![topic.clone()])
         .await
-        .expect("first subscribe should succeed");
-    let got1 = poll_until_captured(consumer.as_mut(), &captured1, Duration::from_secs(90)).await;
-    let got1_set: HashSet<TopicPartition> = got1.iter().cloned().collect();
+        .unwrap_or_else(|e| panic!("{backend} backend: first subscribe: {e}"));
+    let has_tp = |e: &CallbackLogEntry| e.has_partition(tp.topic(), tp.partition());
+    let entries = poll_until_entry(&mut consumer, &log, KIND_ASSIGNED, has_tp, Duration::from_secs(90)).await;
+    let got1 = first_entry(&entries, KIND_ASSIGNED, has_tp)
+        .unwrap_or_else(|| panic!("{backend} backend: Timed out before expected rebalance completed: {entries:?}"));
     assert_eq!(
-        got1_set,
+        partition_set(&got1.partitions),
         [tp.clone()].into_iter().collect::<HashSet<_>>(),
-        "first onPartitionsAssigned should be exactly {{tp}}"
+        "{backend} backend: first onPartitionsAssigned should be exactly {{tp}}"
     );
-    assert_eq!(consumer.assignment(), [tp.clone()].into_iter().collect::<HashSet<_>>());
+    assert_eq!(
+        consumer.assignment(),
+        [tp.clone()].into_iter().collect::<HashSet<_>>(),
+        "{backend} backend"
+    );
 
     // Expand subscription to add `newTopic`. The callback should receive
     // ONLY the newly added partition (KIP-848 incremental assignment).
-    let captured2: Arc<Mutex<Option<Vec<TopicPartition>>>> = Arc::new(Mutex::new(None));
-    let listener2: Arc<dyn ConsumerRebalanceListener> = Arc::new(RecordingAssignedListener {
-        expected: [added.clone()].into_iter().collect(),
-        captured: Arc::clone(&captured2),
-    });
-    consumer
-        .subscribe_with_topics_listener(vec![topic.clone(), new_topic.clone()], listener2)
+    log.subscribe_with_logging_listener(&mut consumer, vec![topic.clone(), new_topic.clone()])
         .await
-        .expect("expand subscribe should succeed");
-    let got2 = poll_until_captured(consumer.as_mut(), &captured2, Duration::from_secs(90)).await;
-    let got2_set: HashSet<TopicPartition> = got2.iter().cloned().collect();
+        .unwrap_or_else(|e| panic!("{backend} backend: expand subscribe: {e}"));
+    let has_added = |e: &CallbackLogEntry| e.has_partition(added.topic(), added.partition());
+    let entries = poll_until_entry(&mut consumer, &log, KIND_ASSIGNED, has_added, Duration::from_secs(90)).await;
+    let got2 = first_entry(&entries, KIND_ASSIGNED, has_added)
+        .unwrap_or_else(|| panic!("{backend} backend: Timed out before expected rebalance completed: {entries:?}"));
     assert_eq!(
-        got2_set,
+        partition_set(&got2.partitions),
         [added.clone()].into_iter().collect::<HashSet<_>>(),
-        "expand onPartitionsAssigned should be exactly the newly-added partition {{added}}, \
-         got {got2:?}"
+        "{backend} backend: expand onPartitionsAssigned should be exactly the newly-added partition {{added}}, \
+         got {:?}",
+        got2.partitions
     );
     // The full assignment now contains both partitions.
     assert_eq!(
         consumer.assignment(),
-        [tp.clone(), added.clone()].into_iter().collect::<HashSet<_>>()
+        [tp.clone(), added.clone()].into_iter().collect::<HashSet<_>>(),
+        "{backend} backend"
     );
 
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
 
 // ── In-callback-reentrancy tests (Issue 8 — closed by Phase 41) ───────
 //
-// Each listener captures a `ConsumerHandle` (the Rust equivalent of Java
-// capturing the `consumer` variable) and, on the matching callback for the
-// test partition, runs the op the Java test runs and records its outcome.
-// The harness then asserts the recorded outcome matches Java's assertion.
+// Each listener runs the op the Java test runs on the matching callback for
+// the test partition and logs its outcome (a `listener_action` entry). The
+// harness then asserts the logged outcome matches Java's assertion.
 
-/// The reentrant action a listener runs against its captured handle, and
-/// where it records the result for the harness to assert.
-enum CallbackAction {
-    /// Java: `assertTrue(consumer.assignment().contains(tp))`. Records the
-    /// `assignment()` set seen from inside the callback.
-    Assignment {
-        captured_assignment: Arc<Mutex<Option<HashSet<TopicPartition>>>>,
-    },
-    /// Java: `consumer.beginningOffsets([tp])` → `map.get(tp) == 0`. Records
-    /// the returned map.
-    BeginningOffsets {
-        tp: TopicPartition,
-        captured: Arc<Mutex<Option<HashMap<TopicPartition, i64>>>>,
-    },
-    /// Java: `assertDoesNotThrow(() -> consumer.position(tp))`. Records the
-    /// position result.
-    Position {
-        tp: TopicPartition,
-        result: Arc<Mutex<Option<Result<i64, Error>>>>,
-    },
-    /// Java: `consumer.seek_with_offset(tp, offset); consumer.pause([tp])`. Records the
-    /// combined result.
-    SeekAndPause {
-        tp: TopicPartition,
-        offset: i64,
-        result: Arc<Mutex<Option<Result<(), Error>>>>,
-    },
-}
-
-impl CallbackAction {
-    async fn run(&self, handle: &ConsumerHandle) {
-        match self {
-            CallbackAction::Assignment { captured_assignment } => {
-                *captured_assignment.lock().expect("assignment mutex") = Some(handle.assignment());
-            },
-            CallbackAction::BeginningOffsets { tp, captured } => {
-                let map = handle
-                    .beginning_offsets(std::slice::from_ref(tp))
-                    .await
-                    .expect("beginning_offsets should succeed");
-                *captured.lock().expect("offsets mutex") = Some(map);
-            },
-            CallbackAction::Position { tp, result } => {
-                let r = handle.position(tp).await;
-                *result.lock().expect("position mutex") = Some(r);
-            },
-            CallbackAction::SeekAndPause { tp, offset, result } => {
-                let r = async {
-                    handle.seek_with_offset(tp.clone(), *offset).await?;
-                    handle.pause(std::slice::from_ref(tp)).await
-                }
-                .await;
-                *result.lock().expect("seek+pause mutex") = Some(r);
-            },
-        }
-    }
-}
-
-/// Listener that runs a [`CallbackAction`] against a captured
-/// [`ConsumerHandle`] on the targeted method, once `partitions` contains
-/// `tp`. Mirrors Java's anonymous listener that captures `consumer` and
-/// calls `execute.accept(consumer, partitions)`.
-struct ReentrantListener {
-    handle: ConsumerHandle,
-    tp: TopicPartition,
-    /// `true` to run the action on `onPartitionsAssigned`, `false` on
-    /// `onPartitionsRevoked`.
-    on_assigned: bool,
-    action: CallbackAction,
-    /// Set once the action has run (Java's `partitionsAssigned`/`Revoked`
-    /// `AtomicBoolean`).
-    done: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[async_trait]
-impl ConsumerRebalanceListener for ReentrantListener {
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        if self.on_assigned && partitions.contains(&self.tp) {
-            self.action.run(&self.handle).await;
-            self.done.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        Ok(())
-    }
-
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        if !self.on_assigned && partitions.contains(&self.tp) {
-            self.action.run(&self.handle).await;
-            self.done.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        Ok(())
-    }
+/// The `listener_action` entries of `entries`, in log order.
+fn action_entries(entries: &[CallbackLogEntry]) -> Vec<CallbackLogEntry> {
+    entries.iter().filter(|e| e.kind == KIND_LISTENER_ACTION).cloned().collect()
 }
 
 /// Java's `triggerOnPartitionsAssigned(tp, consumer, execute)`: subscribe
-/// with a listener that runs `action` from inside `onPartitionsAssigned`
-/// once `tp` is assigned, then poll until the action has run.
+/// with a listener that runs `steps` from inside `onPartitionsAssigned`
+/// once `tp` is assigned, then poll until they have run. Returns the steps'
+/// log entries, in order.
 async fn trigger_on_partitions_assigned(
     consumer: &mut BytesConsumer,
+    log: &ConsumerCallbackLog,
+    backend: &str,
     topic: &str,
     tp: &TopicPartition,
-    action: CallbackAction,
-) {
-    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(ReentrantListener {
-        handle: consumer.handle(),
-        tp: tp.clone(),
-        on_assigned: true,
-        action,
-        done: Arc::clone(&done),
-    });
-    consumer
-        .subscribe_with_topics_listener(vec![topic.to_string()], listener)
-        .await
-        .expect("subscribe should succeed");
-    poll_until_flag(consumer, &done, Duration::from_secs(90)).await;
+    steps: Vec<ListenerStep>,
+) -> Vec<CallbackLogEntry> {
+    let want = steps.len();
+    log.subscribe_with_logging_listener_action(
+        consumer,
+        vec![topic.to_string()],
+        ListenerAction::new().on_assigned(ListenerTrigger::OnceWhenContains(tp.clone()), steps),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{backend} backend: subscribe: {e}"));
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let entries = log.entries().await.expect("read consumer callback log");
+        let actions = action_entries(&entries);
+        if actions.len() >= want {
+            return actions;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{backend} backend: Timed out before expected rebalance callback ran: {entries:?}"
+        );
+        consumer
+            .poll(Duration::from_millis(500))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll: {e}"));
+    }
 }
 
 /// Java's `triggerOnPartitionsRevoked(tp, protocol, execute)`: subscribe a
-/// listener that runs `action` from inside `onPartitionsRevoked` once `tp`
+/// listener that runs `steps` from inside `onPartitionsRevoked` once `tp`
 /// is revoked. Poll until assigned, then `unsubscribe()` to force the
-/// revocation, then assert the action ran.
+/// revocation, then assert the steps ran. Returns their log entries, in order.
 async fn trigger_on_partitions_revoked(
     consumer: &mut BytesConsumer,
+    log: &ConsumerCallbackLog,
+    backend: &str,
     topic: &str,
     tp: &TopicPartition,
-    action: CallbackAction,
-) {
-    let assigned = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(RevokeTrackingListener {
-        handle: consumer.handle(),
-        tp: tp.clone(),
-        action,
-        assigned: Arc::clone(&assigned),
-        revoked: Arc::clone(&revoked),
-    });
-    consumer
-        .subscribe_with_topics_listener(vec![topic.to_string()], listener)
-        .await
-        .expect("subscribe should succeed");
-    poll_until_flag(consumer, &assigned, Duration::from_secs(90)).await;
+    steps: Vec<ListenerStep>,
+) -> Vec<CallbackLogEntry> {
+    let want = steps.len();
+    log.subscribe_with_logging_listener_action(
+        consumer,
+        vec![topic.to_string()],
+        ListenerAction::new().on_revoked(ListenerTrigger::OnceWhenContains(tp.clone()), steps),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{backend} backend: subscribe: {e}"));
+    let has_tp = |e: &CallbackLogEntry| e.has_partition(tp.topic(), tp.partition());
+    let entries = poll_until_entry(consumer, log, KIND_ASSIGNED, has_tp, Duration::from_secs(90)).await;
+    assert!(
+        first_entry(&entries, KIND_ASSIGNED, has_tp).is_some(),
+        "{backend} backend: Timed out before expected rebalance callback ran: {entries:?}"
+    );
 
     // Force a revocation: unsubscribe drives `onPartitionsRevoked`. Poll a
     // few times so the bg loop drives the reconcile + the app side drains
-    // the callback.
-    consumer.unsubscribe().await.expect("unsubscribe should succeed");
+    // the callback. The consumer has no subscription any more, so a poll may
+    // fail; as in the Java helper only the callback matters.
+    consumer
+        .unsubscribe()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: unsubscribe: {e}"));
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline && !revoked.load(std::sync::atomic::Ordering::SeqCst) {
+    loop {
+        let entries = log.entries().await.expect("read consumer callback log");
+        let actions = action_entries(&entries);
+        if actions.len() >= want {
+            return actions;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{backend} backend: onPartitionsRevoked must have run the reentrant action: {entries:?}"
+        );
         let _ = consumer.poll(Duration::from_millis(100)).await;
     }
-    assert!(
-        revoked.load(std::sync::atomic::Ordering::SeqCst),
-        "onPartitionsRevoked must have run the reentrant action"
-    );
-}
-
-/// Listener for the revoked-callback tests: tracks assignment (so the
-/// harness knows when to unsubscribe) and runs `action` on revocation.
-struct RevokeTrackingListener {
-    handle: ConsumerHandle,
-    tp: TopicPartition,
-    action: CallbackAction,
-    assigned: Arc<std::sync::atomic::AtomicBool>,
-    revoked: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[async_trait]
-impl ConsumerRebalanceListener for RevokeTrackingListener {
-    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        if partitions.contains(&self.tp) {
-            self.assigned.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        Ok(())
-    }
-
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        if partitions.contains(&self.tp) {
-            self.action.run(&self.handle).await;
-            self.revoked.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        Ok(())
-    }
-}
-
-/// Drive `poll(100ms)` until `flag` is set or the deadline elapses.
-async fn poll_until_flag(
-    consumer: &mut BytesConsumer,
-    flag: &Arc<std::sync::atomic::AtomicBool>,
-    deadline_duration: Duration,
-) {
-    let deadline = Instant::now() + deadline_duration;
-    while Instant::now() < deadline {
-        let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
-        if flag.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-    }
-    panic!("Timed out before expected rebalance callback ran");
 }
 
 /// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned`:
 /// `assignment()` inside the callback contains tp.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_rebalance_listener_assignment_on_partitions_assigned() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn rebalance_listener_assignment_on_partitions_assigned<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_assignment_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
+    ensure_topic(ctx, &topic).await;
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
+    let entry =
+        trigger_on_partitions_assigned(&mut consumer, &log, backend, &topic, &tp, vec![ListenerStep::Assignment])
+            .await
+            .remove(0);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let captured: Arc<Mutex<Option<HashSet<TopicPartition>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_assigned(
-        consumer.as_mut(),
-        &topic,
-        &tp,
-        CallbackAction::Assignment { captured_assignment: Arc::clone(&captured) },
-    )
-    .await;
-
-    let assignment = captured.lock().unwrap().take().expect("action ran");
+    assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
+    assert!(
+        entry.error.is_empty(),
+        "{backend} backend: assignment() failed: {}",
+        entry.error
+    );
+    let assignment = partition_set(&entry.result_partitions);
     assert!(
         assignment.contains(&tp),
-        "assignment() inside the callback must contain {tp}, got {assignment:?}"
+        "{backend} backend: assignment() inside the callback must contain {tp}, got {assignment:?}"
     );
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
 
 /// Java `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsAssigned`:
 /// `beginningOffsets([tp])` inside the callback → `get(tp) == 0`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_rebalance_listener_beginning_offsets_on_partitions_assigned() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn rebalance_listener_beginning_offsets_on_partitions_assigned<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_begin_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
+    ensure_topic(ctx, &topic).await;
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let captured: Arc<Mutex<Option<HashMap<TopicPartition, i64>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_assigned(
-        consumer.as_mut(),
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
+    let entry = trigger_on_partitions_assigned(
+        &mut consumer,
+        &log,
+        backend,
         &topic,
         &tp,
-        CallbackAction::BeginningOffsets { tp: tp.clone(), captured: Arc::clone(&captured) },
+        vec![ListenerStep::BeginningOffsets(vec![tp.clone()])],
     )
-    .await;
+    .await
+    .remove(0);
 
-    let map = captured.lock().unwrap().take().expect("action ran");
-    assert!(map.contains_key(&tp), "beginningOffsets must contain {tp}");
-    assert_eq!(map.get(&tp), Some(&0), "beginningOffsets({tp}) must be 0");
-    consumer.close().await.expect("consumer close should succeed");
+    assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
+    assert!(
+        entry.error.is_empty(),
+        "{backend} backend: beginning_offsets failed: {}",
+        entry.error
+    );
+    let offset = entry.offset_for(tp.topic(), tp.partition());
+    assert!(offset.is_some(), "{backend} backend: beginningOffsets must contain {tp}");
+    assert_eq!(offset, Some(0), "{backend} backend: beginningOffsets({tp}) must be 0");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
 
 /// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsRevoked`:
 /// `assignment()` inside revoked contains tp.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_rebalance_listener_assignment_on_partitions_revoked() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn rebalance_listener_assignment_on_partitions_revoked<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_assignment_on_revoked");
     let tp = TopicPartition::new(topic.clone(), 0);
+    ensure_topic(ctx, &topic).await;
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
+    let entry =
+        trigger_on_partitions_revoked(&mut consumer, &log, backend, &topic, &tp, vec![ListenerStep::Assignment])
+            .await
+            .remove(0);
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let captured: Arc<Mutex<Option<HashSet<TopicPartition>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_revoked(
-        consumer.as_mut(),
-        &topic,
-        &tp,
-        CallbackAction::Assignment { captured_assignment: Arc::clone(&captured) },
-    )
-    .await;
-
-    let assignment = captured.lock().unwrap().take().expect("action ran");
+    assert_eq!(entry.method, KIND_REVOKED, "{backend} backend: {entry:?}");
+    assert!(
+        entry.error.is_empty(),
+        "{backend} backend: assignment() failed: {}",
+        entry.error
+    );
+    let assignment = partition_set(&entry.result_partitions);
     assert!(
         assignment.contains(&tp),
-        "assignment() inside the revoked callback must contain {tp}, got {assignment:?}"
+        "{backend} backend: assignment() inside the revoked callback must contain {tp}, got {assignment:?}"
     );
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
 
 /// Java `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsRevoked`:
 /// `beginningOffsets([tp])` inside revoked → `get(tp) == 0`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_rebalance_listener_beginning_offsets_on_partitions_revoked() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn rebalance_listener_beginning_offsets_on_partitions_revoked<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_begin_on_revoked");
     let tp = TopicPartition::new(topic.clone(), 0);
+    ensure_topic(ctx, &topic).await;
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let captured: Arc<Mutex<Option<HashMap<TopicPartition, i64>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_revoked(
-        consumer.as_mut(),
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
+    let entry = trigger_on_partitions_revoked(
+        &mut consumer,
+        &log,
+        backend,
         &topic,
         &tp,
-        CallbackAction::BeginningOffsets { tp: tp.clone(), captured: Arc::clone(&captured) },
+        vec![ListenerStep::BeginningOffsets(vec![tp.clone()])],
     )
-    .await;
+    .await
+    .remove(0);
 
-    let map = captured.lock().unwrap().take().expect("action ran");
-    assert!(map.contains_key(&tp), "beginningOffsets must contain {tp}");
-    assert_eq!(map.get(&tp), Some(&0), "beginningOffsets({tp}) must be 0");
-    consumer.close().await.expect("consumer close should succeed");
+    assert_eq!(entry.method, KIND_REVOKED, "{backend} backend: {entry:?}");
+    assert!(
+        entry.error.is_empty(),
+        "{backend} backend: beginning_offsets failed: {}",
+        entry.error
+    );
+    let offset = entry.offset_for(tp.topic(), tp.partition());
+    assert!(offset.is_some(), "{backend} backend: beginningOffsets must contain {tp}");
+    assert_eq!(offset, Some(0), "{backend} backend: beginningOffsets({tp}) must be 0");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
 
 /// Java `testAsyncConsumerGetPositionOfNewlyAssignedPartitionOnPartitionsAssignedCallback`:
 /// `position(tp)` inside the assigned callback does not throw.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_get_position_of_newly_assigned_partition_on_partitions_assigned_callback() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn get_position_of_newly_assigned_partition_on_partitions_assigned_callback<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_position_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
+    ensure_topic(ctx, &topic).await;
 
-    let producer = build_producer_bytes(&ctx);
-    ensure_topic(&producer, &topic).await;
-    producer.close().await.expect("producer close should succeed");
-
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let result: Arc<Mutex<Option<Result<i64, Error>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_assigned(
-        consumer.as_mut(),
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
+    let entry = trigger_on_partitions_assigned(
+        &mut consumer,
+        &log,
+        backend,
         &topic,
         &tp,
-        CallbackAction::Position { tp: tp.clone(), result: Arc::clone(&result) },
+        vec![ListenerStep::Position(tp.clone())],
     )
-    .await;
+    .await
+    .remove(0);
 
-    let position = result.lock().unwrap().take().expect("action ran");
+    assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
     assert!(
-        position.is_ok(),
-        "position() inside the callback must not error, got {position:?}"
+        entry.error.is_empty(),
+        "{backend} backend: position() inside the callback must not error, got {}",
+        entry.error
     );
-    consumer.close().await.expect("consumer close should succeed");
+    assert!(
+        entry.offset_for(tp.topic(), tp.partition()).is_some(),
+        "{backend} backend: position() must report a position for {tp}: {entry:?}"
+    );
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
 
 /// Java `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback`:
 /// `seek(tp, 100)` + `pause([tp])` inside the assigned callback,
 /// then resume + consume the remaining records from offset 100.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+async fn seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_seek_pause_on_assigned");
     let tp = TopicPartition::new(topic.clone(), 0);
 
     let starting_offset: i64 = 100;
     let total_records: usize = 120;
+    let starting_timestamp: i64 = 0;
 
-    let producer = build_producer_bytes(&ctx);
-    for i in 0..total_records {
-        let record = ProducerRecord::with_partition_key(
-            topic.clone(),
-            Some(0),
-            Some(format!("key-{i}").into_bytes()),
-            Some(format!("value-{i}").into_bytes()),
-        )
-        .expect("ProducerRecord::with_partition_key should succeed");
-        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
-            .await
-            .expect("send should succeed");
-        fut.get_with_timeout(Duration::from_secs(30)).await.expect("send should ack");
-    }
-    producer.flush().await.expect("producer.flush should succeed");
-    producer.close().await.expect("producer close should succeed");
+    send_records(ctx, &tp, total_records, starting_timestamp).await;
 
-    let mut consumer = new_bytes_consumer(make_consumer_config_bytes(&ctx, &group_id));
-    let result: Arc<Mutex<Option<Result<(), Error>>>> = Arc::new(Mutex::new(None));
-    trigger_on_partitions_assigned(
-        consumer.as_mut(),
+    let (mut consumer, log) = create_consumer(ctx, factory, &group_id).await;
+    let entries = trigger_on_partitions_assigned(
+        &mut consumer,
+        &log,
+        backend,
         &topic,
         &tp,
-        CallbackAction::SeekAndPause { tp: tp.clone(), offset: starting_offset, result: Arc::clone(&result) },
+        vec![
+            ListenerStep::Seek(tp.clone(), starting_offset),
+            ListenerStep::Pause(vec![tp.clone()]),
+        ],
     )
     .await;
 
-    result
-        .lock()
-        .unwrap()
-        .take()
-        .expect("action ran")
-        .expect("seek+pause inside callback must succeed");
+    let steps: Vec<&str> = entries.iter().map(|e| e.step.as_str()).collect();
+    assert_eq!(steps, ["SEEK", "PAUSE"], "{backend} backend: {entries:?}");
+    for entry in &entries {
+        assert_eq!(entry.method, KIND_ASSIGNED, "{backend} backend: {entry:?}");
+        assert!(
+            entry.error.is_empty(),
+            "{backend} backend: seek+pause inside callback must succeed, got {}",
+            entry.error
+        );
+    }
 
     // Java: `assertTrue(consumer.paused().contains(tp))`.
     assert!(
         consumer.paused().contains(&tp),
-        "tp must be paused after the callback paused it"
+        "{backend} backend: tp must be paused after the callback paused it"
     );
 
-    // Resume and consume the remaining records from `starting_offset`.
-    consumer.resume(std::slice::from_ref(&tp)).await.expect("resume should succeed");
+    // Resume and consume the remaining records from `starting_offset`:
+    // Java's `consumeAndVerifyRecords(consumer, tp, totalRecords - startingOffset,
+    // startingOffset, startingOffset, startingOffset)`, which checks each
+    // record's partition, timestamp type, timestamp, offset, key, value and
+    // serialized sizes.
+    consumer
+        .resume(std::slice::from_ref(&tp))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: resume: {e}"));
     let mut consumed: usize = 0;
-    let mut next_offset = starting_offset;
     let deadline = Instant::now() + Duration::from_secs(60);
     let expected = total_records - starting_offset as usize;
     while consumed < expected && Instant::now() < deadline {
-        let records = consumer.poll(Duration::from_millis(200)).await.expect("poll should succeed");
+        let records = consumer
+            .poll(Duration::from_millis(200))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll: {e}"));
         for rec in records.records_with_partition(&tp) {
+            let i = starting_offset + consumed as i64;
+            assert_eq!(rec.topic(), tp.topic(), "{backend} backend");
+            assert_eq!(rec.partition(), tp.partition(), "{backend} backend");
+            assert_eq!(rec.timestamp_type(), TimestampType::CreateTime, "{backend} backend");
+            assert_eq!(rec.timestamp(), starting_timestamp + i, "{backend} backend");
             assert_eq!(
                 rec.offset(),
-                next_offset,
-                "records must resume contiguously from {starting_offset}"
+                i,
+                "{backend} backend: records must resume contiguously from {starting_offset}"
             );
-            next_offset += 1;
+            assert_eq!(
+                rec.key().map(Vec::as_slice),
+                Some(format!("key {i}").as_bytes()),
+                "{backend} backend"
+            );
+            assert_eq!(
+                rec.value().map(Vec::as_slice),
+                Some(format!("value {i}").as_bytes()),
+                "{backend} backend"
+            );
+            assert_eq!(rec.serialized_key_size(), format!("key {i}").len() as i32, "{backend} backend");
+            assert_eq!(
+                rec.serialized_value_size(),
+                format!("value {i}").len() as i32,
+                "{backend} backend"
+            );
             consumed += 1;
         }
     }
     assert_eq!(
         consumed, expected,
-        "must consume the remaining {expected} records after resuming from {starting_offset}"
+        "{backend} backend: must consume the remaining {expected} records after resuming from {starting_offset}"
     );
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close: {e}"));
 }
+
+multilanguage_consumer_test!(
+    test_on_partitions_assigned_called_with_new_partitions_only,
+    on_partitions_assigned_called_with_new_partitions_only,
+    cluster_config_with_kip848_3brokers()
+);
+multilanguage_consumer_test!(
+    test_rebalance_listener_assignment_on_partitions_assigned,
+    rebalance_listener_assignment_on_partitions_assigned,
+    cluster_config_with_kip848_3brokers()
+);
+multilanguage_consumer_test!(
+    test_rebalance_listener_beginning_offsets_on_partitions_assigned,
+    rebalance_listener_beginning_offsets_on_partitions_assigned,
+    cluster_config_with_kip848_3brokers()
+);
+multilanguage_consumer_test!(
+    test_rebalance_listener_assignment_on_partitions_revoked,
+    rebalance_listener_assignment_on_partitions_revoked,
+    cluster_config_with_kip848_3brokers()
+);
+multilanguage_consumer_test!(
+    test_rebalance_listener_beginning_offsets_on_partitions_revoked,
+    rebalance_listener_beginning_offsets_on_partitions_revoked,
+    cluster_config_with_kip848_3brokers()
+);
+multilanguage_consumer_test!(
+    test_get_position_of_newly_assigned_partition_on_partitions_assigned_callback,
+    get_position_of_newly_assigned_partition_on_partitions_assigned_callback,
+    cluster_config_with_kip848_3brokers()
+);
+multilanguage_consumer_test!(
+    test_seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback,
+    seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback,
+    cluster_config_with_kip848_3brokers()
+);

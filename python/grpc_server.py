@@ -40,7 +40,6 @@ the future fires; KafkaConsumer's waiting calls drain their completions and
 callbacks on the handler thread itself.
 """
 
-import datetime as _dt
 import logging
 import os
 import sys
@@ -81,7 +80,11 @@ from grpc_translate import (  # noqa: E402
     admin_create_sync,
     CallbackLog,
     GroupMetadataStore,
+    ActionLoggingRebalanceListener,
+    ListenerAction,
     LoggingRebalanceListener,
+    _binding_error,
+    _duration_of_ms,
     _consumer_close_options,
     _consumer_subscribe_kwargs,
     _consumer_timeout,
@@ -89,7 +92,7 @@ from grpc_translate import (  # noqa: E402
     # The error codes the servicers stamp on errors of their own making, so the
     # Rust client can tell those apart from an error the client reported.
     _LOCAL_ILLEGAL_STATE,
-    _REQUEST_TIMED_OUT,
+    _LOCAL_TIMEOUT,
     _admin_abort_transaction_spec,
     _admin_acl_bindings,
     _admin_acl_filter,
@@ -167,6 +170,7 @@ from grpc_translate import (  # noqa: E402
     _tp,
     _tp_to_proto,
     ignore_commit_completion,
+    install_error_replies,
     make_logging_commit_callback,
     make_logging_delivery_callback,
 )
@@ -236,11 +240,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             callback = make_logging_delivery_callback(self._callback_log, request.producer_id)
         try:
             future = producer.send(record=record, callback=callback)
-        except KafkaError as e:
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("send raised")
-            return pb.SendResponse(error=_kafka_error_to_proto(e))
+            # Raised by send() itself, Java's send throwing, as opposed to the
+            # future failing below: raised_by_send tells the harness which.
+            if not isinstance(e, KafkaError):
+                LOG.exception("send raised")
+            return pb.SendResponse(error=_kafka_error_to_proto(e), raised_by_send=True)
 
         # Block this gRPC worker thread until the producer future fires.
         # KafkaProducer's futures are KafkaFutures completed on the C extension's
@@ -254,7 +259,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
-                code=_REQUEST_TIMED_OUT,
+                code=_LOCAL_TIMEOUT,
                 message="python server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
             LOG.exception("future.get raised")
@@ -398,7 +403,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # KafkaProducer.close(*, timeout=...) is Java's close(Duration), the
         # FFI's close_with_timeout. timeout_ms is milliseconds; Duration is
         # seconds / timedelta.
-        timeout = _dt.timedelta(milliseconds=request.timeout_ms)
+        timeout = _duration_of_ms(request.timeout_ms)
         return self._close(request.producer_id, timeout)
 
     def GetCallbackLog(self, request, context):
@@ -429,6 +434,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         # delivers them, not the one that serves GetCallbackLog — hence
         # CallbackLog's lock.
         self._callback_log = CallbackLog()
+        # SetListenerAction's pending actions, keyed by consumer_id, each taken
+        # by the consumer's next Subscribe with with_listener.
+        self._listener_actions = {}
 
     def _get(self, consumer_id):
         with self._lock:
@@ -445,8 +453,13 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             else:
                 consumer = KafkaConsumer(configs=config)
         except Exception as e:  # noqa: BLE001
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
             LOG.exception("CreateConsumer failed")
-            return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(e))
+            return cpb.CreateConsumerResponse(consumer_id=0, error=_kafka_error_to_proto(error))
         with self._lock:
             consumer_id = self._next_id
             self._next_id += 1
@@ -463,19 +476,33 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             fn(consumer)
             return pb.StatusResponse()
-        except KafkaError as e:
-            return self._status_err(e)
         except Exception as e:  # noqa: BLE001
-            LOG.exception("consumer op raised")
-            return self._status_err(e)
+            # Only a binding error is the binding's answer; anything else is
+            # re-raised, a transport failure on which the harness panics.
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return self._status_err(error)
 
     def Subscribe(self, request, context):
         # with_listener => subscribe with a real ConsumerRebalanceListener built
-        # by consumer.py, whose invocations land in the callback log. Registration
-        # is per-subscribe: a listener-less Subscribe releases it.
+        # by consumer.py, whose invocations land in the callback log. The binding
+        # keeps the registration until a later subscribe replaces it (a non-empty
+        # topic list or a pattern; a listener-less one included) or a
+        # KafkaConsumer closes; unsubscribe, an empty topic list and assign keep it.
+        # A pending SetListenerAction belongs to this registration: the
+        # listener calls back into the consumer from inside the method it
+        # targets, on this thread, inside the consumer call running it.
         listener = None
         if request.with_listener:
-            listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
+            with self._lock:
+                action = self._listener_actions.pop(request.consumer_id, None)
+                consumer = self._consumers.get(request.consumer_id)
+            if action is None:
+                listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
+            else:
+                listener = ActionLoggingRebalanceListener(
+                    self._callback_log, request.consumer_id, consumer, action)
         return self._run_status(
             request.consumer_id,
             lambda c: c.subscribe(**_consumer_subscribe_kwargs(request, listener)))
@@ -494,12 +521,14 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                 code=_LOCAL_ILLEGAL_STATE,
                 message=f"unknown consumer_id {request.consumer_id}"))
         try:
-            records = consumer.poll(timeout=request.timeout_ms / 1000.0)
-        except KafkaError as e:
-            return cpb.PollResponse(error=_kafka_error_to_proto(e))
+            records = consumer.poll(timeout=_duration_of_ms(request.timeout_ms))
         except Exception as e:  # noqa: BLE001
-            LOG.exception("poll raised")
-            return cpb.PollResponse(error=_kafka_error_to_proto(e))
+            # As in _run_status: a binding error is the reply's, anything else
+            # is re-raised.
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.PollResponse(error=_kafka_error_to_proto(error))
         proto_records = [_record_to_proto(r) for r in records]
         return cpb.PollResponse(records=cpb.ConsumerRecordList(records=proto_records))
 
@@ -507,7 +536,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
             timeout_kwargs = _consumer_timeout(request)
-            if offsets:
+            if offsets or request.with_offsets:
                 c.commit(offsets=offsets, **timeout_kwargs)
             else:
                 c.commit(**timeout_kwargs)
@@ -525,7 +554,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             # waits for its offsets runs here, on this thread (the binding keeps
             # this thread draining the queue meanwhile).
             offsets = _proto_offsets_to_dict(request.offsets)
-            if offsets:
+            if offsets or request.with_offsets:
                 c.commit_nowait(offsets=offsets,
                                 callback=callback or ignore_commit_completion)
             else:
@@ -675,7 +704,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             tps = consumer.assignment()
         except Exception as e:  # noqa: BLE001
-            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(error))
         return cpb.TopicPartitionListResponse(
             partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
 
@@ -688,7 +722,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             topics = consumer.subscription()
         except Exception as e:  # noqa: BLE001
-            return cpb.SubscriptionResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.SubscriptionResponse(error=_kafka_error_to_proto(error))
         return cpb.SubscriptionResponse(topics=cpb.StringList(values=list(topics)))
 
     def Metrics(self, request, context):
@@ -702,7 +741,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             snapshot = consumer.metrics()
         except Exception as e:  # noqa: BLE001
-            return pb.MetricsResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return pb.MetricsResponse(error=_kafka_error_to_proto(error))
         return pb.MetricsResponse(metrics=pb.MetricList(
             metrics=[_metric_to_proto(m) for m in snapshot.values()]))
 
@@ -715,7 +759,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             tps = consumer.paused()
         except Exception as e:  # noqa: BLE001
-            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.TopicPartitionListResponse(error=_kafka_error_to_proto(error))
         return cpb.TopicPartitionListResponse(
             partitions=cpb.TopicPartitionList(partitions=[_tp_to_proto(tp) for tp in tps]))
 
@@ -729,7 +778,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             group_metadata = consumer.group_metadata()
         except Exception as e:  # noqa: BLE001
-            return cpb.GroupMetadataResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.GroupMetadataResponse(error=_kafka_error_to_proto(error))
         return cpb.GroupMetadataResponse(
             group_metadata_id=self._group_metadata.add(group_metadata),
             group_metadata=_group_metadata_to_proto(group_metadata))
@@ -768,13 +822,43 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         try:
             lag = consumer.current_lag(topic_partition=_tp(request.partition))
         except Exception as e:  # noqa: BLE001
-            return cpb.CurrentLagResponse(error=_kafka_error_to_proto(e))
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return cpb.CurrentLagResponse(error=_kafka_error_to_proto(error))
         return _current_lag_response(lag)
 
     def GetCallbackLog(self, request, context):
         # Readable after Close on purpose: close() drains pending commit
         # callbacks and fires on_partitions_lost, so those entries land last.
         return self._callback_log.response(request.consumer_id)
+
+    def SetListenerAction(self, request, context):
+        # Kept for the consumer's next Subscribe with with_listener, whose
+        # listener runs it (see Subscribe); NONE clears a pending one.
+        if self._get(request.consumer_id) is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                code=_LOCAL_ILLEGAL_STATE,
+                message=f"unknown consumer_id {request.consumer_id}"))
+        try:
+            action = ListenerAction.from_request(request)
+        except KafkaError as e:
+            return self._status_err(e)
+        except Exception as e:  # noqa: BLE001
+            # Only a binding error is the reply; anything else is re-raised,
+            # a transport failure on which the harness panics (ruling 3).
+            error = _binding_error(e)
+            if error is None:
+                raise
+            return self._status_err(error)
+        with self._lock:
+            if action is None:
+                self._listener_actions.pop(request.consumer_id, None)
+            else:
+                self._listener_actions[request.consumer_id] = action
+        return pb.StatusResponse()
 
 
 # ---------------------------------------------------------------------------
@@ -1578,6 +1662,13 @@ def _log_level(rust_log):
     if level in ("DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"):
         return level
     return "INFO"
+
+
+# Every binding error is returned as its reply's error, never as a transport
+# failure (grpc_translate.install_error_replies).
+install_error_replies(ProducerService, pb, "ProducerService")
+install_error_replies(ConsumerService, cpb, "ConsumerService")
+install_error_replies(AdminService, apb, "AdminService")
 
 
 def main():

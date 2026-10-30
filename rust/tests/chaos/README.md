@@ -235,10 +235,11 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
     the integration suite (`INTEGRATION_TEST_PROTOCOL=ssl`).
   - `sasl_plaintext` — SASL/PLAIN over plain TCP as `admin` / `admin-secret`.
   - `sasl_ssl` — SASL/PLAIN over TLS (both of the above).
-  - **Rust workloads only.** The gRPC (python / c) backends run in a sibling
-    container and reach the broker through its container-network listener,
-    which on this branch exists for PLAINTEXT only; a secured run with a gRPC
-    workload is rejected up front with a clear error.
+  - Every protocol works for every workload. A gRPC (python / c) backend
+    whose server runs in a sibling container reaches the broker through the
+    container-network twin of the selected listener (CONTAINER, CTLSONLY,
+    CSASLPLAIN or CSASLTLS); a natively launched server uses the host
+    listeners, as the Rust workloads do.
   ```
   cargo xtask chaos --security-protocol sasl_ssl --cycles 3 --reports
   ```

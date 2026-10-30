@@ -24,7 +24,7 @@
 //! every container-backed arm across the producer, consumer and admin suites
 //! with a single `--skip __grpc`.
 //!
-//! Unlike `multilanguage_test!` and `multilanguage_consumer_test!`, the three
+//! As in `multilanguage_test!` and `multilanguage_consumer_test!`, the three
 //! container-backed arms are individually `#[cfg(feature =
 //! "multilanguage-tests")]` and the macro itself is available with only
 //! `integration-tests`. That is what lets the committed admin integration tests
@@ -32,9 +32,11 @@
 //! `integration-tests` alone (`make test-integration`, `verify-sandbox`) an
 //! invocation still expands to the `__rust` arm, which drives the same
 //! production `Admin` trait against the same broker as the single-backend test
-//! it replaced — so converting costs no coverage at any feature level. The
-//! producer suite took the other route (`mod producer_test` is gated whole), and
-//! its scenarios do not run under `make test-integration` as a result.
+//! it replaced — so converting costs no coverage at any feature level.
+//!
+//! Every arm prints one timing line to stderr when it ends, through
+//! [`crate::common::arm_timer::ArmTimer`], which shows in CI logs for passing
+//! tests too.
 //!
 //! Multi-thread flavor matches the other two macros. The native admin client
 //! spawns its own background task and the gRPC backends block a tonic worker,
@@ -44,25 +46,38 @@
 /// backend (rust / grpc_python / grpc_python_async / grpc_c). Two forms,
 /// mirroring `multilanguage_test!`: with or without an explicit
 /// `ClusterConfig`.
+///
+/// Leading outer attributes (`#[ignore = "<reason>"]`) are applied to every
+/// arm: the form for a scenario that exposes a defect in the shared Rust core,
+/// which every backend reaches.
 #[macro_export]
 macro_rules! multilanguage_admin_test {
-    ($name:ident, $body:ident) => {
-        $crate::multilanguage_admin_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
+    ($(#[$attr:meta])* $name:ident, $body:ident) => {
+        $crate::multilanguage_admin_test!(
+            $(#[$attr])* $name,
+            $body,
+            $crate::common::cluster_config::ClusterConfig::default()
+        );
     };
-    ($name:ident, $body:ident, $cluster_config:expr) => {
+    ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "rust");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let factory = $crate::common::backend_factory::RustNativeFactory;
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_python");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::Python,
@@ -70,14 +85,17 @@ macro_rules! multilanguage_admin_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_python_async");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::PythonAsync,
@@ -85,14 +103,17 @@ macro_rules! multilanguage_admin_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_c");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,
@@ -100,7 +121,8 @@ macro_rules! multilanguage_admin_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
         }
