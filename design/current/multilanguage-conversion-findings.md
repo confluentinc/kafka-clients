@@ -201,7 +201,7 @@ state:
   - `consumer1.close(CloseOptions.timeout(2000 ms))` must return in less than 2000 + 2000 ms;
   - `consumer2.close(CloseOptions.timeout(Long.MAX_VALUE ms))` must return in less than
     6000 + 2000 ms, Java's `request.timeout.ms` plus its 2 s `closeGraceTimeMs`.
-- **Arms**: every gRPC arm, intermittently, on images with fdd2df838. The counts are of completed
+- **Arms**: every gRPC arm, intermittently, on images with 227a937c2. The counts are of completed
   runs; one more run never started, because Docker had run out of network pools:
   - `__grpc_python`: 3 of 5 failed;
   - `__grpc_c`: 1 of 3 failed;
@@ -217,8 +217,8 @@ state:
 
   4001 and 8001 are not a fixed step of 2 s: they are the test's own limit firing, the
   `tokio::time::timeout(ms + CLOSE_GRACE_TIME_MS)` that `close_and_validate` used until
-  f5687166a. Those closes took at least 2 s past their bound on the monotonic clock; how long they
-  would have taken is unknown. Since f5687166a the test measures with the wall clock, as Java
+  ff621ef3a. Those closes took at least 2 s past their bound on the monotonic clock; how long they
+  would have taken is unknown. Since ff621ef3a the test measures with the wall clock, as Java
   does, and a 300 s hang guard is its only bound.
 - **Java / Rust**: `close(CloseOptions)` with the cluster down returns within the close timeout,
   and with an unbounded timeout within `request.timeout.ms`
@@ -226,7 +226,7 @@ state:
   returns in time on every run.
 - **Arm**: the bindings' close sometimes returns 2 s or more past the bound. The C and both
   Python arms fail and the native one does not. The servers pass the timeout exactly (a
-  `timedelta` since fdd2df838, clamped to `timedelta.max` for `Long.MAX_VALUE`) and add no wait of
+  `timedelta` since 227a937c2, clamped to `timedelta.max` for `Long.MAX_VALUE`) and add no wait of
   their own.
 - **Diagnosis (inferred, not confirmed: from reading the code, nothing was run)**:
   - The sync Python wait adds no fixed delay. `_run_sync` loops `event.wait(0.1)` plus `_drain`,
@@ -280,7 +280,7 @@ state:
        `docker logs` timestamps show it). The core's close deadlines use
        `Time::milliseconds()`, wall-clock as Java's `System.currentTimeMillis()`, while the
        test then bounded the close with tokio's monotonic clock (it measures with the wall
-       clock, as Java does, since f5687166a). So a step back of 1.9 s makes the
+       clock, as Java does, since ff621ef3a). So a step back of 1.9 s makes the
        close's own 2000 ms commit step run about 3.9 s of real time: in `__grpc_c` run 1 the core
        logged "Timeout of 2000ms expired" and closed 2.06 s after the close started by its wall
        clock, while the test's monotonic timeout had already fired at 4.0 s. 5 of the 11 failures
@@ -301,7 +301,7 @@ state:
   close timers read the wall clock as Java's do, and `close_and_validate` measured and bounded the
   close on the monotonic clock. Java's `submitCloseAndValidate` measures with
   `System.currentTimeMillis()` and sets no bound, so a step back cannot fail it. This half is
-  fixed in the test (f5687166a: the elapsed time is measured on the wall clock, and only a 300 s
+  fixed in the test (ff621ef3a: the elapsed time is measured on the wall clock, and only a 300 s
   hang guard bounds the wait); the native arm was exposed to it too. The rest is a stall of the core's network threads that happens only
   when the backend reaches the brokers by container name over the Docker network. Native mode,
   with the same core and binding over the host IP-literal listeners, never reproduced it. Whether
@@ -310,11 +310,11 @@ state:
   identified.
 - **Failing assertion**:
   `assert!(time_taken_ms < ms as i64 + CLOSE_GRACE_TIME_MS, "{backend} backend: Close took too long {time_taken_ms}")`
-  in `close_and_validate`, `time_taken_ms` on the wall clock since f5687166a. Until f5687166a it was reached through the bounding
+  in `close_and_validate`, `time_taken_ms` on the wall clock since ff621ef3a. Until ff621ef3a it was reached through the bounding
   `tokio::time::timeout`'s `panic!("{backend} backend: Close took too long {}", ...)`; since then
   the time is wall clock and the wait is bounded only by the 300 s hang guard. One `__grpc_c` run
   with the skip lifted locally (not committed) passed after that change.
-- **State**: skipped in the body on the gRPC arms (e8370c9b3; the `__rust` arm runs); needs owner.
+- **State**: skipped in the body on the gRPC arms (ff621ef3a; the `__rust` arm runs); needs owner.
   The confirmation run refuted the DNS hypothesis and found two causes: the wall-clock half is
-  fixed in the test (f5687166a); what blocks the network threads in container mode is still to be
+  fixed in the test (ff621ef3a); what blocks the network threads in container mode is still to be
   identified (see the verdict).
