@@ -689,6 +689,35 @@ pub fn take_and_remove_handles_on_network(broker_network: &str) -> usize {
     removed.len()
 }
 
+/// [`take_and_remove_handles_on_network`] for a caller that may not be on a
+/// runtime: de-pools every backend attached to `broker_network`, stops it, and
+/// leaks its handle instead of dropping it, so no `ContainerAsync::drop` runs.
+/// Returns how many were stopped.
+///
+/// Called by a dedicated cluster's teardown, which runs in
+/// [`super::test_context::TestContext`]'s `Drop`, possibly while unwinding out of
+/// `#[tokio::test]`'s `block_on`, where that `Drop` could find no runtime (the
+/// cluster's own containers are leaked the same way). The backend container is
+/// a child of the dedicated cluster's network, so without this the network
+/// cannot be removed and leaks. A later test on another network starts a fresh
+/// backend, as the entry is gone.
+pub fn stop_and_forget_handles_on_network(broker_network: &str) -> usize {
+    let removed: Vec<BackendCell> = {
+        let mut pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
+        let keys: Vec<(BackendKind, String)> =
+            pool.keys().filter(|(_, network)| network == broker_network).cloned().collect();
+        keys.into_iter().filter_map(|key| pool.remove(&key)).collect()
+    };
+    let count = removed.len();
+    for cell in removed {
+        if let Some(handle) = cell.get() {
+            handle.terminate();
+        }
+        std::mem::forget(cell);
+    }
+    count
+}
+
 /// Stop every backend in the pool (`docker rm -f` a container, kill a native
 /// process), **leaving the pool entries in place**.
 ///

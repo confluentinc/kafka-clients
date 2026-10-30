@@ -367,7 +367,7 @@ impl Drop for TestContext {
             // containers synchronously, one extra strong reference is leaked
             // so the `KafkaCluster` (and its `ContainerAsync`s) is never
             // dropped; that is a few hundred bytes per dedicated test.
-            cluster_pool::teardown(&self.cluster);
+            cluster_pool::teardown_dedicated(&self.cluster);
             std::mem::forget(Arc::clone(&self.cluster));
         }
         if !self.created_topics.is_empty() {
