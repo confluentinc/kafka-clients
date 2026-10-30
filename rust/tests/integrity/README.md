@@ -1,10 +1,12 @@
 # Data-integrity tests
 
-These tests check that what the Rust client writes is what it reads back. Each
+These tests check that what a client writes is what it reads back. Each
 record must come back byte for byte. No acknowledged record may be lost, and no
 record may be duplicated, reordered, or visible when its transaction aborted.
-Apart from two cross-language tests, only the Rust client is exercised:
-nothing but the brokers (Apache Kafka on a local cluster) touches the data.
+The client is the Rust client, or a binding's (Python sync and asyncio, C)
+through the gRPC multi-language test servers. Apart from two cross-language
+tests with the Java client, nothing but that client and the brokers (Apache
+Kafka on a local cluster) touches the data.
 
 There are two forms, on one harness (`tests/common/integrity/`):
 
@@ -17,6 +19,30 @@ There are two forms, on one harness (`tests/common/integrity/`):
   ```
 
   Its `self_tests` module checks the harness itself and needs no broker.
+
+  Each scenario that checks a client runs once per client, named like the
+  other multi-language tests: `<test>__rust` with the Rust client, and with the
+  `multilanguage-tests` feature `<test>__grpc_python`,
+  `<test>__grpc_python_async` and `<test>__grpc_c`, with the binding's client
+  behind its gRPC test server (`tests/common/integrity/clients.rs`). The
+  checker stays in the test process, and every check is the same; the records
+  pass through the binding's own send and poll. Each binding's CI job runs its
+  arms with the rest of its gRPC tests (`make test-integration-python`,
+  `make test-integration-c`); on macOS, run them natively:
+
+  ```sh
+  make test-integration-python-native     # every __grpc_python test
+  make test-integration-c-native          # every __grpc_c test
+  ```
+
+  Two things differ over gRPC. A send returns only once its record is
+  acknowledged, so a writer has one record in flight and each batch holds one
+  record: the bindings are checked for what they carry (bytes, headers, nulls,
+  timestamps, offsets, transactions), not for batching, which the Rust arms
+  cover. And a listener cannot cross the wire: a member subscribes with the
+  server's logging listener, which cannot commit, so after a clean restart a
+  binding may read a record again (never below the committed offset), where
+  the Rust arm must read nothing twice.
 
   Two of them check compatibility with the Java client, using Apache Kafka's
   own tools in the broker container:
