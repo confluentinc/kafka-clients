@@ -461,9 +461,12 @@ awaits it (decision 9).
    freed once the error table has read it (`Error_destroy_err`, BH:17957; §A5).
    `on_completion`'s `metadata` and `error` are borrowed and never destroyed (§A6).
 3. **Owned result (borrow-root)** → copy every value out into managed types, then free the root
-   once, in a `finally`: `Metrics()`'s owned `kafka_Map_t` of owned `MetricName_t *` keys and
-   `KafkaMetric_t *` values (BH:38342-38355), freed with `kafka_Map_destroy_err`, which frees
-   the owned keys and values too (BH:40277-40288); `PartitionsFor`'s owned `kafka_List_t` of
+   once, in a `finally`: `Metrics()`'s owned `kafka_common_metrics_MetricsView_t`, read through
+   its owned `kafka_Iterator_t` (`kafka_common_metrics_MetricsView_iterator_err`) of
+   `kafka_Map_Entry_t *`, each with a `MetricName_t *` key and a `KafkaMetric_t *` value owned by
+   the iterator until its next `kafka_Iterator_next_err` or its `kafka_Iterator_destroy_err`;
+   the binding destroys the iterator, then the view (`kafka_common_metrics_MetricsView_destroy_err`);
+   `PartitionsFor`'s owned `kafka_List_t` of
    owned `PartitionInfo_t *` (BH:3824-3826, BH:38316-38340), freed with `kafka_List_destroy_err`,
    which frees the owned elements too (BH:40160-40171), copied through the common
    `PartitionInfo` marshal (ledger 79 4d).
@@ -476,7 +479,7 @@ awaits it (decision 9).
 | `Callback_t` | 2 | the binding, per send, after the record is built | the send, which consumes it on every path |
 | `KafkaFuture_t` from a send | 2 | the blocking send's return; the handover `cb` | the binding, at once, unread |
 | an owned `kafka_common_Error_t` | 2 | an `out_err` slot; a `_cb` completion | the error-table read, then `Error_destroy_err` |
-| `kafka_Map_t` (metrics), `kafka_List_t` (partitions) | 3 | `Metrics`; `PartitionsFor`'s `_cb` completion | the reader, after copying out, in a `finally` |
+| `kafka_common_metrics_MetricsView_t` and its `kafka_Iterator_t` (metrics), `kafka_List_t` (partitions) | 3 | `Metrics`; `PartitionsFor`'s `_cb` completion | the reader, after copying out, in a `finally` |
 
 **Note — classify by the accessor, not the type.** A non-`const` return, an `out_err` slot or a
 `_cb` argument the header calls owned is **owned**: free it once. A `const *` return, an
