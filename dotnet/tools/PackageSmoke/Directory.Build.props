@@ -1,0 +1,6 @@
+<Project>
+
+  <!-- Empty on purpose: it stops MSBuild from importing dotnet/Directory.Build.props, so this project
+       builds as a user's project does, with only the Confluent.Kafka package. -->
+
+</Project>

@@ -28,7 +28,8 @@ DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
-.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet
+.PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
+	pack-dotnet package-check-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -190,6 +191,34 @@ test-soak-dotnet: build-dotnet
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS)
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS)
+
+# ---------------------------------------------------------------------------
+# The Confluent.Kafka NuGet package.
+#
+# pack-dotnet packs dotnet/artifacts/package/Confluent.Kafka.<version>.nupkg with
+# this machine's own native library only (.semaphore/pack-nupkg.sh --dev). It is
+# checked as a release package is (check-nupkg.py), except for the platform
+# floors (glibc 2.28, macOS 11.0) a local build does not meet: a package to test
+# the packaging, never one to release. The release package, with the natives of
+# all four RIDs, is packed by semaphore.yml's "Release (.NET): pack" block.
+#
+# package-check-dotnet installs that package from a local feed into a project
+# outside the repository, with an empty NuGet cache, and runs the smoke program
+# on net8.0 and net10.0 (.semaphore/test-nupkg.sh --smoke): what the release's
+# package verification runs, less the unit tests against the package, the Linux
+# distribution containers and the self-contained publish. CI runs it in the
+# macOS verify-dotnet job. The version is <Version> in Directory.Build.props;
+# `dotnet pack` without the scripts fails, as the package needs its natives.
+# ---------------------------------------------------------------------------
+PACKAGE_DIR := $(REPO_ROOT)/dotnet/artifacts/package
+
+pack-dotnet:
+	$(MAKE) -C $(RUST_PROJECT_ROOT) build
+	rm -rf $(PACKAGE_DIR)
+	cd $(REPO_ROOT) && sh .semaphore/pack-nupkg.sh --dev $(PACKAGE_DIR)
+
+package-check-dotnet: pack-dotnet
+	cd $(REPO_ROOT) && sh .semaphore/test-nupkg.sh --smoke $(PACKAGE_DIR)
 
 # ---------------------------------------------------------------------------
 # gRPC-server unit tests (M18/P1, PLAN §7.1): the chaos-harness service

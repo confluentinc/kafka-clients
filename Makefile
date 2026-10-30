@@ -28,6 +28,7 @@ VENV = . venv/bin/activate
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
+	pack-dotnet package-check-dotnet \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -345,6 +346,17 @@ DOTNET_MACOS_TEST_FILTER = FullyQualifiedName!~Confluent.Kafka.IntegrationTests
 test-dotnet-macos-docker:
 	$(MAKE) -C dotnet $(ROOTS) DOTNET_TEST_FILTER='$(DOTNET_MACOS_TEST_FILTER)' test-dotnet
 
+# The Confluent.Kafka NuGet package, with this machine's native library only:
+# pack-dotnet packs it into dotnet/artifacts/package, and package-check-dotnet
+# packs it, then installs it into a fresh project and runs the smoke program
+# there. See dotnet/Makefile; the release package is built by semaphore.yml's
+# "Release (.NET):" blocks.
+pack-dotnet:
+	$(MAKE) -C dotnet $(ROOTS) pack-dotnet
+
+package-check-dotnet:
+	$(MAKE) -C dotnet $(ROOTS) package-check-dotnet
+
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
@@ -425,9 +437,10 @@ package-check:
 check-api-compat:
 	$(MAKE) -C rust check-api-compat
 
-# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...]`: see rust/Makefile.
-# VERSION and PYTHON_VERSION reach the sub-make through its environment (make
-# passes command-line variables down); this recipe never pastes them in.
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`:
+# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
+# sub-make through its environment (make passes command-line variables down);
+# this recipe never pastes them in.
 bump-version:
 	$(MAKE) -C rust bump-version
 

@@ -320,14 +320,17 @@ check-api-compat:
 # (PEP 440, e.g. 4.4.0.post1) gives the Python packages another version.
 # Python versions only move up, so a lower one is refused (rfc/versioning.md):
 # PYTHON_VERSION is required whenever VERSION's PEP 440 form is below the
-# current Python version (python/pyproject.toml). The recipe reads both from
-# its environment ("$$VERSION"), never through $(VERSION), so make pastes no
+# current Python version (python/pyproject.toml). DOTNET_VERSION (semver, e.g.
+# 4.4.0-beta.1) sets the .NET package's version (dotnet/Directory.Build.props),
+# which stays as it is without it and only moves up too; to change only that
+# one, give VERSION and PYTHON_VERSION their current values. The recipe reads them
+# from its environment ("$$VERSION"), never through $(VERSION), so make pastes no
 # value into the shell. make still expands $(...) in a value given on its
 # command line, so a caller passing values it did not write (the Semaphore
 # Task) checks them and passes them in the environment instead.
 bump-version:
-	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440]" >&2; exit 2; }
-	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"}
+	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER]" >&2; exit 2; }
+	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"}
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the

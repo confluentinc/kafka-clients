@@ -1,11 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The Confluent.Kafka library — the P/Invoke binding over the Rust core's C ABI.
-    Now holds the interop foundation (the NativeMethods [DllImport] class +
-    Utf8Marshal helpers under Internal/Interop/), the owned-handle SafeHandles, and
-    the consumer completion bridge (callback → TaskCompletionSource); the public
-    managed API is not landed yet — everything stays internal (see design/history/).
+    The Confluent.Kafka library: the public API, a P/Invoke binding over the Rust
+    core's C ABI (Internal/Interop/), and the Confluent.Kafka NuGet package.
 
     TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): netstandard2.0 is the floor
     and satisfies net462 as well — no separate net462 target, because the binding
@@ -20,18 +17,74 @@
     <!-- Utf8Marshal pins and walks raw byte buffers (ffi §A3/§B3); `unsafe` is
          confined to Internal/Interop/ per CLAUDE.md §2. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-
-    <!--
-      Holds CLAUDE.md §4's ⚠ package-id gate shut. Microsoft.NET.Sdk defaults
-      IsPackable to true for a library and PackageId to $(AssemblyName), so
-      writing neither would leave a bare `dotnet pack` emitting a package id
-      byte-equal to confluent-kafka-dotnet's — the very collision that gate
-      defers. Reverses in one line once the gate is decided (own the
-      Schema-Registry integration, or diverge the id). Deliberately the only
-      packaging property here: no PackageId, no Version, no Pack* metadata.
-    -->
-    <IsPackable>false</IsPackable>
   </PropertyGroup>
+
+  <!--
+    The package. The id is confluent-kafka-dotnet's, with a new major version: the decision of
+    the Confluence page "Rust based clients repository and packages" (confluent-kafka-dotnet
+    section), which closes CLAUDE.md §4's package-id gate. The version is <Version> in
+    dotnet/Directory.Build.props. The package carries the native library of each platform under
+    runtimes/<rid>/native/ (ffi-marshalling.md §0.2, "at publish"), from NativeAssetsDir below;
+    the release pipeline packs it (.semaphore/pack-nupkg.sh) and checks it
+    (.semaphore/check-nupkg.py), which fails on any entry it does not expect.
+  -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Confluent.Kafka</PackageId>
+    <Title>Confluent.Kafka</Title>
+    <Description>Confluent's .NET client for Apache Kafka, built on the Confluent Kafka Rust client. Its API follows the Apache Kafka Java client.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/confluentinc/kafka-clients</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageTags>Kafka;Confluent</PackageTags>
+    <!-- The nuspec's <repository> names this URL and the commit packed. The URL is fixed rather
+         than read from the clone's remote, which a checkout may name differently. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <RepositoryUrl>https://github.com/confluentinc/kafka-clients</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <!-- The SDK's own pack-time check that the assets of the three TFMs are compatible
+         with each other. -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="README.md" Visible="false" />
+    <None Include="../../icon.png" Pack="true" PackagePath="icon.png" Visible="false" />
+  </ItemGroup>
+
+  <!--
+    The native libraries of a package: NativeAssetsDir holds one directory per RID, each holding
+    that RID's library (`linux-x64/libconfluent_kafka.so`, `osx-arm64/libconfluent_kafka.dylib`,
+    ...), and each file is packed at runtimes/<rid>/native/. pack-nupkg.sh stages a directory
+    holding exactly the RIDs to pack. A pack is refused without NativeAssetsDir, with a relative
+    one, or with one holding no library or anything else than <rid>/<library>, so no package is
+    made without native libraries; a build that is not a pack is refused with it, since it would
+    leave out the developer native the build copies.
+  -->
+  <ItemGroup Condition="'$(NativeAssetsDir)' != ''">
+    <None Include="$(NativeAssetsDir)/**/*" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="RequireNativeAssetsForPack" BeforeTargets="GenerateNuspec">
+    <ItemGroup>
+      <_NativeAssetFile Include="$(NativeAssetsDir)/**/*" Condition="'$(NativeAssetsDir)' != ''" />
+      <_NativeAssetLibrary Include="$(NativeAssetsDir)/*/libconfluent_kafka.so;$(NativeAssetsDir)/*/libconfluent_kafka.dylib" Condition="'$(NativeAssetsDir)' != ''" />
+    </ItemGroup>
+    <Error Condition="'$(NativeAssetsDir)' == ''"
+           Text="A Confluent.Kafka package needs its native libraries: pack with -p:NativeAssetsDir=&lt;dir&gt; holding &lt;rid&gt;/&lt;library&gt; (.semaphore/pack-nupkg.sh, or `make -C dotnet pack-dotnet`)." />
+    <Error Condition="'$(NativeAssetsDir)' != '' and !$([System.IO.Path]::IsPathRooted('$(NativeAssetsDir)'))"
+           Text="NativeAssetsDir '$(NativeAssetsDir)' must be an absolute path." />
+    <Error Condition="'$(NativeAssetsDir)' != '' and !Exists('$(NativeAssetsDir)')"
+           Text="NativeAssetsDir '$(NativeAssetsDir)' does not exist." />
+    <Error Condition="'$(NativeAssetsDir)' != '' and ('@(_NativeAssetLibrary)' == '' or '@(_NativeAssetFile->Count())' != '@(_NativeAssetLibrary->Count())')"
+           Text="NativeAssetsDir '$(NativeAssetsDir)' must hold &lt;rid&gt;/libconfluent_kafka.so or &lt;rid&gt;/libconfluent_kafka.dylib for each RID to pack, and nothing else." />
+  </Target>
+
+  <Target Name="RejectNativeAssetsOutsidePack" BeforeTargets="Build"
+          Condition="'$(NativeAssetsDir)' != '' and '$(_IsPacking)' != 'true'">
+    <Error Text="NativeAssetsDir is for `dotnet pack` only: a build with it leaves out the native library (.semaphore/pack-nupkg.sh)." />
+  </Target>
 
   <!--
     Native-copy (PLAN D1, un-defers M0/P0 D2 / ffi §0.2). The binding P/Invokes our
@@ -64,14 +117,17 @@
     <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/target/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  <!-- Pack="false": the package carries the natives from NativeAssetsDir instead, and a <Content>
+       item would otherwise be packed under content/. A pack (NativeAssetsDir set) neither copies
+       nor requires the developer native. -->
+  <ItemGroup Condition="'$(NativeAssetsDir)' == ''">
+    <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="PreserveNewest" Visible="false" Pack="false" />
   </ItemGroup>
 
   <!-- Fail early with a clear message if the native is missing (reinforces
        CLAUDE.md §7.1 "never build .NET before Rust"); otherwise a bare
        DllNotFoundException surfaces only at runtime. -->
-  <Target Name="EnsureNativeLibraryExists" BeforeTargets="Build">
+  <Target Name="EnsureNativeLibraryExists" BeforeTargets="Build" Condition="'$(NativeAssetsDir)' == ''">
     <Error Condition="!Exists('$(NativeLibraryPath)')"
            Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` in rust/ first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
   </Target>

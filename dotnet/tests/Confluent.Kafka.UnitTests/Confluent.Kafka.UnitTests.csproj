@@ -40,8 +40,15 @@
     </PackageReference>
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- -p:ConfluentKafkaPackageVersion=<version> tests the Confluent.Kafka package of that version,
+       restored from a feed that holds it, instead of the project: the release pipeline runs these
+       tests against the package it publishes (.semaphore/test-nupkg.sh). -->
+  <ItemGroup Condition="'$(ConfluentKafkaPackageVersion)' == ''">
     <ProjectReference Include="..\..\src\Confluent.Kafka\Confluent.Kafka.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ConfluentKafkaPackageVersion)' != ''">
+    <PackageReference Include="Confluent.Kafka" Version="[$(ConfluentKafkaPackageVersion)]" />
   </ItemGroup>
 
   <!--
