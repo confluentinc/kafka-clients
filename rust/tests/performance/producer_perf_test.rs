@@ -44,15 +44,17 @@
 //! | `BATCH_SIZE`           | `1024` (1 MiB)     | `batch.size` in **KiB** (×1024)            |
 //! | `MAX_REQUEST_SIZE`     | (`batch×64`, ≤8MiB)| `max.request.size` in **KiB** (×1024), capped 8 MiB |
 //! | `BUFFER_MEMORY`        | (client default)   | `buffer.memory` in **MiB** (×1024×1024)    |
+//! | `BUFFER_MEMORY_ALLOCATION_STRATEGY` | (client default) | `buffer.memory.allocation.strategy`: `full`/`incremental` |
 //! | `LINGER_MS`            | `5`                | `linger.ms`                                |
 //! | `MAX_IN_FLIGHT`        | (client default)   | `max.in.flight.requests.per.connection`    |
 //! | `COMPRESSION_TYPE`     | `none`             | Compression: none/gzip/snappy/lz4/zstd     |
 //! | `ENABLE_IDEMPOTENCE`   | `false`            | `enable.idempotence`                       |
+//! | `ACKS`                 | (client default)   | `acks`: `all`/`-1`/`1`/`0` (default all)   |
 //! | `USE_DEFAULTS`         | `False`            | Omit all tuning knobs; use client defaults |
 //! | `WARMUP_SECONDS`       | `120` *            | Warmup duration                            |
 //! | `TEST_DURATION_SECONDS`| `600` *            | Measured interval duration                 |
 //! | `DO_VERIFY`            | `True`             | Verify `RecordMetadata` per message        |
-//! | `VERIFY_CONSUMED`      | `False`            | Consumer-side verification (not yet avail.)|
+//! | `VERIFY_CONSUMED`      | `False`            | Consumer-side verification (unimplemented) |
 //! | `P99_LIMIT_MS`         | `0` off *          | Per-message p99 latency budget (asserted)  |
 //! | `SECURITY_PROTOCOL`    | (none)             | `PLAINTEXT`/`SASL_PLAINTEXT`/`SASL_SSL`     |
 //! | `SASL_MECHANISM`       | (none)             | e.g. `PLAIN`                               |
@@ -65,6 +67,13 @@
 //! run (no `BOOTSTRAP_SERVERS`) to keep it short and latency-asserted:
 //! `TEST_DURATION_SECONDS=10`, `LIMIT_RPS=100`, `P99_LIMIT_MS=70`,
 //! `WARMUP_SECONDS=0`. Setting any of them explicitly disables that override.
+//!
+//! A counted run (`NUM_MESSAGES` > 0, which `LIMIT_RPS` > 0 sets to
+//! `LIMIT_RPS × TEST_DURATION_SECONDS`) stops at the target or once the measured
+//! interval reaches `TEST_DURATION_SECONDS` + 10 s, whichever comes first. A run
+//! the time cap stops prints a `capped:` line, writes `results.json` with what it
+//! measured and does not fail for the shortfall (the driver's report flags a
+//! client that held less than 95% of the target rate).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -104,6 +113,20 @@ const MAX_LATENCY_MS: usize = 10_000;
 /// the plot but are excluded from the measured-interval statistics.
 const POST_TEST_AWAIT_SECONDS: u64 = 10;
 
+/// A counted run (`NUM_MESSAGES` > 0) also stops once the measured interval
+/// reaches `TEST_DURATION_SECONDS` plus this slack, so a client that cannot hold
+/// the target rate ends with its real numbers instead of running unbounded.
+const COUNTED_RUN_CAP_SLACK: Duration = Duration::from_secs(10);
+
+/// A send the producer rejects synchronously (`send()` returns an error) is not
+/// counted and the same record is retried. A persistent rejection (e.g. a
+/// record larger than `max.request.size`) would make that retry spin until the
+/// duration ends, so this many rejections in a row, with no successful send in
+/// between, stop the send loop and fail the run (the summary and `results.json`
+/// are still written). Isolated rejections are logged and do not fail the run.
+/// Same rule as the C harness.
+const MAX_CONSECUTIVE_SEND_REJECTIONS: u64 = 1000;
+
 /// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
 /// utime/stime into CPU seconds. Effectively always 100 on Linux.
 const USER_HZ: f64 = 100.0;
@@ -122,10 +145,12 @@ struct PerfTestConfig {
     batch_size: i64,
     max_request_size: i64,
     buffer_memory: Option<i64>,
+    buffer_memory_allocation_strategy: Option<String>,
     linger_ms: Option<String>,
     max_in_flight: Option<String>,
     compression_type: String,
     enable_idempotence: String,
+    acks: Option<String>,
     use_defaults: bool,
     warmup_seconds: u64,
     test_duration_seconds: u64,
@@ -143,23 +168,14 @@ struct PerfTestConfig {
 impl PerfTestConfig {
     fn from_env() -> Self {
         // `batch.size`: default 1 MiB (1024 KiB); env value is in KiB.
-        let batch_size = match env_opt("BATCH_SIZE") {
-            Some(kib) => kib.parse::<i64>().unwrap_or(1024) * 1024,
-            None => 1024 * 1024,
-        };
+        let batch_size = env_parse::<i64>("BATCH_SIZE", 1024) * 1024;
         // `max.request.size`: default batch×64, capped at 8 MiB; env value is
         // in KiB.
-        let max_request_size = {
-            let requested = match env_opt("MAX_REQUEST_SIZE") {
-                Some(kib) => kib.parse::<i64>().unwrap_or(0) * 1024,
-                None => batch_size * 64,
-            };
-            requested.min(8 * 1024 * 1024)
-        };
+        let max_request_size = env_parse_opt::<i64>("MAX_REQUEST_SIZE")
+            .map_or(batch_size * 64, |kib| kib * 1024)
+            .min(8 * 1024 * 1024);
         // `buffer.memory`: only set when present; env value is in MiB.
-        let buffer_memory = env_opt("BUFFER_MEMORY")
-            .and_then(|mib| mib.parse::<i64>().ok())
-            .map(|mib| mib * 1024 * 1024);
+        let buffer_memory = env_parse_opt::<i64>("BUFFER_MEMORY").map(|mib| mib * 1024 * 1024);
 
         // Full defaults match the other producer performance tests (600 s,
         // unlimited rate). The in-suite integration run overrides these in
@@ -182,10 +198,12 @@ impl PerfTestConfig {
             batch_size,
             max_request_size,
             buffer_memory,
+            buffer_memory_allocation_strategy: env_opt("BUFFER_MEMORY_ALLOCATION_STRATEGY"),
             linger_ms: Some(env_or("LINGER_MS", "5")),
             max_in_flight: env_opt("MAX_IN_FLIGHT"),
             compression_type: env_or("COMPRESSION_TYPE", "none"),
             enable_idempotence: env_or("ENABLE_IDEMPOTENCE", "false"),
+            acks: env_opt("ACKS"),
             use_defaults: env_or("USE_DEFAULTS", "False") == "True",
             warmup_seconds: env_parse("WARMUP_SECONDS", 120),
             test_duration_seconds,
@@ -221,10 +239,16 @@ impl PerfTestConfig {
             props.insert("max.request.size".to_string(), self.max_request_size.to_string());
             props.insert("compression.type".to_string(), self.compression_type.clone());
             props.insert("enable.idempotence".to_string(), self.enable_idempotence.clone());
-            // `acks` is intentionally not set, so it relies on the client default
-            // (acks = all / -1), consistent with the other performance tests.
+            // Unset, `acks` is the client default (all / -1), which the other
+            // performance tests set explicitly.
+            if let Some(v) = &self.acks {
+                props.insert("acks".to_string(), v.clone());
+            }
             if let Some(v) = &self.buffer_memory {
                 props.insert("buffer.memory".to_string(), v.to_string());
+            }
+            if let Some(v) = &self.buffer_memory_allocation_strategy {
+                props.insert("buffer.memory.allocation.strategy".to_string(), v.clone());
             }
             if let Some(v) = &self.linger_ms {
                 props.insert("linger.ms".to_string(), v.clone());
@@ -262,8 +286,21 @@ fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+/// A numeric variable, `None` when unset or empty. A value that does not parse
+/// fails the run, naming the variable, rather than running with the default
+/// (`LIMIT_RPS=10k` would otherwise run unlimited).
+fn env_parse_opt<T: std::str::FromStr>(key: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    env_opt(key).map(|v| v.parse().unwrap_or_else(|e| panic!("invalid {key}={v:?}: {e}")))
+}
+
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T
+where
+    T::Err: std::fmt::Display,
+{
+    env_parse_opt(key).unwrap_or(default)
 }
 
 fn now_ms() -> u128 {
@@ -546,8 +583,62 @@ fn rollover_line(
 }
 
 // ---------------------------------------------------------------------------
-// Latency histogram (for p99 assertion)
+// Latency summary (results.json and the p99 assertion)
 // ---------------------------------------------------------------------------
+
+/// The measured interval's per-record latency series for the run summary: a
+/// 1 ms histogram for the percentiles (bucket `floor(latency / 1 ms)`, clamped
+/// to the overflow bucket) plus the exact count / sum / min / max for the
+/// average and the extremes, which bucket indices would floor by up to 1 ms.
+/// Only the measured interval's sends record into it (warmup sends carry no
+/// callback), so both halves cover the same records.
+struct LatencySeries {
+    hist: Vec<AtomicU64>,
+    count: AtomicU64,
+    sum_us: AtomicU64,
+    min_us: AtomicU64,
+    max_us: AtomicU64,
+}
+
+impl LatencySeries {
+    fn new() -> Self {
+        Self {
+            hist: (0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect(),
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+            min_us: AtomicU64::new(u64::MAX),
+            max_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, latency_us: u64) {
+        let ms = (latency_us / 1000) as usize;
+        self.hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.min_us.fetch_min(latency_us, Ordering::Relaxed);
+        self.max_us.fetch_max(latency_us, Ordering::Relaxed);
+    }
+
+    /// Percentile (0.0..=1.0) in whole ms from the histogram.
+    fn percentile_ms(&self, p: f64) -> u64 {
+        percentile_from_hist(&self.hist, p)
+    }
+
+    /// Exact `(min, avg, max)` in ms; all 0 when nothing was recorded.
+    fn exact_ms(&self) -> (f64, f64, f64) {
+        let count = self.count.load(Ordering::Relaxed);
+        if count == 0 {
+            return (0.0, 0.0, 0.0);
+        }
+        let us_to_ms = |us: u64| us as f64 / 1000.0;
+        (
+            us_to_ms(self.min_us.load(Ordering::Relaxed)),
+            us_to_ms(self.sum_us.load(Ordering::Relaxed)) / count as f64,
+            us_to_ms(self.max_us.load(Ordering::Relaxed)),
+        )
+    }
+}
 
 fn percentile_from_hist(hist: &[AtomicU64], p: f64) -> u64 {
     let total: u64 = hist.iter().map(|b| b.load(Ordering::Relaxed)).sum();
@@ -641,6 +732,9 @@ async fn producer_perf_test() {
         if let Some(v) = config.buffer_memory {
             println!("buffer.memory: {v} B");
         }
+        if let Some(v) = &config.buffer_memory_allocation_strategy {
+            println!("buffer.memory.allocation.strategy: {v}");
+        }
         if let Some(v) = &config.linger_ms {
             println!("linger.ms: {v}");
         }
@@ -668,13 +762,11 @@ async fn producer_perf_test() {
             .expect("Failed to create producer");
 
     // --- Consumer-side verification (VERIFY_CONSUMED) ---
-    // Blocked on master: the Consumer API is not yet merged here (only on the
-    // unmerged `consumer-impl` branch). murmur2/partition_for_key DO exist, so
-    // this can be wired up once a Consumer lands.
+    // Not implemented in this harness.
     if config.verify_consumed {
         println!(
             "Consumer verification requested (VERIFY_CONSUMED=True) but skipped: \
-             the Consumer API is not available in this build."
+             not implemented in the Rust harness."
         );
     }
 
@@ -691,7 +783,7 @@ async fn producer_perf_test() {
     let completed_messages = Arc::new(AtomicU64::new(0));
     let in_flight = Arc::new(AtomicU64::new(0));
     let verified = Arc::new(AtomicU64::new(0));
-    let latency_hist: Arc<Vec<AtomicU64>> = Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
+    let latency = Arc::new(LatencySeries::new());
 
     // === METRICS COLLECTOR ===
     // Spawned BEFORE warmup so the rollover JSONL also captures warmup windows
@@ -766,10 +858,12 @@ async fn producer_perf_test() {
             let record: ProducerRecord<&[u8], &[u8]> =
                 ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
             if let Ok(produce_call) = producer.send(record, None).await {
-                let md = produce_call
-                    .get_with_timeout(Duration::from_secs(30))
-                    .await
-                    .expect("warmup send failed");
+                // No timeout of our own, as Java's `f.get()` and the C harness:
+                // the producer's delivery.timeout.ms bounds the wait. A shorter
+                // one (30 s, request.timeout.ms) failed the run whenever one
+                // request was lost to a broker dropping its connection, before
+                // the producer could retry it.
+                let md = produce_call.get().await.expect("warmup send failed");
                 assert!(
                     !config.do_verify || verify_record_metadata(&md, &topic),
                     "warmup failed due to message verification error"
@@ -842,8 +936,10 @@ async fn producer_perf_test() {
         // whose per-poll cost grows with the set size and collapses throughput
         // at max rate. This keeps pace with the producer, so the unbounded
         // channel never deeply fills.
+        // No timeout of our own, as in warmup: the producer's
+        // delivery.timeout.ms bounds the wait.
         while let Some(produce_call) = produce_calls_rx.recv().await {
-            let result = produce_call.get_with_timeout(Duration::from_secs(60)).await;
+            let result = produce_call.get().await;
             record_completed_calls(result);
         }
         // The channel is closed and drained: the response for the last message
@@ -851,11 +947,25 @@ async fn producer_perf_test() {
         meas_end_completion.store(now_ms() as u64, Ordering::Relaxed);
     });
 
+    // A counted run that has not reached `num_messages` by this point of the
+    // measured interval stops anyway (see `COUNTED_RUN_CAP_SLACK`).
+    let count_cap = test_duration + COUNTED_RUN_CAP_SLACK;
+    let mut capped = false;
+    // Synchronous send rejections: in total, and in a row since the last
+    // successful send (see `MAX_CONSECUTIVE_SEND_REJECTIONS`).
+    let mut send_rejections: u64 = 0;
+    let mut consecutive_rejections: u64 = 0;
+
     loop {
-        // A counted run is bounded by `num_messages`; a time-based run
+        // A counted run is bounded by `num_messages`, or by the time cap if that
+        // comes first (checked before every send); a time-based run
         // (num_messages == 0) is bounded by the duration.
         if config.num_messages > 0 {
             if messages_sent.load(Ordering::Relaxed) >= config.num_messages {
+                break;
+            }
+            if test_start.elapsed() >= count_cap {
+                capped = true;
                 break;
             }
         } else if test_start.elapsed() >= test_duration {
@@ -872,29 +982,40 @@ async fn producer_perf_test() {
         // `start_time.elapsed()` measured at ack, so the completion task's own
         // drain backlog can never inflate it. `record_success` (which also feeds
         // the per-window messages_sent/bytes_sent throughput counters) and the
-        // cumulative summary histogram bump therefore run exactly once per
-        // record, here — NOT in the completion task.
+        // cumulative summary series therefore run exactly once per record,
+        // here — NOT in the completion task.
         let start_time = Instant::now();
         let metrics_cb = Arc::clone(&metrics);
-        let latency_hist_cb = Arc::clone(&latency_hist);
-        let callback: Box<dyn Callback> = Box::new(callback::new(move |md, _err| {
-            // On success `md` is Some; on failure it is None (err is Some) and no
-            // latency is recorded, matching the completion task's Ok-only path.
-            if md.is_some() {
+        let latency_cb = Arc::clone(&latency);
+        let callback: Box<dyn Callback> = Box::new(callback::new(move |_md, err| {
+            // Success is `err` being None: on failure the client still passes
+            // metadata (every field -1) along with the error. A failed record
+            // adds no latency or throughput, matching the completion task's
+            // Ok-only path, which counts it as completed but not verified.
+            if err.is_none() {
                 let latency_us = start_time.elapsed().as_micros() as u64;
                 metrics_cb.record_success(latency_us, message_size);
-                let ms = (latency_us / 1000) as usize;
-                latency_hist_cb[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+                latency_cb.record(latency_us);
             }
         }));
         match producer.send(record, Some(callback)).await {
             Ok(produce_call) => {
+                consecutive_rejections = 0;
                 messages_sent.fetch_add(1, Ordering::Relaxed);
                 in_flight.fetch_add(1, Ordering::Relaxed);
                 let _ = produce_calls_tx.send(produce_call);
             },
             Err(e) => {
                 eprintln!("Send error: {e:?}");
+                send_rejections += 1;
+                consecutive_rejections += 1;
+                if consecutive_rejections >= MAX_CONSECUTIVE_SEND_REJECTIONS {
+                    eprintln!(
+                        "{consecutive_rejections} consecutive sends rejected with no successful send in \
+                         between; stopping the run as failed"
+                    );
+                    break;
+                }
             },
         }
 
@@ -908,19 +1029,37 @@ async fn producer_perf_test() {
         }
     }
 
-    // === COOLDOWN ===
-    println!(
-        "Stopping after {} messages sent, waiting for in-flight ...",
-        messages_sent.load(Ordering::Relaxed)
-    );
-    drop(produce_calls_tx);
-    while in_flight.load(Ordering::Relaxed) > 0 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // The wait owed for the records after the last checkpoint, as the C harness
+    // takes it: without it a fast client ends a counted run early and overstates
+    // throughput.
+    let sent_messages = messages_sent.load(Ordering::Relaxed);
+    if rate > 0.0 {
+        let deadline = Duration::from_secs_f64(sent_messages as f64 / rate);
+        let elapsed = test_start.elapsed();
+        if elapsed < deadline {
+            tokio::time::sleep(deadline - elapsed).await;
+        }
     }
+
+    // === COOLDOWN ===
+    println!("Stopping after {sent_messages} messages sent, waiting for in-flight ...");
+    // Closing the channel ends the completion task once it has resolved every
+    // queued future, so awaiting it waits for all in-flight records.
+    drop(produce_calls_tx);
     let _ = record_completed_calls_loop.await;
+    if send_rejections > 0 {
+        eprintln!("Send rejections: {send_rejections}");
+    }
     // Measured time spans the send loop + drain, captured before the cooldown.
     // (`meas_end` was set inside the completion task on the last response.)
     let measured_secs = test_start.elapsed().as_secs_f64();
+    if capped {
+        println!(
+            "capped: sent {sent_messages} of {} records in {measured_secs:.2} s (TEST_DURATION_SECONDS + {} s)",
+            config.num_messages,
+            COUNTED_RUN_CAP_SLACK.as_secs()
+        );
+    }
 
     // Post-test await: keep the collector sampling for a short cooldown so the
     // JSONL captures post-measurement windows. They carry measurement_end_ms and
@@ -973,33 +1112,13 @@ async fn producer_perf_test() {
         0.0
     };
 
-    // Average/min/max latency and percentiles from the histogram (ms
-    // resolution).
-    let (lat_count, lat_sum_ms, min_latency_ms, max_latency_ms) = {
-        let (mut count, mut sum, mut min, mut max) = (0u64, 0u64, 0u64, 0u64);
-        for (ms, b) in latency_hist.iter().enumerate() {
-            let n = b.load(Ordering::Relaxed);
-            if n > 0 {
-                if count == 0 {
-                    min = ms as u64;
-                }
-                count += n;
-                sum += ms as u64 * n;
-                max = ms as u64;
-            }
-        }
-        (count, sum, min, max)
-    };
-    let avg_latency_ms = if lat_count > 0 {
-        lat_sum_ms as f64 / lat_count as f64
-    } else {
-        0.0
-    };
-    let p50_ms = percentile_from_hist(&latency_hist, 0.50);
-    let p90_ms = percentile_from_hist(&latency_hist, 0.90);
-    let p95_ms = percentile_from_hist(&latency_hist, 0.95);
-    let p99_ms = percentile_from_hist(&latency_hist, 0.99);
-    let p999_ms = percentile_from_hist(&latency_hist, 0.999);
+    // Exact min/avg/max latency, and percentiles from the 1 ms histogram.
+    let (min_latency_ms, avg_latency_ms, max_latency_ms) = latency.exact_ms();
+    let p50_ms = latency.percentile_ms(0.50);
+    let p90_ms = latency.percentile_ms(0.90);
+    let p95_ms = latency.percentile_ms(0.95);
+    let p99_ms = latency.percentile_ms(0.99);
+    let p999_ms = latency.percentile_ms(0.999);
 
     println!();
     println!("Duration: {:.2} ms", measured_secs * 1000.0);
@@ -1030,7 +1149,7 @@ async fn producer_perf_test() {
     println!("Average rate msg/s: {msg_rate:.2} msg/s");
     println!("Average rate MiB/s: {mib_rate:.2} MiB/s");
     println!("Average latency: {avg_latency_ms:.2} ms");
-    println!("Max latency: {max_latency_ms} ms");
+    println!("Max latency: {max_latency_ms:.2} ms");
     println!("p99 latency: {p99_ms} ms");
     println!("Metrics written to: {}", config.metrics_file);
 
@@ -1048,9 +1167,9 @@ async fn producer_perf_test() {
             "  \"duration_s\": {duration:.2},\n",
             "  \"throughput_msg_s\": {msg_rate:.2},\n",
             "  \"throughput_mib_s\": {mib_rate:.2},\n",
-            "  \"latency_ms\": {{\"min\": {min}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
+            "  \"latency_ms\": {{\"min\": {min:.2}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
             "\"p90\": {p90}, \"p95\": {p95}, \"p99\": {p99}, \"p999\": {p999}, ",
-            "\"max\": {max}}},\n",
+            "\"max\": {max:.2}}},\n",
             "  \"cpu_avg_pct\": {cpu:.2},\n",
             "  \"rss_avg_kib\": {rss:.2}\n",
             "}}\n"
@@ -1082,16 +1201,23 @@ async fn producer_perf_test() {
     // === PERFORMANCE TARGET ASSERTIONS ===
     // verified == completed, completed == produced target, and the p99 latency
     // budget for the rate-limited in-suite run.
+    assert!(
+        consecutive_rejections < MAX_CONSECUTIVE_SEND_REJECTIONS,
+        "{consecutive_rejections} consecutive sends were rejected; the run stopped early (see above)"
+    );
     assert!(completed_messages > 0, "Should have completed at least one message");
     assert_eq!(
         verified, completed_messages,
         "verified records ({verified}) must match completed ({completed_messages})"
     );
     if config.num_messages > 0 {
+        // A run the time cap stopped is held to the records it sent, not to the
+        // target: the shortfall is reported (the `capped:` line, results.json),
+        // not failed.
+        let target = if capped { sent_messages } else { config.num_messages };
         assert_eq!(
-            completed_messages, config.num_messages,
-            "completed ({completed_messages}) must match produced target ({})",
-            config.num_messages
+            completed_messages, target,
+            "completed ({completed_messages}) must match produced target ({target})"
         );
     }
     // Latency budget — only asserted when set (P99_LIMIT_MS=0 disables it for

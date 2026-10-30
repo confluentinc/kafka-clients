@@ -33,14 +33,23 @@
  *      per-record allocation in the hot loop.
  *   5. Every `interval` s: sample CPU% (percent of one core:
  *      (ru_utime+ru_stime) delta / wall delta * 100 via getrusage(RUSAGE_SELF))
- *      and RSS (ru_maxrss; on macOS this is BYTES, on Linux KILOBYTES). Print
- *      interval lines, reset interval histogram, append metrics.jsonl.
+ *      and RSS (on Linux the current RSS, from /proc/self/statm; on macOS the
+ *      peak ru_maxrss). Print interval lines, reset interval histogram, append
+ *      metrics.jsonl.
  *   6. After `duration` s of measurement: stop the producer, print + persist a
- *      summary with the same JSONL schema (client:"librdkafka-c").
+ *      summary with the same JSONL schema (client:"librdkafka-c"), and with
+ *      --results-file also in the shape of the producer harnesses'
+ *      results.json (client:"librdkafka-consumer"), which
+ *      `cargo xtask perf-cloud` reads.
+ *
+ * SASL comes from SECURITY_PROTOCOL, SASL_MECHANISM, SASL_USERNAME and
+ * SASL_PASSWORD when they are set, as in c/tests/producer_perf_test.c, so a
+ * secret does not have to be on the command line (--conf).
  */
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdint.h>
@@ -60,13 +69,31 @@
 
 /* ----------------------------- histogram ------------------------------ */
 
+/* The buckets are allocated once, zeroed (calloc), so only the pages of the
+ * buckets actually written become resident: the reported RSS is the client's,
+ * not this 4.8 MB array's. hist_reset() clears in place and only the bucket
+ * range written since the last reset, so it never touches the rest of the
+ * array. */
 typedef struct {
     int64_t *buckets; /* MAX_LATENCY_MS + 1 entries */
     int64_t count;
     int64_t sum;
     int64_t min;
     int64_t max;
+    /* Lowest and highest bucket written since init / reset; every non-zero
+     * bucket lies in [lo, hi]. Meaningless while count == 0. */
+    int64_t lo;
+    int64_t hi;
 } hist_t;
+
+static void hist_clear_stats(hist_t *h) {
+    h->count = 0;
+    h->sum = 0;
+    h->min = (int64_t)1 << 62;
+    h->max = -((int64_t)1 << 62);
+    h->lo = MAX_LATENCY_MS;
+    h->hi = 0;
+}
 
 static void hist_init(hist_t *h) {
     h->buckets = calloc(MAX_LATENCY_MS + 1, sizeof(int64_t));
@@ -74,18 +101,16 @@ static void hist_init(hist_t *h) {
         fprintf(stderr, "out of memory allocating histogram\n");
         exit(1);
     }
-    h->count = 0;
-    h->sum = 0;
-    h->min = (int64_t)1 << 62;
-    h->max = -((int64_t)1 << 62);
+    hist_clear_stats(h);
 }
 
+/* Empties the histogram in place for the next interval, zeroing only the
+ * buckets written since the last reset. */
 static void hist_reset(hist_t *h) {
-    memset(h->buckets, 0, (size_t)(MAX_LATENCY_MS + 1) * sizeof(int64_t));
-    h->count = 0;
-    h->sum = 0;
-    h->min = (int64_t)1 << 62;
-    h->max = -((int64_t)1 << 62);
+    if (h->count > 0)
+        memset(h->buckets + h->lo, 0,
+               (size_t)(h->hi - h->lo + 1) * sizeof(int64_t));
+    hist_clear_stats(h);
 }
 
 static void hist_free(hist_t *h) {
@@ -100,6 +125,10 @@ static void hist_record(hist_t *h, int64_t latency_ms) {
     else if (idx > MAX_LATENCY_MS)
         idx = MAX_LATENCY_MS;
     h->buckets[idx]++;
+    if (idx < h->lo)
+        h->lo = idx;
+    if (idx > h->hi)
+        h->hi = idx;
     h->count++;
     h->sum += latency_ms > 0 ? latency_ms : 0;
     if (latency_ms < h->min)
@@ -119,7 +148,7 @@ static double hist_stddev(const hist_t *h) {
         return 0.0;
     double mean = (double)h->sum / (double)h->count;
     double var = 0.0;
-    for (int64_t i = 0; i <= MAX_LATENCY_MS; i++) {
+    for (int64_t i = h->lo; i <= h->hi; i++) {
         if (h->buckets[i]) {
             double d = (double)i - mean;
             var += (double)h->buckets[i] * d * d;
@@ -134,12 +163,12 @@ static int64_t hist_percentile(const hist_t *h, double pct) {
         return 0;
     int64_t target = (int64_t)ceil(pct / 100.0 * (double)h->count);
     int64_t cumulative = 0;
-    for (int64_t i = 0; i <= MAX_LATENCY_MS; i++) {
+    for (int64_t i = h->lo; i <= h->hi; i++) {
         cumulative += h->buckets[i];
         if (cumulative >= target)
             return i;
     }
-    return MAX_LATENCY_MS;
+    return h->hi;
 }
 
 /* ------------------------------ clocks -------------------------------- */
@@ -210,6 +239,23 @@ static double cpu_sampler_sample(cpu_sampler_t *c, double *rss_mb_out) {
 
 /* ------------------------------- args --------------------------------- */
 
+/* The whole-number value of option `opt`. One that is not a whole number in
+ * [min, max] exits with an error rather than run with another value (atoi
+ * reads "10k" as 10). */
+static long long parse_number_arg(const char *opt, const char *value,
+                                  long long min, long long max) {
+    char *end = NULL;
+    errno = 0;
+    long long v = strtoll(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || v < min || v > max) {
+        fprintf(stderr,
+                "invalid %s '%s': expected a whole number from %lld to %lld\n",
+                opt, value, min, max);
+        exit(2);
+    }
+    return v;
+}
+
 typedef struct {
     const char *bootstrap;
     const char *topic;
@@ -218,7 +264,7 @@ typedef struct {
     int duration;
     int message_size;
     int partitions;
-    int warmup;
+    int64_t warmup; /* records skipped before measuring; 0 for none */
     int interval;
     int poll_timeout_ms;
     int join_timeout;
@@ -245,6 +291,8 @@ typedef struct {
     /* --compression-type: compression.type of the spawned load generator.
      * NULL => its default. */
     const char *compression_type;
+    /* --results-file: where to also write the summary as results.json. */
+    const char *results_file;
 } args_t;
 
 /* ----------------------- producer spawn (fork+exec) -------------------- */
@@ -422,6 +470,18 @@ static rd_kafka_t *build_consumer(const args_t *a, char *errstr,
     SET("enable.auto.commit", "true");
     SET("group.protocol", a->protocol);
 
+    static const char *const sasl_env[][2] = {
+        {"SECURITY_PROTOCOL", "security.protocol"},
+        {"SASL_MECHANISM", "sasl.mechanism"},
+        {"SASL_USERNAME", "sasl.username"},
+        {"SASL_PASSWORD", "sasl.password"},
+    };
+    for (size_t si = 0; si < sizeof(sasl_env) / sizeof(sasl_env[0]); si++) {
+        const char *v = getenv(sasl_env[si][0]);
+        if (v && *v)
+            SET(sasl_env[si][1], v);
+    }
+
     /* Fetch knobs: apply override if provided, else fall back to the prior
      * default for fetch.min.bytes (1) and librdkafka's native defaults for the
      * rest. */
@@ -487,6 +547,7 @@ int main(int argc, char **argv) {
     a.no_produce = 0;
     a.producer_config = NULL;
     a.compression_type = NULL;
+    a.results_file = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -501,23 +562,23 @@ int main(int argc, char **argv) {
         else if (!strcmp(arg, "--group-id") || !strcmp(arg, "-g"))
             snprintf(a.group_id, sizeof(a.group_id), "%s", NEXT());
         else if (!strcmp(arg, "--throughput") || !strcmp(arg, "-r"))
-            a.throughput = atoi(NEXT());
+            a.throughput = (int)parse_number_arg(arg, NEXT(), -1, INT_MAX);
         else if (!strcmp(arg, "--duration") || !strcmp(arg, "-d"))
-            a.duration = atoi(NEXT());
+            a.duration = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--message-size"))
-            a.message_size = atoi(NEXT());
+            a.message_size = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--partitions"))
-            a.partitions = atoi(NEXT());
+            a.partitions = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--warmup") || !strcmp(arg, "-w"))
-            a.warmup = atoi(NEXT());
+            a.warmup = parse_number_arg(arg, NEXT(), 0, INT64_MAX);
         else if (!strcmp(arg, "--interval"))
-            a.interval = atoi(NEXT());
+            a.interval = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--poll-timeout-ms"))
-            a.poll_timeout_ms = atoi(NEXT());
+            a.poll_timeout_ms = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--join-timeout"))
-            a.join_timeout = atoi(NEXT());
+            a.join_timeout = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--max-poll-records"))
-            a.max_poll_records = atoi(NEXT());
+            a.max_poll_records = (int)parse_number_arg(arg, NEXT(), 0, INT_MAX);
         else if (!strcmp(arg, "--single-poll"))
             a.single_poll = 1;
         else if (!strcmp(arg, "--fetch-min-bytes"))
@@ -561,7 +622,10 @@ int main(int argc, char **argv) {
                         a.compression_type);
                 return 2;
             }
-        } else {
+        }
+        else if (!strcmp(arg, "--results-file"))
+            a.results_file = NEXT();
+        else {
             fprintf(stderr, "unknown arg: %s\n", arg);
             return 2;
         }
@@ -580,10 +644,24 @@ int main(int argc, char **argv) {
     printf("Throughput:  %d msg/s\n", a.throughput);
     printf("Duration:    %d s (after warmup)\n", a.duration);
     printf("Msg size:    %d bytes\n", a.message_size);
-    printf("Warmup:      %d messages\n", a.warmup);
+    printf("Warmup:      %lld messages\n", (long long)a.warmup);
     printf("Interval:    %d s\n", a.interval);
     printf("rdkafka ver: %s\n", rd_kafka_version_str());
     printf("======================================================================\n");
+
+    /* The histograms are allocated once, here, before the client has
+     * allocated and freed anything large: glibc raises its mmap threshold when
+     * a large mmap'd block is freed, after which a large calloc may be carved
+     * from a freed heap region and memset, making the whole array resident.
+     * Allocated now they are fresh zero pages, resident only where written. */
+    hist_t overall, interval_hist;
+    hist_init(&overall);
+    hist_init(&interval_hist);
+    /* Records-per-batch distribution over NON-EMPTY batches during the
+     * measurement window (post-warmup), mirroring the Rust harness. Reuses the
+     * 1-unit-bucket histogram; batch sizes are bounded by max_poll_records. */
+    hist_t rpp;
+    hist_init(&rpp);
 
     char errstr[512];
     rd_kafka_t *rk = build_consumer(&a, errstr, sizeof(errstr));
@@ -663,33 +741,37 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Settle to the live edge (poll discarding until two consecutive empties). */
-    printf(">>> Settling to the live edge (polling until empty) before "
-           "producer...\n");
-    fflush(stdout);
-    double settle_deadline = monotonic_s() + 15;
-    int empties = 0;
-    while (1) {
-        rd_kafka_message_t *msg =
-            rd_kafka_consumer_poll(rk, a.poll_timeout_ms);
-        if (!msg) {
-            empties++;
-            if (empties >= 2)
+    /* Settle to the live edge (poll discarding until two consecutive empties).
+     * Not with --no-produce: an external producer may already be running, so
+     * the polls would not come back empty. */
+    if (!a.no_produce) {
+        printf(">>> Settling to the live edge (polling until empty) before "
+               "producer...\n");
+        fflush(stdout);
+        double settle_deadline = monotonic_s() + 15;
+        int empties = 0;
+        while (1) {
+            rd_kafka_message_t *msg =
+                rd_kafka_consumer_poll(rk, a.poll_timeout_ms);
+            if (!msg) {
+                empties++;
+                if (empties >= 2)
+                    break;
+            } else if (msg->err) {
+                empties++;
+                rd_kafka_message_destroy(msg);
+            } else {
+                empties = 0;
+                rd_kafka_message_destroy(msg);
+            }
+            if (monotonic_s() >= settle_deadline) {
+                printf("    (settle timeout - proceeding)\n");
                 break;
-        } else if (msg->err) {
-            empties++;
-            rd_kafka_message_destroy(msg);
-        } else {
-            empties = 0;
-            rd_kafka_message_destroy(msg);
+            }
         }
-        if (monotonic_s() >= settle_deadline) {
-            printf("    (settle timeout - proceeding)\n");
-            break;
-        }
+        printf("    at live edge; starting producer now.\n");
+        fflush(stdout);
     }
-    printf("    at live edge; starting producer now.\n");
-    fflush(stdout);
 
     int64_t total_records =
         (int64_t)a.throughput * (a.duration + 30) + a.warmup;
@@ -701,14 +783,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    hist_t overall, interval_hist;
-    hist_init(&overall);
-    hist_init(&interval_hist);
-    /* Records-per-batch distribution over NON-EMPTY batches during the
-     * measurement window (post-warmup), mirroring the Rust harness. Reuses the
-     * 1-unit-bucket histogram; batch sizes are bounded by max_poll_records. */
-    hist_t rpp;
-    hist_init(&rpp);
     cpu_sampler_t sampler;
     /* Re-initialised when warmup completes, so the CPU average covers only
      * the measurement window. */
@@ -738,6 +812,8 @@ int main(int argc, char **argv) {
     }
 
     int64_t messages_consumed = 0;
+    /* Set when the run ends without a usable measurement. */
+    int failed = 0;
     /* Records-per-batch tracking (only non-empty batches counted, mirroring
      * how the Rust harness counts poll() calls that returned records). */
     int64_t batch_calls = 0;
@@ -748,10 +824,21 @@ int main(int argc, char **argv) {
     double interval_start = 0.0;
     int interval_count = 0;
     double loop_start = monotonic_s();
+    /* Until the measurement starts, the run fails when no record arrives by
+     * this deadline: the first within 120 s (the load never started), then
+     * each within 120 s of the last during the warmup (the load stopped before
+     * --warmup records). The measurement itself ends after --duration. */
     double no_data_deadline = loop_start + 120;
+    if (a.warmup <= 0) {
+        /* No warmup: the measurement starts with the first poll. */
+        warmup_complete = 1;
+        measure_start = loop_start;
+        interval_start = loop_start;
+        cpu_sampler_init(&sampler);
+    }
 
-    printf("\n>>> Measuring (warmup %d msgs, then %d s)...\n\n", a.warmup,
-           a.duration);
+    printf("\n>>> Measuring (warmup %lld msgs, then %d s)...\n\n",
+           (long long)a.warmup, a.duration);
     fflush(stdout);
 
     while (1) {
@@ -783,14 +870,22 @@ int main(int argc, char **argv) {
         if (n < 0) {
             fprintf(stderr, "batch consume error: %s\n",
                     rd_kafka_err2str(rd_kafka_last_error()));
+            failed = 1;
             break;
         }
         if (n == 0) {
-            if (!warmup_complete && monotonic_s() >= no_data_deadline &&
-                messages_consumed == 0) {
-                fprintf(stderr,
-                        "ERROR: no records within 120s (producer not "
-                        "running?)\n");
+            if ((!warmup_complete || messages_consumed == 0) &&
+                monotonic_s() >= no_data_deadline) {
+                if (messages_consumed == 0)
+                    fprintf(stderr,
+                            "ERROR: no records within 120s (producer not "
+                            "running?)\n");
+                else
+                    fprintf(stderr,
+                            "ERROR: no records for 120s during the warmup "
+                            "(%lld of %lld; did the load stop?)\n",
+                            (long long)messages_consumed, (long long)a.warmup);
+                failed = 1;
                 break;
             }
             if (warmup_complete &&
@@ -803,6 +898,7 @@ int main(int argc, char **argv) {
          * the wall clock once per poll() and applies it to every record in the
          * returned batch. */
         int64_t poll_now = now_millis();
+        int64_t consumed_before = messages_consumed;
         batch_calls++;
         batch_records += (int64_t)n;
         /* Records-per-batch distribution, post-warmup only (mirrors the Rust
@@ -836,8 +932,8 @@ int main(int argc, char **argv) {
                      * cover only measured time, not the join / settle /
                      * warmup CPU accumulated since the init above. */
                     cpu_sampler_init(&sampler);
-                    printf("    warmup complete (%d msgs); measuring now\n",
-                           a.warmup);
+                    printf("    warmup complete (%lld msgs); measuring now\n",
+                           (long long)a.warmup);
                     fflush(stdout);
                 }
                 rd_kafka_message_destroy(msg);
@@ -855,6 +951,8 @@ int main(int argc, char **argv) {
         }
 
         double now_mono = monotonic_s();
+        if (!warmup_complete && messages_consumed > consumed_before)
+            no_data_deadline = now_mono + 120;
         if (warmup_complete && (now_mono - interval_start) >= a.interval) {
             double elapsed_s = now_mono - interval_start;
             double rss_mb = 0.0;
@@ -906,7 +1004,6 @@ int main(int argc, char **argv) {
         measure_start > 0.0 ? (monotonic_s() - measure_start) : 0.0;
 
     kill_producer();
-    rd_kafka_consumer_close(rk);
 
     /* Summary. */
     int64_t total_bytes = overall.count * a.message_size;
@@ -941,8 +1038,8 @@ int main(int argc, char **argv) {
     int64_t rpp_max = hist_max(&rpp);
 
     printf("\n======================================================================\n");
-    printf("SUMMARY - librdkafka-c (warmup %d excluded, group.protocol=%s)\n",
-           a.warmup, a.protocol);
+    printf("SUMMARY - librdkafka-c (warmup %lld excluded, group.protocol=%s)\n",
+           (long long)a.warmup, a.protocol);
     printf("======================================================================\n");
     printf("Measured messages: %lld\n", (long long)overall.count);
     printf("Duration:          %.2f s\n", measured_duration_s);
@@ -991,7 +1088,55 @@ int main(int argc, char **argv) {
     fflush(jsonl);
     fclose(jsonl);
 
+    if (overall.count == 0) {
+        fprintf(stderr, "ERROR: no records measured\n");
+        failed = 1;
+    }
+    /* The same summary in the shape (keys, units, `latency_ms`) of the
+     * producer harnesses' results.json. Not written for a failed run: zeros
+     * would read as a result. */
+    if (a.results_file && !failed) {
+        FILE *rf = fopen(a.results_file, "w");
+        if (!rf) {
+            fprintf(stderr, "cannot open %s: %s\n", a.results_file,
+                    strerror(errno));
+            failed = 1;
+        } else {
+            fprintf(rf,
+                    "{\n"
+                    "  \"test\": \"consumer\",\n"
+                    "  \"client\": \"librdkafka-consumer\",\n"
+                    "  \"topic\": \"%s\",\n"
+                    "  \"messages_measured\": %lld,\n"
+                    "  \"duration_s\": %.2f,\n"
+                    "  \"throughput_msg_s\": %.2f,\n"
+                    "  \"throughput_mib_s\": %.2f,\n"
+                    "  \"latency_ms\": {\"min\": %lld, \"avg\": %.2f, "
+                    "\"p50\": %lld, \"p90\": %lld, \"p95\": %lld, "
+                    "\"p99\": %lld, \"p999\": %lld, \"max\": %lld},\n"
+                    "  \"cpu_avg_pct\": %.2f,\n"
+                    "  \"rss_avg_kib\": %.2f\n"
+                    "}\n",
+                    a.topic, (long long)overall.count, measured_duration_s,
+                    throughput_msg_s, throughput_mib_s, (long long)mn, avg,
+                    (long long)p50, (long long)p90, (long long)p95,
+                    (long long)p99, (long long)p999, (long long)mx, cpu_avg,
+                    rss_avg * 1024.0);
+            if (fclose(rf) != 0)
+                failed = 1;
+        }
+    }
+
     printf("\nResults written to: %s\n", run_dir);
+    fflush(stdout);
+
+    /* Closed only once the results are on disk: a close error (e.g. a KIP-848
+     * leave-group timeout) says nothing about the measurement, so it is a
+     * warning and neither discards the results nor changes the exit status. */
+    rd_kafka_resp_err_t cerr = rd_kafka_consumer_close(rk);
+    if (cerr)
+        fprintf(stderr, "warning: closing the consumer failed: %s\n",
+                rd_kafka_err2str(cerr));
 
     free(rkmessages);
     rd_kafka_queue_destroy(rkqu);
@@ -999,5 +1144,5 @@ int main(int argc, char **argv) {
     hist_free(&interval_hist);
     hist_free(&rpp);
     rd_kafka_destroy(rk);
-    return 0;
+    return failed ? 1 : 0;
 }

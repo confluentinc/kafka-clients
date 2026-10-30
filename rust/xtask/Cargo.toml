@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+serde_json = "1.0"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
 quote = "1"
 
