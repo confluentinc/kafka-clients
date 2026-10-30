@@ -778,9 +778,54 @@ fn coverage_lcov() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs the unit and integration tests under coverage. `admin_examples_test`
+/// runs the example binaries from the test binary's target directory, which a
+/// plain `cargo llvm-cov` neither builds them into nor keeps them in, so the
+/// examples and the tests are built by plain `cargo` commands under the
+/// environment of `cargo llvm-cov show-env`, in its target directory, and the
+/// report is made afterwards.
 fn coverage_all() -> anyhow::Result<()> {
     println!("Running full test coverage (unit + integration, requires Docker)...");
-    run_coverage_lcov(&["--features", "integration-tests"])?;
+    fs::create_dir_all("coverage")?;
+    let target_dir = env::current_dir()?.join("target").join("llvm-cov-target");
+    let target_env = [("CARGO_TARGET_DIR".to_owned(), target_dir.display().to_string())];
+    // Every step, `clean` and `report` included, runs under the show-env
+    // environment: without it cargo-llvm-cov puts its own `llvm-cov-target`
+    // under `CARGO_TARGET_DIR` and looks for the profile data there.
+    let mut coverage_env = llvm_cov_show_env(&target_env)?;
+    coverage_env.extend(target_env.iter().cloned());
+    run_command_with_env("cargo", &["llvm-cov", "clean", "--workspace"], &coverage_env)?;
+    run_command_with_env(
+        "cargo",
+        &["build", "--examples", "--features", "integration-tests"],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "confluent-kafka",
+            "--features",
+            "integration-tests",
+        ],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "llvm-cov",
+            "report",
+            "--package",
+            "confluent-kafka",
+            "--ignore-filename-regex",
+            COVERAGE_IGNORE_FILENAME_REGEX,
+            "--lcov",
+            "--output-path",
+            "coverage/lcov.info",
+        ],
+        &coverage_env,
+    )?;
     run_grcov_html()?;
     println!("Coverage report: coverage/html/index.html");
     Ok(())
@@ -1536,6 +1581,39 @@ fn transactional_producer_perf_test() -> anyhow::Result<()> {
     run_command("cargo", &arg_refs)
 }
 
+/// The generated wire code and the `src/bin` tools, left out of every coverage report.
+const COVERAGE_IGNORE_FILENAME_REGEX: &str = "(target/debug/build/.*/out/(test_)?generated/|src/bin/)";
+
+/// The environment `cargo llvm-cov show-env` gives for instrumenting the
+/// `confluent-kafka` package, its `KEY=VALUE` lines with the shell quotes
+/// removed, run with `env_vars` set.
+fn llvm_cov_show_env(env_vars: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+    let output = Command::new("cargo")
+        .args(["llvm-cov", "show-env", "--package", "confluent-kafka"])
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Command failed: cargo llvm-cov show-env\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .with_context(|| format!("unexpected cargo llvm-cov show-env line: {line}"))?;
+            let value = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')).unwrap_or(value);
+            if value.contains('\'') {
+                anyhow::bail!("unsupported quoting in cargo llvm-cov show-env line: {line}");
+            }
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
     fs::create_dir_all("coverage")?;
     let mut args = vec![
@@ -1543,7 +1621,7 @@ fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
         "--package",
         "confluent-kafka",
         "--ignore-filename-regex",
-        "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
+        COVERAGE_IGNORE_FILENAME_REGEX,
         "--lcov",
         "--output-path",
         "coverage/lcov.info",
@@ -2230,7 +2308,15 @@ fn package_rust_version() -> anyhow::Result<String> {
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(program).args(args).status()?;
+    run_command_with_env(program, args, &[])
+}
+
+/// [`run_command`] with `env_vars` added to the inherited environment.
+fn run_command_with_env(program: &str, args: &[&str], env_vars: &[(String, String)]) -> anyhow::Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .status()?;
 
     if !status.success() {
         anyhow::bail!("Command failed: {} {}", program, args.join(" "));
