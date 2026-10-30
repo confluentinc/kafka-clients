@@ -11,9 +11,16 @@ name: create-release-tag
 #     (Python):" publishes ${PYPI_PACKAGE} to Test PyPI. For a final version,
 #     the "Publish to PyPI" promotion of the tag build (publish-pypi.yml) then
 #     publishes it to PyPI.
-#   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
-#     like any other. A rust dev version is tested and packaged, never
-#     published; a python dev version is published to Test PyPI only.
+#   - DOTNET_VERSION: the tag is dotnet/v<DOTNET_VERSION>, and "Release
+#     (.NET):" builds, tests and packages ${NUGET_PACKAGE}. The "Publish to
+#     NuGet test gallery" promotion of the tag build (publish-nuget-test.yml)
+#     then publishes it to the NuGet test gallery, and that pipeline's
+#     "Publish to NuGet" promotion (publish-nuget.yml) to nuget.org.
+#   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python,
+#     4.4.0-dev.1 for dotnet) is tagged like any other. A rust dev version is
+#     tested and packaged, never published; a python dev version is published
+#     to Test PyPI only; a dotnet dev version is published like any other, by
+#     the two manual promotions.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
@@ -21,13 +28,16 @@ name: create-release-tag
 #   - the version is a valid release version for the client and equals its
 #     version at this commit: [package] version in rust/Cargo.toml
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N
-#     or -dev.N), or [project] version in python/pyproject.toml
+#     or -dev.N), [project] version in python/pyproject.toml
 #     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
-#     optionally by .devN);
+#     optionally by .devN), or <Version> in dotnet/Directory.Build.props
+#     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N,
+#     -dev.N or -rc.N);
 #   - the tag does not yet exist, and the version is new: for rust, unless it
 #     is a dev version, higher than every version on crates.io; for python, not
 #     yet on any index it is published to (Test PyPI, and PyPI for a final
-#     version that is not a dev version);
+#     version that is not a dev version); for dotnet, on neither the NuGet test
+#     gallery nor nuget.org;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
@@ -44,6 +54,8 @@ global_job_config:
       value: confluent-kafka
     - name: PYPI_PACKAGE
       value: confluent-kafka
+    - name: NUGET_PACKAGE
+      value: Confluent.Kafka
     # The jobs of semaphore.yml that must pass before a commit is tagged, by
     # their exact names, separated by ';'. The list must stay in sync with
     # semaphore.yml: a job that reports a result but is not listed, or is
@@ -65,7 +77,7 @@ blocks:
             - checkout
             # refuse: fails the job with a message stating why no tag was
             # created. use_client <client>: sets the variables that the checks
-            # below read for that client (rust or python).
+            # below read for that client (rust, python or dotnet).
             #
             # The version patterns are those of the `run` conditions of each
             # client's release blocks in semaphore.yml, without the tag prefix.
@@ -95,10 +107,20 @@ blocks:
                     manifest=python/pyproject.toml
                     manifest_key=project
                     ;;
+                  dotnet)
+                    version_param=DOTNET_VERSION
+                    version=${DOTNET_VERSION:-}
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N'
+                    dev_pattern='-dev\.[0-9]+$'
+                    manifest=dotnet/Directory.Build.props
+                    manifest_key=Version
+                    ;;
                 esac
                 tag="${client}/v${version}"
                 # A rust dev version is never published; a python one is
-                # published to Test PyPI only.
+                # published to Test PyPI only; a dotnet one is published like
+                # any other.
                 dev=""
                 [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
                 return 0
@@ -118,13 +140,15 @@ blocks:
             # The clients to release are those whose version was entered. Each
             # version must be valid and equal the client's version at this
             # commit. /usr/bin/python3 is the image's system Python (3.12 on
-            # Ubuntu 24.04), which provides tomllib.
+            # Ubuntu 24.04), which provides tomllib. The .NET version is read
+            # by check-nupkg.py, as the release blocks read it.
             - |
               clients=()
               [ -z "${RUST_VERSION:-}" ] || clients+=(rust)
               [ -z "${PYTHON_VERSION:-}" ] || clients+=(python)
+              [ -z "${DOTNET_VERSION:-}" ] || clients+=(dotnet)
               if [ "${#clients[@]}" -eq 0 ]; then
-                refuse "RUST_VERSION and PYTHON_VERSION are both empty; enter the version of each client to release"
+                refuse "RUST_VERSION, PYTHON_VERSION and DOTNET_VERSION are all empty; enter the version of each client to release"
               fi
               head_sha=$(git rev-parse HEAD) || refuse "could not resolve HEAD"
               for client in "${clients[@]}"; do
@@ -132,8 +156,13 @@ blocks:
                 if ! [[ "${version}" =~ ${version_pattern} ]]; then
                   refuse "${version_param} '${version}' is not a ${client} release version (${version_form})"
                 fi
-                manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open(sys.argv[1], "rb"))[sys.argv[2]].get("version"); print(v) if isinstance(v, str) else sys.exit(f"[{sys.argv[2]}] version must be a literal string")' "${manifest}" "${manifest_key}") \
-                  || refuse "could not read [${manifest_key}] version from ${manifest}"
+                if [ "${client}" = dotnet ]; then
+                  manifest_version=$(/usr/bin/python3 .semaphore/check-nupkg.py version) \
+                    || refuse "could not read <Version> from ${manifest}"
+                else
+                  manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open(sys.argv[1], "rb"))[sys.argv[2]].get("version"); print(v) if isinstance(v, str) else sys.exit(f"[{sys.argv[2]}] version must be a literal string")' "${manifest}" "${manifest_key}") \
+                    || refuse "could not read [${manifest_key}] version from ${manifest}"
+                fi
                 if [ "${version}" != "${manifest_version}" ]; then
                   refuse "${version_param} is '${version}', but ${manifest} at this commit has '${manifest_version}'; merge the version bump to master first, then promote its build"
                 fi
@@ -147,7 +176,7 @@ blocks:
                 existing=$(git ls-remote --tags origin "refs/tags/${tag}") \
                   || refuse "could not read tags from origin"
                 if [ -n "${existing}" ]; then
-                  refuse "tag ${tag} already exists on origin (${existing%%[[:space:]]*}); bump [${manifest_key}] version in ${manifest} for a new release"
+                  refuse "tag ${tag} already exists on origin (${existing%%[[:space:]]*}); bump the version in ${manifest} for a new release"
                 fi
               done
             # Applies the same version policy as each client's publish block in
@@ -158,9 +187,13 @@ blocks:
             # need only be new on each index it is published to, Test PyPI and,
             # for a final version, PyPI: as with Apache Kafka, a patch of an
             # older minor version can follow a newer minor version (4.4.101
-            # after 4.5.0). A rust dev version is never published, so it is
-            # not compared with crates.io; a python dev version only with Test
-            # PyPI. `fetch` writes the body of a URL to a file, or
+            # after 4.5.0). A .NET version, the same, on the NuGet test gallery
+            # and nuget.org, where a version can never be reused, even after
+            # it is deleted; check-published-nupkg.py lists the versions of
+            # each, unlisted ones included, in the lowercase normalized form
+            # that a version matching the pattern above already has. A rust
+            # dev version is never published, so it is not compared with
+            # crates.io; a python dev version only with Test PyPI. `fetch` writes the body of a URL to a file, or
             # empties the file if the URL does not exist; it fails on any other
             # status, and on an empty body, which no existing page has.
             - |
@@ -219,6 +252,15 @@ blocks:
                         || refuse "could not read the versions of ${PYPI_PACKAGE} on ${index}"
                       if grep -qxF -- "${version}" "${published_file}"; then
                         refuse "${PYPI_PACKAGE} ${version} is already on ${index}; bump [project] version in python/pyproject.toml for a new release"
+                      fi
+                    done
+                    ;;
+                  dotnet)
+                    for index in https://apiint.nugettest.org/v3/index.json https://api.nuget.org/v3/index.json; do
+                      /usr/bin/python3 .semaphore/check-published-nupkg.py versions "${index}" "${NUGET_PACKAGE}" > "${published_file}" \
+                        || refuse "could not read ${index} to confirm that ${NUGET_PACKAGE} ${version} is new"
+                      if grep -qxF -- "${version}" "${published_file}"; then
+                        refuse "${NUGET_PACKAGE} ${version} is already on ${index}; bump <Version> in dotnet/Directory.Build.props for a new release"
                       fi
                     done
                     ;;
@@ -296,12 +338,13 @@ blocks:
                   echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${CRATE} ${version}; a dev version publishes nothing."
                   continue
                 fi
-                if [ -n "${dev}" ]; then
+                if [ -n "${dev}" ] && [ "${client}" = python ]; then
                   echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI; a dev version is never published to PyPI."
                   continue
                 fi
                 case "${client}" in
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
                   python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI. For a final version, then run its \"Publish to PyPI\" promotion to publish to PyPI." ;;
+                  dotnet) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds, tests and packages ${NUGET_PACKAGE} ${version}. When every job passes, run its \"Publish to NuGet test gallery\" promotion, then that pipeline's \"Publish to NuGet\" promotion to publish to nuget.org." ;;
                 esac
               done

@@ -1,0 +1,94 @@
+version: v1.0
+name: publish-nuget
+
+# The manual "Publish to NuGet" promotion of publish-nuget-test.yml, itself the
+# "Publish to NuGet test gallery" promotion of semaphore.yml. It publishes a
+# .NET version to nuget.org from the build of its dotnet/v<version> tag, with
+# exactly the package that this workflow published to the NuGet test gallery
+# and that passed the post-publish checks there (see publish-nuget-test.yml and
+# the .NET release blocks of semaphore.yml). Its blocks run on the tag of any
+# .NET version, a pre-release or a dev version included: both publishes are
+# manual, so a version reaches nuget.org only when someone promotes it twice,
+# and NuGet installs a pre-release only when it is asked for one. The tag
+# pattern must stay the pattern of semaphore.yml.
+#
+# A promotion can be started even from a failed pipeline, so the publish job
+# does not rely on the result of the build it was promoted from:
+# publish-nupkg.sh refuses, before the key is loaded, unless the test gallery's
+# checks recorded this package as verified in this workflow.
+#
+# To resume an interrupted publish, rerun the failed blocks of this pipeline.
+# The pipeline limit covers its three blocks in sequence, each at its own limit.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 3
+
+global_job_config:
+  env_vars:
+    # As in semaphore.yml: <PackageId> in
+    # dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj.
+    - name: NUGET_PACKAGE
+      value: Confluent.Kafka
+  prologue:
+    commands:
+      - checkout
+
+blocks:
+  - name: "Release (.NET): publish to nuget.org"
+    # As for the test gallery in publish-nuget-test.yml.
+    dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 45
+    task:
+      env_vars:
+        - name: NUGET_GALLERY
+          value: https://www.nuget.org
+      jobs:
+        - name: "dotnet nuget push (nuget.org)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - bash .semaphore/publish-nupkg.sh prepare
+            - bash .semaphore/publish-nupkg.sh upload
+
+  - name: "Release (.NET): post-publish check (nuget.org)"
+    # As for the test gallery in publish-nuget-test.yml, on nuget.org, which
+    # has served each new version of the id within 2 to 6 minutes: it waits up
+    # to 40 minutes. If nuget.org does not serve the version in time, the check
+    # says so: the version is not defective, so rerun this block later. Any
+    # other failure means the published version is defective for users.
+    # Release a fixed version, and unlist this one if it is unusable.
+    dependencies: ["Release (.NET): publish to nuget.org"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 60
+    task:
+      jobs:
+        - name: "nuget.org serves the upload"
+          commands:
+            - artifact pull workflow nuget/www.nuget.org/uploaded.sha256 --destination /tmp/uploaded.sha256
+            - export PACKAGE_FILE="${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg"
+            - artifact pull workflow "nuget/release/${PACKAGE_FILE}" --destination "/tmp/${PACKAGE_FILE}"
+            - test "$(cat /tmp/uploaded.sha256)" = "$(cd /tmp && sha256sum "${PACKAGE_FILE}")"
+            - /usr/bin/python3 .semaphore/check-published-nupkg.py check https://api.nuget.org/v3/index.json "${NUGET_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" "/tmp/${PACKAGE_FILE}" --attempts 80
+
+  - name: "Release (.NET): post-publish smoke test (nuget.org, Linux amd64)"
+    # As for the test gallery in publish-nuget-test.yml, from nuget.org.
+    dependencies: ["Release (.NET): post-publish check (nuget.org)"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 40
+    task:
+      jobs:
+        - name: "Install from nuget.org (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - sh .semaphore/test-nupkg.sh --source https://api.nuget.org/v3/index.json "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}"
+            - artifact pull workflow nuget/www.nuget.org/uploaded.sha256 --destination /tmp/verified.sha256
+            - artifact push workflow /tmp/verified.sha256 --destination nuget/www.nuget.org/verified --force
