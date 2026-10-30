@@ -7,6 +7,8 @@ edition = "2021"
 anyhow = "1.0"
 syn = { version = "2", features = ["full", "parsing", "visit"] }
 quote = "1"
+# The test selection file and cargo's JSON messages (src/test_selection.rs).
+serde_json = "1.0"
 
 [lints.clippy]
 # See the root Cargo.toml: `#[expect]`, never `#[allow]`.

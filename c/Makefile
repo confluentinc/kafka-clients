@@ -17,6 +17,14 @@ else
 endif
 CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 
+# `$(call selected_run,<options> -- <command>)` runs the command only when the
+# test selection (test-selection.json at the repository root, the root's
+# `select-tests`) selects its section, and always when there is no selection;
+# an argument `{}` stands for the selected tests. See `cargo xtask help`
+# (`selected-run`). The subshell keeps the `cd`, which cargo needs to find the
+# toolchain and the `xtask` alias, from leaking into the rest of the recipe.
+selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
+
 # Every target expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target: the repository root's Makefile orders that
 # (e.g. `build-c` depends on the Rust build); run standalone, build it first.
@@ -35,7 +43,7 @@ devel-build: build
 test: test-unit test-integration
 
 test-unit: build
-	cd $(BUILD_DIR) && ctest --output-on-failure
+	$(call selected_run,--section c.unit --ctest -C $(CURDIR)/$(BUILD_DIR) -- ctest --output-on-failure {})
 
 # The C-backend arm of the multilanguage suite: build the gRPC server image,
 # then run the `__grpc_c` tests of the Rust harness against it.
@@ -65,7 +73,7 @@ test-integration:
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
-		$(MAKE) grpc-image && \
+		$(call selected_run,--section c.integration -- $(MAKE) -C $(CURDIR) grpc-image) && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-c; \
 	fi
 

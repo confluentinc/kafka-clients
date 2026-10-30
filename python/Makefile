@@ -18,6 +18,14 @@ else
 endif
 CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 
+# `$(call selected_run,<options> -- <command>)` runs the command only when the
+# test selection (test-selection.json at the repository root, the root's
+# `select-tests`) selects its section, and always when there is no selection;
+# an argument `{}` stands for the selected tests. See `cargo xtask help`
+# (`selected-run`). The subshell keeps the `cd`, which cargo needs to find the
+# toolchain and the `xtask` alias, from leaking into the rest of the recipe.
+selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
+
 # Every target runs in the Python environment the caller activated (the
 # repository root's Makefile activates its venv first) and, except
 # `check-static` and `test-soak`, expects the Rust library already built under
@@ -43,8 +51,8 @@ build:
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	$(MAKE) typecheck
-	python -m pytest test/unit -v
-	python -m pytest test/integration -v
+	$(call selected_run,--section python.unit --default test/unit -- python -m pytest {} -v)
+	$(call selected_run,--section python.integration --default test/integration -- python -m pytest {} -v)
 	$(MAKE) check-static
 	$(MAKE) test-soak
 	$(MAKE) test-verifiable-clients
@@ -54,7 +62,7 @@ test: build
 # only; this is what the macOS verify job runs.
 test-unit: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
-	python -m pytest test/unit -v
+	$(call selected_run,--section python.unit --default test/unit -- python -m pytest {} -v)
 
 # Static type check of the `confluent_kafka` package (CLAUDE.md, Python Binding
 # Conventions, Tests and typing: `mypy --strict` over the package runs in
@@ -65,7 +73,7 @@ test-unit: build
 # runs in the venv the caller activated, where mypy and the built
 # `_confluentkafka` extension live.
 typecheck:
-	python -m mypy --strict confluent_kafka test/unit/test_typing.py
+	$(call selected_run,--section python.typecheck -- python -m mypy --strict confluent_kafka test/unit/test_typing.py)
 
 # Static checks (test/static): the check that _confluentkafka.c reaches the C
 # API only through the `_err` twins of confluent_kafka_bindings.h, and the
@@ -77,7 +85,7 @@ typecheck:
 # statically. They read source files
 # only, so they need neither the Rust library nor the C extension built.
 check-static:
-	python -m pytest test/static -v
+	$(call selected_run,--section python.static --default test/static -- python -m pytest {} -v)
 
 # The API reference (docs/, the `docs` extra): Sphinx autodoc over this source
 # tree with the C extension mocked, so it needs neither the Rust library nor the
@@ -92,7 +100,7 @@ docs:
 # broker and no container, so they belong in `test` above rather than alongside
 # the broker-backed suites.
 test-soak:
-	python -m pytest soak/test -v
+	$(call selected_run,--section python.soak --default soak/test -- python -m pytest {} -v)
 
 # The system-test tools' tests (verifiable_clients/test): the throttler, the
 # JSON events, the argument parsing, the loops over MockProducer and
@@ -100,8 +108,8 @@ test-soak:
 # and no container; they need the built extension. The tools are type checked
 # as strictly as the package they use.
 test-verifiable-clients:
-	python -m mypy --strict verifiable_clients
-	python -m pytest verifiable_clients/test -v
+	$(call selected_run,--section python.verifiable_clients -- python -m mypy --strict verifiable_clients)
+	$(call selected_run,--section python.verifiable_clients --default verifiable_clients/test -- python -m pytest {} -v)
 
 # The Python-backend arms of the multilanguage suite: build the sync and
 # asyncio gRPC server images, then run the `__grpc_python` tests of the Rust
@@ -131,7 +139,7 @@ test-integration:
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
-		$(MAKE) grpc-image grpc-image-async && \
+		$(call selected_run,--section python.grpc -- $(MAKE) -C $(CURDIR) grpc-image grpc-image-async) && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-python; \
 	fi
 
@@ -139,7 +147,7 @@ test-integration:
 # otherwise-idle machine. Run via `make test-integration-perf-python` at the root.
 test-performance: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
-	python -m pytest test/performance -v
+	$(call selected_run,--section python.performance --default test/performance -- python -m pytest {} -v)
 
 # The librdkafka venv's interpreter (the root's `init-venv-librdkafka`): the PyPI
 # confluent-kafka client shares the top-level package `confluent_kafka` with this

@@ -33,7 +33,8 @@ VENV = . venv/bin/activate
 	transactional-producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
-	verify-sandbox format-check lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
+	verify-commit verify-commit-checks format-check lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer \
+	select-tests clean-test-selection clean
 
 build: init-hooks build-all
 
@@ -286,7 +287,16 @@ verify-rust: build-rust-all-features format-check check-generated lint test-rust
 verify-rust-macos-docker: build-rust-all-features format-check check-generated lint test-rust-all-features
 	$(MAKE) -C rust test-integration-perf-macos
 
-verify-sandbox: build-rust build-c format-check check-generated lint test-integration test-c
+# The pre-commit hook's verification. It first selects the tests the changes
+# since the last commit can affect (keeping a selection already made at HEAD
+# that covers them, see Test selection), then verifies with that selection. If
+# the selection fails there is no file, and every test runs.
+verify-commit:
+	$(MAKE) select-tests BASE=HEAD SELECT_TESTS_FLAGS=--reuse || \
+		echo "verify-commit: the test selection failed, so every test runs"
+	$(MAKE) verify-commit-checks
+
+verify-commit-checks: build-rust build-c format-check check-generated lint test-integration test-c
 
 init-hooks:
 	@git config core.hooksPath .githooks
@@ -332,6 +342,34 @@ bump-version:
 # Needs no build artifacts, so it is cheap to run.
 check-bindings:
 	@($(VENV) && $(MAKE) -C python $(ROOTS) check-static)
+
+# ── Test selection ───────────────────────────────────────────────────────
+#
+# `make select-tests` gives an agent the changes from BASE (committed,
+# uncommitted and untracked) and writes the tests they can affect, per
+# language, to test-selection.json (or $TEST_SELECTION, relative to this
+# directory). The agent is told to include a test whenever in doubt. While the
+# file exists, every test recipe (`test`, `verify`, the integration and
+# performance targets, in all three languages) runs only the selected tests,
+# and a suite the file leaves out does not run at all; `make
+# clean-test-selection` removes it, and everything runs again. A failed
+# `select-tests` removes the previous file rather than leave it in force.
+#
+# AGENT is any command taking Claude Code's `--model`, `--allowedTools` and
+# `-p`: by default a local Claude Code, which reads the working tree, so
+# uncommitted and untracked changes count. The agent only reads files and runs
+# read-only git commands. rust/xtask/src/test_selection.rs describes the file's format.
+AGENT ?= claude
+AGENT_MODEL ?= opus
+BASE ?= origin/master
+# `--reuse` keeps a file made at HEAD that covers every current change.
+SELECT_TESTS_FLAGS ?=
+
+select-tests:
+	cd rust && cargo xtask select-tests --base "$(BASE)" --agent "$(AGENT)" --model "$(AGENT_MODEL)" $(SELECT_TESTS_FLAGS)
+
+clean-test-selection:
+	rm -f "$${TEST_SELECTION:-test-selection.json}"
 
 clean:
 	$(MAKE) -C rust clean

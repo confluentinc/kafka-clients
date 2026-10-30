@@ -2,5 +2,13 @@
 # Pre-commit hook: run `make verify` (format-check + lint + tests) before
 # allowing the commit. Installed by `make init-hooks`, which sets
 # core.hooksPath to .githooks. Bypass with `git commit --no-verify`.
+#
+# `verify-commit` first asks the test-selection agent (`make select-tests`,
+# AGENT and AGENT_MODEL) which tests the changes since the last commit can
+# affect, keeping a selection already made at HEAD for them, then runs only
+# those tests; the checks always run in full. If the selection fails, every
+# test runs.
 set -e
-exec make verify-sandbox
+cd "$(git rev-parse --show-toplevel)"
+echo "pre-commit: selecting the tests the changes since the last commit can affect, then verifying"
+exec make verify-commit

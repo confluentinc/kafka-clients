@@ -53,7 +53,7 @@ use std::sync::OnceLock;
 pub const KAFKA_SUBMODULE: &str = "../kafka";
 
 /// A `git -C` [`KAFKA_SUBMODULE`] command. Inside a git hook (the pre-commit
-/// hook runs `make verify-sandbox`) git exports the variables that name the
+/// hook runs `make verify-commit`) git exports the variables that name the
 /// superproject's repository, `GIT_DIR` among them when committing from a
 /// linked worktree; `-C` does not override them, so the command would read the
 /// superproject, which has none of the submodule's refs. They are cleared, as
