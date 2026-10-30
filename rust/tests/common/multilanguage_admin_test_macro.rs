@@ -29,7 +29,7 @@
 //! "multilanguage-tests")]` and the macro itself is available with only
 //! `integration-tests`. That is what lets the committed admin integration tests
 //! be *converted* to scenarios rather than duplicated by them: under
-//! `integration-tests` alone (`make test-integration`, `verify-sandbox`) an
+//! `integration-tests` alone (`make test-integration`, `verify-commit`) an
 //! invocation still expands to the `__rust` arm, which drives the same
 //! production `Admin` trait against the same broker as the single-backend test
 //! it replaced — so converting costs no coverage at any feature level. The
