@@ -344,11 +344,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     internal IReadOnlyDictionary<MetricName, IMetric> Metrics()
     {
         IntPtr outErr = IntPtr.Zero;
-        IntPtr map;
+        IntPtr view;
         EnterUse();
         try
         {
-            map = NativeMethods.ProducerMetrics(_handle, ref outErr);
+            view = NativeMethods.ProducerMetrics(_handle, ref outErr);
         }
         finally
         {
@@ -356,9 +356,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        return map == IntPtr.Zero
+        return view == IntPtr.Zero
             ? new Dictionary<MetricName, IMetric>()
-            : KafkaMetricMapMarshal.CopyOutAndDestroy(map);
+            : MetricsViewMarshal.CopyOutAndDestroy(view);
     }
 
     internal bool MockCompleteNext() =>

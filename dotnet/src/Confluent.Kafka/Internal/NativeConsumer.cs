@@ -1837,9 +1837,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         try
         {
             IntPtr outErr = IntPtr.Zero;
-            IntPtr map = NativeMethods.ConsumerMetrics(_handle, ref outErr);
+            IntPtr view = NativeMethods.ConsumerMetrics(_handle, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            return KafkaMetricMapMarshal.CopyOutAndDestroy(map);
+            return MetricsViewMarshal.CopyOutAndDestroy(view);
         }
         finally
         {

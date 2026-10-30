@@ -513,24 +513,26 @@ public sealed class PublicAdminCreateTopicsTests
     }
 
     [Fact]
-    public void NullConfigValue_IsSentAsJavasNull()
+    public void NullConfigValue_IsRejectedBeforeAnythingIsSent()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        NewTopic topic = new NewTopic("null-config", 1, 1)
+
+        ArgumentException failure = Assert.Throws<ArgumentException>(() => admin.CreateTopics(new[]
         {
-            Configs = new Dictionary<string, string> { ["retention.ms"] = null! },
-        };
+            new NewTopic("fine", 1, 1),
+            new NewTopic("null-config", 1, 1)
+            {
+                Configs = new Dictionary<string, string> { ["retention.ms"] = null!, ["cleanup.policy"] = "compact" },
+            },
+        }));
+        Assert.Equal("newTopics", failure.ParamName);
+        Assert.StartsWith(
+            "The topics to create must not contain a null configuration value.",
+            failure.Message,
+            StringComparison.Ordinal);
 
-        Assert.EndsWith(", configs={retention.ms=null})", topic.ToString(), StringComparison.Ordinal);
-
-        admin.CreateTopics(new[] { topic }).All().Get();
-
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "null-config");
-        Config config = admin.DescribeConfigs(new[] { resource }).All().Get()[resource];
-        ConfigEntry? entry = config.Get("retention.ms");
-        Assert.NotNull(entry);
-        Assert.Null(entry!.Value);
+        Assert.Empty(admin.ListTopics().Names().Get());
     }
 
     [Fact]

@@ -227,10 +227,13 @@ internal sealed class AsyncConsumerServiceImpl
                     : entry.Consumer.Committed(partitions)).ConfigureAwait(false);
                 foreach (KeyValuePair<TopicPartition, OffsetAndMetadata?> pair in result)
                 {
+                    Proto.OffsetMapEntry mapEntry = new Proto.OffsetMapEntry { Partition = Translate.TpToProto(pair.Key) };
                     if (pair.Value is not null)
                     {
-                        map.Entries.Add(new Proto.OffsetMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OamToProto(pair.Value) });
+                        mapEntry.Offset = Translate.OamToProto(pair.Value);
                     }
+
+                    map.Entries.Add(mapEntry);
                 }
             }
             finally
@@ -337,10 +340,13 @@ internal sealed class AsyncConsumerServiceImpl
                     : entry.Consumer.OffsetsForTimes(spec)).ConfigureAwait(false);
                 foreach (KeyValuePair<TopicPartition, OffsetAndTimestamp?> pair in result)
                 {
+                    Proto.OffsetAndTimestampMapEntry mapEntry = new Proto.OffsetAndTimestampMapEntry { Partition = Translate.TpToProto(pair.Key) };
                     if (pair.Value is not null)
                     {
-                        map.Entries.Add(new Proto.OffsetAndTimestampMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = Translate.OatToProto(pair.Value) });
+                        mapEntry.Offset = Translate.OatToProto(pair.Value);
                     }
+
+                    map.Entries.Add(mapEntry);
                 }
             }
             finally

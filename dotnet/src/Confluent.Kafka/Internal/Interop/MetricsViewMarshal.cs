@@ -18,37 +18,54 @@ using System.Collections.Generic;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies an owned <c>kafka_Map_t</c> of <c>kafka_common_MetricName_t</c> keys and
-/// <c>kafka_common_metrics_KafkaMetric_t</c> values into managed metrics, then frees the map, which frees its keys
-/// and values.
+/// Copies an owned <c>kafka_common_metrics_MetricsView_t</c> of <c>kafka_common_MetricName_t</c> keys and
+/// <c>kafka_common_metrics_KafkaMetric_t</c> values into managed metrics, through an iterator over it, then frees the
+/// iterator, which frees its entries, and the view.
 /// </summary>
-internal static class KafkaMetricMapMarshal
+internal static class MetricsViewMarshal
 {
-    internal static IReadOnlyDictionary<MetricName, IMetric> CopyOutAndDestroy(IntPtr map)
+    internal static IReadOnlyDictionary<MetricName, IMetric> CopyOutAndDestroy(IntPtr view)
     {
+        IntPtr iterator = IntPtr.Zero;
         try
         {
             IntPtr outErr = IntPtr.Zero;
-            int count = NativeMethods.MapSize(map, ref outErr);
+            iterator = NativeMethods.MetricsViewIterator(view, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            Dictionary<MetricName, IMetric> result = new Dictionary<MetricName, IMetric>(count);
-            for (int i = 0; i < count; i++)
+            Dictionary<MetricName, IMetric> result = new Dictionary<MetricName, IMetric>();
+            while (true)
             {
-                IntPtr key = NativeMethods.MapKey(map, i, ref outErr);
+                sbyte hasNext = NativeMethods.IteratorHasNext(iterator, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                IntPtr value = NativeMethods.MapValue(map, i, ref outErr);
+                if (hasNext == 0)
+                {
+                    return result;
+                }
+
+                IntPtr entry = NativeMethods.IteratorNext(iterator, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr key = NativeMethods.MapEntryKey(entry, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr value = NativeMethods.MapEntryValue(entry, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
                 MetricName name = CopyOutName(key);
                 result[name] = new Metric(name, CopyOutValue(value));
             }
-
-            return result;
         }
         finally
         {
-            IntPtr destroyErr = IntPtr.Zero;
-            NativeMethods.MapDestroy(map, ref destroyErr);
-            KafkaException.ThrowIfFfiFailed(ref destroyErr);
+            try
+            {
+                IntPtr iteratorErr = IntPtr.Zero;
+                NativeMethods.IteratorDestroy(iterator, ref iteratorErr);
+                KafkaException.ThrowIfFfiFailed(ref iteratorErr);
+            }
+            finally
+            {
+                IntPtr viewErr = IntPtr.Zero;
+                NativeMethods.MetricsViewDestroy(view, ref viewErr);
+                KafkaException.ThrowIfFfiFailed(ref viewErr);
+            }
         }
     }
 

@@ -202,10 +202,13 @@ internal sealed partial class NativeAdminClient
                 foreach (KeyValuePair<string, string> config in topic.Configs)
                 {
                     AdminStrings.Validate(config.Key, nameof(newTopics));
-                    if (config.Value is not null)
+                    if (config.Value is null)
                     {
-                        AdminStrings.Validate(config.Value, nameof(newTopics));
+                        throw new ArgumentException(
+                            "The topics to create must not contain a null configuration value.", nameof(newTopics));
                     }
+
+                    AdminStrings.Validate(config.Value, nameof(newTopics));
                 }
             }
 
@@ -310,15 +313,9 @@ internal sealed partial class NativeAdminClient
             {
                 Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(config.Key);
                 pins.Add(key);
-                IntPtr value = IntPtr.Zero;
-                if (config.Value is not null)
-                {
-                    Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(config.Value);
-                    pins.Add(pinned);
-                    value = pinned.Pointer;
-                }
-
-                NativeMethods.MapPut(map, key.Pointer, value, ref outErr);
+                Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(config.Value);
+                pins.Add(value);
+                NativeMethods.MapPut(map, key.Pointer, value.Pointer, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 

@@ -122,6 +122,27 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_Map_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MapDestroy(IntPtr self, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_Map_Entry_key_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MapEntryKey(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Map_Entry_value_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MapEntryValue(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Iterator_has_next_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte IteratorHasNext(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Iterator_next_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr IteratorNext(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_Iterator_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void IteratorDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_metrics_MetricsView_iterator_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricsViewIterator(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_metrics_MetricsView_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MetricsViewDestroy(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_List_new_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ListNew(ref IntPtr outErr);
 
