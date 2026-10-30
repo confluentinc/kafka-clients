@@ -39,8 +39,7 @@ the root ``IndexOutOfBoundsError`` with Java's ``IndexOutOfBoundsException`` mes
 (``NumberFormatException``), and a ``null`` the mock itself looks up and dereferences
 (Java's ``NullPointerException``) raises ``IllegalStateError`` naming the state the
 mock lacks, or ``TypeError`` for an option left ``None``. Java's ``UnsupportedOperationException``
-is the root ``UnsupportedOperationError`` (Types), with Java's messages, typo included
-.
+is the root ``UnsupportedOperationError`` (Types), with Java's messages, typo included.
 
 Left out with what they serve (Class family, Dropped): ``setMockMetrics`` (state of
 ``metrics()``), ``disableTelemetry``, ``injectTimeoutException``,

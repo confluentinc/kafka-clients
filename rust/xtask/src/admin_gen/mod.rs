@@ -891,7 +891,13 @@ pub fn wrap_expression(prefix: &str, atoms: &[Vec<Piece>]) -> String {
 /// Greedy word wrap of `text` at [`DOC_WIDTH`], the first line prefixed with
 /// `first`, the others with `indent` spaces.
 pub fn wrap_words(text: &str, indent: usize, first: &str) -> Vec<String> {
+    wrap_hanging(text, indent, first, indent)
+}
+
+/// [`wrap_words`] with the lines after the first indented by `hang` spaces.
+fn wrap_hanging(text: &str, indent: usize, first: &str, hang: usize) -> Vec<String> {
     let pad = " ".repeat(indent);
+    let rest = " ".repeat(hang);
     let mut lines = Vec::new();
     let mut cur = format!("{pad}{first}");
     let mut empty = true;
@@ -903,7 +909,7 @@ pub fn wrap_words(text: &str, indent: usize, first: &str) -> Vec<String> {
         };
         if !empty && cur.chars().count() + add > DOC_WIDTH {
             lines.push(cur);
-            cur = format!("{pad}{w}");
+            cur = format!("{rest}{w}");
             continue;
         }
         if !empty {
@@ -917,7 +923,8 @@ pub fn wrap_words(text: &str, indent: usize, first: &str) -> Vec<String> {
 }
 
 /// A docstring at `indent`: the paragraphs, then `fields` (`:param x: …`)
-/// one per line. One paragraph and no fields closes on its last line;
+/// one per line, a field's wrapped lines indented four more, as reST reads a
+/// field's body. One paragraph and no fields closes on its last line;
 /// otherwise the closing quotes stand alone.
 pub fn docstring(indent: usize, paragraphs: &[String], fields: &[String]) -> String {
     let pad = " ".repeat(indent);
@@ -935,7 +942,7 @@ pub fn docstring(indent: usize, paragraphs: &[String], fields: &[String]) -> Str
             lines.push(String::new());
         }
         for f in fields {
-            lines.extend(wrap_words(f, indent, if first { "\"\"\"" } else { "" }));
+            lines.extend(wrap_hanging(f, indent, if first { "\"\"\"" } else { "" }, indent + 4));
             first = false;
         }
     }

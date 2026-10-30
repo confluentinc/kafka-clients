@@ -696,6 +696,7 @@ mod tests {
     }
 
     /// Java's `testV6AndBelowCannotUseZStdCompression`.
+    #[cfg(feature = "zstd")]
     #[test]
     fn test_validate_records_rejects_zstd_below_version_7() {
         let zstd = v2_batch(0, crate::common::compress::Compression::zstd().build());

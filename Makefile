@@ -37,7 +37,7 @@ VENV = . venv/bin/activate
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
-	verify-sandbox format-check lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
+	verify-sandbox format-check lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build: init-hooks build-all
 
@@ -424,6 +424,10 @@ package-check:
 
 check-api-compat:
 	$(MAKE) -C rust check-api-compat
+
+# Audits the Rust dependencies with cargo-audit: see rust/Makefile.
+audit:
+	$(MAKE) -C rust audit
 
 # `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...]`: see rust/Makefile.
 # VERSION and PYTHON_VERSION reach the sub-make through its environment (make

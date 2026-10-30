@@ -1,33 +1,39 @@
 version: v1.0
 name: create-release-tag
 # Target of the manual "Create release tag" promotion in semaphore.yml. Tags
-# the commit of this master build for the release of each client whose
-# version is entered, and pushes the tags, which start those releases:
+# the commit of this master or release branch build for the release of each
+# client whose version is entered, and pushes the tags, which start those
+# releases:
 # semaphore.yml runs on each tag and, once every CI job passes, that client's
 # release blocks publish it.
 #   - RUST_VERSION: the tag is rust/v<RUST_VERSION>, and "Release (Rust):"
 #     publishes ${CRATE} to crates.io.
 #   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
-#     (Python):" publishes ${PYPI_PACKAGE} to Test PyPI. For a final version,
-#     the "Publish to PyPI" promotion of the tag build (publish-pypi.yml) then
-#     publishes it to PyPI.
+#     (Python):" builds and tests the ${PYPI_PACKAGE} wheels. The "Publish to
+#     Test PyPI" promotion of the tag build (publish-testpypi.yml) publishes
+#     them to Test PyPI, and its "Publish to PyPI" promotion (publish-pypi.yml)
+#     then publishes them to PyPI.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python) is tagged
 #     like any other. A rust dev version is tested and packaged, never
-#     published; a python dev version is published to Test PyPI only.
+#     published; a python dev version is released like any other, through the
+#     two manual promotions.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
-#   - the build is of the master branch;
+#   - the build is of the master branch or of a release branch
+#     <major>.<minor>.x (1.0.x), where fixes are backported for patch and
+#     pre-release versions of that line;
 #   - the version is a valid release version for the client and equals its
 #     version at this commit: [package] version in rust/Cargo.toml
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N
 #     or -dev.N), or [project] version in python/pyproject.toml
 #     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
 #     optionally by .devN);
+#   - on a release branch <major>.<minor>.x, the rust version is of that
+#     <major>.<minor>, the only one its publish block accepts from the branch;
 #   - the tag does not yet exist, and the version is new: for rust, unless it
 #     is a dev version, higher than every version on crates.io; for python, not
-#     yet on any index it is published to (Test PyPI, and PyPI for a final
-#     version that is not a dev version);
+#     yet on Test PyPI or PyPI;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
@@ -48,10 +54,10 @@ global_job_config:
     # their exact names, separated by ';'. The list must stay in sync with
     # semaphore.yml: a job that reports a result but is not listed, or is
     # listed but reports no result, blocks the release until the list is
-    # updated. The release blocks never run on a master build, so they are not
+    # updated. The release blocks never run on a branch build, so they are not
     # listed.
     - name: REQUIRED_CI_JOBS
-      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64)"
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64)"
 
 blocks:
   - name: "Create release tag"
@@ -98,22 +104,25 @@ blocks:
                 esac
                 tag="${client}/v${version}"
                 # A rust dev version is never published; a python one is
-                # published to Test PyPI only.
+                # released like any other version.
                 dev=""
                 [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
                 return 0
               }
             # A pull request build reports the target branch in
-            # SEMAPHORE_GIT_BRANCH, so it is excluded by the ref type. A build
+            # SEMAPHORE_GIT_BRANCH, so it is excluded by the ref type. The
+            # release branch pattern is the one the "Release (Rust): publish to
+            # crates.io" block of semaphore.yml accepts. A build
             # whose jobs were redirected to another branch
             # (SEMAPHORE_GIT_BRANCH_CHECKOUT, see semaphore.yml) did not test
             # the commit checked out here.
             - |
-              if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] || [ "${SEMAPHORE_GIT_BRANCH}" != "master" ]; then
-                refuse "only a master branch build can be tagged for release (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')"
+              if [ "${SEMAPHORE_GIT_REF_TYPE}" != "branch" ] \
+                || ! [[ "${SEMAPHORE_GIT_BRANCH}" == master || "${SEMAPHORE_GIT_BRANCH}" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
+                refuse "only a build of master or of a release branch <major>.<minor>.x can be tagged for release (ref type '${SEMAPHORE_GIT_REF_TYPE}', branch '${SEMAPHORE_GIT_BRANCH}')"
               fi
               if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT:-}" ]; then
-                refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test master"
+                refuse "this build's jobs were switched to branch '${SEMAPHORE_GIT_BRANCH_CHECKOUT}' and did not test ${SEMAPHORE_GIT_BRANCH}"
               fi
             # The clients to release are those whose version was entered. Each
             # version must be valid and equal the client's version at this
@@ -135,7 +144,11 @@ blocks:
                 manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open(sys.argv[1], "rb"))[sys.argv[2]].get("version"); print(v) if isinstance(v, str) else sys.exit(f"[{sys.argv[2]}] version must be a literal string")' "${manifest}" "${manifest_key}") \
                   || refuse "could not read [${manifest_key}] version from ${manifest}"
                 if [ "${version}" != "${manifest_version}" ]; then
-                  refuse "${version_param} is '${version}', but ${manifest} at this commit has '${manifest_version}'; merge the version bump to master first, then promote its build"
+                  refuse "${version_param} is '${version}', but ${manifest} at this commit has '${manifest_version}'; merge the version bump to ${SEMAPHORE_GIT_BRANCH} first, then promote its build"
+                fi
+                if [ "${client}" = rust ] && [ "${SEMAPHORE_GIT_BRANCH}" != master ] \
+                  && [ "$(printf '%s' "${version}" | cut -d. -f1-2).x" != "${SEMAPHORE_GIT_BRANCH}" ]; then
+                  refuse "${version_param} '${version}' is not of release branch ${SEMAPHORE_GIT_BRANCH}; release it from master or from its own release branch"
                 fi
               done
             # Tags are never moved or reused, because a published version
@@ -155,8 +168,7 @@ blocks:
             # not, cannot be published again. A crate version must also be
             # higher than every published version, by Semantic Versioning
             # precedence (0.2.0-alpha.1 < 0.2.0 < 0.10.0). A Python version
-            # need only be new on each index it is published to, Test PyPI and,
-            # for a final version, PyPI: as with Apache Kafka, a patch of an
+            # need only be new on Test PyPI and PyPI: as with Apache Kafka, a patch of an
             # older minor version can follow a newer minor version (4.4.101
             # after 4.5.0). A rust dev version is never published, so it is
             # not compared with crates.io; a python dev version only with Test
@@ -210,8 +222,7 @@ blocks:
                     fi
                     ;;
                   python)
-                    indexes=(https://test.pypi.org)
-                    [[ "${version}" =~ (a|b|rc)[0-9]+$ ]] || [ -n "${dev}" ] || indexes+=(https://pypi.org)
+                    indexes=(https://test.pypi.org https://pypi.org)
                     for index in "${indexes[@]}"; do
                       fetch "${index}/simple/${PYPI_PACKAGE}/" "${body}" -H 'Accept: application/vnd.pypi.simple.v1+json' \
                         || refuse "could not read ${index} to confirm that ${PYPI_PACKAGE} ${version} is new"
@@ -296,12 +307,8 @@ blocks:
                   echo "Pushed ${tag} at ${head_sha}. Its build runs CI, then tests and packages ${CRATE} ${version}; a dev version publishes nothing."
                   continue
                 fi
-                if [ -n "${dev}" ]; then
-                  echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI; a dev version is never published to PyPI."
-                  continue
-                fi
                 case "${client}" in
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
-                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds the wheels and, when every job passes, publishes ${PYPI_PACKAGE} ${version} to Test PyPI. For a final version, then run its \"Publish to PyPI\" promotion to publish to PyPI." ;;
+                  python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI, then that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
                 esac
               done

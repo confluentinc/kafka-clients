@@ -26,7 +26,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check check-api-compat bump-version install-rust-analyzer clean
+	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -98,6 +98,8 @@ test-all-features: build-all-features
 # `performance` cargo test target (tests/performance/main.rs), so `--test
 # integration` cannot schedule them alongside the functional suite.
 test-integration: build-integration-tests
+	# admin_examples_test runs the example binaries, which `--test` does not build.
+	cargo build --examples
 	cargo test --features integration-tests --test integration
 	# The integration tests that drive crate internals live in the lib test
 	# binary (src/integration_tests), since those types are not public API.
@@ -123,12 +125,15 @@ test-integration: build-integration-tests
 # `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4 make test-integration` runs the suite
 # against a newer broker. It combines with INTEGRATION_TEST_PROTOCOL.
 test-integration-plaintext: build-integration-tests
+	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
 	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --lib -- integration_tests::
 test-integration-ssl: build-integration-tests
+	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
 	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --lib -- integration_tests::
 test-integration-sasl-ssl: build-integration-tests
+	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --lib -- integration_tests::
 
@@ -313,6 +318,16 @@ package-check:
 # the tags fetched; not part of `make verify`.
 check-api-compat:
 	cargo xtask api-compat
+
+# Audit Cargo.lock, which covers every crate of the workspace, against the
+# RustSec advisory database with cargo-audit. A vulnerable dependency fails;
+# an unmaintained, unsound or yanked one is only reported. cargo-audit fetches
+# the database on each run, so a new advisory can fail it with no change here.
+# Needs network access and cargo-audit (`cargo install cargo-audit --locked`);
+# not part of `make verify`.
+audit:
+	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found: install it with 'cargo install cargo-audit --locked'" >&2; exit 1; }
+	cargo audit
 
 # Sets one version on the crates and Python packages released together, in
 # each one's syntax: `make bump-version VERSION=0.3.0-rc.1` writes 0.3.0-rc.1
