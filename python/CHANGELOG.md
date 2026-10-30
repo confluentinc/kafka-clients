@@ -4,7 +4,7 @@ All notable changes to the `confluent-kafka` Python package are documented in th
 
 Before GA the public API is not stable, and an interface may change even in a minor release.
 
-## [Unreleased]
+## [4.4.0b1] - 2026-10-30
 
 First preview release of the 4.4.0 Python client built on a new Rust core. Its
 API is the Apache Kafka Java client's (4.4.0), in Python form.
