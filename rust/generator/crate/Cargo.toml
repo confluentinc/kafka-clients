@@ -9,7 +9,7 @@
 # which could not be published as a path-only dependency.
 [package]
 name = "generator"
-version = "1.0.0-rc.2"
+version = "1.0.0"
 edition = "2024"
 publish = false
 

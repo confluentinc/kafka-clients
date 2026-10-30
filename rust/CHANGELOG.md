@@ -2,16 +2,15 @@
 
 All notable changes to the `confluent-kafka` crate are documented in this file.
 
-Before 1.0 the public API is not stable, and any minor release may contain
-breaking changes.
-
-## [Unreleased]
+## [1.0.0] - 2026-10-30
 
 ### General availability
 
 - First generally available (GA) release of the Rust client, version 1.0.0.
-- The FFI layer (the `ffi` feature) is experimental right now.
-- Windows is not supported yet.
+- Clients no longer log the preview warning at startup.
+- Clippy runs with `avoid-breaking-exported-api = true` (`clippy.toml`): it
+  skips every lint whose fix would change an exported signature, so a lint
+  fix never makes a breaking change to the public API.
 
 ## [1.0.0-rc.2] - 2026-10-29
 
