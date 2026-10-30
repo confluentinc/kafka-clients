@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::create_partitions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.CreatePartitionsOptions`.
 
 /// Options for `Admin::create_partitions`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.CreatePartitionsOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsOptions")]
 pub struct CreatePartitionsOptions {
@@ -41,8 +37,16 @@ impl CreatePartitionsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `CreatePartitionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -50,15 +54,22 @@ impl CreatePartitionsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set to true if the request should be validated without creating new
-    /// partitions.
+    /// Set to true if the request should be validated without creating new partitions.
+    ///
+    /// # Arguments
+    ///
+    /// - `validate_only` - `true` to only validate the request.
+    ///
+    /// # Returns
+    ///
+    /// This `CreatePartitionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsOptions#validateOnly")]
     pub fn set_validate_only(mut self, validate_only: bool) -> Self {
@@ -66,14 +77,21 @@ impl CreatePartitionsOptions {
         self
     }
 
-    /// Return true if the request should be validated without creating new
-    /// partitions.
+    /// Returns true if the request should be validated without creating new partitions.
     #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsOptions#validateOnly")]
     pub fn validate_only(&self) -> bool {
         self.validate_only
     }
 
     /// Set to true if quota violation should be automatically retried.
+    ///
+    /// # Arguments
+    ///
+    /// - `retry_on_quota_violation` - `true` to retry on quota violation.
+    ///
+    /// # Returns
+    ///
+    /// This `CreatePartitionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsOptions#retryOnQuotaViolation")]
     pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {

@@ -260,8 +260,8 @@ def _rpcs() -> list[tuple[str, Call, Callable[[Any], list[Any]], str]]:
          lambda r: [*r.fenced_producers().values(), r.producer_id(transactional_id="x"),
                     r.epoch_id(transactional_id="x"), r.all()],
          "fenceProducer(api=FIND_COORDINATOR)"),
-        # Java's forceTerminateTransaction is fenceProducers of the one id
-        # (KafkaAdminClient.java:4862-4877), so the call is FenceProducersHandler's.
+        # Java's org.apache.kafka.clients.admin.KafkaAdminClient#forceTerminateTransaction
+        # is fenceProducers of the one id, so the call is FenceProducersHandler's.
         ("force_terminate_transaction",
          lambda a: a.force_terminate_transaction(
              transactional_id="x", options=TerminateTransactionOptions(timeout_ms=SHORT)),
@@ -447,7 +447,7 @@ async def test_async_update_features_should_fail_request_for_empty_updates() -> 
 @pytest.mark.parametrize("blank", [" ", "\t\n"])
 def test_update_features_blank_feature_name(admin: Admin, blank: str) -> None:
     """Java's ``Utils.isBlank`` (``trim().isEmpty()``) rejects a blank name before
-    the call (``KafkaAdminClient.java:4597``)."""
+    the call (``org.apache.kafka.clients.admin.KafkaAdminClient#updateFeatures``)."""
     with pytest.raises(IllegalArgumentError) as info:
         admin.update_features(feature_updates={
             blank: FeatureUpdate(max_version_level=2, upgrade_type=UPGRADE)})
@@ -455,8 +455,8 @@ def test_update_features_blank_feature_name(admin: Admin, blank: str) -> None:
 
 
 def test_describe_acls_unknown_filter_fails_the_future(admin: Admin) -> None:
-    """Java's ``describeAcls`` fails the future, without a call, for a filter with
-    UNKNOWN elements (``KafkaAdminClient.java:2571-2575``); the core does too."""
+    """Java's ``org.apache.kafka.clients.admin.KafkaAdminClient#describeAcls`` fails
+    the future, without a call, for a filter with UNKNOWN elements; the core does too."""
     unknown = AclBindingFilter(
         pattern_filter=ResourcePatternFilter(resource_type=ResourceType.UNKNOWN, name=None,
                                              pattern_type=PatternType.ANY),

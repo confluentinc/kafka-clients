@@ -18,14 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// This most likely occurs because of a request being malformed by the client
-    /// library or the message was sent to an incompatible broker. See the broker
-    /// logs for more details.
+    /// Thrown when a request breaks basic wire protocol rules. This most likely occurs because of a
+    /// request being malformed by the client library or the message was sent to an incompatible
+    /// broker.
     ///
-    /// Corresponds to Java's `InvalidRequestException`, error code `Errors::InvalidRequest`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidRequestException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidRequest`. Java `extends` chain: `InvalidRequestException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidRequestException")]
     InvalidRequestError,
     code: Errors::InvalidRequest,

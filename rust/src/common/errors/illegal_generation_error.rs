@@ -20,11 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Specified group generation id is not valid.
     ///
-    /// Corresponds to Java's `IllegalGenerationException`, error code `Errors::IllegalGeneration`.
-    ///
-    /// Java `extends` chain:
-    ///    `IllegalGenerationException` -> `ApplicationRecoverableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::IllegalGeneration`. Java `extends` chain: `IllegalGenerationException`
+    /// -> `ApplicationRecoverableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.IllegalGenerationException")]
     IllegalGenerationError,
     code: Errors::IllegalGeneration,

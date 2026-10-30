@@ -27,8 +27,7 @@ use crate::common::record::internal::RecordBatch;
 /// A byte buffer backed log input stream. This class avoids the need to copy
 /// records by returning slices from the underlying byte buffer.
 ///
-/// Corresponds to Java's `ByteBufferLogInputStream`
-/// (`ByteBufferLogInputStream.java:32-88`). Java's `ByteBuffer` carries its own
+/// Corresponds to Java's `ByteBufferLogInputStream`. Java's `ByteBuffer` carries its own
 /// read position; here the stream borrows the buffer and keeps the position
 /// itself, so `remaining()` is `buffer.len() - position`.
 ///
@@ -64,11 +63,11 @@ impl<'a> ByteBufferLogInputStream<'a> {
     /// Returns the next batch, or `None` when the buffer holds no further
     /// complete batch.
     ///
-    /// Corresponds to Java's `nextBatch()` (`ByteBufferLogInputStream.java:41-58`):
+    /// Corresponds to Java's `ByteBufferLogInputStream#nextBatch`:
     /// the header is validated by [`next_batch_size`](Self::next_batch_size), a
-    /// batch that is not wholly present is no batch (`:44-46`), and the returned
-    /// view is limited to exactly the declared size (`batchSlice.limit(batchSize)`,
-    /// `:51`) before the position moves past it.
+    /// batch that is not wholly present is no batch, and the returned
+    /// view is limited to exactly the declared size (`batchSlice.limit(batchSize)`)
+    /// before the position moves past it.
     ///
     /// # Errors
     ///
@@ -76,7 +75,7 @@ impl<'a> ByteBufferLogInputStream<'a> {
     /// - A `LocalUnsupportedOperationError` ([`unsupported_magic_error`](Self::unsupported_magic_error))
     ///   for magic v0
     ///   or v1. Java returns an `AbstractLegacyRecordBatch.ByteBufferLegacyRecordBatch`
-    ///   here (`:57`); this client does not implement the legacy formats, which
+    ///   here; this client does not implement the legacy formats, which
     ///   Kafka 4.0 removed (KIP-724), and fails the batch instead of misreading
     ///   its header as a v2 one.
     /// - An invalid-record error for a v2 batch shorter than
@@ -86,7 +85,7 @@ impl<'a> ByteBufferLogInputStream<'a> {
     ///   because those reads would be slice panics.
     ///
     /// In both of the last two cases the position has already moved past the
-    /// batch, as in Java, whose `:52` runs before the batch class is chosen.
+    /// batch, as in Java, whose `nextBatch` advances the buffer before the batch class is chosen.
     #[doc(alias = "org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatch")]
     pub(crate) fn next_batch(&mut self) -> Result<Option<DefaultRecordBatchRef<'a>>, Error> {
         let remaining = self.remaining();
@@ -116,7 +115,7 @@ impl<'a> ByteBufferLogInputStream<'a> {
     /// Returns the next batch size including `LOG_OVERHEAD` if the buffer
     /// contains the header up to the magic byte, `None` otherwise.
     ///
-    /// Corresponds to Java's `nextBatchSize()` (`ByteBufferLogInputStream.java:66-87`),
+    /// Corresponds to Java's `ByteBufferLogInputStream#nextBatchSize`,
     /// check for check and message for message. The record size is read as a
     /// signed `i32` and compared signed, so a negative length is rejected as too
     /// small rather than wrapping to an enormous `usize`, and the returned size is
@@ -333,8 +332,8 @@ mod tests {
         assert_eq!("Record size -5 is less than the minimum record overhead (14)", err.message());
     }
 
-    /// Java's two "not yet" answers (`ByteBufferLogInputStream.java:68-69`,
-    /// `:79-80`): fewer than `LOG_OVERHEAD` bytes, and a valid size without the
+    /// Java's two "not yet" answers in `ByteBufferLogInputStream#nextBatchSize`: fewer
+    /// than `LOG_OVERHEAD` bytes, and a valid size without the
     /// magic byte.
     #[test]
     fn test_next_batch_size_returns_none_until_the_magic_byte_is_present() {
@@ -354,7 +353,9 @@ mod tests {
                 .next_batch_size()
                 .unwrap()
         );
-        // A size is checked before the magic byte is needed (`:70-77` precede `:79`).
+        // A size is checked before the magic byte is needed (the size checks of
+        // `org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatchSize`
+        // precede its magic-byte check).
         let mut short = buffer[..AbstractRecords::LOG_OVERHEAD].to_vec();
         short[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&3_i32.to_be_bytes());
         let err = ByteBufferLogInputStream::new(&short, i32::MAX).next_batch_size().unwrap_err();
@@ -362,7 +363,7 @@ mod tests {
     }
 
     /// `next_batch` hands out a view limited to exactly the declared size
-    /// (`batchSlice.limit(batchSize)`, `:51`) and moves past it.
+    /// (`batchSlice.limit(batchSize)` in `ByteBufferLogInputStream#nextBatch`) and moves past it.
     #[test]
     fn test_next_batch_view_is_limited_to_the_declared_size() {
         let (buffer, position) = two_batches();

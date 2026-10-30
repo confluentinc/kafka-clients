@@ -1719,10 +1719,9 @@ impl Renderer<'_> {
         let path = self.repo_root.join(JAVA_ROOT).join(&rel);
         let src = fs::read_to_string(&path).map_err(|e| self.st(format!("{rel}: {e}")))?;
         let needle = format!(" {constant} = ");
-        let (line_no, line) = src
+        let line = src
             .lines()
-            .enumerate()
-            .find(|(_, l)| l.contains(&needle) && l.contains("static final"))
+            .find(|l| l.contains(&needle) && l.contains("static final"))
             .ok_or_else(|| self.st(format!("{class}.{constant} not found in {rel}")))?;
         let value = line
             .split_once(&needle)
@@ -1740,8 +1739,7 @@ impl Renderer<'_> {
         let mut words = a.clone();
         words.extend(b[overlap..].iter().cloned());
         let py = format!("_{}", words.join("_"));
-        let shown = rel.strip_prefix("org/apache/kafka/clients/").unwrap_or(&rel).to_string();
-        let block = format!("# ``{class}.{constant}`` ({shown}:{}).\n{py} = {value}", line_no + 1);
+        let block = format!("# ``{fqcn}#{constant}``.\n{py} = {value}");
         self.uses.internal_consts.insert(py.clone(), (block, String::new()));
         Ok(py)
     }
@@ -2294,6 +2292,9 @@ mod tests {
         let root = repo_root();
         let g = render_all(&root).unwrap();
         let py = &g.files.iter().find(|(p, _)| p.ends_with("list_groups_options.py")).unwrap().1;
-        assert!(py.contains("# ``ConsumerProtocol.PROTOCOL_TYPE`` (consumer/internals/ConsumerProtocol.java:45).\n_CONSUMER_PROTOCOL_TYPE = \"consumer\""));
+        assert!(py.contains(
+            "# ``org.apache.kafka.clients.consumer.internals.ConsumerProtocol#PROTOCOL_TYPE``.\n\
+             _CONSUMER_PROTOCOL_TYPE = \"consumer\""
+        ));
     }
 }

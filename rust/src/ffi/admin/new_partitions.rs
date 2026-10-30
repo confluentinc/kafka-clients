@@ -53,11 +53,11 @@ pub(crate) fn box_new_partitions(partitions: NewPartitions) -> *mut kafka_admin_
     Box::into_raw(Box::new(NewPartitionsInner { partitions })) as *mut kafka_admin_NewPartitions_t
 }
 
-/// Reads a borrowed list of `const int32_t *` into values; null reads as empty.
+/// Reads a borrowed list of `const int32_t *` into values; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements point at `int32_t`s,
+/// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
 unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
@@ -90,25 +90,49 @@ unsafe fn destroy_list_element(element: *mut c_void) {
     unsafe { kafka_List_destroy(element as *mut kafka_List_t) };
 }
 
-/// `NewPartitions.increaseTo(int totalCount)`: the broker assigns the new
-/// partitions' replicas. Owned, freed with
-/// [`kafka_admin_NewPartitions_destroy`].
+/// Increase the partition count for a topic to the given `total_count`. The assignment of new
+/// replicas to brokers will be decided by the broker.
+///
+/// # Parameters
+///
+/// - `total_count` - The total number of partitions after the operation succeeds.
+///
+/// # Returns
+///
+/// The new partitions.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_NewPartitions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_NewPartitions_increase_to(total_count: i32) -> *mut kafka_admin_NewPartitions_t {
     box_new_partitions(NewPartitions::increase_to(total_count))
 }
 
-/// `NewPartitions.increaseTo(int totalCount, List<List<Integer>> newAssignments)`:
-/// a borrowed list of `const kafka_List_t *` of `const int32_t *` broker ids,
-/// one inner list per new partition, copied (`NULL` reads as empty). Owned,
-/// freed with [`kafka_admin_NewPartitions_destroy`].
+/// Increase the partition count for a topic to the given `total_count` assigning the new
+/// partitions according to the given `new_assignments`. The length of the given
+/// `new_assignments` should equal `total_count - oldCount`, since the assignment of existing
+/// partitions are not changed. Each inner list of `new_assignments` should have a length equal to
+/// the topic's replication factor. The first broker id in each inner list is the "preferred
+/// replica".
+///
+/// # Parameters
+///
+/// - `total_count` - The total number of partitions after the operation succeeds.
+/// - `new_assignments` - The replica assignments for the new partitions.
+///
+/// # Returns
+///
+/// The new partitions.
 ///
 /// # Safety
 ///
-/// `new_assignments` must be null or a valid list whose elements are valid
-/// lists whose elements point at `int32_t`s, all kept alive and not mutated
-/// for this call.
+/// `new_assignments` must be `NULL`, read as empty, or a valid borrowed list of
+/// `const kafka_List_t *`, one per new partition, whose elements point at `int32_t` broker ids,
+/// all kept alive and not mutated for this call; it is copied.
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_NewPartitions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignments(
@@ -128,7 +152,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignme
     box_new_partitions(NewPartitions::increase_to_with_new_assignments(total_count, new_assignments))
 }
 
-/// `totalCount()`.
+/// Returns the total number of partitions after the operation succeeds.
 ///
 /// # Safety
 ///
@@ -141,14 +165,17 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_total_count(self_: *const kaf
     unsafe { new_partitions_ref(self_) }.total_count()
 }
 
-/// `assignments()`: an owned list of owned `kafka_List_t *` of owned
-/// `int32_t *` broker ids, in the order given, freed together with
-/// `kafka_List_destroy`; `NULL` when the broker assigns the replicas (Java
-/// returns null).
+/// The replica assignments for the new partitions, or `NULL` if the assignment will be done by
+/// the controller.
+///
+/// # Returns
+///
+/// A list of `kafka_List_t *` of `int32_t *` broker ids, in the order given, or `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid new-partitions handle.
+/// `self_` must be a valid new-partitions handle. The returned list is owned, freed together with
+/// its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_assignments(
@@ -165,11 +192,12 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_assignments(
     }
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the new partitions.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid new-partitions handle.
+/// `self_` must be a valid new-partitions handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitions_to_string(self_: *const kafka_admin_NewPartitions_t) -> *mut c_char {
@@ -178,11 +206,11 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_to_string(self_: *const kafka
     into_c_string(&unsafe { new_partitions_ref(self_) }.to_string())
 }
 
-/// Frees an owned handle; null is a no-op.
+/// Frees an owned handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

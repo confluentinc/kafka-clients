@@ -50,15 +50,20 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `DeleteConsumerGroupsResult.deletedGroups()`: an owned map, sorted by
-/// group id, of owned `char *` group ids to owned
-/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers
-/// `NULL`). Freed with `kafka_Map_destroy`, which frees the keys and the
-/// futures.
+/// Return a map from group id to futures which can be used to check the status of individual
+/// deletions.
+///
+/// # Returns
+///
+/// A map, sorted by group id, of owned `char *` group ids to owned `kafka_common_KafkaFuture_t *`
+/// (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_deleted_groups(
@@ -71,13 +76,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_deleted_groups(
     h.ctx.string_keyed_future_map(groups.iter(), FutureCtx::void_future)
 }
 
-/// `DeleteConsumerGroupsResult.all()`: an owned `KafkaFuture<Void>` (its
-/// `get` delivers `NULL`) that succeeds once every group was deleted, freed
-/// with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the consumer group deletions succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every group was deleted.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_all(
@@ -89,12 +98,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -23,9 +23,6 @@ use std::hash::{Hash, Hasher};
 use crate::common::security::auth::KafkaPrincipal;
 
 /// A class representing delegation token details.
-///
-/// Corresponds to
-/// `org.apache.kafka.common.security.token.delegation.TokenInformation`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation")]
 pub struct TokenInformation {
@@ -41,8 +38,14 @@ pub struct TokenInformation {
 impl TokenInformation {
     /// Creates token information where the owner is also the requester.
     ///
-    /// Mirrors the `TokenInformation(tokenId, owner, renewers, ...)`
-    /// constructor.
+    /// # Arguments
+    ///
+    /// - `token_id` - the token id
+    /// - `owner` - the token owner
+    /// - `renewers` - the principals allowed to renew the token
+    /// - `issue_timestamp` - the issue timestamp, in milliseconds
+    /// - `max_timestamp` - the maximum timestamp up to which the token can be renewed, in milliseconds
+    /// - `expiry_timestamp` - the expiry timestamp, in milliseconds
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#TokenInformation")]
     pub fn new(
         token_id: impl Into<String>,
@@ -66,9 +69,15 @@ impl TokenInformation {
 
     /// Creates token information with a distinct token requester.
     ///
-    /// Mirrors the
-    /// `TokenInformation(tokenId, owner, tokenRequester, renewers, ...)`
-    /// constructor.
+    /// # Arguments
+    ///
+    /// - `token_id` - the token id
+    /// - `owner` - the token owner
+    /// - `token_requester` - the principal that requested the token
+    /// - `renewers` - the principals allowed to renew the token
+    /// - `issue_timestamp` - the issue timestamp, in milliseconds
+    /// - `max_timestamp` - the maximum timestamp up to which the token can be renewed, in milliseconds
+    /// - `expiry_timestamp` - the expiry timestamp, in milliseconds
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#TokenInformation")]
     pub fn with_token_requester(
         token_id: impl Into<String>,
@@ -91,64 +100,48 @@ impl TokenInformation {
     }
 
     /// Returns the token owner.
-    ///
-    /// Mirrors `TokenInformation.owner`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#owner")]
     pub fn owner(&self) -> &KafkaPrincipal {
         &self.owner
     }
 
     /// Returns the token owner as a `type:name` string.
-    ///
-    /// Mirrors `TokenInformation.ownerAsString`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#ownerAsString")]
     pub fn owner_as_string(&self) -> String {
         self.owner.to_string()
     }
 
     /// Returns the token requester.
-    ///
-    /// Mirrors `TokenInformation.tokenRequester`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#tokenRequester")]
     pub fn token_requester(&self) -> &KafkaPrincipal {
         &self.token_requester
     }
 
     /// Returns the token requester as a `type:name` string.
-    ///
-    /// Mirrors `TokenInformation.tokenRequesterAsString`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#tokenRequesterAsString")]
     pub fn token_requester_as_string(&self) -> String {
         self.token_requester.to_string()
     }
 
     /// Returns the renewers.
-    ///
-    /// Mirrors `TokenInformation.renewers`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#renewers")]
     pub fn renewers(&self) -> &[KafkaPrincipal] {
         &self.renewers
     }
 
     /// Returns the renewers as `type:name` strings.
-    ///
-    /// Mirrors `TokenInformation.renewersAsString`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#renewersAsString")]
     pub fn renewers_as_string(&self) -> Vec<String> {
         self.renewers.iter().map(KafkaPrincipal::to_string).collect()
     }
 
     /// Returns the issue timestamp.
-    ///
-    /// Mirrors `TokenInformation.issueTimestamp`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#issueTimestamp")]
     pub fn issue_timestamp(&self) -> i64 {
         self.issue_timestamp
     }
 
     /// Returns the expiry timestamp.
-    ///
-    /// Mirrors `TokenInformation.expiryTimestamp`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#expiryTimestamp")]
     pub fn expiry_timestamp(&self) -> i64 {
         self.expiry_timestamp
@@ -156,23 +149,21 @@ impl TokenInformation {
 
     /// Sets the expiry timestamp.
     ///
-    /// Mirrors `TokenInformation.setExpiryTimestamp`.
+    /// # Arguments
+    ///
+    /// - `expiry_timestamp` - the new expiry timestamp, in milliseconds
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#setExpiryTimestamp")]
     pub fn set_expiry_timestamp(&mut self, expiry_timestamp: i64) {
         self.expiry_timestamp = expiry_timestamp;
     }
 
     /// Returns the token id.
-    ///
-    /// Mirrors `TokenInformation.tokenId`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#tokenId")]
     pub fn token_id(&self) -> &str {
         &self.token_id
     }
 
     /// Returns the maximum timestamp.
-    ///
-    /// Mirrors `TokenInformation.maxTimestamp`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#maxTimestamp")]
     pub fn max_timestamp(&self) -> i64 {
         self.max_timestamp
@@ -181,7 +172,9 @@ impl TokenInformation {
     /// Returns `true` if the given principal is the owner, the token requester,
     /// or one of the renewers.
     ///
-    /// Mirrors `TokenInformation.ownerOrRenewer`.
+    /// # Arguments
+    ///
+    /// - `principal` - the principal to check
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.TokenInformation#ownerOrRenewer")]
     pub fn owner_or_renewer(&self, principal: &KafkaPrincipal) -> bool {
         &self.owner == principal || &self.token_requester == principal || self.renewers.contains(principal)

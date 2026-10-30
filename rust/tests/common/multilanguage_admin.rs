@@ -950,19 +950,7 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        // The proto's `map<string, string>` cannot carry Java's `null` config
-        // value; no test sends one.
-        configs: topic
-            .configs()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, value)| {
-                let value =
-                    value.unwrap_or_else(|| panic!("NewTopic config {name} is null, which the proto cannot carry"));
-                (name, value)
-            })
-            .collect(),
+        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {
@@ -2018,7 +2006,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             group_id: group_id.to_string(),
             // `removeAll()` is Java's own `members.isEmpty()`
-            // (`RemoveMembersFromConsumerGroupOptions.java:57-59`), and it must
+            // (`org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#removeAll`), and it must
             // cross as the absent wrapper rather than as a present-but-empty list:
             // present-and-empty is the collection constructor, which Java rejects
             // with `IllegalArgumentException("Invalid empty members has been

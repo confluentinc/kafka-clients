@@ -81,6 +81,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka._args import MISSING, Form, java_forms, reject_str
 from confluent_kafka._config import duration_to_ms
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._preview import log_preview_warning
 from confluent_kafka._wait import WAIT_SLICE_S
 from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Sync
@@ -240,7 +241,7 @@ __all__ = ["Admin"]
 _LOG = logging.getLogger("confluent_kafka.admin")
 
 #: Java's message for a call on a closing ``KafkaAdminClient``
-#: (``KafkaAdminClient.java:1601``).
+#: (``org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#call``).
 CLOSED_MESSAGE = "Cannot accept new calls when AdminClient is closing."
 
 
@@ -297,6 +298,7 @@ class _AdminState:
             raise from_ffi_error(error)
         self._c_admin = c_admin
         _lib.Admin__set_callbacks_notify(c_admin, self._notify_hook())
+        log_preview_warning(_LOG)
 
     def _notify_hook(self) -> Callable[[], None]:
         """The callable the C API's notify hook fires (from a Rust task, the GIL

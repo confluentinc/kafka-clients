@@ -20,15 +20,15 @@
 //!
 //! ## Translated (CONSUMER / KIP-848 arm)
 //!
-//! - `testAsyncConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs` (line 73) →
+//! - `testAsyncConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs` →
 //!   [`test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms`]
-//! - `testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs` (line 91) →
+//! - `testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs` →
 //!   [`test_async_consumer_close_with_timeout_ignores_fetch_max_wait_ms`]
 //!
 //! ## SKIPped (classic group protocol — `consumer-threading.md` §20)
 //!
-//! - `testClassicConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs` (line 68)
-//! - `testClassicConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs` (line 86)
+//! - `testClassicConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs`
+//! - `testClassicConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs`
 //!
 //! # Cluster
 //!
@@ -97,7 +97,7 @@ fn current_time_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// `ClientsTestUtils.sendRecords(cluster, tp, numRecords)` (line 242): a fresh
+/// `ClientsTestUtils.sendRecords(cluster, tp, numRecords)`: a fresh
 /// producer sends `numRecords` records with 1 ms timestamp increments, then
 /// flushes and closes.
 async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize) {
@@ -122,7 +122,7 @@ async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize
         .expect("producer close");
 }
 
-/// `ClientsTestUtils.consumeRecords(consumer, numRecords)` (line 67):
+/// `ClientsTestUtils.consumeRecords(consumer, numRecords)`:
 /// `poll(100ms)` until at least `numRecords` records are consumed, failing
 /// after 60 s.
 async fn consume_records(consumer: &mut BytesConsumer, num_records: usize) {
@@ -138,7 +138,7 @@ async fn consume_records(consumer: &mut BytesConsumer, num_records: usize) {
     }
 }
 
-/// `calculateConsumerCloseDelay` (`PlaintextConsumerCloseTest.java:105`), for
+/// `PlaintextConsumerCloseTest#calculateConsumerCloseDelay`, for
 /// the CONSUMER group protocol. Returns the wall-clock duration of the close
 /// call alone, in milliseconds.
 async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: CloseOperation) -> u128 {
@@ -196,9 +196,8 @@ async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: 
     close_ms
 }
 
-/// Translates `testAsyncConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs`
-/// (`PlaintextConsumerCloseTest.java:73`), via
-/// `testCloseWithDefaultTakesAtLeastFetchMaxWaitMs` (line 77).
+/// Translates `PlaintextConsumerCloseTest#testAsyncConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs`,
+/// via `testCloseWithDefaultTakesAtLeastFetchMaxWaitMs`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms() {
     let mut ctx = TestContext::new(kip848_3_broker(2)).await;
@@ -210,9 +209,8 @@ async fn test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms
     ctx.cleanup().await;
 }
 
-/// Translates `testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs`
-/// (`PlaintextConsumerCloseTest.java:91`), via
-/// `testCloseWithTimeoutIgnoresFetchMaxWaitMs` (line 95).
+/// Translates `PlaintextConsumerCloseTest#testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs`,
+/// via `testCloseWithTimeoutIgnoresFetchMaxWaitMs`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_close_with_timeout_ignores_fetch_max_wait_ms() {
     let mut ctx = TestContext::new(kip848_3_broker(2)).await;

@@ -17,16 +17,7 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// A blocking operation was interrupted.
-    ///
-    /// Java wraps `InterruptedException`, which is checked; it extends
-    /// `KafkaException` directly and so is NOT an `ApiException`.
-    ///
-    /// Corresponds to Java's `InterruptException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
-    ///
-    /// Java `extends` chain:
-    ///    `InterruptException` -> `KafkaException`
+    /// An unchecked wrapper for `InterruptedException`
     #[doc(alias = "org.apache.kafka.common.errors.InterruptException")]
     InterruptError,
     extends: [

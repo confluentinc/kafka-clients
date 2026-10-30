@@ -18,13 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Client sent a push telemetry request with an invalid or outdated
-    /// subscription ID.
+    /// This error indicates that the client sent an invalid or outdated SubscriptionId
     ///
-    /// Corresponds to Java's `UnknownSubscriptionIdException`, error code `Errors::UnknownSubscriptionId`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnknownSubscriptionIdException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnknownSubscriptionId`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownSubscriptionIdException")]
     UnknownSubscriptionIdError,
     code: Errors::UnknownSubscriptionId,

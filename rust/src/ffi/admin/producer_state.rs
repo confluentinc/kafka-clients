@@ -61,11 +61,25 @@ pub(crate) unsafe fn destroy_producer_state_element(element: *mut c_void) {
     unsafe { kafka_admin_ProducerState_destroy(element as *mut kafka_admin_ProducerState_t) }
 }
 
-/// `new ProducerState(long producerId, int producerEpoch, int lastSequence,
-/// long lastTimestamp, OptionalInt coordinatorEpoch, OptionalLong
-/// currentTransactionStartOffset)`; `coordinator_epoch` and
-/// `current_transaction_start_offset` are `-1` when empty. Owned, freed with
-/// [`kafka_admin_ProducerState_destroy`].
+/// Creates the state of an active producer on a partition.
+///
+/// # Parameters
+///
+/// - `producer_id` - the producer id.
+/// - `producer_epoch` - the producer epoch.
+/// - `last_sequence` - the last sequence number written by the producer.
+/// - `last_timestamp` - the timestamp of the producer's last write.
+/// - `coordinator_epoch` - the epoch of the transaction coordinator, `-1` for none.
+/// - `current_transaction_start_offset` - the start offset of the producer's ongoing
+///   transaction, `-1` for none.
+///
+/// # Returns
+///
+/// The producer state.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_ProducerState_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ProducerState_new(
@@ -86,7 +100,7 @@ pub extern "C" fn kafka_admin_ProducerState_new(
     ))
 }
 
-/// `producerId()`.
+/// Returns the producer id.
 ///
 /// # Safety
 ///
@@ -99,7 +113,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kaf
     unsafe { producer_state_ref(self_) }.producer_id()
 }
 
-/// `producerEpoch()`.
+/// Returns the producer epoch.
 ///
 /// # Safety
 ///
@@ -112,7 +126,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const 
     unsafe { producer_state_ref(self_) }.producer_epoch()
 }
 
-/// `lastSequence()`.
+/// Returns the last sequence number written by the producer.
 ///
 /// # Safety
 ///
@@ -125,7 +139,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const k
     unsafe { producer_state_ref(self_) }.last_sequence()
 }
 
-/// `lastTimestamp()`.
+/// Returns the timestamp of the producer's last write.
 ///
 /// # Safety
 ///
@@ -138,9 +152,10 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const 
     unsafe { producer_state_ref(self_) }.last_timestamp()
 }
 
-/// `coordinatorEpoch()`: the epoch, or `-1` for `OptionalInt.empty()`.
+/// Returns the epoch of the transaction coordinator, or `-1` for `OptionalInt.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no coordinator epoch: Java reads a negative one as `OptionalInt.empty()`.
+/// A caught Rust panic returns -2, which is no coordinator epoch: Java reads a negative one as
+/// `OptionalInt.empty()`.
 ///
 /// # Safety
 ///
@@ -153,10 +168,11 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *con
     unsafe { producer_state_ref(self_) }.coordinator_epoch().unwrap_or(-1)
 }
 
-/// `currentTransactionStartOffset()`: the offset, or `-1` for
+/// Returns the start offset of the producer's ongoing transaction, or `-1` for
 /// `OptionalLong.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no transaction start offset: Java reads a negative one as `OptionalLong.empty()`.
+/// A caught Rust panic returns -2, which is no transaction start offset: Java reads a negative one
+/// as `OptionalLong.empty()`.
 ///
 /// # Safety
 ///
@@ -173,11 +189,12 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_off
         .unwrap_or(-1)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the producer state.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid producer-state handle.
+/// `self_` must be a valid producer-state handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka_admin_ProducerState_t) -> *mut c_char {
@@ -186,11 +203,11 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka
     into_c_string(&unsafe { producer_state_ref(self_) }.to_string())
 }
 
-/// Frees an owned producer-state handle; null is a no-op.
+/// Frees an owned producer-state handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

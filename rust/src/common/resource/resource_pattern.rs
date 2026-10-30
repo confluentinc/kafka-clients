@@ -22,8 +22,6 @@ use super::{PatternType, ResourcePatternFilter, ResourceType};
 
 /// Represents a pattern that is used by ACLs to match zero or more
 /// [`Resource`](super::Resource)s.
-///
-/// Corresponds to `org.apache.kafka.common.resource.ResourcePattern`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern")]
 pub struct ResourcePattern {
@@ -35,6 +33,7 @@ pub struct ResourcePattern {
 impl ResourcePattern {
     /// A special literal resource name that corresponds to 'all resources of a
     /// certain type'.
+    #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#WILDCARD_RESOURCE")]
     pub const WILDCARD_RESOURCE: &str = "*";
 
     /// Create a pattern using the supplied parameters.
@@ -47,9 +46,9 @@ impl ResourcePattern {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `resource_type` is
-    /// [`ResourceType::Any`], or `pattern_type` is [`PatternType::Match`] or
-    /// [`PatternType::Any`] (mirrors Java's `IllegalArgumentException`).
+    /// - [`Error::is_local_illegal_argument_error`] if `resource_type` is
+    ///   [`ResourceType::Any`], or `pattern_type` is [`PatternType::Match`] or
+    ///   [`PatternType::Any`].
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#ResourcePattern")]
     pub fn new(
         resource_type: ResourceType,
@@ -65,31 +64,31 @@ impl ResourcePattern {
         Ok(ResourcePattern { resource_type, name: name.into(), pattern_type })
     }
 
-    /// Return the specific resource type this pattern matches.
+    /// Returns the specific resource type this pattern matches.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#resourceType")]
     pub fn resource_type(&self) -> ResourceType {
         self.resource_type
     }
 
-    /// Return the resource name.
+    /// Returns the resource name.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Return the resource pattern type.
+    /// Returns the resource pattern type.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#patternType")]
     pub fn pattern_type(&self) -> PatternType {
         self.pattern_type
     }
 
-    /// Return a filter which matches only this pattern.
+    /// Returns a filter which matches only this pattern.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#toFilter")]
     pub fn to_filter(&self) -> ResourcePatternFilter {
         ResourcePatternFilter::new(self.resource_type, Some(self.name.clone()), self.pattern_type)
     }
 
-    /// Return `true` if this pattern has any UNKNOWN components.
+    /// Returns `true` if this pattern has any UNKNOWN components.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePattern#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.resource_type.is_unknown() || self.pattern_type.is_unknown()

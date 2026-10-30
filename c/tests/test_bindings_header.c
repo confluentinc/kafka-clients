@@ -93,6 +93,54 @@ static void test_fallible_function_keeps_its_name_and_its_errors(void) {
     assert_ok(err);
 }
 
+/* A metrics view is iterated with the `_err` twins of kafka_Iterator_t, and
+ * `next` past the end, Java's NoSuchElementException, is a caught panic
+ * reported as an IllegalStateError. */
+static void test_iterator_past_the_end_reports_an_illegal_state(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_common_metrics_Metrics_t *registry = kafka_common_metrics_Metrics_new_err(&err);
+    assert_ok(err);
+    kafka_common_metrics_MetricsView_t *view = kafka_common_metrics_Metrics_metrics_err(registry, &err);
+    assert_ok(err);
+    kafka_Iterator_t *it = kafka_common_metrics_MetricsView_iterator_err(view, &err);
+    assert_ok(err);
+    int count = 0;
+    while (kafka_Iterator_has_next_err(it, &err)) {
+        assert_ok(err);
+        const kafka_Map_Entry_t *entry = kafka_Iterator_next_err(it, &err);
+        assert_ok(err);
+        const kafka_common_MetricName_t *name = kafka_Map_Entry_key_err(entry, &err);
+        assert_ok(err);
+        /* The registry's only metric is its built-in `count`. */
+        TEST_ASSERT_EQUAL_STRING("count", kafka_common_MetricName_name_err(name, &err));
+        assert_ok(err);
+        TEST_ASSERT_NOT_NULL(kafka_Map_Entry_value_err(entry, &err));
+        assert_ok(err);
+        count++;
+    }
+    assert_ok(err);
+    TEST_ASSERT_EQUAL_INT(1, count);
+    TEST_ASSERT_NULL(kafka_Iterator_next_err(it, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_Error_t *read_err = NULL;
+    TEST_ASSERT_EQUAL_INT(kafka_common_Error_LOCAL_ILLEGAL_STATE, kafka_common_Error__enum_err(err, &read_err));
+    assert_ok(read_err);
+    const char *message = kafka_common_Error_message_err(err, &read_err);
+    assert_ok(read_err);
+    TEST_ASSERT_EQUAL_STRING(
+        "Rust panic caught at the FFI boundary in kafka_Iterator_next_err: the iteration has no more elements",
+        message);
+    kafka_common_Error_destroy_err(err, &read_err);
+    assert_ok(read_err);
+    err = NULL;
+    kafka_Iterator_destroy_err(it, &err);
+    assert_ok(err);
+    kafka_common_metrics_MetricsView_destroy_err(view, &err);
+    assert_ok(err);
+    kafka_common_metrics_Metrics_destroy_err(registry, &err);
+    assert_ok(err);
+}
+
 static void on_closed(void *opaque) {
     atomic_fetch_add((atomic_int *)opaque, 1);
 }
@@ -143,5 +191,6 @@ int main(void) {
     RUN_TEST(test_twin_returns_the_value_and_leaves_out_err_alone);
     RUN_TEST(test_fallible_function_keeps_its_name_and_its_errors);
     RUN_TEST(test_cb_function_completes_through_the_callback_queue);
+    RUN_TEST(test_iterator_past_the_end_reports_an_illegal_state);
     return UNITY_END();
 }

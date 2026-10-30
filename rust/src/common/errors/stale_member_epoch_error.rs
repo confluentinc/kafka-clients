@@ -18,13 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The member epoch is stale. The member must retry after receiving its
-    /// updated member epoch via the ConsumerGroupHeartbeat API.
+    /// The StaleMemberEpochError is used in the context of the new consumer group protocol
+    /// (KIP-848). This error is returned in the OffsetCommit/Fetch APIs when the member epoch
+    /// received does not match the current member epoch.
     ///
-    /// Corresponds to Java's `StaleMemberEpochException`, error code `Errors::StaleMemberEpoch`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `StaleMemberEpochException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::StaleMemberEpoch`. Java `extends` chain: `StaleMemberEpochException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.StaleMemberEpochException")]
     StaleMemberEpochError,
     code: Errors::StaleMemberEpoch,

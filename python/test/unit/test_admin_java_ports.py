@@ -587,7 +587,7 @@ class _LogDirsNative:
 def test_describe_log_dirs_with_cordoned_dir() -> None:
     """``testDescribeLogDirsWithCordonedDir`` (KIP-1066): a log directory the broker
     reports as cordoned says so through ``is_cordoned()`` in ``descriptions()``
-    (``KafkaAdminClientTopicTest:1121``) and in ``all_descriptions()`` (``:1129``).
+    and in ``all_descriptions()``.
     The extension hands each broker's directories to the conversion as
     ``(error, total, usable, replicas, is_cordoned)`` rows; the ``MockClient``
     response of Java is the core's (``test_describe_log_dirs_with_cordoned_dir``)."""

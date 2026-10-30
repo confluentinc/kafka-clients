@@ -165,8 +165,8 @@ struct State {
 ///
 /// Java's `MockAdminClient` has no `toString()`, neither on the client nor on
 /// its `TopicMetadata`, so there is no Java rendering of these maps to mirror.
-/// They are plain `Map<String, String>`s (`MockAdminClient.java:98-101`,
-/// `:1503`), and a value may be a secret, such as a broker's
+/// They are plain `Map<String, String>`s (`MockAdminClient#brokerConfigs`,
+/// `MockAdminClient#groupConfigs`), and a value may be a secret, such as a broker's
 /// `ssl.keystore.password` or a listener's `sasl.jaas.config`, with no
 /// `isSensitive` flag to tell it apart. So no value is printed, just as
 /// `ProducerConfig`'s `Debug` prints no value of its raw `originals` map. The
@@ -279,10 +279,10 @@ impl std::fmt::Debug for State {
 
 /// An in-memory [`Admin`] implementation for tests.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.MockAdminClient`. The topic,
-/// cluster, and config methods are implemented through Tier 1 Phase 3; other
-/// RPCs will be added with their tiers. All futures returned are immediately
-/// resolved.
+/// Every method Java's `MockAdminClient` implements works on in-memory state;
+/// the ones Java leaves unimplemented return futures failed with an error for
+/// which `Error::is_local_unsupported_operation_error` holds. All futures
+/// returned are immediately resolved.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient")]
 // Java ships it in the clients test fixtures (clients/src/testFixtures since 4.4) for users to test against, as MockProducer / MockConsumer are public
@@ -293,15 +293,15 @@ pub struct MockAdminClient {
 
 /// Builds a [`MockAdminClient`].
 ///
-/// Translated from Java's nested `MockAdminClient.Builder`
-/// (`MockAdminClient.java:124-223`): the same setters, defaults and failure
-/// points. A fresh builder has one broker, `Node(0, "localhost", 1000)`, with
+/// It has the setters, defaults and failure points of Java's nested
+/// `MockAdminClient.Builder`. A fresh builder has one broker, `Node(0, "localhost", 1000)`, with
 /// [`MockAdminClient::DEFAULT_LOG_DIRS`].
 ///
 /// Java's builder throws from `java.util` collection methods where it reads an
 /// index out of range. The crate has no `IndexOutOfBoundsException`
-/// counterpart, so those failures are [`Error::LocalIllegalArgument`] (like the
-/// mock's other argument errors), carrying the JDK's message text.
+/// counterpart, so those failures are errors for which
+/// `Error::is_local_illegal_argument_error` holds (like the mock's other
+/// argument errors), carrying the JDK's message text.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder")]
 // Java's nested MockAdminClient.Builder, the way users build the test-fixtures MockAdminClient above
@@ -327,10 +327,8 @@ impl Default for Builder {
 }
 
 impl Builder {
-    /// Creates a builder with one broker.
-    ///
-    /// Mirrors Java's `public Builder()`, which calls `numBrokers(1)`
-    /// (`MockAdminClient.java:137-139`).
+    /// Creates a builder with one broker, as Java's `public Builder()`, which
+    /// calls `numBrokers(1)`.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#Builder")]
     pub fn new() -> Self {
         let mut builder = Self {
@@ -352,7 +350,15 @@ impl Builder {
         builder
     }
 
-    /// Sets the cluster id. Mirrors Java's `clusterId(String)`.
+    /// Sets the cluster id.
+    ///
+    /// # Arguments
+    ///
+    /// - `cluster_id` - The cluster id
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#clusterId")]
     pub fn set_cluster_id(mut self, cluster_id: &str) -> Self {
         self.cluster_id = cluster_id.to_string();
@@ -361,15 +367,23 @@ impl Builder {
 
     /// Replaces the broker list.
     ///
-    /// Mirrors Java's `brokers(List<Node>)` (`MockAdminClient.java:146-150`),
-    /// in the same order: first `numBrokers(brokers.size())` resizes the
+    /// As Java's `brokers(List<Node>)`, first `numBrokers(brokers.size())` resizes the
     /// current lists, which keeps existing log-dir entries and pads with
     /// [`MockAdminClient::DEFAULT_LOG_DIRS`], and only then is the broker list
     /// replaced.
     ///
+    /// # Arguments
+    ///
+    /// - `brokers` - The brokers
+    ///
+    /// # Returns
+    ///
+    /// This builder.
+    ///
     /// # Errors
     ///
-    /// The errors of [`set_num_brokers`](Self::set_num_brokers). With a
+    /// The errors of [`set_num_brokers`](Self::set_num_brokers)
+    /// (`Error::is_local_illegal_argument_error`). With a
     /// non-negative count the only reachable one is a log-dir list shorter than
     /// `brokers` (after [`set_broker_log_dirs`](Self::set_broker_log_dirs)), where
     /// Java's `brokerLogDirs.subList(0, n)` throws.
@@ -385,14 +399,21 @@ impl Builder {
 
     /// Sets the number of brokers, keeping the first ones.
     ///
-    /// Mirrors Java's `numBrokers(int)` (`MockAdminClient.java:152-163`).
     /// Shrinking truncates both the broker list and the per-broker log dirs;
     /// growing appends `Node(id, "localhost", 1000 + id)` and
     /// [`MockAdminClient::DEFAULT_LOG_DIRS`] for each new id.
     ///
+    /// # Arguments
+    ///
+    /// - `num_brokers` - The number of brokers
+    ///
+    /// # Returns
+    ///
+    /// This builder.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] where Java's `subList(0, n)`
+    /// `Error::is_local_illegal_argument_error` where Java's `subList(0, n)`
     /// (`AbstractList.subListRangeCheck`) throws:
     ///
     /// - `num_brokers` is negative: "fromIndex(0) > toIndex(n)" (Java's
@@ -423,14 +444,20 @@ impl Builder {
         }
     }
 
-    /// Makes the broker at `index` the controller.
+    /// Makes the broker at `index` the controller, reading `brokers.get(index)`
+    /// at this call as Java's `controller(int)` does.
     ///
-    /// Mirrors Java's `controller(int)` (`MockAdminClient.java:165-168`), which
-    /// reads `brokers.get(index)` at this call.
+    /// # Arguments
+    ///
+    /// - `index` - The index of the controller in the broker list
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] with the JDK's
+    /// `Error::is_local_illegal_argument_error` with the JDK's
     /// `IndexOutOfBoundsException` text, "Index i out of bounds for length n"
     /// (`ArrayList.get` → `Objects.checkIndex`), when `index` is not a broker
     /// index.
@@ -444,9 +471,18 @@ impl Builder {
         Ok(self)
     }
 
-    /// Replaces the per-broker log directories. Mirrors Java's
-    /// `brokerLogDirs(List<List<String>>)`; like Java, the length is not
-    /// checked against the broker count.
+    /// Replaces the per-broker log directories. Like Java's
+    /// `brokerLogDirs(List<List<String>>)`, the length is not checked against
+    /// the broker count.
+    ///
+    /// # Arguments
+    ///
+    /// - `broker_log_dirs` - The log directories of each broker, indexed by
+    ///   broker id
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#brokerLogDirs")]
     pub fn set_broker_log_dirs(mut self, broker_log_dirs: Vec<Vec<String>>) -> Self {
         self.broker_log_dirs = broker_log_dirs;
@@ -455,9 +491,16 @@ impl Builder {
 
     /// Sets the replication factor used when `createTopics` does not give one.
     ///
-    /// Mirrors Java's `defaultReplicationFactor(int)`. [`build`](Self::build)
-    /// narrows it to 16 bits the way Java's `Integer.shortValue()` does: the
-    /// value wraps, it is not clamped.
+    /// [`build`](Self::build) narrows it to 16 bits the way Java's
+    /// `Integer.shortValue()` does: the value wraps, it is not clamped.
+    ///
+    /// # Arguments
+    ///
+    /// - `default_replication_factor` - The default replication factor
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultReplicationFactor")]
     pub fn set_default_replication_factor(mut self, default_replication_factor: i32) -> Self {
         self.default_replication_factor = Some(default_replication_factor);
@@ -466,8 +509,15 @@ impl Builder {
 
     /// Sets whether the mocked cluster runs a KRaft (Raft) controller quorum,
     /// which decides whether `unregister_controller` succeeds (default
-    /// `false`). Mirrors Java's `usingRaftController(boolean)`; as in Java the
-    /// value is fixed once the mock is built.
+    /// `false`). The value is fixed once the mock is built.
+    ///
+    /// # Arguments
+    ///
+    /// - `using_raft_controller` - Whether the cluster uses a Raft controller
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#usingRaftController")]
     pub fn set_using_raft_controller(mut self, using_raft_controller: bool) -> Self {
         self.using_raft_controller = using_raft_controller;
@@ -475,39 +525,76 @@ impl Builder {
     }
 
     /// Sets the partition count used when `createTopics` does not give one.
-    /// Mirrors Java's `defaultPartitions(short)`.
+    ///
+    /// # Arguments
+    ///
+    /// - `num_partitions` - The default partition count
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultPartitions")]
     pub fn set_default_partitions(mut self, num_partitions: i16) -> Self {
         self.default_partitions = Some(num_partitions);
         self
     }
 
-    /// Sets the finalized feature levels. Mirrors Java's
-    /// `featureLevels(Map<String, Short>)`.
+    /// Sets the finalized feature levels.
+    ///
+    /// # Arguments
+    ///
+    /// - `feature_levels` - The finalized level of each feature, by name
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#featureLevels")]
     pub fn set_feature_levels(mut self, feature_levels: HashMap<String, i16>) -> Self {
         self.feature_levels = feature_levels;
         self
     }
 
-    /// Sets the minimum supported feature levels. Mirrors Java's
-    /// `minSupportedFeatureLevels(Map<String, Short>)`.
+    /// Sets the minimum supported feature levels.
+    ///
+    /// # Arguments
+    ///
+    /// - `min_supported_feature_levels` - The minimum supported level of each
+    ///   feature, by name
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#minSupportedFeatureLevels")]
     pub fn set_min_supported_feature_levels(mut self, min_supported_feature_levels: HashMap<String, i16>) -> Self {
         self.min_supported_feature_levels = min_supported_feature_levels;
         self
     }
 
-    /// Sets the maximum supported feature levels. Mirrors Java's
-    /// `maxSupportedFeatureLevels(Map<String, Short>)`.
+    /// Sets the maximum supported feature levels.
+    ///
+    /// # Arguments
+    ///
+    /// - `max_supported_feature_levels` - The maximum supported level of each
+    ///   feature, by name
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#maxSupportedFeatureLevels")]
     pub fn set_max_supported_feature_levels(mut self, max_supported_feature_levels: HashMap<String, i16>) -> Self {
         self.max_supported_feature_levels = max_supported_feature_levels;
         self
     }
 
-    /// Sets the defaults overlaid onto every group's configs. Mirrors Java's
-    /// `defaultGroupConfigs(Map<String, String>)`.
+    /// Sets the defaults overlaid onto every group's configs.
+    ///
+    /// # Arguments
+    ///
+    /// - `default_group_configs` - The default group configs, by name
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultGroupConfigs")]
     pub fn set_default_group_configs(mut self, default_group_configs: HashMap<String, String>) -> Self {
         self.default_group_configs = default_group_configs;
@@ -516,19 +603,23 @@ impl Builder {
 
     /// Builds the mock.
     ///
-    /// Mirrors Java's `build()` (`MockAdminClient.java:210-222`). Defaults: the
-    /// controller is the first broker, the default partition count is 1, and the
-    /// default replication factor is `min(brokers.len(), 3)`.
+    /// Defaults: the controller is the first broker, the default partition
+    /// count is 1, and the default replication factor is
+    /// `min(brokers.len(), 3)`.
+    ///
+    /// # Returns
+    ///
+    /// The mock admin client.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] where Java throws:
+    /// `Error::is_local_illegal_argument_error` where Java throws:
     ///
     /// - no controller was set and there are no brokers: "Index 0 out of bounds
     ///   for length 0", the JDK's text for Java's `brokers.get(0)`;
     /// - the controller is no longer one of the brokers (for example
     ///   `set_controller(2)` followed by `set_num_brokers(1)`): "The controller
-    ///   node must be in the list of brokers" (`MockAdminClient.java:282`).
+    ///   node must be in the list of brokers".
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient$Builder#build")]
     pub fn build(self) -> Result<MockAdminClient, Error> {
         let controller = match self.controller {
@@ -590,7 +681,7 @@ fn broker_log_dirs_of(broker_log_dirs: &[Vec<String>], broker_id: i32) -> Result
         .ok_or_else(|| index_out_of_bounds(broker_id, broker_log_dirs.len()))
 }
 
-/// The check of Java's `controller(Node)` (`MockAdminClient.java:281-282`): the
+/// The check of Java's `MockAdminClient#controller(Node)`: the
 /// controller must be one of the brokers.
 fn check_controller(brokers: &[Node], controller: &Node) -> Result<(), Error> {
     if !brokers.contains(controller) {
@@ -611,19 +702,12 @@ impl Default for MockAdminClient {
 impl MockAdminClient {
     /// The cluster id a [`Builder`] uses unless
     /// [`set_cluster_id`](Builder::set_cluster_id) overrides it.
-    ///
-    /// Mirrors Java's `MockAdminClient.DEFAULT_CLUSTER_ID`.
     pub const DEFAULT_CLUSTER_ID: &'static str = "I4ZmrWqfT2e-upky_4fdPA";
 
     /// The log directories a [`Builder`] gives each broker it adds.
-    ///
-    /// Mirrors Java's `MockAdminClient.DEFAULT_LOG_DIRS`.
     pub const DEFAULT_LOG_DIRS: &'static [&'static str] = &["/tmp/kafka-logs"];
 
-    /// Creates a [`Builder`] with one broker.
-    ///
-    /// Mirrors Java's `public static Builder create()`
-    /// (`MockAdminClient.java:120-122`), which returns `new Builder()`.
+    /// Returns a new [`Builder`] with one broker.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#create")]
     pub fn create() -> Builder {
         Builder::new()
@@ -632,9 +716,7 @@ impl MockAdminClient {
     /// Creates a mock with one broker, [`Node::no_node`], which is also the
     /// controller.
     ///
-    /// Mirrors Java's `public MockAdminClient()` (`MockAdminClient.java:225-227`),
-    /// `this(Collections.singletonList(Node.noNode()), Node.noNode())`. It cannot
-    /// fail: the controller is the only broker.
+    /// It cannot fail: the controller is the only broker.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#MockAdminClient()")]
     pub fn new() -> Self {
         let node = Node::no_node().clone();
@@ -642,21 +724,23 @@ impl MockAdminClient {
             .expect("the only broker is the controller, so the controller check passes")
     }
 
-    /// Creates a mock with the given brokers and controller.
-    ///
-    /// Mirrors Java's `public MockAdminClient(List<Node> brokers, Node controller)`
-    /// (`MockAdminClient.java:229-241`): [`DEFAULT_CLUSTER_ID`](Self::DEFAULT_CLUSTER_ID),
+    /// Creates a mock with the given brokers and controller:
+    /// [`DEFAULT_CLUSTER_ID`](Self::DEFAULT_CLUSTER_ID),
     /// one default partition, a default replication factor of `brokers.len()`
     /// (unlike [`Builder::build`]'s `min(brokers.len(), 3)`),
     /// [`DEFAULT_LOG_DIRS`](Self::DEFAULT_LOG_DIRS) for every broker, no raft
     /// controller and empty feature-level and default-group-config maps.
     ///
+    /// # Arguments
+    ///
+    /// - `brokers` - The brokers
+    /// - `controller` - The controller, one of `brokers`
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// `Error::is_local_illegal_argument_error`, with Java's message "The
     /// controller node must be in the list of brokers", when `controller` is not
-    /// one of `brokers` (Java's constructor calls `controller(Node)`, which
-    /// throws `IllegalArgumentException`).
+    /// one of `brokers`.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#MockAdminClient(List,Node)")]
     pub fn with_brokers_controller(brokers: Vec<Node>, controller: Node) -> Result<Self, Error> {
         let broker_log_dirs = vec![Self::default_log_dirs(); brokers.len()];
@@ -680,12 +764,13 @@ impl MockAdminClient {
 
     /// Makes `controller` the controller node reported by `describe_cluster`.
     ///
-    /// Mirrors Java's public setter `controller(Node)`
-    /// (`MockAdminClient.java:280-284`).
+    /// # Arguments
+    ///
+    /// - `controller` - The controller, one of the mock's brokers
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
+    /// `Error::is_local_illegal_argument_error`, with Java's message "The
     /// controller node must be in the list of brokers", when `controller` is not
     /// one of the mock's brokers; the controller is then left unchanged.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#controller")]
@@ -703,15 +788,14 @@ impl MockAdminClient {
 
     /// Translated from Java's private constructor
     /// `MockAdminClient(List<Node>, Node, String, int, int, List<List<String>>,
-    /// boolean, Map, Map, Map, Map)` (`MockAdminClient.java:243-278`), which
-    /// [`Builder::build`] calls.
+    /// boolean, Map, Map, Map, Map)`, which [`Builder::build`] calls.
     ///
     /// # Errors
     ///
     /// Returns [`Error::LocalIllegalArgument`] with Java's message, "The
     /// controller node must be in the list of brokers", when `controller` is
     /// not one of `brokers`. Java throws `IllegalArgumentException` from
-    /// `controller(Node)` (`:281-282`), which the constructor calls.
+    /// `controller(Node)`, which the constructor calls.
     #[expect(clippy::too_many_arguments)]
     fn with_state(
         brokers: Vec<Node>,
@@ -784,7 +868,9 @@ impl MockAdminClient {
     /// Seeds the beginning offsets returned by `list_offsets` for the given
     /// partitions.
     ///
-    /// Mirrors `MockAdminClient.updateBeginningOffsets`.
+    /// # Arguments
+    ///
+    /// - `new_offsets` - The beginning offset of each partition
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateBeginningOffsets")]
     pub fn update_beginning_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
@@ -794,7 +880,9 @@ impl MockAdminClient {
     /// Seeds the end offsets returned by `list_offsets` for the given
     /// partitions.
     ///
-    /// Mirrors `MockAdminClient.updateEndOffsets`.
+    /// # Arguments
+    ///
+    /// - `new_offsets` - The end offset of each partition
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateEndOffsets")]
     pub fn update_end_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
@@ -804,7 +892,9 @@ impl MockAdminClient {
     /// Seeds the committed consumer-group offsets returned by
     /// `list_consumer_group_offsets_with_group_specs` for the given partitions.
     ///
-    /// Mirrors `MockAdminClient.updateConsumerGroupOffsets`.
+    /// # Arguments
+    ///
+    /// - `new_offsets` - The committed offset of each partition
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#updateConsumerGroupOffsets")]
     pub fn update_consumer_group_offsets(&self, new_offsets: HashMap<TopicPartition, i64>) {
         let mut state = self.state.lock().unwrap();
@@ -813,14 +903,19 @@ impl MockAdminClient {
 
     /// Adds an existing topic to the mock's state.
     ///
-    /// Mirrors `MockAdminClient.addTopic`.
+    /// # Arguments
+    ///
+    /// - `internal` - Whether the topic is internal
+    /// - `name` - The topic name
+    /// - `partitions` - The topic's partitions, whose leaders, replicas and ISR
+    ///   must be brokers of the mock
+    /// - `configs` - The topic configs, or `None` for none
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
-    /// was already added, or if any partition names a broker the mock does not
-    /// have as its leader, in its replica list, or in its ISR
-    /// (`MockAdminClient.java:296-309`).
+    /// `Error::is_local_illegal_argument_error`, with Java's message, if the
+    /// topic was already added, or if any partition names a broker the mock does
+    /// not have as its leader, in its replica list, or in its ISR.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#addTopic")]
     pub fn add_topic(
         &self,
@@ -834,7 +929,7 @@ impl MockAdminClient {
             return Err(Error::local_illegal_argument(format!("Topic {name} was already added.")));
         }
         // Java validates every partition against the broker list before touching
-        // `brokerLogDirs` (MockAdminClient.java:298-309). Note that
+        // `brokerLogDirs` (`MockAdminClient#addTopic`). Note that
         // `brokers.contains(partition.leader())` is false for a null leader, so
         // Java rejects a leaderless partition here too — which is why the log-dir
         // loop's `partition.leader() != null` guard below can never fail once
@@ -852,7 +947,7 @@ impl MockAdminClient {
             }
         }
         // Each partition starts on the first log directory of its leader broker:
-        // Java's `brokerLogDirs.get(leader.id()).get(0)` (MockAdminClient.java:313-317).
+        // Java's `brokerLogDirs.get(leader.id()).get(0)` (`MockAdminClient#addTopic`).
         // Both lookups throw `IndexOutOfBoundsException` in Java — the outer one
         // for a leader whose id is not an index of `brokerLogDirs` (the check
         // above only proves the leader is one of `brokers`), the inner one for a
@@ -886,12 +981,14 @@ impl MockAdminClient {
 
     /// Marks a topic for deletion so `describe_topics_with_topics` treats it as absent.
     ///
-    /// Mirrors `MockAdminClient.markTopicForDeletion`.
+    /// # Arguments
+    ///
+    /// - `name` - The topic name
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] with Java's message if the topic
-    /// does not exist (`MockAdminClient.java:328-330`).
+    /// `Error::is_local_illegal_argument_error`, with Java's message, if the
+    /// topic does not exist.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#markTopicForDeletion")]
     pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), Error> {
         let mut state = self.state.lock().unwrap();
@@ -905,14 +1002,19 @@ impl MockAdminClient {
 
     /// Hides a topic from the next `fetches_remaining_until_visible` fetches.
     ///
-    /// Mirrors Java's `setFetchesRemainingUntilVisible(String, int)`
-    /// (`MockAdminClient.java:1626-1632`). Each `list_topics`, `describe_topics`
-    /// (by name or by id) and topic `describe_configs` that would return the
-    /// topic decrements the counter instead, until it reaches zero.
+    /// Each `list_topics`, `describe_topics` (by name or by id) and topic
+    /// `describe_configs` that would return the topic decrements the counter
+    /// instead, until it reaches zero.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic_name` - The topic name
+    /// - `fetches_remaining_until_visible` - The number of fetches that do not
+    ///   return the topic
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] with Java's message,
+    /// `Error::is_local_illegal_argument_error`, with Java's message,
     /// `"No such topic as <name>"`, if the topic does not exist. Java throws a bare
     /// `RuntimeException`, which has no closer counterpart in the crate.
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#setFetchesRemainingUntilVisible")]
@@ -931,6 +1033,10 @@ impl MockAdminClient {
     }
 
     /// Causes the next `number_of_requests` operations to fail with a timeout.
+    ///
+    /// # Arguments
+    ///
+    /// - `number_of_requests` - The number of operations to fail
     #[doc(alias = "org.apache.kafka.clients.admin.MockAdminClient#timeoutNextRequest")]
     pub fn timeout_next_request(&self, number_of_requests: i32) {
         self.state.lock().unwrap().timeout_next_requests = number_of_requests;
@@ -954,9 +1060,8 @@ fn current_time_millis() -> i64 {
 /// Computes the `PartitionReassignment` for a partition from the mock's stored
 /// reassignments and topic metadata.
 ///
-/// Mirrors `MockAdminClient.findPartitionReassignment`
-/// (`MockAdminClient.java:1182-1210`). Returns `Ok(None)` if there is no stored
-/// reassignment for the partition.
+/// Mirrors `MockAdminClient#findPartitionReassignment`. Returns `Ok(None)` if
+/// there is no stored reassignment for the partition.
 ///
 /// # Errors
 ///
@@ -1007,7 +1112,7 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
         .map(|configs| {
             configs
                 .iter()
-                .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
+                .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1029,7 +1134,7 @@ fn to_config_object(map: &BTreeMap<String, Option<String>>) -> Config {
 /// Applies a sequence of [`AlterConfigOp`]s to an in-memory config map.
 ///
 /// A `Set` stores the entry's value as given, `None` included, as Java's
-/// `newMap.put(name, value)` stores a `null` value (`MockAdminClient.java:937`).
+/// `newMap.put(name, value)` stores a `null` value (`MockAdminClient#handleIncrementalResourceAlteration`).
 ///
 /// Returns an error for an unsupported op type (mirrors Java's
 /// `InvalidRequestException`). `Append` / `Subtract` are list-type operations
@@ -1105,7 +1210,7 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             }
             let mut group_config = state.group_configs.get(resource_name).cloned().unwrap_or_default();
             // Overlay the defaults with Java's `putIfAbsent`, which also
-            // replaces a key set to `null` (`MockAdminClient.java:883`).
+            // replaces a key set to `null` (`MockAdminClient#getResourceDescription`).
             for (k, v) in &state.default_group_configs {
                 let value = group_config.entry(k.clone()).or_insert(None);
                 if value.is_none() {
@@ -1115,7 +1220,8 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             Ok(to_config_object(&group_config))
         },
         // Java throws `UnsupportedOperationException("Not implemented yet")`
-        // (`MockAdminClient.java:887`).
+        // (in
+        // `org.apache.kafka.clients.admin.MockAdminClient#getResourceDescription`).
         _ => Err(Error::local_unsupported_operation("Not implemented yet")),
     }
 }
@@ -1174,7 +1280,8 @@ fn handle_incremental_resource_alteration(
             Ok(())
         },
         // Java returns `new UnsupportedOperationException()`, with no message
-        // (`MockAdminClient.java:1029`).
+        // (in
+        // `org.apache.kafka.clients.admin.MockAdminClient#handleIncrementalResourceAlteration`).
         _ => Err(Error::local_unsupported_operation("")),
     }
 }
@@ -1208,8 +1315,8 @@ impl Admin for MockAdminClient {
                 continue;
             }
 
-            // Java widens the `short` to `int replicationFactor`
-            // (`MockAdminClient.java:390`).
+            // Java widens the `short` to `int replicationFactor` (in
+            // `org.apache.kafka.clients.admin.MockAdminClient#createTopics`).
             let mut replication_factor = i32::from(new_topic.replication_factor());
             if replication_factor == -1 {
                 replication_factor = state.default_replication_factor;
@@ -1235,13 +1342,14 @@ impl Admin for MockAdminClient {
             let leader = state.brokers[0].clone();
             // Every partition of this topic shares the same leader (above), so
             // check its log directories once, before building `partitions`.
-            // Java's `brokerLogDirs.get(id).get(0)` (MockAdminClient.java:415)
+            // Java's `brokerLogDirs.get(id).get(0)` (in
+            // `org.apache.kafka.clients.admin.MockAdminClient#createTopics`)
             // throws an unchecked `IndexOutOfBoundsException` for a leader whose
             // id is not an index of `brokerLogDirs`, and for a broker with no log
-            // directories; `add_topic` already translates the identical
-            // situation as an error instead of a panic (CLAUDE.md §10.1), so
-            // `create_topics` fails the topic's future the same way here.
-            // Java reads `brokerLogDirs` only inside its per-partition loop, so a
+            // directories; `add_topic` already translates the identical situation
+            // as an error instead of a panic (CLAUDE.md §10.1), so
+            // `create_topics` fails the topic's future the same way here. Java
+            // reads `brokerLogDirs` only inside its per-partition loop, so a
             // topic with no partitions never looks it up. Every partition is led
             // by `leader`, so they all start on its first log directory.
             let partition_log_dirs: Vec<String> = if number_of_partitions > 0 {
@@ -1289,9 +1397,10 @@ impl Admin for MockAdminClient {
                     is_internal: false,
                     partitions,
                     partition_log_dirs,
-                    // Java stores the map as given, `null` values included
-                    // (`MockAdminClient.java:420`).
-                    configs: new_topic.configs().cloned(),
+                    // Java stores the map as given (`MockAdminClient#createTopics`).
+                    configs: new_topic
+                        .configs()
+                        .map(|configs| configs.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect()),
                     marked_for_deletion: false,
                     fetches_remaining_until_visible: 0,
                 },
@@ -1412,10 +1521,11 @@ impl Admin for MockAdminClient {
                         result.insert(requested.clone(), handle.future());
                         continue;
                     }
-                    // Java's `handleDescribeTopicsByNames` (`MockAdminClient.java:491-502`):
+                    // Java's
+                    // `org.apache.kafka.clients.admin.MockAdminClient#handleDescribeTopicsByNames`:
                     // a visible topic is described unless its fetch countdown is still
-                    // running, in which case the countdown is decremented and the topic
-                    // is reported as not found.
+                    // running, in which case the countdown is decremented and the topic is
+                    // reported as not found.
                     let visible = match state.all_topics.get_mut(requested) {
                         Some(metadata) if !metadata.marked_for_deletion => {
                             if metadata.fetches_remaining_until_visible > 0 {
@@ -1463,7 +1573,8 @@ impl Admin for MockAdminClient {
                         result.insert(*requested, handle.future());
                         continue;
                     }
-                    // Java's `handleDescribeTopicsUsingIds` (`MockAdminClient.java:530-544`),
+                    // Java's
+                    // `org.apache.kafka.clients.admin.MockAdminClient#handleDescribeTopicsUsingIds`,
                     // with the same fetch countdown as the by-name path.
                     let state = &mut *state;
                     let found = match state.topic_names.get(requested) {
@@ -1495,7 +1606,8 @@ impl Admin for MockAdminClient {
                         None => {
                             handle.complete_with_error(Error::with_message(
                                 Errors::UnknownTopicId,
-                                // Java's text has no space after "id" (`MockAdminClient.java:547`).
+                                // Java's text has no space after "id" (in
+                                // `org.apache.kafka.clients.admin.MockAdminClient#handleDescribeTopicsUsingIds`).
                                 format!("Topic id{requested} not found."),
                             ));
                         },
@@ -1515,7 +1627,8 @@ impl Admin for MockAdminClient {
         new_partitions: &HashMap<String, NewPartitions>,
         _options: CreatePartitionsOptions,
     ) -> CreatePartitionsResult {
-        // Java's `MockAdminClient.createPartitions` (MockAdminClient.java:629)
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#createPartitions`
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1534,7 +1647,7 @@ impl Admin for MockAdminClient {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         _options: DeleteRecordsOptions,
     ) -> DeleteRecordsResult {
-        // Java's `MockAdminClient.deleteRecords` (MockAdminClient.java:633-638)
+        // Java's `org.apache.kafka.clients.admin.MockAdminClient#deleteRecords`
         // returns an empty result for an empty request and otherwise throws
         // `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the non-empty case returns an
@@ -1554,7 +1667,8 @@ impl Admin for MockAdminClient {
         partitions: &[TopicPartition],
         _options: DescribeProducersOptions,
     ) -> DescribeProducersResult {
-        // Java's `MockAdminClient.describeProducers` (MockAdminClient.java:1384)
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeProducers`
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1590,7 +1704,8 @@ impl Admin for MockAdminClient {
         spec: AbortTransactionSpec,
         _options: AbortTransactionOptions,
     ) -> AbortTransactionResult {
-        // Java's `MockAdminClient.abortTransaction` (MockAdminClient.java:1394)
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#abortTransaction`
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1605,11 +1720,12 @@ impl Admin for MockAdminClient {
         transactional_ids: &[String],
         _options: DescribeTransactionsOptions,
     ) -> DescribeTransactionsResult {
-        // Java's `MockAdminClient.describeTransactions` (MockAdminClient.java:1389)
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeTransactions`
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
-        // `.claude/rules/admin-client.md` §9 the Rust mock returns an
-        // "unsupported" `Error` per key instead of panicking (faithful
-        // translation of the Java behavior).
+        // `.claude/rules/admin-client.md` §9 the Rust mock returns an "unsupported"
+        // `Error` per key instead of panicking (faithful translation of the Java
+        // behavior).
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<TransactionDescription> = KafkaFutureImpl::new();
@@ -1624,7 +1740,8 @@ impl Admin for MockAdminClient {
         transactional_ids: &[String],
         _options: FenceProducersOptions,
     ) -> FenceProducersResult {
-        // Java's `MockAdminClient.fenceProducers` (MockAdminClient.java:1409)
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#fenceProducers`
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1639,7 +1756,8 @@ impl Admin for MockAdminClient {
     }
 
     fn list_transactions_with_options(&self, _options: ListTransactionsOptions) -> ListTransactionsResult {
-        // Java's `MockAdminClient.listTransactions` (MockAdminClient.java:1404)
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#listTransactions`
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock completes the
         // top-level future exceptionally instead of panicking.
@@ -1653,12 +1771,13 @@ impl Admin for MockAdminClient {
         transactional_id: &str,
         options: TerminateTransactionOptions,
     ) -> TerminateTransactionResult {
-        // Java's `MockAdminClient.forceTerminateTransaction` throws
-        // `UnsupportedOperationException("Not implemented yet")` directly
-        // (MockAdminClient.java:1399) — it does *not* delegate. It is the
-        // production `KafkaAdminClient.forceTerminateTransaction` that delegates
-        // ("Simply leverage the existing fenceProducers implementation",
-        // KafkaAdminClient.java:4848-4864). The Rust mock mirrors that production
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#forceTerminateTransaction`
+        // throws `UnsupportedOperationException("Not implemented yet")`
+        // directly — it does *not* delegate. It is the production
+        // `org.apache.kafka.clients.admin.KafkaAdminClient#forceTerminateTransaction`
+        // that delegates ("Simply leverage the existing fenceProducers
+        // implementation"). The Rust mock mirrors that production
         // delegation, which lands in the mock's own `fence_producers` — itself
         // "Not implemented yet" — so the resulting future carries the same
         // "unsupported" error Java's mock throws, by a different route.
@@ -1793,7 +1912,7 @@ impl Admin for MockAdminClient {
         ListConfigResourcesResult::new(handle.future())
     }
 
-    /// Mirrors `MockAdminClient.describeLogDirs`.
+    // Mirrors `MockAdminClient.describeLogDirs`.
     fn describe_log_dirs_with_options(
         &self,
         brokers: &[i32],
@@ -1807,12 +1926,13 @@ impl Admin for MockAdminClient {
 
         // Two deliberate divergences below, both skipping where Java throws.
         // Java dereferences `partitionLogDirs.get(0)` and
-        // `unwrappedResults.get(node.id())` unchecked
-        // (`MockAdminClient.java:1082-1083`), so a topic with no log dirs raises
-        // `IndexOutOfBoundsException` and a replica on a broker the caller did
-        // not ask about raises an NPE. Both are latent defects in a test helper
-        // rather than a contract, and reproducing them would mean panicking in a
-        // public API (CLAUDE.md §12.1), so each case is skipped instead.
+        // `unwrappedResults.get(node.id())` unchecked (in
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeLogDirs`), so
+        // a topic with no log dirs raises `IndexOutOfBoundsException` and a
+        // replica on a broker the caller did not ask about raises an NPE. Both
+        // are latent defects in a test helper rather than a contract, and
+        // reproducing them would mean panicking in a public API (CLAUDE.md
+        // §12.1), so each case is skipped instead.
         for (topic_name, meta) in &state.all_topics {
             // For tests, we assume there will always be only 1 log-dir entry.
             let Some(log_dir) = meta.partition_log_dirs.first() else {
@@ -1855,7 +1975,7 @@ impl Admin for MockAdminClient {
         DescribeLogDirsResult::new(results)
     }
 
-    /// Mirrors `MockAdminClient.alterReplicaLogDirs`.
+    // Mirrors `MockAdminClient.alterReplicaLogDirs`.
     fn alter_replica_log_dirs_with_options(
         &self,
         replica_assignment: &HashMap<TopicPartitionReplica, String>,
@@ -1918,7 +2038,7 @@ impl Admin for MockAdminClient {
         AlterReplicaLogDirsResult::new(results)
     }
 
-    /// Mirrors `MockAdminClient.describeReplicaLogDirs`.
+    // Mirrors `MockAdminClient.describeReplicaLogDirs`.
     fn describe_replica_log_dirs_with_options(
         &self,
         replicas: &[TopicPartitionReplica],
@@ -1960,10 +2080,9 @@ impl Admin for MockAdminClient {
         DescribeReplicaLogDirsResult::new(results)
     }
 
-    /// Mirrors `MockAdminClient.electLeaders`, which throws
-    /// `UnsupportedOperationException("Not implemented yet")`
-    /// (`MockAdminClient.java:799`). Translated to a future failed with an
-    /// "unsupported" `Error` (CLAUDE.md §12.1: no panic in public API).
+    // Mirrors `MockAdminClient.electLeaders`, which throws
+    // `UnsupportedOperationException("Not implemented yet")`.
+    // Translated to a future failed with an "unsupported" `Error`, not a panic.
     fn elect_leaders_with_options(
         &self,
         _election_type: ElectionType,
@@ -1975,7 +2094,7 @@ impl Admin for MockAdminClient {
         ElectLeadersResult::new(handle.future())
     }
 
-    /// Mirrors `MockAdminClient.alterPartitionReassignments`.
+    // Mirrors `MockAdminClient.alterPartitionReassignments`.
     fn alter_partition_reassignments_with_options(
         &self,
         reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
@@ -2002,14 +2121,13 @@ impl Admin for MockAdminClient {
         AlterPartitionReassignmentsResult::new(futures)
     }
 
-    /// Mirrors `MockAdminClient.listPartitionReassignments`.
-    ///
-    /// Java throws a `RuntimeException` from `findPartitionReassignment` when a
-    /// stored reassignment names a topic that is no longer in `allTopics`
-    /// (`MockAdminClient.java:1186-1192`). A synchronous throw is not
-    /// representable in this signature, so the result's single future is failed
-    /// instead — the same accommodation `list_offsets` makes for a
-    /// `TimestampSpec` (CLAUDE.md §12.1).
+    // Mirrors `MockAdminClient.listPartitionReassignments`.
+    //
+    // Java throws a `RuntimeException` from `findPartitionReassignment` when a
+    // stored reassignment names a topic that is no longer in `allTopics`.
+    // A synchronous throw is not representable in this signature, so the result's single future is failed
+    // instead — the same accommodation `list_offsets` makes for a
+    // `TimestampSpec`.
     fn list_partition_reassignments_with_partitions_options(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
@@ -2038,12 +2156,12 @@ impl Admin for MockAdminClient {
         ListPartitionReassignmentsResult::new(handle.future())
     }
 
-    /// Mirrors `MockAdminClient.listOffsets`.
-    ///
-    /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
-    /// (`MockAdminClient.java:1233`); since a synchronous throw is not
-    /// representable in this signature, the affected partition's future is
-    /// failed with an "unsupported" `Error` (CLAUDE.md §12.1).
+    // Mirrors `MockAdminClient.listOffsets`.
+    //
+    // Java throws `UnsupportedOperationException` for a `TimestampSpec`
+    // since a synchronous throw is not
+    // representable in this signature, the affected partition's future is
+    // failed with an "unsupported" `Error`.
     fn list_offsets_with_options(
         &self,
         topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
@@ -2055,7 +2173,8 @@ impl Admin for MockAdminClient {
             let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
             match spec {
                 OffsetSpec::Timestamp(_) => {
-                    // Java's message is "Not implement yet" (sic), `MockAdminClient.java:1233`.
+                    // Java's message is "Not implement yet" (sic), in
+                    // `org.apache.kafka.clients.admin.MockAdminClient#listOffsets`.
                     future.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
                 },
                 OffsetSpec::Earliest => {
@@ -2098,10 +2217,11 @@ impl Admin for MockAdminClient {
         group_ids: &[String],
         _options: DescribeConsumerGroupsOptions,
     ) -> DescribeConsumerGroupsResult {
-        // Java's `MockAdminClient.describeConsumerGroups` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:738). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeConsumerGroups`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
@@ -2116,10 +2236,11 @@ impl Admin for MockAdminClient {
         group_ids: &[String],
         _options: DescribeClassicGroupsOptions,
     ) -> DescribeClassicGroupsResult {
-        // Java's `MockAdminClient.describeClassicGroups` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:1531). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeClassicGroups`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ClassicGroupDescription> = KafkaFutureImpl::new();
@@ -2136,8 +2257,9 @@ impl Admin for MockAdminClient {
     ) -> ListConsumerGroupOffsetsResult {
         // Java ignores the group and assumes each test works on a single group;
         // more than one group is "Not implemented yet"
-        // (MockAdminClient.java:753). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // (`org.apache.kafka.clients.admin.MockAdminClient#listConsumerGroupOffsets`).
+        // Per admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         if group_specs.len() != 1 {
             let futures = group_specs
                 .keys()
@@ -2155,18 +2277,20 @@ impl Admin for MockAdminClient {
         let include_all = spec.topic_partitions().is_none_or(<[_]>::is_empty);
         let state = self.state.lock().unwrap();
         // Java builds each row with `new OffsetAndMetadata(entry.getValue())`
-        // inline in the collect (MockAdminClient.java:756), and that constructor
-        // rejects a negative offset with
+        // inline in the collect of
+        // `org.apache.kafka.clients.admin.MockAdminClient#listConsumerGroupOffsets`,
+        // and that constructor rejects a negative offset with
         // `IllegalArgumentException("Invalid negative offset")`
-        // (OffsetAndMetadata.java:51-52). A negative offset *is* seedable and
-        // nothing upstream establishes otherwise: `updateConsumerGroupOffsets` is
-        // an unvalidated `putAll` (MockAdminClient.java:1493-1495), which the
-        // Rust mock mirrors. Java's throw is a catchable `RuntimeException`;
-        // a Rust panic here would instead unwind out of the `extern "C"` FFI
-        // wrapper — `admin_sync_future_op` runs the submit closure inline on the
-        // calling thread — and abort the process. So the error is surfaced on the
-        // group's future, which the trait signature can carry
-        // (CLAUDE.md §12.1/§12.2, admin-client.md §9).
+        // (`org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)`).
+        // A negative offset *is* seedable and nothing upstream establishes
+        // otherwise: `updateConsumerGroupOffsets` is an unvalidated `putAll`
+        // (`MockAdminClient#updateConsumerGroupOffsets`), which the Rust mock
+        // mirrors. Java's throw is a catchable `RuntimeException`; a Rust panic
+        // here would instead unwind out of the `extern "C"` FFI wrapper —
+        // `admin_sync_future_op` runs the submit closure inline on the calling
+        // thread — and abort the process. So the error is surfaced on the group's
+        // future, which the trait signature can carry (CLAUDE.md §12.1/§12.2,
+        // admin-client.md §9).
         let offsets: Result<GroupOffsets, Error> = state
             .committed_offsets
             .iter()
@@ -2193,11 +2317,11 @@ impl Admin for MockAdminClient {
         _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
         _options: AlterConsumerGroupOffsetsOptions,
     ) -> AlterConsumerGroupOffsetsResult {
-        // Java's `MockAdminClient.alterConsumerGroupOffsets` throws
-        // `UnsupportedOperationException("Not implement yet")`
-        // (MockAdminClient.java:1215 — note Java's own typo "implement"). Per
-        // admin-client.md §9 the Rust mock surfaces that as an exceptional
-        // future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#alterConsumerGroupOffsets`
+        // throws `UnsupportedOperationException("Not implement yet")` (note
+        // Java's own typo "implement"). Per admin-client.md §9 the Rust mock
+        // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
         handle.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
         AlterConsumerGroupOffsetsResult::new(handle.future())
@@ -2209,10 +2333,11 @@ impl Admin for MockAdminClient {
         partitions: &HashSet<TopicPartition>,
         _options: DeleteConsumerGroupOffsetsOptions,
     ) -> DeleteConsumerGroupOffsetsResult {
-        // Java's `MockAdminClient.deleteConsumerGroupOffsets` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:786). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#deleteConsumerGroupOffsets`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
         handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions.clone())
@@ -2223,10 +2348,11 @@ impl Admin for MockAdminClient {
         group_ids: &[String],
         _options: DeleteConsumerGroupsOptions,
     ) -> DeleteConsumerGroupsResult {
-        // Java's `MockAdminClient.deleteConsumerGroups` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:776). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future per group rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#deleteConsumerGroups`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future per group rather than a panic.
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
@@ -2241,21 +2367,21 @@ impl Admin for MockAdminClient {
         _group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
     ) -> RemoveMembersFromConsumerGroupResult {
-        // Java's `MockAdminClient.removeMembersFromConsumerGroup` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:804). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#removeMembersFromConsumerGroup`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<MemberIdentity, Errors>> = KafkaFutureImpl::new();
         handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         RemoveMembersFromConsumerGroupResult::new(handle.future(), options.members().clone())
     }
 
     fn create_acls_with_options(&self, acls: &[AclBinding], _options: CreateAclsOptions) -> CreateAclsResult {
-        // Java's `MockAdminClient.createAcls` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:809). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future per binding rather than a
-        // panic.
+        // Java's `org.apache.kafka.clients.admin.MockAdminClient#createAcls`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future per binding rather than a panic.
         let mut futures = HashMap::new();
         for acl in acls {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
@@ -2270,20 +2396,20 @@ impl Admin for MockAdminClient {
         _filter: &AclBindingFilter,
         _options: DescribeAclsOptions,
     ) -> DescribeAclsResult {
-        // Java's `MockAdminClient.describeAcls` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:814). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's `org.apache.kafka.clients.admin.MockAdminClient#describeAcls`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
         handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         DescribeAclsResult::new(handle.future())
     }
 
     fn delete_acls_with_options(&self, filters: &[AclBindingFilter], _options: DeleteAclsOptions) -> DeleteAclsResult {
-        // Java's `MockAdminClient.deleteAcls` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:819). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future per filter rather than a panic.
+        // Java's `org.apache.kafka.clients.admin.MockAdminClient#deleteAcls`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future per filter rather than a panic.
         let mut futures = HashMap::new();
         for filter in filters {
             let handle: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
@@ -2298,10 +2424,11 @@ impl Admin for MockAdminClient {
         _filter: &ClientQuotaFilter,
         _options: DescribeClientQuotasOptions,
     ) -> DescribeClientQuotasResult {
-        // Java's `MockAdminClient.describeClientQuotas` throws
-        // `UnsupportedOperationException("Not implement yet")`
-        // (MockAdminClient.java:1247). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeClientQuotas`
+        // throws `UnsupportedOperationException("Not implement yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
         handle.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
         DescribeClientQuotasResult::new(handle.future())
@@ -2312,10 +2439,11 @@ impl Admin for MockAdminClient {
         entries: &[ClientQuotaAlteration],
         _options: AlterClientQuotasOptions,
     ) -> AlterClientQuotasResult {
-        // Java's `MockAdminClient.alterClientQuotas` throws
-        // `UnsupportedOperationException("Not implement yet")`
-        // (MockAdminClient.java:1252). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future per entity rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#alterClientQuotas`
+        // throws `UnsupportedOperationException("Not implement yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future per entity rather than a panic.
         let mut futures = HashMap::new();
         for entry in entries {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
@@ -2330,10 +2458,11 @@ impl Admin for MockAdminClient {
         _users: &[String],
         _options: DescribeUserScramCredentialsOptions,
     ) -> DescribeUserScramCredentialsResult {
-        // Java's `MockAdminClient.describeUserScramCredentials` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:1257). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeUserScramCredentials`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future rather than a panic.
         let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
         handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         DescribeUserScramCredentialsResult::new(handle.future())
@@ -2344,10 +2473,11 @@ impl Admin for MockAdminClient {
         alterations: &[UserScramCredentialAlteration],
         _options: AlterUserScramCredentialsOptions,
     ) -> AlterUserScramCredentialsResult {
-        // Java's `MockAdminClient.alterUserScramCredentials` throws
-        // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:1262). Per admin-client.md §9 the Rust mock
-        // surfaces that as an exceptional future per user rather than a panic.
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#alterUserScramCredentials`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock surfaces that as an exceptional
+        // future per user rather than a panic.
         let mut futures = HashMap::new();
         for alteration in alterations {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
@@ -2372,13 +2502,14 @@ impl Admin for MockAdminClient {
             }
         }
 
-        // Java uses `options.renewers().get(0)` as the owner
-        // (MockAdminClient.java:652), which throws `IndexOutOfBoundsException`
-        // when no renewer was supplied. That is a catchable `RuntimeException`
-        // in Java, but an index panic in Rust — and every FFI path runs this
-        // inline on the calling thread, so it would unwind across an
-        // `extern "C"` boundary and abort the process. Per CLAUDE.md §12.1 the
-        // future is completed exceptionally instead.
+        // Java uses `options.renewers().get(0)` as the owner (in
+        // `org.apache.kafka.clients.admin.MockAdminClient#createDelegationToken`),
+        // which throws `IndexOutOfBoundsException` when no renewer was
+        // supplied. That is a catchable `RuntimeException` in Java, but an
+        // index panic in Rust — and every FFI path runs this inline on the
+        // calling thread, so it would unwind across an `extern "C"` boundary
+        // and abort the process. Per CLAUDE.md §12.1 the future is completed
+        // exceptionally instead.
         let Some(owner) = options.renewers().first().cloned() else {
             handle.complete_with_error(Error::local_illegal_argument(
                 "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner",
@@ -2620,10 +2751,12 @@ mod tests {
             .expect("num_brokers is at least 1")
     }
 
-    // --- Builder broker-count validation (MockAdminClient.java:152, :210) ----
+    // --- Builder broker-count validation -------------------------------------
+    // (`org.apache.kafka.clients.admin.MockAdminClient.Builder#numBrokers`,
+    // `MockAdminClient.Builder#build`)
 
-    /// Java's `Builder.build()` reads `brokers.get(0)` for the controller
-    /// (`MockAdminClient.java:212`), so `numBrokers(0)` fails at `build()` with
+    /// Java's `MockAdminClient.Builder#build` reads `brokers.get(0)` for the
+    /// controller, so `numBrokers(0)` fails at `build()` with
     /// the JDK's `IndexOutOfBoundsException` text instead of yielding a
     /// broker-less mock.
     #[test]
@@ -2641,7 +2774,7 @@ mod tests {
     }
 
     /// `numBrokers(-1)` throws even earlier in Java, from `brokers.subList(0, -1)`
-    /// (`MockAdminClient.java:154`), whose `subListRangeCheck` throws
+    /// in `MockAdminClient.Builder#numBrokers`, whose `subListRangeCheck` throws
     /// `IllegalArgumentException("fromIndex(0) > toIndex(-1)")`.
     #[test]
     fn set_num_brokers_rejects_a_negative_broker_count() {
@@ -2652,7 +2785,7 @@ mod tests {
         assert_eq!(err.message(), "fromIndex(0) > toIndex(-1)");
     }
 
-    // --- Builder (MockAdminClient.java:124-223) --------------------------------
+    // --- Builder (`org.apache.kafka.clients.admin.MockAdminClient.Builder`) ----
     //
     // No clients-module Java test uses the Builder (its users are in
     // connect/streams/tools), so these pin the Java source directly.
@@ -2697,7 +2830,7 @@ mod tests {
         );
     }
 
-    /// `MockAdminClient.create()` is `new Builder()` (`MockAdminClient.java:120-122`),
+    /// `MockAdminClient#create` is `new Builder()`,
     /// so it builds the same defaults as `Builder::new()`.
     #[test]
     fn create_returns_a_fresh_builder() {
@@ -2720,7 +2853,7 @@ mod tests {
         assert_eq!(created.max_supported_feature_levels, fresh.max_supported_feature_levels);
     }
 
-    // --- Public constructors (MockAdminClient.java:225-284) ---------------------
+    // --- Public constructors (`org.apache.kafka.clients.admin.MockAdminClient#MockAdminClient`) ---
     //
     // Rust-side tests, no Java counterpart: Java has no tests for these
     // constructors or the controller setter. They were added with this port and
@@ -2730,12 +2863,13 @@ mod tests {
         (0..4).map(|id| Node::new(id, format!("h{id}"), 9092)).collect()
     }
 
-    /// `new MockAdminClient(brokers, controller)` (`MockAdminClient.java:229-241`):
-    /// the given brokers and controller, `DEFAULT_CLUSTER_ID`, one default
-    /// partition, a default replication factor of `brokers.size()` (not the
-    /// Builder's `min(n, 3)`), `DEFAULT_LOG_DIRS` per broker, each broker's
-    /// `default.replication.factor` config seeded with that factor, no raft
-    /// controller and empty feature and group-config maps.
+    /// `new MockAdminClient(brokers, controller)`
+    /// (`MockAdminClient#MockAdminClient(List,Node)`): the given brokers and
+    /// controller, `DEFAULT_CLUSTER_ID`, one default partition, a default
+    /// replication factor of `brokers.size()` (not the Builder's `min(n, 3)`),
+    /// `DEFAULT_LOG_DIRS` per broker, each broker's `default.replication.factor`
+    /// config seeded with that factor, no raft controller and empty feature and
+    /// group-config maps.
     #[tokio::test]
     async fn with_brokers_controller_matches_java_constructor() {
         let nodes = four_nodes();
@@ -2762,7 +2896,7 @@ mod tests {
         assert!(state.default_group_configs.is_empty());
     }
 
-    /// `new MockAdminClient()` (`MockAdminClient.java:225-227`) is
+    /// `new MockAdminClient()` (`MockAdminClient#MockAdminClient()`) is
     /// `this(singletonList(Node.noNode()), Node.noNode())`: one broker with id -1,
     /// which is also the controller.
     #[tokio::test]
@@ -2787,10 +2921,10 @@ mod tests {
     }
 
     /// `new MockAdminClient()`'s only broker is `Node.noNode()`, whose id is -1,
-    /// and `brokerLogDirs` is indexed by broker id, so Java's `createTopics`
-    /// throws `IndexOutOfBoundsException("Index -1 out of bounds for length 1")`
-    /// (`MockAdminClient.java:415`). The mock fails the topic with that error
-    /// instead of panicking.
+    /// and `brokerLogDirs` is indexed by broker id, so Java's
+    /// `MockAdminClient#createTopics` throws
+    /// `IndexOutOfBoundsException("Index -1 out of bounds for length 1")`. The
+    /// mock fails the topic with that error instead of panicking.
     #[tokio::test]
     async fn create_topics_on_new_fails_for_the_no_node_broker_as_java_does() {
         let mock = MockAdminClient::new();
@@ -2803,11 +2937,12 @@ mod tests {
         assert_eq!(err.message(), "Index -1 out of bounds for length 1");
     }
 
-    /// Java passes `brokers.size()` straight through as the `int
-    /// defaultReplicationFactor` (`MockAdminClient.java:234`), so unlike the
-    /// Builder's `shortValue()` it does not wrap at `Short.MAX_VALUE + 1`
-    /// brokers: the broker config holds 32768 and a topic created with the
-    /// default replication factor gets one replica per broker.
+    /// Java passes `brokers.size()` straight through as the
+    /// `int defaultReplicationFactor`
+    /// (`MockAdminClient#MockAdminClient(List,Node)`), so unlike the Builder's
+    /// `shortValue()` it does not wrap at `Short.MAX_VALUE + 1` brokers: the
+    /// broker config holds 32768 and a topic created with the default
+    /// replication factor gets one replica per broker.
     #[tokio::test]
     async fn with_brokers_controller_keeps_a_broker_count_above_short_max() {
         let nodes: Vec<Node> = (0..32_768).map(|id| Node::new(id, format!("h{id}"), 9092)).collect();
@@ -2825,7 +2960,7 @@ mod tests {
         assert_eq!(result.replication_factor("t").get().await.unwrap(), 32_768);
     }
 
-    /// The constructor calls `controller(Node)` (`MockAdminClient.java:257`),
+    /// The constructor calls `MockAdminClient#controller`,
     /// which throws `IllegalArgumentException` for a node outside the broker list.
     #[test]
     fn with_brokers_controller_rejects_a_controller_outside_the_brokers() {
@@ -2835,7 +2970,7 @@ mod tests {
         assert_eq!(err.message(), "The controller node must be in the list of brokers");
     }
 
-    /// The public setter `controller(Node)` (`MockAdminClient.java:280-284`)
+    /// The public setter `MockAdminClient#controller`
     /// replaces the controller when the node is a broker and throws, leaving the
     /// controller unchanged, when it is not.
     #[tokio::test]
@@ -2964,11 +3099,12 @@ mod tests {
         assert_eq!(mock.state.lock().unwrap().broker_log_dirs, vec![dirs("a")]);
     }
 
-    /// `brokerLogDirs` is indexed by broker **id** (`MockAdminClient.java:315`,
-    /// `:415`), so with brokers 5, 6 and 7 Java's `createTopics` and `addTopic`
-    /// throw `IndexOutOfBoundsException` ("Index 5 out of bounds for length 3").
-    /// The mock reports that error instead of panicking. A topic with no
-    /// partitions never looks the list up, as in Java.
+    /// `brokerLogDirs` is indexed by broker **id**, so with brokers 5, 6 and 7
+    /// Java's `MockAdminClient#createTopics` and
+    /// `MockAdminClient#addTopic(boolean,String,List,Map,boolean)` throw
+    /// `IndexOutOfBoundsException` ("Index 5 out of bounds for length 3"). The
+    /// mock reports that error instead of panicking. A topic with no partitions
+    /// never looks the list up, as in Java.
     #[tokio::test]
     async fn broker_ids_that_are_not_log_dir_indexes_fail_like_java() {
         let nodes: Vec<Node> = (5..8).map(|id| Node::new(id, format!("h{id}"), 9092)).collect();
@@ -3038,7 +3174,7 @@ mod tests {
     /// `build()` passes the chosen controller to the constructor, whose
     /// `controller(Node)` throws `IllegalArgumentException("The controller node
     /// must be in the list of brokers")` when a later resize or replacement
-    /// dropped it (`MockAdminClient.java:280-283`).
+    /// dropped it (`MockAdminClient#controller`).
     #[test]
     fn build_rejects_a_controller_no_longer_in_the_broker_list() {
         let err = Builder::new()
@@ -3488,36 +3624,11 @@ mod tests {
         result.values()[resource].get().await.unwrap()
     }
 
-    /// New test, no Java original: Java's mock stores a created topic's configs
-    /// as given (`MockAdminClient.java:420`), so a config set to `null` reads
-    /// back from `describeConfigs` as `new ConfigEntry(key, null)`, not as an
-    /// empty value (`MockAdminClient.java:891-897`).
-    #[tokio::test]
-    async fn describe_configs_returns_a_null_value_given_to_create_topics() {
-        let client = admin();
-        let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(Some(
-            BTreeMap::from([
-                ("cleanup.policy".to_string(), None),
-                ("retention.ms".to_string(), Some("1000".to_string())),
-            ]),
-        ));
-        client
-            .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
-            .all()
-            .get()
-            .await
-            .unwrap();
-
-        let config = described(&client, &ConfigResource::new(config_resource::Type::Topic, "t".to_string())).await;
-        assert_eq!(config.get("cleanup.policy").expect("the null config is stored").value(), None);
-        assert_eq!(config.get("retention.ms").unwrap().value(), Some("1000"));
-    }
-
     /// New test, no Java original: Java's `incrementalAlterConfigs` stores a
     /// `SET` value as given, `null` included, for every resource type
-    /// (`MockAdminClient.java:937, 960, 988, 1015`), so `describeConfigs` reads
+    /// (`MockAdminClient#handleIncrementalResourceAlteration`), so `describeConfigs` reads
     /// the config back with a `null` value. For a group, Java then overlays the
-    /// default configs with `putIfAbsent` (`:883`), which also replaces a
+    /// default configs with `putIfAbsent` (`MockAdminClient#getResourceDescription`), which also replaces a
     /// `null` value, so a group config set to `null` that has a default reads
     /// back as the default.
     #[tokio::test]
@@ -3586,7 +3697,7 @@ mod tests {
     async fn describe_configs_topic_returns_stored_configs() {
         let client = admin();
         let mut configs = BTreeMap::new();
-        configs.insert("retention.ms".to_string(), Some("1000".to_string()));
+        configs.insert("retention.ms".to_string(), "1000".to_string());
         let new_topic =
             NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(Some(configs));
         client
@@ -3717,9 +3828,9 @@ mod tests {
         assert_eq!(err.message(), "No such topic as missing");
     }
 
-    /// Java's `handleIncrementalResourceAlteration` returns
+    /// Java's `MockAdminClient#handleIncrementalResourceAlteration` returns
     /// `new UnsupportedOperationException()`, with no message, for a resource
-    /// type it does not handle (`MockAdminClient.java:1029`).
+    /// type it does not handle.
     #[tokio::test]
     async fn incremental_alter_configs_broker_logger_is_unsupported_without_message() {
         let client = admin();
@@ -3830,9 +3941,10 @@ mod tests {
     //
     // There are ZERO Java client-side unit tests for delegation tokens anywhere
     // in `clients/src/test/java` (Milestone-11 finding #10). The tests below are
-    // NEW, written against `MockAdminClient`'s real in-memory logic
-    // (MockAdminClient.java ~641-725), which is the authoritative behavioral
-    // reference for this phase.
+    // NEW, written against `org.apache.kafka.clients.admin.MockAdminClient`'s
+    // real in-memory logic (`createDelegationToken`, `renewDelegationToken`,
+    // `expireDelegationToken` and `describeDelegationToken`), which is the
+    // authoritative behavioral reference for this phase.
 
     fn user(name: &str) -> KafkaPrincipal {
         KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, name)
@@ -3855,8 +3967,8 @@ mod tests {
     }
 
     /// New test, no Java original: with no renewer at all the future completes
-    /// exceptionally rather than panicking. Java's
-    /// `options.renewers().get(0)` (MockAdminClient.java:652) throws a catchable
+    /// exceptionally rather than panicking. Java's `options.renewers().get(0)`
+    /// (in `MockAdminClient#createDelegationToken`) throws a catchable
     /// `IndexOutOfBoundsException` here; an index panic in Rust would unwind
     /// across the C FFI boundary and abort the process, so the mock reports it
     /// as an error instead. `CreateDelegationTokenOptions::new()` defaults the
@@ -4206,7 +4318,8 @@ mod tests {
         assert_eq!(reassignment.adding_replicas(), &[] as &[i32]);
         assert_eq!(reassignment.removing_replicas(), &[0]);
 
-        // An empty `Optional` cancels (`MockAdminClient.java:1160-1162`).
+        // An empty `Optional` cancels
+        // (`org.apache.kafka.clients.admin.MockAdminClient#alterPartitionReassignments`).
         client
             .alter_partition_reassignments_with_options(
                 &HashMap::from([(tp.clone(), None)]),
@@ -4256,10 +4369,9 @@ mod tests {
         );
     }
 
-    /// Regression for `findPartitionReassignment`'s *second* guard
-    /// (`MockAdminClient.java:1190-1192`): the topic exists again, but the
-    /// stale reassignment names a partition index the recreated topic no longer
-    /// has.
+    /// Regression for `MockAdminClient#findPartitionReassignment`'s *second*
+    /// guard: the topic exists again, but the stale reassignment names a
+    /// partition index the recreated topic no longer has.
     ///
     /// This branch is dead in Java — `metadata.partitions` is an `ArrayList`,
     /// so `get(i)` on an out-of-range index throws `IndexOutOfBoundsException`
@@ -4321,7 +4433,8 @@ mod tests {
             "Internal MockAdminClient logic error: found reassignment for rt2-1, but no TopicPartitionInfo"
         );
     }
-    // --- add_topic broker validation (MockAdminClient.java:296-309) ----------
+    // --- add_topic broker validation -----------------------------------------
+    // (`org.apache.kafka.clients.admin.MockAdminClient#addTopic(boolean,String,List,Map,boolean)`)
 
     /// Builds a `TopicPartitionInfo` with the given leader / replicas / isr and
     /// no offline, ELR or last-known-ELR replicas.
@@ -4443,7 +4556,7 @@ mod tests {
         assert_eq!(error.message(), "Broker 0 has no log directories.");
     }
 
-    // --- setFetchesRemainingUntilVisible (MockAdminClient.java:1626-1632) -------
+    // --- `org.apache.kafka.clients.admin.MockAdminClient#setFetchesRemainingUntilVisible` ---
     //
     // Rust-side tests, no Java counterpart: Java has no tests for the fetch
     // countdown. They were added with this port and check the behaviour against
@@ -4467,7 +4580,7 @@ mod tests {
         mock
     }
 
-    /// `handleDescribeTopicsByNames` (`MockAdminClient.java:492-502`): while the
+    /// `MockAdminClient#handleDescribeTopicsByNames`: while the
     /// counter is positive, each describe decrements it and reports
     /// `UnknownTopicOrPartitionException("Topic <name> not found.")`.
     #[tokio::test]
@@ -4494,7 +4607,7 @@ mod tests {
         assert_eq!(description.name(), "t");
     }
 
-    /// `handleDescribeTopicsUsingIds` (`MockAdminClient.java:534-544`): the same
+    /// `MockAdminClient#handleDescribeTopicsUsingIds`: the same
     /// countdown, reporting `UnknownTopicIdException("Topic id" + id +
     /// " not found.")` -- Java's message has no space after "id".
     #[tokio::test]
@@ -4534,8 +4647,8 @@ mod tests {
         assert_eq!(err.message(), "No such topic as nope");
     }
 
-    /// `listTopics` (`MockAdminClient.java:451-456`) and the topic arm of
-    /// `getResourceDescription` (`:862-865`) count down the same counter.
+    /// `MockAdminClient#listTopics` and the topic arm of
+    /// `MockAdminClient#getResourceDescription` count down the same counter.
     #[tokio::test]
     async fn list_topics_and_describe_configs_count_down_the_same_counter() {
         let mock = admin_with_topic("t");
@@ -4579,14 +4692,16 @@ mod tests {
 
     #[tokio::test]
     async fn mock_list_consumer_group_offsets_rejects_a_negative_seeded_offset() {
-        // `updateConsumerGroupOffsets` is an unvalidated `putAll` in Java
-        // (MockAdminClient.java:1493-1495), so -1 -- Kafka's own invalid-offset
+        // `org.apache.kafka.clients.admin.MockAdminClient#updateConsumerGroupOffsets`
+        // is an unvalidated `putAll` in Java, so -1 -- Kafka's own invalid-offset
         // sentinel -- is seedable. Java then throws
         // `IllegalArgumentException("Invalid negative offset")` from
-        // `new OffsetAndMetadata(...)` while building the row
-        // (MockAdminClient.java:756, OffsetAndMetadata.java:51-52). The Rust mock
-        // must surface a `Error`, not panic: the FFI runs this inline on the
-        // caller's thread, so a panic would unwind out of `extern "C"`.
+        // `new OffsetAndMetadata(...)` while building the row (in
+        // `MockAdminClient#listConsumerGroupOffsets` and
+        // `org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)`).
+        // The Rust mock must surface a `Error`, not panic: the FFI runs this
+        // inline on the caller's thread, so a panic would unwind out of
+        // `extern "C"`.
         let mock = admin();
         let tp = TopicPartition::new("topic".to_string(), 0);
         mock.update_consumer_group_offsets(HashMap::from([(tp.clone(), -1i64)]));

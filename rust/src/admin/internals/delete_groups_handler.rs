@@ -177,8 +177,9 @@ impl AdminApiHandler<CoordinatorKey, ()> for DeleteGroupsHandler {
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ()> {
         let ConcreteResponse::DeleteGroups(response) = response else {
-            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
-            // mismatch; see `ApiResult::failed_all`.
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+            // fails this one call on a response-type mismatch; see
+            // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
                 Error::local_illegal_state("DeleteGroupsHandler received an unexpected response type"),

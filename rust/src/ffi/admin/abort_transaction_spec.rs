@@ -76,14 +76,20 @@ pub(crate) fn box_abort_transaction_spec(spec: AbortTransactionSpec) -> *mut kaf
     Box::into_raw(Box::new(AbortTransactionSpecInner::new(spec))) as *mut kafka_admin_AbortTransactionSpec_t
 }
 
-/// `new AbortTransactionSpec(TopicPartition topicPartition, long producerId,
-/// short producerEpoch, int coordinatorEpoch)`: the partition is copied, the
-/// caller keeps its handle. Owned, freed with
-/// [`kafka_admin_AbortTransactionSpec_destroy`].
+/// Creates the spec of a hanging transaction to abort.
+///
+/// # Parameters
+///
+/// - `topic_partition` - the partition the transaction is hanging on; copied, the caller keeps
+///   its handle.
+/// - `producer_id` - the producer id of the transaction.
+/// - `producer_epoch` - the producer epoch of the transaction.
+/// - `coordinator_epoch` - the epoch of the transaction coordinator.
 ///
 /// # Safety
 ///
-/// `topic_partition` must be a valid topic-partition handle.
+/// `topic_partition` must be a valid topic-partition handle. The returned handle is owned, freed
+/// with [`kafka_admin_AbortTransactionSpec_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_new(
@@ -103,12 +109,12 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_new(
     ))
 }
 
-/// `topicPartition()`: a borrowed handle valid as long as the spec, never
-/// passed to `kafka_common_TopicPartition_destroy`.
+/// Returns the partition the transaction is hanging on.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid abort-transaction-spec handle.
+/// `self_` must be a valid abort-transaction-spec handle. The returned handle is borrowed, valid
+/// as long as the spec, never passed to `kafka_common_TopicPartition_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_topic_partition(
@@ -120,7 +126,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_topic_partition(
     unsafe { inner_ref(self_) }.topic_partition.as_ptr()
 }
 
-/// `producerId()`.
+/// Returns the producer id of the transaction.
 ///
 /// # Safety
 ///
@@ -135,7 +141,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_id(
     unsafe { abort_transaction_spec_ref(self_) }.producer_id()
 }
 
-/// `producerEpoch()`.
+/// Returns the producer epoch of the transaction.
 ///
 /// # Safety
 ///
@@ -150,7 +156,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_producer_epoch(
     unsafe { abort_transaction_spec_ref(self_) }.producer_epoch()
 }
 
-/// `coordinatorEpoch()`.
+/// Returns the epoch of the transaction coordinator.
 ///
 /// # Safety
 ///
@@ -165,11 +171,12 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_coordinator_epoch(
     unsafe { abort_transaction_spec_ref(self_) }.coordinator_epoch()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the spec.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid abort-transaction-spec handle.
+/// `self_` must be a valid abort-transaction-spec handle. The returned string is owned, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_to_string(
@@ -180,11 +187,11 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionSpec_to_string(
     into_c_string(&unsafe { abort_transaction_spec_ref(self_) }.to_string())
 }
 
-/// Frees an owned spec handle; null is a no-op.
+/// Frees an owned spec handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned spec handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned spec handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

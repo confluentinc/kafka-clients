@@ -27,7 +27,7 @@ pub struct kafka_common_TopicPartitionReplica_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_TopicPartitionReplica_t`] points at: the value plus
+/// What a `kafka_common_TopicPartitionReplica_t` points at: the value plus
 /// the NUL-terminated topic the string getter borrows out.
 struct TopicPartitionReplicaInner {
     replica: TopicPartitionReplica,
@@ -61,13 +61,18 @@ pub(crate) unsafe fn topic_partition_replica_ref<'a>(
     &unsafe { inner_ref(replica) }.replica
 }
 
-/// `new TopicPartitionReplica(String topic, int partition, int brokerId)`,
-/// as an owned handle freed with
-/// [`kafka_common_TopicPartitionReplica_destroy`].
+/// Creates a topic partition replica.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+/// - `partition` - the partition number
+/// - `broker_id` - the id of the broker holding the replica
 ///
 /// # Safety
 ///
-/// `topic` must be a valid NUL-terminated string.
+/// `topic` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_TopicPartitionReplica_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_new(
@@ -84,11 +89,12 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_new(
         as *mut kafka_common_TopicPartitionReplica_t
 }
 
-/// `topic()`: borrowed from the handle, valid until it is destroyed.
+/// Returns the topic name.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-partition-replica handle.
+/// `self_` must be a valid topic-partition-replica handle. The string is borrowed from the
+/// handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_topic(
@@ -100,7 +106,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_topic(
     unsafe { inner_ref(self_) }.topic_c.as_ptr()
 }
 
-/// `partition()`.
+/// Returns the partition number.
 ///
 /// # Safety
 ///
@@ -115,7 +121,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_partition(
     unsafe { inner_ref(self_) }.replica.partition()
 }
 
-/// `brokerId()`.
+/// Returns the id of the broker holding the replica.
 ///
 /// # Safety
 ///
@@ -130,12 +136,12 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_broker_id(
     unsafe { inner_ref(self_) }.replica.broker_id()
 }
 
-/// `toString()`: `topic-partition-brokerId`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns `topic-partition-brokerId`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-replica handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_to_string(

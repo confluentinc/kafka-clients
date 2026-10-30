@@ -70,28 +70,40 @@ unsafe fn endpoint_type_value_of(endpoint_type: *const kafka_admin_EndpointType_
     unsafe { *(endpoint_type as *const EndpointType) }
 }
 
-/// `EndpointType.UNKNOWN`.
+/// Returns the `EndpointType.UNKNOWN` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_EndpointType_unknown() -> *const kafka_admin_EndpointType_t {
     endpoint_type_singleton(EndpointType::Unknown)
 }
 
-/// `EndpointType.BROKER`.
+/// Returns the `EndpointType.BROKER` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_EndpointType_broker() -> *const kafka_admin_EndpointType_t {
     endpoint_type_singleton(EndpointType::Broker)
 }
 
-/// `EndpointType.CONTROLLER`.
+/// Returns the `EndpointType.CONTROLLER` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_EndpointType_controller() -> *const kafka_admin_EndpointType_t {
     endpoint_type_singleton(EndpointType::Controller)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_EndpointType_UNKNOWN`.
 ///
@@ -108,12 +120,13 @@ pub unsafe extern "C" fn kafka_admin_EndpointType__enum(
     enum_of(unsafe { endpoint_type_value_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// Returns the text form of the endpoint type (`toString()`, Java's inherited `Enum.toString()`):
+/// the constant's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_EndpointType_to_string(self_: *const kafka_admin_EndpointType_t) -> *mut c_char {
@@ -123,7 +136,7 @@ pub unsafe extern "C" fn kafka_admin_EndpointType_to_string(self_: *const kafka_
     into_c_string(&unsafe { endpoint_type_value_of(self_) }.to_string())
 }
 
-/// `EndpointType.id()`: the wire-protocol byte of the endpoint type.
+/// Returns the wire-protocol byte of the endpoint type (`EndpointType.id()`).
 ///
 /// A caught Rust panic returns -1, which is no id of this Java `byte` enum: its
 /// 0 is the valid `UNKNOWN`.
@@ -139,8 +152,16 @@ pub unsafe extern "C" fn kafka_admin_EndpointType_id(self_: *const kafka_admin_E
     unsafe { endpoint_type_value_of(self_) }.id()
 }
 
-/// `EndpointType.fromId(byte id)`: the borrowed singleton with that wire byte,
+/// Returns the singleton whose wire-protocol id is `id` (`EndpointType.fromId(byte id)`):
 /// `UNKNOWN` for an id Java does not know.
+///
+/// # Parameters
+///
+/// - `id` - The wire-protocol id.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_EndpointType_from_id(id: i8) -> *const kafka_admin_EndpointType_t {

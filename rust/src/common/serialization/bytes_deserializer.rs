@@ -61,7 +61,7 @@ impl Deserializer<Bytes> for BytesDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         _topic: &str,
-        _headers: &RecordHeaders,
+        _headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<Bytes, Error> {
         // Zero-copy: `data` is already a refcounted slice of the buffer that
@@ -101,8 +101,8 @@ mod tests {
         let source = Bytes::from(vec![0u8, 1, 2, 3, 4, 5, 6, 7]);
         // A subslice of the source allocation, as the receive path passes it.
         let data = source.slice(2..5);
-        let headers = RecordHeaders::new();
-        let result = de.deserialize_with_headers_bytes("topic", &headers, &data).await.unwrap();
+        let mut headers = RecordHeaders::new();
+        let result = de.deserialize_with_headers_bytes("topic", &mut headers, &data).await.unwrap();
         assert_eq!(&result[..], &[2, 3, 4]);
         // The returned Bytes shares the source allocation (same data ptr).
         assert_eq!(result.as_ptr(), source[2..].as_ptr());

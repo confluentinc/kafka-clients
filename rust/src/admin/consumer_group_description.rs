@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A detailed description of a single consumer group in the cluster.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ConsumerGroupDescription`.
 
 use std::collections::BTreeSet;
 
@@ -23,12 +21,9 @@ use crate::common::acl::AclOperation;
 use crate::common::{GroupState, GroupType, Node};
 
 /// A detailed description of a single consumer group in the cluster.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ConsumerGroupDescription`.
-///
-/// Note: Java's `@Deprecated(forRemoval = true)` constructors that accept a
-/// `ConsumerGroupState`, and the deprecated `state()` accessor, are not
-/// translated; use [`new`](Self::new) and [`group_state`](Self::group_state).
+// Note: Java's `@Deprecated(forRemoval = true)` constructors that accept a
+// `ConsumerGroupState`, and the deprecated `state()` accessor, are not
+// translated; use [`new`](Self::new) and [`group_state`](Self::group_state).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription")]
 pub struct ConsumerGroupDescription {
@@ -50,11 +45,20 @@ pub struct ConsumerGroupDescription {
 impl ConsumerGroupDescription {
     /// Creates a consumer group description with all fields.
     ///
-    /// Mirrors the primary
-    /// `ConsumerGroupDescription(String, boolean, Collection<MemberDescription>,
-    /// String, GroupType, GroupState, Node, Set<AclOperation>, Optional<Integer>,
-    /// Optional<Integer>)` constructor. `coordinator` is `None` when the
-    /// coordinator is not known (Java's nullable `Node`).
+    /// # Arguments
+    ///
+    /// - `group_id` - the id of the consumer group.
+    /// - `is_simple_consumer_group` - whether the group is a simple consumer group.
+    /// - `members` - the members of the group.
+    /// - `partition_assignor` - the name of the partition assignor.
+    /// - `group_type` - the group protocol type.
+    /// - `group_state` - the group state.
+    /// - `coordinator` - the group coordinator, or `None` if not known.
+    /// - `authorized_operations` - the authorized operations for this group, or `None` if not
+    ///   known.
+    /// - `group_epoch` - the epoch of the group, or `None` for a classic group.
+    /// - `target_assignment_epoch` - the epoch of the target assignment, or `None` for a
+    ///   classic group.
     #[expect(clippy::too_many_arguments)]
     #[doc(
         alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#ConsumerGroupDescription(String,boolean,Collection,String,GroupType,GroupState,Node,Set,Optional,Optional)"
@@ -85,63 +89,65 @@ impl ConsumerGroupDescription {
         }
     }
 
-    /// The id of the consumer group. Mirrors `groupId()`.
+    /// Returns the id of the consumer group.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
 
-    /// Whether the consumer group is simple. Mirrors `isSimpleConsumerGroup()`.
+    /// Returns whether the consumer group is simple.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#isSimpleConsumerGroup")]
     pub fn is_simple_consumer_group(&self) -> bool {
         self.is_simple_consumer_group
     }
 
-    /// The members of the consumer group. Mirrors `members()`.
+    /// Returns the members of the consumer group.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#members")]
     pub fn members(&self) -> &[MemberDescription] {
         &self.members
     }
 
-    /// The consumer group partition assignor. Mirrors `partitionAssignor()`.
+    /// Returns the consumer group partition assignor.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#partitionAssignor")]
     pub fn partition_assignor(&self) -> &str {
         &self.partition_assignor
     }
 
-    /// The group type. Mirrors `type()`.
+    /// Returns the group type.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#type")]
     pub fn r#type(&self) -> GroupType {
         self.group_type
     }
 
-    /// The group state. Mirrors `groupState()`.
+    /// Returns the group state, or [`GroupState::Unknown`] if the state is too new for us to
+    /// parse.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupState")]
     pub fn group_state(&self) -> GroupState {
         self.group_state
     }
 
-    /// The consumer group coordinator, or `None` if not known. Mirrors
-    /// `coordinator()`.
+    /// Returns the consumer group coordinator, or `None` if not known.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#coordinator")]
     pub fn coordinator(&self) -> Option<&Node> {
         self.coordinator.as_ref()
     }
 
-    /// The authorized operations for this group, or `None` if the broker did not
-    /// report them (Java returns `null`). Mirrors `authorizedOperations()`.
+    /// Returns the authorized operations for this group, or `None` if that information is
+    /// not known.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#authorizedOperations")]
     pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
         self.authorized_operations.as_ref()
     }
 
-    /// The epoch of the consumer group. Mirrors `groupEpoch()`.
+    /// Returns the epoch of the consumer group. The optional is set to an integer if it is a
+    /// [`GroupType::Consumer`] group, and to `None` if it is a [`GroupType::Classic`] group.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#groupEpoch")]
     pub fn group_epoch(&self) -> Option<i32> {
         self.group_epoch
     }
 
-    /// The epoch of the target assignment. Mirrors `targetAssignmentEpoch()`.
+    /// Returns the epoch of the target assignment. The optional is set to an integer if it is a
+    /// [`GroupType::Consumer`] group, and to `None` if it is a [`GroupType::Classic`] group.
     #[doc(alias = "org.apache.kafka.clients.admin.ConsumerGroupDescription#targetAssignmentEpoch")]
     pub fn target_assignment_epoch(&self) -> Option<i32> {
         self.target_assignment_epoch

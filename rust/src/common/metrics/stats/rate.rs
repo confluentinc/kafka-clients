@@ -44,18 +44,31 @@ impl Rate {
     }
 
     /// Create a `Rate` with the given unit backed by a [`WindowedSum`].
+    ///
+    /// # Arguments
+    ///
+    /// - `unit` - the time unit of the rate
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_unit(unit: TimeUnit) -> Self {
         Self::with_unit_stat(unit, Arc::new(WindowedSum::new().into_sampled_stat()))
     }
 
     /// Create a `Rate` over seconds backed by the given sampled stat.
+    ///
+    /// # Arguments
+    ///
+    /// - `stat` - the sampled stat whose total the rate divides
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_stat(stat: Arc<SampledStat>) -> Self {
         Self::with_unit_stat(TimeUnit::Seconds, stat)
     }
 
     /// Create a `Rate` with the given unit and sampled stat.
+    ///
+    /// # Arguments
+    ///
+    /// - `unit` - the time unit of the rate
+    /// - `stat` - the sampled stat whose total the rate divides
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_unit_stat(unit: TimeUnit, stat: Arc<SampledStat>) -> Self {
         Self::with_unit_stat_window(unit, stat, -1)
@@ -63,8 +76,11 @@ impl Rate {
 
     /// Create a `Rate` with the given unit, sampled stat and explicit window.
     ///
-    /// `window` is expressed in `unit`; when positive it configures the stat's
-    /// own time window (Java `stat.withTimeWindow(window, unit)`).
+    /// # Arguments
+    ///
+    /// - `unit` - the time unit of the rate and of `window`
+    /// - `stat` - the sampled stat whose total the rate divides
+    /// - `window` - when positive, the stat's own time window, in `unit`
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#Rate")]
     pub fn with_unit_stat_window(unit: TimeUnit, stat: Arc<SampledStat>, window: i64) -> Self {
         let time_window_ms = if window > 0 {
@@ -77,8 +93,8 @@ impl Rate {
         Self { unit, stat, time_window_ms }
     }
 
-    /// The lower-cased name of the rate's unit with the trailing "s" stripped
-    /// (Java `unitName()`), e.g. `SECONDS` -> `second`.
+    /// Returns the lower-cased name of the rate's unit with the trailing "s"
+    /// stripped, e.g. `SECONDS` -> `second`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#unitName")]
     pub fn unit_name(&self) -> String {
         let name = self.unit.name();
@@ -92,7 +108,14 @@ impl Rate {
 
     /// Compute the window size in milliseconds used for the rate calculation.
     ///
-    /// Faithful translation of `Rate.windowSize`.
+    /// # Arguments
+    ///
+    /// - `config` - the metric's configuration
+    /// - `now` - the current POSIX time in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// The window size in milliseconds.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Rate#windowSize")]
     pub fn window_size(&self, config: &MetricConfig, now: i64) -> i64 {
         // purge old samples before we compute the window size

@@ -36,10 +36,10 @@ pub struct ElectLeadersResponse {
 }
 
 /// The parameters of Java's four-argument `ElectLeadersResponse` constructor
-/// (`ElectLeadersResponse.java:42`) that do not fit in the derived method name.
+/// that do not fit in the derived method name.
 ///
-/// Java's two constructors (`:37`, `:42`) share no parameter name, so all four
-/// of `:42`'s parameters reach its derived name. CLAUDE.md §2 caps that at three
+/// Java's two `ElectLeadersResponse#ElectLeadersResponse` constructors share no parameter
+/// name, so all four of this one's parameters reach its derived name. CLAUDE.md §2 caps that at three
 /// and makes this struct the method's *only* parameter, so every Java parameter
 /// lives here. This struct has no Java counterpart: it exists solely to satisfy
 /// that naming rule (DoD #7).
@@ -47,7 +47,7 @@ pub struct ElectLeadersResponse {
 /// It deliberately has **no** `Default`. Java declares no `ElectLeadersResponse`
 /// overload that omits any of these four, so none has a Java-derived default —
 /// for `version` in particular a synthesised `0` would silently drop the
-/// top-level error code (`:49` encodes it only for v1+). Construct it with
+/// top-level error code (the four-argument constructor encodes it only for v1+). Construct it with
 /// [`ElectLeadersResponseOptionsBuilder::new`] and set all four: [`ElectLeadersResponseOptionsBuilder::build`] returns an error if any of `throttle_time_ms`, `error_code`, `election_results`, `version` was not set.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -147,8 +147,7 @@ impl ElectLeadersResponseOptionsBuilder {
 impl ElectLeadersResponse {
     /// Creates a new `ElectLeadersResponse` from the underlying data.
     ///
-    /// Corresponds to Java's `ElectLeadersResponse(ElectLeadersResponseData)`
-    /// (`ElectLeadersResponse.java:37`).
+    /// Corresponds to Java's `ElectLeadersResponse(ElectLeadersResponseData)`.
     #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#ElectLeadersResponse")]
     pub fn with_data(data: ElectLeadersResponseData) -> Self {
         Self { data }
@@ -158,8 +157,8 @@ impl ElectLeadersResponse {
     /// results.
     ///
     /// Corresponds to Java's
-    /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)`
-    /// (`ElectLeadersResponse.java:42`) — the error code is only encoded for v1+.
+    /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)` — the error code
+    /// is only encoded for v1+.
     #[doc(alias = "org.apache.kafka.common.requests.ElectLeadersResponse#ElectLeadersResponse")]
     pub fn with_options(options: ElectLeadersResponseOptions) -> Self {
         let ElectLeadersResponseOptions { throttle_time_ms, error_code, election_results, version } = options;

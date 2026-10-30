@@ -27,6 +27,11 @@ pub struct TopicPartition {
 
 impl TopicPartition {
     /// Creates a new `TopicPartition` with the given topic and partition.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name
+    /// - `partition` - the partition number
     #[doc(alias = "org.apache.kafka.common.TopicPartition#TopicPartition")]
     pub fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
         Self { partition, topic: topic.into() }

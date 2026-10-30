@@ -160,7 +160,7 @@ pub(crate) struct MembershipInner {
     /// (`transition_to_stale`) is in flight. Mirrors the lifetime of
     /// Java's `staleMemberAssignmentRelease` `CompletableFuture` between
     /// its creation in `transitionToStale()` and its `whenComplete`
-    /// firing (`AbstractMembershipManager.java:839-854`). While this is
+    /// firing (`AbstractMembershipManager#transitionToStale`). While this is
     /// `true`, `maybe_rejoin_stale_member` must NOT transition STALE →
     /// JOINING — it records the intent in
     /// [`Self::stale_rejoin_requested`] and the release-completion path
@@ -182,7 +182,7 @@ pub(crate) struct MembershipInner {
     /// leave is in progress.
     ///
     /// Java: `Optional<CompletableFuture<Void>> leaveGroupInProgress`
-    /// (`AbstractMembershipManager.java:155-160`). Completed only through
+    /// (`AbstractMembershipManager#leaveGroupInProgress`). Completed only through
     /// [`AbstractMembershipManager::maybe_complete_leave_in_progress`] (or
     /// [`MembershipInner::take_leave_in_progress`] where the caller already
     /// holds the guard), always after the guard is released, because the
@@ -273,9 +273,8 @@ impl MembershipInner {
     }
 
     /// Take the in-progress leave future, if any, leaving `None` behind —
-    /// the first half of Java's `maybeCompleteLeaveInProgress()`
-    /// (`AbstractMembershipManager.java:378-385`) for call sites that hold the
-    /// guard. The caller completes the returned future with
+    /// the first half of Java's `maybeCompleteLeaveInProgress()` for call sites
+    /// that hold the guard. The caller completes the returned future with
     /// [`AbstractMembershipManager::complete_leave`] AFTER dropping the guard.
     pub(crate) fn take_leave_in_progress(&mut self) -> Option<KafkaFutureImpl<()>> {
         self.leave_group_in_progress.take()
@@ -419,7 +418,7 @@ impl AbstractMembershipManager {
     /// [`ConsumerMembershipManager::extract_assignment`].
     ///
     /// Java: `public final void onHeartbeatSuccess(R response)`
-    /// (`AbstractMembershipManager.java:299-340`). The Rust abstract layer is
+    /// (`AbstractMembershipManager#onHeartbeatSuccess`). The Rust abstract layer is
     /// hard-wired to [`ConsumerGroupHeartbeatResponse`] (Share / Streams are
     /// out of scope per `consumer-threading.md` §20), so the three hooks
     /// Java declares `protected abstract` are plain associated functions of
@@ -431,7 +430,7 @@ impl AbstractMembershipManager {
     /// An UNSUBSCRIBED member receiving a response with a negative epoch (the
     /// response to its leave heartbeat), and a member receiving an invalid
     /// negative epoch, complete the in-progress leave via Java's
-    /// `maybeCompleteLeaveInProgress()` (`AbstractMembershipManager.java:309,323`),
+    /// `maybeCompleteLeaveInProgress()` (from `AbstractMembershipManager#onHeartbeatSuccess`),
     /// which is what unblocks the `unsubscribe()` / `close()` caller waiting
     /// on the leave.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onHeartbeatSuccess")]
@@ -513,7 +512,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `private void throwIfUnexpectedError(R response)`
-    /// (`AbstractMembershipManager.java:342-349`).
+    /// (`AbstractMembershipManager#throwIfUnexpectedError`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#throwIfUnexpectedError")]
     fn return_if_unexpected_error(response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         let error_code = ConsumerMembershipManager::error_code(response);
@@ -765,7 +764,7 @@ impl AbstractMembershipManager {
             // earlier Rust form gated the clear on `state == Unsubscribed`,
             // which leaked the flag when polling while in-group (observable
             // via `subscription_updated()` staying true) — diverging from
-            // Java. (`AbstractMembershipManager.java:552`).
+            // Java (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#onConsumerPoll`).
             let was_updated = guard.subscription_updated;
             guard.subscription_updated = false;
             was_updated && guard.state == MemberState::Unsubscribed
@@ -880,9 +879,10 @@ impl AbstractMembershipManager {
             },
             MemberState::Leaving => {
                 if guard.is_poll_timer_expired {
-                    // Java transitions to STALE here via `transitionToStale()`,
+                    // Java transitions to STALE here via
+                    // `org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#transitionToStale`,
                     // which also schedules the onPartitionsLost assignment
-                    // release (`AbstractMembershipManager.java:839-854`). The
+                    // release. The
                     // release is async (it awaits the §31 listener) and cannot
                     // run inside this sync method; the concrete
                     // `ConsumerMembershipManager::transition_to_stale` performs
@@ -904,7 +904,7 @@ impl AbstractMembershipManager {
     }
 
     /// Java: `maybeRejoinStaleMember()`
-    /// (`AbstractMembershipManager.java:823-830`). Resets the
+    /// (`AbstractMembershipManager#maybeRejoinStaleMember`). Resets the
     /// `isPollTimerExpired` flag; if the member is currently STALE,
     /// transitions it to JOINING so the next heartbeat re-joins the
     /// group with `memberEpoch=0`.
@@ -937,8 +937,9 @@ impl AbstractMembershipManager {
                 // The onPartitionsLost release triggered by
                 // `transition_to_stale` has not completed yet. Java chains
                 // `transitionToJoining` onto the in-flight
-                // `staleMemberAssignmentRelease` future
-                // (`AbstractMembershipManager.java:828`); we record the
+                // `staleMemberAssignmentRelease` future (in
+                // `org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeRejoinStaleMember`);
+                // we record the
                 // intent and let the release-completion path perform the
                 // transition once the callback returns. The member stays
                 // STALE in the meantime (it must not clear its assignment
@@ -1009,8 +1010,7 @@ impl AbstractMembershipManager {
     /// complete the leave in progress when a member receives the response to
     /// the leave heartbeat. Returns `true` if a leave was in progress.
     ///
-    /// Java: `maybeCompleteLeaveInProgress()`
-    /// (`AbstractMembershipManager.java:378-385`). The future is taken under
+    /// Java: `AbstractMembershipManager#maybeCompleteLeaveInProgress`. The future is taken under
     /// the guard and completed after the guard is released, since completing
     /// it runs the continuations chained on it.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeCompleteLeaveInProgress")]
@@ -1050,8 +1050,7 @@ impl AbstractMembershipManager {
     ///
     /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
     /// behind the listener-presence checks of
-    /// `invokeOnPartitions{Revoked,Lost}Callback`
-    /// (`ConsumerMembershipManager.java:320-341`).
+    /// `ConsumerMembershipManager#invokeOnPartitions{Revoked,Lost}Callback`.
     ///
     /// `MutexGuard`s are never held across an `.await` (this method does
     /// not await at all).

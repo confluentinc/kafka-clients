@@ -63,7 +63,7 @@ impl Deserializer<GenericValue> for BytesPassthroughDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         _topic: &str,
-        _headers: &RecordHeaders,
+        _headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<GenericValue, Error> {
         Ok(GenericValue::new(box_bytes(data.clone()).cast()))
@@ -85,7 +85,7 @@ impl Deserializer<GenericValue> for ArcDeserializer {
     async fn deserialize_with_headers(
         &self,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: &mut RecordHeaders,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
         Deserializer::deserialize_with_headers(&*self.0.imp().lock().await, topic, headers, data).await
@@ -94,18 +94,18 @@ impl Deserializer<GenericValue> for ArcDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<GenericValue, Error> {
         Deserializer::deserialize_with_headers_bytes(&*self.0.imp().lock().await, topic, headers, data).await
     }
 
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        Deserializer::configure(&mut *self.0.imp().lock().await, configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        Deserializer::configure(&mut *self.0.imp().lock().await, configs, is_key).await
     }
 
-    async fn close(&mut self) {
-        Deserializer::close(&mut *self.0.imp().lock().await).await;
+    async fn close(&mut self) -> Result<(), Error> {
+        Deserializer::close(&mut *self.0.imp().lock().await).await
     }
 }
 
@@ -129,25 +129,43 @@ unsafe fn deserializer_from(
     }
 }
 
-/// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
-/// Deserializer<V> valueDeserializer)`: returns the owned class handle, freed
-/// with [`kafka_consumer_KafkaConsumer_destroy`], or stores the owned error in
-/// `*out_err` and returns `NULL`. The consumer gets its own copy of the
-/// handle's configuration, with the handle's `client.id` (the consumers of one
-/// handle share it, as Java's consumers given one `ConsumerConfig` do), so the
-/// handle stays the caller's and can build further consumers; each
-/// deserializer handle is consumed (its `self` stays the caller's until the
-/// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
-/// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
-/// A constructor that fails after taking the deserializers closes them, as
-/// Java's does (`AsyncKafkaConsumer.java:596-603`), and returns without
-/// waiting for a C deserializer's `close` to report: that report may arrive
-/// after this returned, on the handle, which stays valid for it.
+/// A consumer is instantiated by providing a set of key-value pairs as
+/// configuration, and a key and a value `Deserializer`.
+///
+/// Note: after creating a `KafkaConsumer` you must always close it to avoid
+/// resource leaks.
+///
+/// # Parameters
+///
+/// - `config` - The consumer configs
+/// - `key_deserializer` - The deserializer for key that implements `Deserializer`. The configure()
+///   method won't be called in the consumer when the deserializer is passed in directly.
+/// - `value_deserializer` - The deserializer for value that implements `Deserializer`. The
+///   configure() method won't be called in the consumer when the deserializer is passed in
+///   directly.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `group.protocol` is invalid
+/// - `kafka_common_Error_is_local_unsupported_operation_error` if `group.protocol` is
+///   `classic`
+///
+/// # Translation notes
+///
+/// The consumer gets its own copy of `config`, with its `client.id`, so `config`
+/// can build further consumers. A `NULL` deserializer makes that side's `void *`
+/// a `kafka_Bytes_t *` owned by the records. A constructor that fails after
+/// taking the deserializers closes them, as Java's does, without waiting for a C
+/// deserializer's `close` to report.
 ///
 /// # Safety
 ///
-/// `config` must be a live handle, each deserializer null or a live handle not
-/// used afterwards, and `out_err` a valid slot pointing at null.
+/// `config` must be a live handle, each deserializer null or a live handle (an
+/// owned one not used again by the caller; its `self` stays the caller's until the
+/// consumer is destroyed), `out_err` a valid slot pointing at null. The consumer is
+/// owned by the caller, freed with [`kafka_consumer_KafkaConsumer_destroy`]; a C
+/// deserializer's late `close` report arrives on its handle, which stays valid for
+/// it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
@@ -185,13 +203,17 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     }
 }
 
-/// The class as a `Consumer`: a borrowed view valid until the class handle
-/// is destroyed, never destroyed itself (CLAUDE.md §4 rule 3). `*mut`
-/// because `poll` and the other operations take `&mut self`.
+/// The class as a `Consumer`.
+///
+/// # Returns
+///
+/// The `Consumer` view of the class, `*mut` because `poll` and the other
+/// operations take `&mut self`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the class
+/// handle is destroyed; there is no `kafka_consumer_Consumer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer__as_Consumer(
@@ -276,7 +298,7 @@ mod tests {
                 None,
             )))
         };
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let data = Bytes::from_static(b"v");
         for (kind, deserializer) in [("built-in", &built_in), ("C", &asynchronous)] {
             let future = Deserializer::deserialize(deserializer, "t", &data);
@@ -285,13 +307,14 @@ mod tests {
                 "{kind} deserialize: {} bytes",
                 size_of_val(&future)
             );
-            let future = Deserializer::deserialize_with_headers(deserializer, "t", &headers, &data);
+            let future = Deserializer::deserialize_with_headers(deserializer, "t", &mut headers, &data);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} with_headers: {} bytes",
                 size_of_val(&future)
             );
-            let future = Deserializer::deserialize_with_headers_bytes(deserializer, "t", &headers, &data);
+            drop(future);
+            let future = Deserializer::deserialize_with_headers_bytes(deserializer, "t", &mut headers, &data);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} with_headers_bytes: {} bytes",
@@ -303,8 +326,8 @@ mod tests {
     /// An asynchronous C deserializer costs no allocation per record on the
     /// consumer's path: through `dyn DynDeserializer`, the `ArcDeserializer`
     /// future stays inline, the Tokio lock is uncontended, the registry slot
-    /// and its arguments are reused, and the headers (empty or not, shared
-    /// with the record) and the fetch buffer are not copied.
+    /// and its arguments are reused, and the headers (empty or not, moved
+    /// into the slot and back) and the fetch buffer are not copied.
     #[test]
     fn async_c_deserializer_through_dyn_allocates_nothing_per_record() {
         use std::ffi::{c_char, c_void};
@@ -326,7 +349,7 @@ mod tests {
         unsafe extern "C" fn report_inline(
             self_: *mut c_void,
             _topic: *const c_char,
-            _headers: *const kafka_common_header_internals_RecordHeaders_t,
+            _headers: *mut kafka_common_header_internals_RecordHeaders_t,
             _data: kafka_Bytes_t,
             callback_id: i64,
         ) {
@@ -363,13 +386,13 @@ mod tests {
             Box::new(ArcDeserializer(unsafe { take_deserializer(handle) }));
         let mut with_k = RecordHeaders::new();
         with_k.add_with_key_value("k", Some(b"v")).unwrap();
-        for headers in [RecordHeaders::new(), with_k] {
+        for mut headers in [RecordHeaders::new(), with_k] {
             let data = Bytes::from_static(b"value");
-            let record = || {
+            let mut record = || {
                 let value = ready(DynDeserializer::deserialize_with_headers_bytes(
                     &*deserializer,
                     "topic",
-                    &headers,
+                    &mut headers,
                     &data,
                 ))
                 .expect("an inline report completes the first poll")
@@ -396,11 +419,11 @@ mod tests {
         use crate::ffi::common::serialization::ready;
         let source = Bytes::from_static(b"hello world");
         let data = source.slice(6..);
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let value = ready(Deserializer::deserialize_with_headers_bytes(
             &BytesPassthroughDeserializer,
             "t",
-            &headers,
+            &mut headers,
             &data,
         ))
         .unwrap()
@@ -538,6 +561,7 @@ mod tests {
             crate::ffi::consumer::client_ref(kafka_consumer_KafkaConsumer__as_Consumer(class))
                 .handle()
                 .metrics()
+                .snapshot()
                 .keys()
                 .filter_map(|name| name.tags().get("client-id").cloned())
                 .collect::<std::collections::HashSet<_>>()

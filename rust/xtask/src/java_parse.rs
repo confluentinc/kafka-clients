@@ -538,64 +538,7 @@ pub fn parse_expr(s: &str) -> Res<Expr> {
 /// `{@code X}` reduced to ``X``, HTML tags dropped, block tags (`@see`, …)
 /// removed. Paragraphs are separated by one blank line.
 pub fn javadoc_text(block: &str) -> String {
-    let inner = block.trim().trim_start_matches("/**").trim_end_matches("*/");
-    let mut lines = Vec::new();
-    for line in inner.lines() {
-        let l = line.trim().trim_start_matches('*').trim();
-        if l.starts_with('@') {
-            break;
-        }
-        lines.push(l.to_string());
-    }
-    let mut text = lines.join("\n");
-    // {@link A#b(C) label} -> ``label`` (else ``A.b(C)``); {@code x} -> ``x``.
-    while let Some(start) = text.find("{@") {
-        let Some(end_rel) = text[start..].find('}') else { break };
-        let inside = text[start + 2..start + end_rel].to_string();
-        let (tag, rest) = inside.split_once(' ').unwrap_or((inside.as_str(), ""));
-        let rest = rest.trim();
-        let shown = if tag == "link" || tag == "linkplain" {
-            // The reference ends at the first space outside parentheses.
-            let mut depth = 0;
-            let mut end = rest.len();
-            for (k, c) in rest.char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    ' ' if depth == 0 => {
-                        end = k;
-                        break;
-                    },
-                    _ => {},
-                }
-            }
-            let (reference, label) = rest.split_at(end);
-            let label = label.trim();
-            if label.is_empty() {
-                reference.trim_start_matches('#').replace('#', ".")
-            } else {
-                label.to_string()
-            }
-        } else {
-            rest.to_string()
-        };
-        text.replace_range(start..start + end_rel + 1, &format!("``{shown}``"));
-    }
-    for tag in [
-        "<p>", "</p>", "<ul>", "</ul>", "<li>", "</li>", "<b>", "</b>", "<i>", "</i>",
-    ] {
-        let sub = if tag == "<p>" { "\n\n" } else { "" };
-        text = text.replace(tag, sub);
-    }
-    // Collapse runs of blank lines and trailing whitespace.
-    let mut out: Vec<String> = Vec::new();
-    for para in text.split("\n\n") {
-        let joined = para.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !joined.is_empty() {
-            out.push(joined);
-        }
-    }
-    out.join("\n\n")
+    crate::javadoc::plain_text(block)
 }
 
 /// The `@deprecated` text of a `/** ... */` block, if it has one.

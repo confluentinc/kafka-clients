@@ -7,6 +7,37 @@ breaking changes.
 
 ## [Unreleased]
 
+### General availability
+
+- First generally available (GA) release of the Rust client, version 1.0.0.
+- The FFI layer (the `ffi` feature) is experimental right now.
+- Windows is not supported yet.
+
+## 1.0.0-rc.1
+
+### Consumer
+
+- **Breaking:** `Consumer::committed` / `committed_with_timeout` return
+  `HashMap<TopicPartition, Option<OffsetAndMetadata>>`: every queried
+  partition is a key, `None` for one with no committed offset, as Java maps it
+  to `null`. It was absent from the map before.
+- **Breaking:** `Consumer::offsets_for_times` /
+  `offsets_for_times_with_timeout` return
+  `HashMap<TopicPartition, Option<OffsetAndTimestamp>>`: every queried
+  partition is a key, `None` for one without an offset for its timestamp, as
+  in Java. A zero timeout maps every queried partition to `None`, as Java's
+  `emptyResults()`. The same holds for `ConsumerHandle`.
+- **Breaking:** `Deserializer::deserialize_with_headers` and
+  `deserialize_with_headers_bytes` take the record's headers as
+  `&mut RecordHeaders`, so a deserializer can change them, as Java's can.
+  Update the parameter type in your implementations.
+- `ConsumerHandle` refuses a closed consumer as the consumer does: once
+  `close()` has returned, its async operations return `IllegalStateError`
+  ("This consumer has already been closed.") instead of
+  `ConcurrentModificationError`, and `assignment`, `paused` and
+  `group_metadata` panic with that message instead of returning stale data.
+  A listener that `close()` runs still calls back in; `wakeup` stays callable.
+
 ### Admin client
 
 - **Behaviour change:** a retriable error during `close(timeout)` no longer
@@ -81,13 +112,12 @@ breaking changes.
   `RemoveMembersFromConsumerGroupOptions::set_reason` take an `Option`, so
   `None` clears a value set earlier, as Java's `owner(null)` and
   `reason(null)` do.
-- **Breaking (Rust, Python):** a `NewTopic` config value can be null, as a
-  value of Java's `Map<String, String>` can. `NewTopic::set_configs` takes an
-  `Option<BTreeMap<String, Option<String>>>` and `configs()` returns the
-  `Option`-valued map: `None` for the map clears configs set earlier, as
-  Java's `configs(null)` does, and a `None` value is sent to the broker as a
-  null config value. In Python a `None` value is sent the same way instead of
-  raising `TypeError`, and `configs()` is typed `dict[str, str | None]`.
+- **Breaking:** `NewTopic::set_configs` takes an
+  `Option<BTreeMap<String, String>>`: `None` clears configs set earlier, as
+  Java's `configs(null)` does. A config value cannot be null: the broker
+  rejects a null config value of a new topic with `INVALID_CONFIG`. In Python,
+  `create_topics` raises `TypeError("new_topics must not contain a NewTopic
+  with a None config value")` for one.
 - `NewTopic`'s `Display` prints Java's `toString()`, the maps as `{k=v}` and a
   missing map or value as `null`, instead of Rust's debug syntax.
 - `AclOperation::values()` and `AclPermissionType::values()` return the
@@ -102,6 +132,36 @@ breaking changes.
 
 ### Common
 
+- **Breaking:** `Sensor::record`, `record_with_value` and
+  `record_with_value_time_ms` return `Result<(), Error>` and check the
+  sensor's quotas, as Java's do: a violated quota returns
+  `QuotaViolationError` and stops the parent sensors from recording. New
+  `record_with_value_time_ms_check_quotas` translates Java's
+  `record(double, long, boolean)`.
+- **Breaking:** `GroupAuthorizationError::group_id` returns `Option<&str>`,
+  `None` where Java's `groupId()` is `null`. `GroupAuthorizationError::new`
+  takes the message only, as Java's `(String message)`;
+  `with_group_id(group_id, message)` takes the pair.
+- **Breaking:** `Serializer::configure` / `close` and `Deserializer::configure`
+  / `close` return a future of `Result<(), Error>`, so a serde can report a
+  failure. The producer and the consumer close both serdes and return the
+  first failure as the cause of `Failed to close kafka producer` /
+  `Failed to close kafka consumer`, as Java's `closeQuietly`. Return `Ok(())`
+  from your implementations.
+- `KafkaFuture::then_apply` runs its function once, when this future
+  completes (inside `then_apply` when it already has), and completes the
+  returned future with its result, as Java does. It ran on every `get` of the
+  returned future before, and never when nobody awaited it. `KafkaFuture::all_of`
+  completes once every future has, with the error of the first failed one in
+  the list, as Java's `allOf`; it returned the first failure in list order
+  without waiting for the others before.
+- **Breaking:** `Producer::metrics`, `Consumer::metrics` and `Metrics::metrics`
+  return a `MetricsView`, a live read-only view
+  of the registry, as Java's `Collections.unmodifiableMap(metrics.metrics())`:
+  a metric registered or removed after the call shows in it. It returned a
+  snapshot `HashMap` before. `MetricsView::snapshot` gives the whole map as it
+  is now, without copying it; `MetricsView::from(HashMap)` builds a standalone
+  view for a test double.
 - The minimum rustls version is now 0.23.46, which fixes
   [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
   `Debug` output of rustls's client session values exposed TLS session secrets.
@@ -116,6 +176,42 @@ breaking changes.
 
 ### C API
 
+- **Breaking:** `kafka_consumer_Consumer_committed*` and
+  `kafka_consumer_Consumer_offsets_for_times*` (and the `ConsumerHandle`
+  ones) keep every queried partition in the returned map, with a `NULL` value
+  for one with no offset.
+- **Breaking:** `kafka_common_metrics_Sensor_record`,
+  `_record_with_value` and `_record_with_value_time_ms` take a trailing
+  `out_err`; new `kafka_common_metrics_Sensor_record_with_value_time_ms_check_quotas`.
+- **Breaking:** `kafka_common_GroupAuthorizationError_new` takes the message
+  only, `kafka_common_GroupAuthorizationError_with_group_id` the pair, and
+  `kafka_common_GroupAuthorizationError_group_id` returns `NULL` when the
+  group is unknown.
+- **Breaking:** a C deserializer receives the record's own headers as a
+  mutable `kafka_common_header_internals_RecordHeaders_t *` and may change
+  them, as Java's may: `Deserializer_deserialize_with_headers`,
+  `Deserializer_deserialize_with_headers_bytes`, their `_cb` twins and the
+  `deserialize_with_headers_async_fn_t` /
+  `deserialize_with_headers_bytes_async_fn_t` function-pointer types drop
+  `const`.
+- `kafka_common_KafkaFuture_then_apply` runs the C function once, when the
+  source future completes, and completes the returned future with its result:
+  inside the call when the source is already complete, else from the client's
+  `__execute_callbacks`, where it is queued on completion. It ran on the first
+  `get` of the returned future before.
+- **Breaking:** `kafka_common_serialization_{Serializer,Deserializer}_configure`
+  and `_close` take a trailing `kafka_common_Error_t **out_err`, and their
+  `_configure_cb_t` / `_close_cb_t` completions receive a
+  `kafka_common_Error_t *` (`NULL` on success) before `opaque`. An error a C
+  serde reports through `__set_callback_result` reaches the caller instead of
+  being logged.
+- **Breaking:** `kafka_producer_Producer_metrics`, `kafka_consumer_Consumer_metrics`
+  and `kafka_common_metrics_Metrics_metrics` return a live
+  `kafka_common_metrics_MetricsView_t *` (`_len`, `_is_empty`, `_contains_key`,
+  `_get`, `_iterator`, `_destroy`) instead of a snapshot `kafka_Map_t *`.
+- New `kafka_Iterator_t` (`kafka_Iterator_has_next`, `_next`, `_destroy`), Java's
+  `java.util.Iterator`, and `kafka_Map_Entry_t` (`kafka_Map_Entry_key`,
+  `_value`), Java's `Map.Entry`, its elements when iterating a map.
 - `kafka_admin_EndpointType_t`, Java's `EndpointType`: the singletons
   `kafka_admin_EndpointType_unknown`, `_broker` and `_controller`, the C enum
   `kafka_admin_EndpointType_e` read with `kafka_admin_EndpointType__enum`, and
@@ -145,11 +241,13 @@ breaking changes.
   with `NULL` clears the reason instead of setting an empty one, and
   `kafka_admin_CreateDelegationTokenOptions_set_owner` with `NULL` clears the
   owner, as Java's `reason(null)` and `owner(null)` do.
-- **Breaking (C API):** `kafka_admin_NewTopic_set_configs` takes a `NULL`
-  value as Java's `null` config value, which it used to send as an empty
-  string, and a `NULL` map as Java's `null` map, which clears the configs
-  where it used to set an empty map. `kafka_admin_NewTopic_configs` returns a
-  `NULL` value for a null config value.
+- **Breaking (C API):** a config value passed to
+  `kafka_admin_NewTopic_set_configs` must not be `NULL`, a value the broker
+  rejects for a new topic; it used to be sent as an empty string. A `NULL`
+  value panics and leaves the configs unchanged, which
+  `kafka_admin_NewTopic_set_configs_err` reports as an `IllegalStateError`. A
+  `NULL` map clears the configs, as Java's `configs(null)` does, where it used
+  to set an empty map.
 - `kafka_common_acl_AclOperation_values` and
   `kafka_common_acl_AclPermissionType_values` return an owned list of the
   borrowed singletons in declaration order.

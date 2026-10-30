@@ -65,7 +65,7 @@ mod tests {
     /// is wall-clock — an NTP step backwards makes a later reading smaller than
     /// an earlier one, so elapsed measurements computed as
     /// `nanoseconds() - start` go negative. Java uses `System.nanoTime()`
-    /// (`SystemTime.java:41`), which is monotonic.
+    /// (`SystemTime#nanoseconds`), which is monotonic.
     ///
     /// This cannot inject a clock step, so it asserts the two properties that a
     /// wall-clock implementation would not satisfy by construction: readings

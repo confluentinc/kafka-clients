@@ -8,7 +8,11 @@ links the Rust library's C API (`../rust`, feature `ffi`).
 
 ## Status
 
-**In Development:** the API is subject to large changes and the stability is not guaranteed.
+**Preview:** the Python client is in preview and not yet recommended for production use. The public API is not stable before the GA release and may change. We welcome your feedback while the design is still open.
+
+Windows is not supported yet.
+
+**Known issue on Python 3.14:** a Ctrl+C (`KeyboardInterrupt`) can, rarely, leave a client call counted, so that a later `close()` waits forever, or leave a mock client's lock held. It happens when the Ctrl+C arrives right after a `with` block takes its lock and before the block starts. The bug is in CPython 3.14 and affects every `with` block ([python/cpython#148874](https://github.com/python/cpython/issues/148874)); Python 3.15 has the fix.
 
 ## Import paths
 

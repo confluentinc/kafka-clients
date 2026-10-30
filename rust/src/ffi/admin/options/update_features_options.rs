@@ -64,15 +64,24 @@ fn boxed(options: UpdateFeaturesOptions) -> *mut kafka_admin_UpdateFeaturesOptio
 }
 
 /// `new UpdateFeaturesOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_UpdateFeaturesOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_UpdateFeaturesOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_UpdateFeaturesOptions_new() -> *mut kafka_admin_UpdateFeaturesOptions_t {
     boxed(UpdateFeaturesOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -90,8 +99,12 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -107,7 +120,11 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesOptions_timeout_ms(
     unsafe { update_features_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `UpdateFeaturesOptions.validateOnly(boolean validateOnly)`: when true the request is validated by the broker without being applied.
+/// `UpdateFeaturesOptions.validateOnly(boolean validateOnly)`.
+///
+/// # Parameters
+///
+/// - `validate_only` - when true the request is validated by the broker without being applied.
 ///
 /// # Safety
 ///
@@ -125,7 +142,11 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesOptions_set_validate_only(
     *options = std::mem::take(options).set_validate_only(validate_only != 0);
 }
 
-/// `UpdateFeaturesOptions.validateOnly()`: whether the request is only validated, not applied.
+/// `UpdateFeaturesOptions.validateOnly()`.
+///
+/// # Returns
+///
+/// Whether the request is only validated, not applied.
 ///
 /// # Safety
 ///

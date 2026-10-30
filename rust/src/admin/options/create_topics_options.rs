@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::create_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.CreateTopicsOptions`.
 
 /// Options for `Admin::create_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.CreateTopicsOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions")]
 pub struct CreateTopicsOptions {
@@ -41,8 +37,16 @@ impl CreateTopicsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -50,15 +54,22 @@ impl CreateTopicsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set to true if the request should be validated without creating the
-    /// topic.
+    /// Set to true if the request should be validated without creating the topic.
+    ///
+    /// # Arguments
+    ///
+    /// - `validate_only` - `true` to only validate the request.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#validateOnly")]
     pub fn set_validate_only(mut self, validate_only: bool) -> Self {
@@ -66,14 +77,21 @@ impl CreateTopicsOptions {
         self
     }
 
-    /// Return true if the request should be validated without creating the
-    /// topic.
+    /// Returns true if the request should be validated without creating the topic.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#shouldValidateOnly")]
     pub fn should_validate_only(&self) -> bool {
         self.validate_only
     }
 
     /// Set to true if quota violation should be automatically retried.
+    ///
+    /// # Arguments
+    ///
+    /// - `retry_on_quota_violation` - `true` to retry on quota violation.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsOptions#retryOnQuotaViolation")]
     pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {

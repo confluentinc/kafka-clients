@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_log_dirs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeLogDirsResult`.
 
 use std::collections::HashMap;
 
@@ -23,8 +21,6 @@ use crate::common::KafkaFuture;
 use super::LogDirDescription;
 
 /// The result of the `Admin::describe_log_dirs` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeLogDirsResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult")]
 pub struct DescribeLogDirsResult {
@@ -50,8 +46,6 @@ impl DescribeLogDirsResult {
     /// Returns a future which succeeds only if all the brokers have responded
     /// without error, yielding a map from broker id to a map from broker log
     /// directory path to a description of that log directory.
-    ///
-    /// Corresponds to `DescribeLogDirsResult.allDescriptions`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult#allDescriptions")]
     pub fn all_descriptions(&self) -> KafkaFuture<HashMap<i32, HashMap<String, LogDirDescription>>> {
         let entries: Vec<(i32, KafkaFuture<HashMap<String, LogDirDescription>>)> =

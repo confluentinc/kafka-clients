@@ -58,7 +58,6 @@ mod network_client;
 mod network_client_utils;
 #[cfg_attr(not(test), expect(dead_code))]
 mod node_api_versions;
-mod preview_warning;
 pub mod producer;
 #[cfg(test)]
 mod test_alloc_tracker;
@@ -104,7 +103,8 @@ pub(crate) use metadata_updater::MetadataUpdater;
 pub(crate) use node_api_versions::NodeApiVersions;
 // Only the outer class is re-exported: `FetchRequestData` (Rust
 // `FetchSessionRequestData`) and `Builder` are Java nested classes
-// (`FetchSessionHandler.java:95,231`), so per CLAUDE.md §2 they keep the
+// (`org.apache.kafka.clients.FetchSessionHandler.FetchRequestData` and
+// `org.apache.kafka.clients.FetchSessionHandler.Builder`), so per CLAUDE.md §2 they keep the
 // file-module path that plays the outer-class qualifier.
 #[expect(unused_imports)]
 pub(crate) use fetch_session_handler::FetchSessionHandler;

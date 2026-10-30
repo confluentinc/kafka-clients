@@ -38,6 +38,7 @@ import asyncio
 import os
 import random
 import signal
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -322,6 +323,13 @@ def test_async_admin_pump_survives_an_interrupt(at: str, monkeypatch: pytest.Mon
 STRESS_S = 3.0
 
 
+# CPython 3.14 checks for signals after a `with` statement's `__enter__` returns
+# and before its block starts, so a KeyboardInterrupt there skips `__exit__` and
+# leaves the use counted (https://github.com/python/cpython/issues/148874, fixed
+# in 3.15). These signals land there often enough to fail; a run that misses
+# that point passes.
+@pytest.mark.xfail(sys.version_info[:2] == (3, 14), strict=False,
+                   reason="CPython gh-148874: on 3.14 a signal right after __enter__ skips __exit__")
 @pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs signal.pthread_kill")
 @pytest.mark.parametrize("client", ["producer", "consumer", "admin"])
 def test_real_sigint_leaves_no_use_counted(client: str) -> None:

@@ -49,7 +49,7 @@ pub enum kafka_common_metrics_TimeUnit_e {
     kafka_common_metrics_TimeUnit_DAYS,
 }
 
-/// One static instance per value, indexed by [`kafka_common_metrics_TimeUnit_e`].
+/// One static instance per value, indexed by `kafka_common_metrics_TimeUnit_e`.
 static VARIANTS: [TimeUnit; 7] = [
     TimeUnit::Nanoseconds,
     TimeUnit::Microseconds,
@@ -91,56 +91,56 @@ pub(crate) unsafe fn value_of(unit: *const kafka_common_metrics_TimeUnit_t) -> T
     unsafe { *(unit as *const TimeUnit) }
 }
 
-/// `TimeUnit.NANOSECONDS`.
+/// Returns `TimeUnit.NANOSECONDS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_nanoseconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Nanoseconds)
 }
 
-/// `TimeUnit.MICROSECONDS`.
+/// Returns `TimeUnit.MICROSECONDS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_microseconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Microseconds)
 }
 
-/// `TimeUnit.MILLISECONDS`.
+/// Returns `TimeUnit.MILLISECONDS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_milliseconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Milliseconds)
 }
 
-/// `TimeUnit.SECONDS`.
+/// Returns `TimeUnit.SECONDS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_seconds() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Seconds)
 }
 
-/// `TimeUnit.MINUTES`.
+/// Returns `TimeUnit.MINUTES`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_minutes() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Minutes)
 }
 
-/// `TimeUnit.HOURS`.
+/// Returns `TimeUnit.HOURS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_hours() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Hours)
 }
 
-/// `TimeUnit.DAYS`.
+/// Returns `TimeUnit.DAYS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_TimeUnit_days() -> *const kafka_common_metrics_TimeUnit_t {
     singleton(TimeUnit::Days)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_metrics_TimeUnit_NANOSECONDS`, the first enumerator:
 /// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
@@ -159,11 +159,12 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `name()`: the Java constant name, a static string never freed.
+/// Returns the Java constant name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is static, never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_name(
@@ -185,7 +186,16 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_name(
     }
 }
 
-/// `toMillis(long window)`.
+/// Converts a duration expressed in this unit to milliseconds: a finer unit truncates, a coarser
+/// one saturates at `INT64_MAX` / `INT64_MIN`.
+///
+/// # Parameters
+///
+/// - `window` - the duration, in this unit
+///
+/// # Returns
+///
+/// The duration in milliseconds.
 ///
 /// # Safety
 ///

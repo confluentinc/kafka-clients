@@ -28,14 +28,18 @@ use crate::common::protocol::Errors;
 
 use super::format_java_set;
 
-/// Invalid topic error with the set of invalid topics.
+/// The client has attempted to perform an operation on an invalid topic.
+/// For example the topic name is too long, contains invalid characters etc.
+/// This error is not retriable because the operation won't suddenly become valid.
 ///
-/// Corresponds to Java's `InvalidTopicException`, error code
-/// `Errors::InvalidTopicError`.
+/// # See also
 ///
-/// Java `extends` chain:
-///    `InvalidTopicException` -> `InvalidConfigurationException` ->
-///   `ApiException` -> `KafkaException`
+/// - `UnknownTopicOrPartitionError`
+///
+/// # Translation notes
+///
+/// Error code `Errors::InvalidTopicError`. Java `extends` chain: `InvalidTopicException` ->
+/// `InvalidConfigurationException` -> `ApiException` -> `KafkaException`.
 #[derive(Clone, Debug, Delegate)]
 // Two delegations to the same field. Ambassador takes one trait per
 // `#[delegate]`, so the repeated `target` key is unavoidable; clippy's
@@ -53,10 +57,11 @@ pub struct InvalidTopicError {
 }
 
 impl InvalidTopicError {
-    /// Create an invalid topic error, formatting the topics into the message.
+    /// Creates an invalid topic error with the message `"Invalid topics: [<topics>]"`.
     ///
-    /// Mirrors Java's `InvalidTopicException(Set<String> invalidTopics)`:
-    /// `super("Invalid topics: " + invalidTopics)`.
+    /// # Arguments
+    ///
+    /// - `invalid_topics` - the invalid topics
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#InvalidTopicException")]
     pub fn new(invalid_topics: HashSet<String>) -> Self {
         let message = format!("Invalid topics: {}", format_java_set(&invalid_topics));
@@ -66,12 +71,8 @@ impl InvalidTopicError {
         }
     }
 
-    /// Create an invalid topic error with the code's default message and no
-    /// topics.
-    ///
-    /// Mirrors Java's `InvalidTopicException(String message)` reached via the
-    /// `Errors.INVALID_TOPIC_EXCEPTION` builder (`exception()`), where the
-    /// message is the default constant and the topic set is empty.
+    /// Creates an invalid topic error with the default message of `Errors::InvalidTopicError`
+    /// and an empty set of topics, as the broker's error code is turned into an error.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#InvalidTopicException")]
     pub fn with_default_message() -> Self {
         Self {
@@ -80,15 +81,12 @@ impl InvalidTopicError {
         }
     }
 
-    /// Create an invalid topic error carrying a custom message.
+    /// Creates an invalid topic error carrying a custom message.
     ///
-    /// Mirrors Java's `InvalidTopicException(String message, Set<String> invalidTopics)`
-    /// (`InvalidTopicException.java:60`).
+    /// # Arguments
     ///
-    /// The two translated constructors intersect on `{invalidTopics}`, which is
-    /// exactly `InvalidTopicException(Set<String>)` (`:55`) — so [`new`](Self::new)
-    /// keeps the plain name and this one is suffixed with the parameter beyond the
-    /// intersection (CLAUDE.md §2).
+    /// - `invalid_topics` - the invalid topics
+    /// - `message` - the error's message
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#InvalidTopicException")]
     pub fn with_message(invalid_topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self {
@@ -97,15 +95,13 @@ impl InvalidTopicError {
         }
     }
 
-    /// Access the base error.
-    // the embedded KafkaError base (CLAUDE.md §12.3)
+    /// Returns the embedded `KafkaError` base, holding the error code, message and source.
     #[doc(alias = "rust-only")]
     pub fn kafka_error(&self) -> &KafkaError {
         &self.kafka_error
     }
 
-    /// The set of invalid topics. Mirrors Java's
-    /// `InvalidTopicException.invalidTopics()`.
+    /// Returns the set of invalid topics, empty when the error was not built from them.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTopicException#invalidTopics")]
     pub fn invalid_topics(&self) -> &HashSet<String> {
         &self.invalid_topics
@@ -137,10 +133,8 @@ impl ErrorHierarchy for InvalidTopicError {
 }
 
 impl InvalidTopicError {
-    /// The underlying source, held by the embedded [`KafkaError`] base — Java's
-    /// subclass passes its `cause` up to `super(message, cause)`. Mirrors
-    /// `Throwable.getCause()`.
-    // Java's Throwable.getCause, a JDK method
+    /// Returns the underlying cause, if any, held by the embedded [`KafkaError`] base: Java's
+    /// `getCause()`.
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.kafka_error.source()

@@ -22,10 +22,8 @@ kafka_error_type! {
     /// configured by group.min.session.timeout.ms and
     /// group.max.session.timeout.ms).
     ///
-    /// Corresponds to Java's `InvalidSessionTimeoutException`, error code `Errors::InvalidSessionTimeout`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidSessionTimeoutException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidSessionTimeout`. Java `extends` chain:
+    /// `InvalidSessionTimeoutException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidSessionTimeoutException")]
     InvalidSessionTimeoutError,
     code: Errors::InvalidSessionTimeout,

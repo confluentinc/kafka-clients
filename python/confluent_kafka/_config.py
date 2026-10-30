@@ -192,7 +192,8 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
     ``ConsumerConfig.appendDeserializerToConfig`` replace it with the
     argument's class before ``ConfigDef`` parses the configs. A ``None`` is
     Java's null map, which ``new HashMap<>(configs)`` dereferences
-    (``ProducerConfig.java:717``, ``ConsumerConfig.java:794``,
+    (``org.apache.kafka.clients.producer.ProducerConfig#appendSerializerToConfig``,
+    ``org.apache.kafka.clients.consumer.ConsumerConfig#appendDeserializerToConfig``,
     ``Utils.castToStringObjectMap``): ``TypeError("configs must not be None")``."""
     if configs is None:
         raise TypeError("configs must not be None")

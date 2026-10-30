@@ -44,12 +44,17 @@ impl PayloadClass for ConsumerNoOffsetForPartitionError {
     }
 }
 
-/// The payload of a `NoOffsetForPartitionException` error, borrowed from
-/// the error handle, or null when the error is another class.
+/// Returns the payload of a `NoOffsetForPartitionException` error, or `NULL` when the error is
+/// another class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
@@ -70,13 +75,18 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_no_offset_for_partition(
     }
 }
 
-/// `new NoOffsetForPartitionException(TopicPartition partition)`; the
-/// partition is copied. Owned, freed with
-/// [`kafka_common_ConsumerNoOffsetForPartitionError_destroy`].
+/// `new NoOffsetForPartitionException(TopicPartition partition)`; the partition is copied.
+///
+/// # Parameters
+///
+/// - `partition` - The partition for which no offset is defined
 ///
 /// # Safety
 ///
 /// `partition` must be a valid topic-partition handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_ConsumerNoOffsetForPartitionError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
@@ -94,9 +104,16 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
 /// partitions)`; the list holds `const kafka_common_TopicPartition_t *`,
 /// copied.
 ///
+/// # Parameters
+///
+/// - `partitions` - The partitions for which no offset is defined
+///
 /// # Safety
 ///
-/// `partitions` must be null or a valid list of topic-partition handles.
+/// `partitions` must be `NULL` or a valid list of topic-partition handles.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_ConsumerNoOffsetForPartitionError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_with_partitions(
@@ -110,12 +127,17 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_with_par
     }))
 }
 
-/// `partitions()`: an owned list of `kafka_common_TopicPartition_t *`,
-/// ordered by topic then partition, freed with `kafka_List_destroy`.
+/// `partitions()`: a list of `kafka_common_TopicPartition_t *`, ordered by topic then partition.
+///
+/// # Returns
+///
+/// All partitions without offsets
 ///
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
@@ -132,11 +154,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitio
     )
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_message(
@@ -150,11 +173,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_message(
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_source(
@@ -168,11 +192,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_source(
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid no-offset-for-partition handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_to_string(
@@ -185,12 +210,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_to_strin
     unsafe { Payload::<ConsumerNoOffsetForPartitionError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_destroy(

@@ -17,9 +17,10 @@
 //!
 //! Every function returning a `KafkaFuture<T>` in Rust returns this handle in
 //! C and documents the concrete type behind the `void *` its `get` delivers.
-//! The Rust side maps its typed future to a `KafkaFuture<Arc<FfiValue>>` with
-//! `then_apply` ([`FfiValue::owned`]), so the value is boxed exactly once, when
-//! the future resolves, and freed when the last handle holding it goes away.
+//! The Rust side maps its typed future to a `KafkaFuture<Arc<FfiValue>>`
+//! ([`FfiValue::owned`]) lazily, when its value is read, so a future nobody
+//! reads boxes nothing; the handle caches the value it read, freed when the
+//! last handle holding it goes away.
 //!
 //! # Value lifetime
 //!
@@ -37,12 +38,18 @@
 //! `get` blocks the calling thread. When the future came from a client it is
 //! driven on that client's runtime. A future that belongs to no client can only
 //! be built from `completed_future`, directly or through `then_apply` and
-//! `all_of` over such futures, so it is already complete: `get` answers it on
+//! `all_of` over such futures, whose functions run inline, so it is already
+//! complete: `get` answers it on
 //! the calling thread without waiting and without any runtime, and a timeout
 //! never elapses. `get_cb` queues its callback on the owning client's callbacks
 //! vector (drained by that client's `__execute_callbacks`); a future with no
 //! client invokes the callback inline, on the calling thread, before `get_cb`
-//! returns.
+//! returns. A `then_apply` function over a client's future runs from that
+//! client's `__execute_callbacks`, queued when the source completes, unless
+//! the source is already complete when `then_apply` is called, in which case it
+//! runs inline. A blocking `get` on a future `then_apply` returned runs the
+//! client's pending callbacks, not only its own `apply`, on the calling thread
+//! while it waits.
 //!
 //! A future may outlive its client. The client's `_destroy` fires the callback
 //! of every `get_cb` still waiting, exactly once, before it returns: with the
@@ -61,11 +68,14 @@
 #![expect(non_camel_case_types)]
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 
+use crate::common::internals::KafkaFutureImpl;
 use crate::common::{Error, KafkaFuture};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::common::fail_with;
@@ -169,7 +179,7 @@ pub(crate) fn map_future<T>(future: &KafkaFuture<T>) -> FfiFuture
 where
     T: Clone + Send + Sync + 'static,
 {
-    future.then_apply(|value| Ok(FfiValue::owned(value)))
+    future.map_lazily(FfiValue::owned)
 }
 
 /// Maps a typed future to the C handle `boxer` builds from its value when it
@@ -190,23 +200,23 @@ where
     T: Clone + Send + Sync + 'static,
     F: Fn(T) -> *mut c_void + Send + Sync + 'static,
 {
-    future.then_apply(move |value| {
+    future.map_lazily(move |value| {
         // SAFETY: Per this function's `# Safety`, the pointer `boxer` returns and `destroy` meet
         // `FfiValue::handle`'s `# Safety`.
-        Ok(unsafe { FfiValue::handle(boxer(value), destroy) })
+        unsafe { FfiValue::handle(boxer(value), destroy) }
     })
 }
 
 /// Maps a `Void` future to the `NULL` it delivers.
 pub(crate) fn map_void_future(future: &KafkaFuture<()>) -> FfiFuture {
-    future.then_apply(|()| Ok(FfiValue::null()))
+    future.map_lazily(|()| FfiValue::null())
 }
 
 // ---------------------------------------------------------------------------
 // The handle
 // ---------------------------------------------------------------------------
 
-/// What a [`kafka_common_KafkaFuture_t`] points at, shared between the handle
+/// What a `kafka_common_KafkaFuture_t` points at, shared between the handle
 /// and any in-flight `_cb` delivery.
 pub(crate) struct FutureInner {
     future: FfiFuture,
@@ -223,9 +233,101 @@ pub(crate) struct FutureInner {
     /// blocking `get` runs the queued callbacks on the calling thread while
     /// it waits (see [`box_report_future`]).
     drains_queue: bool,
+    /// The handles this future was built from (`then_apply`'s source,
+    /// `all_of`'s futures), kept as long as it is: a future `then_apply`
+    /// returned cancels its function once nothing can observe it
+    /// ([`ApplyGate`]), and a future built on it observes it.
+    sources: Vec<Arc<FutureInner>>,
+    /// For a future `then_apply` returned, the gate its function runs through.
+    apply_gate: Option<Arc<ApplyGate>>,
+}
+
+impl Drop for FutureInner {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.apply_gate {
+            gate.cancel();
+        }
+    }
+}
+
+/// Runs a `then_apply` function at most once, unless the future it completes
+/// is dropped first: the last reference to that future going (its handle, a
+/// pending `get_cb`, a future built on it) cancels a function not started
+/// yet, so the C caller may free the function's `self_` after it. A function
+/// running on another thread is waited for; one running on the dropping
+/// thread (a function destroying its own future) is not.
+struct ApplyGate {
+    state: Mutex<ApplyState>,
+    finished: Condvar,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyState {
+    Pending,
+    Running(ThreadId),
+    Done,
+}
+
+/// Marks the function finished when dropped, a panic included.
+struct ApplyRun<'a>(&'a ApplyGate);
+
+impl Drop for ApplyRun<'_> {
+    fn drop(&mut self) {
+        *self.0.state.lock().unwrap_or_else(PoisonError::into_inner) = ApplyState::Done;
+        self.0.finished.notify_all();
+    }
+}
+
+impl ApplyGate {
+    fn new() -> Self {
+        Self { state: Mutex::new(ApplyState::Pending), finished: Condvar::new() }
+    }
+
+    /// Starts the function, or `None` when it was cancelled.
+    fn enter(&self) -> Option<ApplyRun<'_>> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match *state {
+            ApplyState::Pending => {
+                *state = ApplyState::Running(std::thread::current().id());
+                Some(ApplyRun(self))
+            },
+            ApplyState::Running(_) | ApplyState::Done => None,
+        }
+    }
+
+    fn cancel(&self) {
+        let current = std::thread::current().id();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            match *state {
+                ApplyState::Running(thread) if thread != current => {
+                    state = self.finished.wait(state).unwrap_or_else(PoisonError::into_inner);
+                },
+                _ => break,
+            }
+        }
+        *state = ApplyState::Done;
+    }
 }
 
 impl FutureInner {
+    fn new(
+        future: FfiFuture,
+        runtime: Option<tokio::runtime::Handle>,
+        queue: Option<Arc<CallbackQueue>>,
+        drains_queue: bool,
+    ) -> Self {
+        Self {
+            future,
+            result: OnceLock::new(),
+            runtime,
+            queue,
+            drains_queue,
+            sources: Vec::new(),
+            apply_gate: None,
+        }
+    }
+
     /// Resolves the future, blocking the calling thread.
     fn resolve(&self, timeout: Option<Duration>) -> Result<Arc<FfiValue>, Error> {
         if let Some(cached) = self.result.get() {
@@ -378,16 +480,18 @@ pub(crate) fn block_on<F: Future>(handle: &tokio::runtime::Handle, future: F) ->
     handle.block_on(future)
 }
 
-/// Opaque handle to a [`KafkaFuture`] whose value is a `void *` (CLAUDE.md
-/// §4, "Generic types"); the function that returned it documents the type
-/// behind the pointer. See the module docs for the value's lifetime.
+/// Opaque handle to a [`KafkaFuture`] whose value is a `void *`; the function
+/// that returned it documents the type behind the pointer. `get` hands out a
+/// pointer borrowed from the value the handle caches: it stays valid until the
+/// handle is destroyed and, for a `_cb` delivery, at least until the callback
+/// returns. A `Void` future delivers `NULL`.
 #[repr(C)]
 pub struct kafka_common_KafkaFuture_t {
     _private: [u8; 0],
 }
 
 /// Hands `future` to C as an owned handle, freed with
-/// [`kafka_common_KafkaFuture_destroy`].
+/// `kafka_common_KafkaFuture_destroy`.
 ///
 /// `runtime` and `queue` are those of the client that produced the future;
 /// `None` for a future that belongs to no client.
@@ -419,13 +523,11 @@ fn box_future_inner(
     queue: Option<Arc<CallbackQueue>>,
     drains_queue: bool,
 ) -> *mut kafka_common_KafkaFuture_t {
-    Arc::into_raw(Arc::new(FutureInner {
-        future,
-        result: OnceLock::new(),
-        runtime,
-        queue,
-        drains_queue,
-    })) as *mut _
+    box_inner(FutureInner::new(future, runtime, queue, drains_queue))
+}
+
+fn box_inner(inner: FutureInner) -> *mut kafka_common_KafkaFuture_t {
+    Arc::into_raw(Arc::new(inner)) as *mut _
 }
 
 /// The future behind a handle.
@@ -462,17 +564,18 @@ unsafe fn future_arc(future: *const kafka_common_KafkaFuture_t) -> Arc<FutureInn
 
 /// `typedef void (*kafka_common_KafkaFuture_get_cb_t)(void *value, kafka_common_Error_t *error, void *opaque);`
 ///
-/// The completion of [`kafka_common_KafkaFuture_get_cb`]: `value` is the
-/// future's value, borrowed as described in the module docs (`NULL` for a
-/// `Void` future or on failure); `error` is `NULL` on success, otherwise an
-/// owned error the callee frees with `kafka_common_Error_destroy`.
+/// The completion of `kafka_common_KafkaFuture_get_cb`: `value` is the
+/// future's value (`NULL` for a `Void` future or on failure), borrowed from the
+/// future: valid at least until the callback returns, and until the future
+/// handle is destroyed; `error` is `NULL` on success, otherwise an owned error
+/// the callee frees with `kafka_common_Error_destroy`.
 pub type kafka_common_KafkaFuture_get_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// `typedef void (*kafka_common_KafkaFuture_get_with_timeout_cb_t)(void *value, kafka_common_Error_t *error, void *opaque);`
 ///
-/// The completion of [`kafka_common_KafkaFuture_get_with_timeout_cb`], with
-/// the same contract as [`kafka_common_KafkaFuture_get_cb_t`].
+/// The completion of `kafka_common_KafkaFuture_get_with_timeout_cb`, with
+/// the same contract as `kafka_common_KafkaFuture_get_cb_t`.
 pub type kafka_common_KafkaFuture_get_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
@@ -483,7 +586,7 @@ const CLIENT_DESTROYED: &str = "The client was destroyed before the future compl
 
 /// The error `get` answers for a future that belongs to no client and is not
 /// complete. Only crate code can build one: every future C builds without a
-/// client is complete (module docs). No Java counterpart: a Java `KafkaFuture`
+/// client is complete. No Java counterpart: a Java `KafkaFuture`
 /// is completed by whoever holds its `KafkaFutureImpl`.
 const NOT_COMPLETE_WITHOUT_CLIENT: &str = "A KafkaFuture that belongs to no client must already be complete";
 
@@ -608,20 +711,24 @@ fn timeout_ms(timeout: i64) -> Duration {
     Duration::from_millis(u64::try_from(timeout).unwrap_or(0))
 }
 
-/// `KafkaFuture.completedFuture(value)`: a future already resolved with
-/// `result`, or failed with `result_error` when that is non-null.
+/// Returns a new KafkaFuture that is already completed with the given value.
 ///
-/// The future belongs to no client, nor does a `then_apply` or `all_of` built
-/// only from such futures: `get`, `get_with_timeout` and their `_cb` forms
-/// answer it on the calling thread without waiting.
+/// # Parameters
 ///
-/// `result` is a `void *` the caller owns and keeps alive while the future may
-/// still deliver it; Rust never frees it. `result_error` is consumed: the
-/// caller must not destroy it.
+/// - `result` - the value, a `void *`
+/// - `result_error` - `NULL`, or the error the future fails with instead
+///
+/// # Returns
+///
+/// The new future.
 ///
 /// # Safety
 ///
-/// `result_error` must be null or an owned error handle not yet destroyed.
+/// The future belongs to no client: `get` answers it on the calling thread.
+/// `result` stays the caller's, kept alive while the future may deliver it;
+/// Rust never frees it. `result_error` must be `NULL` or an owned error handle
+/// not yet destroyed, which this call takes over. The returned future is freed
+/// with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_completed_future(
@@ -637,18 +744,23 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_completed_future(
     box_future(KafkaFuture::completed_future(result), None, None)
 }
 
-/// `KafkaFuture.get()`: blocks until the future resolves and returns its value,
-/// borrowed as described in the module docs. A future that belongs to no client
-/// (see [`kafka_common_KafkaFuture_completed_future`]) is already complete and
-/// is answered without blocking.
+/// Waits if necessary for this future to complete, and then returns its result.
 ///
-/// On failure it stores the error the operation failed with, owned by the
-/// caller, in `*out_err` and returns `NULL`.
+/// # Returns
+///
+/// The future's value, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - The error the underlying operation failed with.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, or if the
+///   future's client was destroyed before the future completed.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid future handle and `out_err` a valid slot pointing at
-/// null.
+/// `NULL`. The value is borrowed from the future: it stays valid until the
+/// future handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
@@ -664,16 +776,27 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
     }
 }
 
-/// The non-blocking form of [`kafka_common_KafkaFuture_get`]: `cb` receives
-/// the value or the error through the owning client's `__execute_callbacks`,
-/// or inline before this returns when the future belongs to no client. A
-/// call still waiting when the client is destroyed fires from its `_destroy`,
-/// and one after it inline (see the module docs).
+/// Waits if necessary for this future to complete, and then returns its result.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the value and the error, `NULL` on
+///   success; run by the owning client's `__execute_callbacks`, or before this
+///   returns for a future with no client; one still waiting when the client is
+///   destroyed fires from its `_destroy`, one after it inline
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - The error the underlying operation failed with.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, or if the
+///   future's client was destroyed before the future completed.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid future handle; `opaque` is handed back to `cb`
-/// untouched.
+/// untouched. The value `cb` receives is borrowed from the future: it stays
+/// valid at least until `cb` returns, and until the future handle is destroyed.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle, as
     // `completion_sink` requires. The guard runs this only when the body did not return,
@@ -692,18 +815,29 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_cb(
     unsafe { get_cb("kafka_common_KafkaFuture_get_cb", self_, None, cb, opaque) };
 }
 
-/// `KafkaFuture.get(timeout, MILLISECONDS)`: like
-/// [`kafka_common_KafkaFuture_get`], failing with the translation of
-/// `java.util.concurrent.TimeoutException` (`kafka_common_Error_is_local_timeout_error`)
-/// when `timeout` milliseconds elapse first. A negative timeout is zero. A
-/// future that belongs to no client (see
-/// [`kafka_common_KafkaFuture_completed_future`]) is already complete: it is
-/// answered at once, and the timeout never elapses.
+/// Waits if necessary for at most the given time for this future to complete,
+/// and then returns its result, if available.
+///
+/// # Parameters
+///
+/// - `timeout` - the maximum time to wait, in milliseconds; negative is zero
+///
+/// # Returns
+///
+/// The future's value, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_timeout_error` if the wait timed out.
+/// - The error the underlying operation failed with.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, or if the
+///   future's client was destroyed before the future completed.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid future handle and `out_err` a valid slot pointing at
-/// null.
+/// `NULL`. The value is borrowed from the future: it stays valid until the
+/// future handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
@@ -720,13 +854,28 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
     }
 }
 
-/// The non-blocking form of [`kafka_common_KafkaFuture_get_with_timeout`];
-/// see [`kafka_common_KafkaFuture_get_cb`] for where `cb` runs.
+/// Waits if necessary for at most the given time for this future to complete,
+/// and then returns its result, if available.
+///
+/// # Parameters
+///
+/// - `timeout` - the maximum time to wait, in milliseconds; negative is zero
+/// - `cb` - the completion, receiving the value and the error, `NULL` on
+///   success; run as for `kafka_common_KafkaFuture_get_cb`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_timeout_error` if the wait timed out.
+/// - The error the underlying operation failed with.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, or if the
+///   future's client was destroyed before the future completed.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid future handle; `opaque` is handed back to `cb`
-/// untouched.
+/// untouched. The value `cb` receives is borrowed from the future: it stays
+/// valid at least until `cb` returns, and until the future handle is destroyed.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle, as
     // `completion_sink` requires. The guard runs this only when the body did not return,
@@ -754,7 +903,8 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
     };
 }
 
-/// `KafkaFuture.isDone()`: 1 when the future has resolved, 0 otherwise.
+/// Returns 1 if completed in any fashion: normally, exceptionally, or via
+/// cancellation, else 0.
 ///
 /// # Safety
 ///
@@ -767,17 +917,24 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_is_done(self_: *const kafka_co
     i8::from(unsafe { future_ref(self_) }.future.is_done())
 }
 
-/// `KafkaFuture.allOf(futures...)`: a `Void` future that resolves once every
-/// future in `futures` has, and fails with the first failure among them.
+/// Returns a new KafkaFuture that is completed when all the given futures have
+/// completed. If any future fails, the returned future returns its error. If
+/// multiple futures fail, which error gets returned is arbitrarily chosen.
 ///
-/// `futures` is a `kafka_List_t` of `kafka_common_KafkaFuture_t *`, borrowed:
-/// the caller still owns the list and each future, and may destroy them right
-/// after this returns. The result delivers `NULL` from `get`.
+/// # Parameters
+///
+/// - `futures` - a `kafka_List_t` of `kafka_common_KafkaFuture_t *`
+///
+/// # Returns
+///
+/// The new future, whose `get` delivers `NULL`.
 ///
 /// # Safety
 ///
-/// `futures` must be null or a valid list whose elements are valid future
-/// handles.
+/// `futures` must be `NULL` or a valid list whose elements are valid future
+/// handles. The list and the futures stay the caller's, and may be destroyed
+/// right after this returns. The returned future is owned, freed with
+/// `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
@@ -785,12 +942,12 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: per this function's `# Safety`, `futures` is null or a valid list, which the
     // caller keeps alive for this call; the borrow ends before return.
-    let inners: Vec<&FutureInner> = unsafe { list_elements(futures) }
+    let inners: Vec<Arc<FutureInner>> = unsafe { list_elements(futures) }
         .iter()
         // SAFETY: per this function's `# Safety`, every element is a valid future handle,
-        // alive for this call. The borrows end before return: only clones of the futures,
-        // runtime and queue outlive it.
-        .map(|&f| unsafe { future_ref(f as *const _) })
+        // alive for this call; each `future_arc` takes a reference of its own, which the
+        // returned future keeps (`FutureInner::sources`).
+        .map(|&f| unsafe { future_arc(f as *const _) })
         .collect();
     // A future waiting for a report drains its own client's queue, so the result takes that
     // client when one of the futures is such a future.
@@ -799,7 +956,9 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
     let queue = owner.map_or_else(|| inners.iter().find_map(|i| i.queue.clone()), |i| i.queue.clone());
     let drains_queue = owner.is_some();
     let all = KafkaFuture::all_of(inners.iter().map(|i| i.future.clone()).collect());
-    box_future_inner(map_void_future(&all), runtime, queue, drains_queue)
+    let mut inner = FutureInner::new(map_void_future(&all), runtime, queue, drains_queue);
+    inner.sources = inners;
+    box_inner(inner)
 }
 
 // ---------------------------------------------------------------------------
@@ -845,7 +1004,7 @@ impl BaseFunctionInner {
 /// the function `then_apply` runs on a future's value. Java declares it as a
 /// functional interface, the Rust `common::kafka_future::BaseFunction` trait,
 /// which C cannot implement, so it is an interface built with
-/// [`kafka_common_KafkaFuture_BaseFunction_new`].
+/// `kafka_common_KafkaFuture_BaseFunction_new`.
 #[repr(C)]
 pub struct kafka_common_KafkaFuture_BaseFunction_t {
     _private: [u8; 0],
@@ -856,7 +1015,7 @@ pub struct kafka_common_KafkaFuture_BaseFunction_t {
 /// # Safety
 ///
 /// `function` must be a valid handle from
-/// [`kafka_common_KafkaFuture_BaseFunction_new`], not destroyed for `'a`.
+/// `kafka_common_KafkaFuture_BaseFunction_new`, not destroyed for `'a`.
 unsafe fn base_function_ref<'a>(function: *const kafka_common_KafkaFuture_BaseFunction_t) -> &'a BaseFunctionInner {
     // SAFETY: per this function's `# Safety`, `function` came from
     // `kafka_common_KafkaFuture_BaseFunction_new`, whose `Box::into_raw` of a
@@ -865,13 +1024,22 @@ unsafe fn base_function_ref<'a>(function: *const kafka_common_KafkaFuture_BaseFu
     unsafe { &*(function as *const BaseFunctionInner) }
 }
 
-/// Registers a C `BaseFunction`: `self_` is the caller's opaque pointer
-/// passed first to `apply`. The caller owns `self_` and keeps it alive until
-/// every future derived through this function has been destroyed.
+/// Returns a C `BaseFunction`: `apply` is called with `self_` first.
 ///
-/// Owned until [`kafka_common_KafkaFuture_then_apply`] consumes it, as the
-/// Rust `then_apply` takes its function by value; freed with
-/// [`kafka_common_KafkaFuture_BaseFunction_destroy`] only when not consumed.
+/// # Parameters
+///
+/// - `self_` - the caller's opaque pointer
+/// - `apply` - the implementation of `apply`
+///
+/// # Safety
+///
+/// The caller owns `self_` and keeps it alive until `apply` has run, or until
+/// the future `kafka_common_KafkaFuture_then_apply` returned has been
+/// destroyed, with every future built on it (`then_apply`, `all_of`) and every
+/// pending `get_cb` on them: that last release cancels an `apply` not started,
+/// and waits for one running on another thread. The returned handle is owned
+/// until `kafka_common_KafkaFuture_then_apply` takes it over; freed with
+/// `kafka_common_KafkaFuture_BaseFunction_destroy` only when not taken over.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
@@ -881,14 +1049,25 @@ pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(
     Box::into_raw(Box::new(BaseFunctionInner { self_: SendPtr(self_), apply })) as *mut _
 }
 
-/// `BaseFunction.apply(a)`: invokes the registered `apply` with its `self`, and
-/// returns its result. On failure it stores the error the function reported,
-/// owned by the caller, in `*out_err` and returns `NULL`.
+/// Invokes the registered `apply` with its `self`.
+///
+/// # Parameters
+///
+/// - `a` - the argument, passed through
+///
+/// # Returns
+///
+/// The function's result, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - The error the function reported.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid function handle and `out_err` a valid slot pointing
-/// at null.
+/// at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
@@ -924,46 +1103,97 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(
     }
 }
 
-/// `KafkaFuture.thenApply(function)`: a new future that, when this one
-/// completes normally, resolves to `function.apply(value)`, or fails with
-/// the error `apply` returned; a failure of this future propagates unchanged.
+/// Returns a new KafkaFuture that, when this future completes normally, is
+/// executed with this futures's result as the argument to the supplied
+/// function. The function may be invoked by the thread that calls
+/// `kafka_common_KafkaFuture_then_apply` or it may be invoked by the thread
+/// that completes the future.
 ///
-/// The function runs once, on the thread that first resolves the derived
-/// future: the caller of its `get`, or a runtime task for a `_cb`. (The Rust
-/// `then_apply` re-evaluates its closure on every `get`, being a pure view
-/// over the source; a C function may have side effects, so its first outcome
-/// is memoized, as Java runs it once.) The value it produces is a `void *`
-/// owned by the C side and never freed by Rust; the source value is borrowed
-/// for the call only (module docs). `function` is consumed, as the Rust
-/// `then_apply` takes its function by value, while the `self` it was built with
-/// must outlive the derived future. The result is owned, freed with
-/// [`kafka_common_KafkaFuture_destroy`], and belongs to the same client as
-/// this future.
+/// # Parameters
+///
+/// - `function` - the function, from `kafka_common_KafkaFuture_BaseFunction_new`
+///
+/// # Returns
+///
+/// The new future, of the same client as this one.
+///
+/// # Translation notes
+///
+/// `apply` runs inline if this future is complete, else from its client's
+/// `__execute_callbacks`. Its error fails the returned future.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid future handle and `function` a valid function
-/// handle, not used again.
+/// handle, which this call takes over. The value `apply` returns stays the
+/// C side's; the source value is borrowed for the call only. The returned
+/// future is owned, freed with `kafka_common_KafkaFuture_destroy`; once it is
+/// destroyed, with every future built on it and every pending `get_cb` on
+/// them, an `apply` not started is not called
+/// (`kafka_common_KafkaFuture_BaseFunction_new`).
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
     self_: *const kafka_common_KafkaFuture_t,
     function: *mut kafka_common_KafkaFuture_BaseFunction_t,
 ) -> *mut kafka_common_KafkaFuture_t {
-    // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
-    // borrow lasts for this call only (the derived future clones what it keeps).
-    let inner = unsafe { future_ref(self_) };
+    // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; this takes a
+    // reference of its own, which the derived future keeps (`FutureInner::sources`).
+    let inner = unsafe { future_arc(self_) };
+    let gate = Arc::new(ApplyGate::new());
+    let apply_gate = Arc::clone(&gate);
     // SAFETY: per this function's `# Safety`, `function` is a valid function handle, i.e. the
     // `Box::into_raw` of `kafka_common_KafkaFuture_BaseFunction_new`, not used again, so
     // `Box::from_raw` reclaims it exactly once and the registration moves into the closure.
     let function = *unsafe { Box::from_raw(function as *mut BaseFunctionInner) };
-    let memo: Mutex<Option<Result<Arc<FfiValue>, Error>>> = Mutex::new(None);
-    let derived = inner.future.then_apply(move |source: Arc<FfiValue>| {
-        let mut memo = memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        memo.get_or_insert_with(|| function.apply(source.ptr()).map(FfiValue::borrowed))
-            .clone()
+    let applied: KafkaFutureImpl<Arc<FfiValue>> = KafkaFutureImpl::new();
+    let completer = applied.clone();
+    // Set once `on_complete` has returned: a completion seen before that, on
+    // the caller's thread, ran inside this call, which runs `apply` itself, as
+    // Java runs the function in the thread calling `thenApply` when the
+    // future is already complete. A completion racing this call on another
+    // thread is queued.
+    let registered = Arc::new(AtomicBool::new(false));
+    let caller = std::thread::current().id();
+    let queue = inner.queue.clone();
+    let registered_in_callback = Arc::clone(&registered);
+    inner.future.on_complete(move |result| {
+        let source = match result {
+            Ok(source) => Arc::clone(source),
+            // The function is not called: the dependant fails as the source did.
+            Err(error) => {
+                completer.complete_with_error(error.clone());
+                return;
+            },
+        };
+        // A function whose future can no longer be observed is not called: its
+        // `self_` may be freed (`ApplyGate`).
+        let apply = move || match apply_gate.enter() {
+            Some(_running) => {
+                completer.complete_result(function.apply(source.ptr()).map(FfiValue::borrowed));
+            },
+            None => {
+                completer.complete_with_error(Error::local_illegal_state(
+                    "The future was destroyed before its function ran",
+                ));
+            },
+        };
+        match queue {
+            // Completed later, by the client: C code never runs on a Rust
+            // background task, so `apply` waits for `__execute_callbacks`
+            // (or runs on the pushing thread once the queue is closed).
+            Some(queue) if registered_in_callback.load(Ordering::Acquire) || std::thread::current().id() != caller => {
+                queue.push(Box::new(apply))
+            },
+            _ => apply(),
+        }
     });
-    box_future_inner(derived, inner.runtime.clone(), inner.queue.clone(), inner.drains_queue)
+    registered.store(true, Ordering::Release);
+    let drains_queue = inner.drains_queue || inner.queue.is_some();
+    let mut derived = FutureInner::new(applied.future(), inner.runtime.clone(), inner.queue.clone(), drains_queue);
+    derived.sources = vec![inner];
+    derived.apply_gate = Some(gate);
+    box_inner(derived)
 }
 
 /// Frees the handle. The value `get` returned becomes invalid, unless a `_cb`
@@ -995,6 +1225,7 @@ mod tests {
     use crate::ffi::error_predicates::kafka_common_Error_is_local_timeout_error;
     use crate::ffi::util::{kafka_List_add, kafka_List_destroy, kafka_List_new};
     use std::ffi::CStr;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -1589,13 +1820,7 @@ mod tests {
         // Held so the resolved value outlives the job that delivers it.
         let mut held = Vec::new();
         for future in [map_future(&resolved), map_future(&pending.future())] {
-            let inner = Arc::new(FutureInner {
-                future,
-                result: OnceLock::new(),
-                runtime: None,
-                queue: None,
-                drains_queue: false,
-            });
+            let inner = Arc::new(FutureInner::new(future, None, None, false));
             held.push(Arc::clone(&inner));
             drop(PendingGet {
                 fn_name: "kafka_common_KafkaFuture_get_cb",
@@ -1799,6 +2024,177 @@ mod tests {
         // SAFETY: Test code: each handle is still live and destroyed here, once.
         unsafe {
             kafka_common_KafkaFuture_destroy(derived);
+            kafka_common_KafkaFuture_destroy(source);
+        }
+    }
+
+    /// Over a client's pending future, `then_apply`'s function is queued on the
+    /// client when the source completes, on whichever thread completes it, and
+    /// runs once, from `__execute_callbacks`, which completes the dependant;
+    /// reading the dependant does not run it again.
+    #[test]
+    fn then_apply_queues_the_function_on_completion_and_runs_it_once() {
+        let runtime = client_runtime();
+        let queue = Arc::new(CallbackQueue::new());
+        for complete_on_another_thread in [true, false] {
+            let pending = KafkaFutureImpl::<i64>::new();
+            let source = box_future(
+                map_future(&pending.future()),
+                Some(runtime.handle().clone()),
+                Some(Arc::clone(&queue)),
+            );
+            let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
+            let function = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
+            // SAFETY: Test code: `source` is a fresh future handle and `function` a fresh function
+            // handle over `doubler`, a live local that outlives `derived`, consumed by `then_apply`.
+            // Both futures are destroyed once at the end of the iteration; the values read are the
+            // `i64`s `source` caches and `double` writes into `doubler`.
+            unsafe {
+                let derived = kafka_common_KafkaFuture_then_apply(source, function);
+                if complete_on_another_thread {
+                    let pending = pending.clone();
+                    std::thread::spawn(move || pending.complete(21)).join().unwrap();
+                } else {
+                    pending.complete(21);
+                }
+                assert_eq!(kafka_common_KafkaFuture_is_done(source), 1);
+                assert_eq!(kafka_common_KafkaFuture_is_done(derived), 0, "the function is queued");
+                assert_eq!(doubler.calls.load(Ordering::SeqCst), 0, "not run on the completing thread");
+                assert_eq!(queue.execute(), 1);
+                assert_eq!(doubler.calls.load(Ordering::SeqCst), 1);
+                assert_eq!(kafka_common_KafkaFuture_is_done(derived), 1);
+                for _ in 0..3 {
+                    assert_eq!(*(get(derived).unwrap() as *const i64), 42);
+                }
+                assert_eq!(doubler.calls.load(Ordering::SeqCst), 1, "Java runs the function once");
+                assert_eq!(queue.execute(), 0);
+
+                // Over a source already complete, it runs inline, queuing nothing.
+                let again = kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double);
+                let inline = kafka_common_KafkaFuture_then_apply(source, again);
+                assert_eq!(doubler.calls.load(Ordering::SeqCst), 2);
+                assert_eq!(kafka_common_KafkaFuture_is_done(inline), 1);
+                assert!(queue.is_empty());
+                assert_eq!(*(get(inline).unwrap() as *const i64), 42);
+
+                kafka_common_KafkaFuture_destroy(inline);
+                kafka_common_KafkaFuture_destroy(derived);
+                kafka_common_KafkaFuture_destroy(source);
+            }
+        }
+    }
+
+    #[test]
+    fn then_apply_does_not_run_the_function_of_a_destroyed_future() {
+        let runtime = client_runtime();
+        let queue = Arc::new(CallbackQueue::new());
+        let pending = KafkaFutureImpl::<i64>::new();
+        let source = box_future(
+            map_future(&pending.future()),
+            Some(runtime.handle().clone()),
+            Some(Arc::clone(&queue)),
+        );
+        let doubler = Doubler { calls: AtomicUsize::new(0), output: Mutex::new(0) };
+        // SAFETY: Test code: `source` is a fresh future handle and each function a fresh
+        // function handle over `doubler`, a live local, consumed by `then_apply`. Each future
+        // is destroyed once; `all` borrows `kept` through the list, destroyed after `all_of`.
+        unsafe {
+            let dropped = kafka_common_KafkaFuture_then_apply(
+                source,
+                kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double),
+            );
+            let kept = kafka_common_KafkaFuture_then_apply(
+                source,
+                kafka_common_KafkaFuture_BaseFunction_new(&doubler as *const _ as *mut c_void, double),
+            );
+            let list = kafka_List_new();
+            kafka_List_add(list, kept as *mut c_void);
+            let all = kafka_common_KafkaFuture_all_of(list);
+            kafka_List_destroy(list);
+            // `dropped` has no other user, `kept` is still needed by `all`.
+            kafka_common_KafkaFuture_destroy(dropped);
+            kafka_common_KafkaFuture_destroy(kept);
+
+            pending.complete(21);
+            assert_eq!(queue.execute(), 2, "both jobs are dequeued");
+            assert_eq!(
+                doubler.calls.load(Ordering::SeqCst),
+                1,
+                "only the function `all` depends on runs"
+            );
+            assert!(get(all).unwrap().is_null());
+
+            kafka_common_KafkaFuture_destroy(all);
+            kafka_common_KafkaFuture_destroy(source);
+        }
+    }
+
+    /// A function that blocks until the test releases it.
+    struct Blocking {
+        entered: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        finished: std::sync::atomic::AtomicBool,
+    }
+
+    unsafe extern "C" fn block(
+        self_: *mut c_void,
+        _a: *const c_void,
+        _out_err: *mut *mut kafka_common_Error_t,
+    ) -> *mut c_void {
+        // SAFETY: Test code: the only registration passes a live `Blocking`, which outlives
+        // the destruction of the future derived through it.
+        let blocking = unsafe { &*(self_ as *const Blocking) };
+        blocking.entered.lock().unwrap().send(()).unwrap();
+        blocking.release.lock().unwrap().recv().unwrap();
+        blocking.finished.store(true, Ordering::SeqCst);
+        std::ptr::null_mut()
+    }
+
+    #[test]
+    fn destroying_a_future_waits_for_its_running_function() {
+        let runtime = client_runtime();
+        let queue = Arc::new(CallbackQueue::new());
+        let pending = KafkaFutureImpl::<i64>::new();
+        let source = box_future(
+            map_future(&pending.future()),
+            Some(runtime.handle().clone()),
+            Some(Arc::clone(&queue)),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking = Arc::new(Blocking {
+            entered: Mutex::new(entered_tx),
+            release: Mutex::new(release_rx),
+            finished: std::sync::atomic::AtomicBool::new(false),
+        });
+        // SAFETY: Test code: `source` is a fresh future handle and the function a fresh
+        // function handle over `blocking`, kept alive by the `Arc` past every use below.
+        // `derived` is destroyed once, by the second thread; `source` once at the end.
+        unsafe {
+            let derived = kafka_common_KafkaFuture_then_apply(
+                source,
+                kafka_common_KafkaFuture_BaseFunction_new(Arc::as_ptr(&blocking) as *mut c_void, block),
+            ) as usize;
+            pending.complete(21);
+            let runner = {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || queue.execute())
+            };
+            entered_rx.recv().unwrap();
+            let destroyer = {
+                let blocking = Arc::clone(&blocking);
+                std::thread::spawn(move || {
+                    kafka_common_KafkaFuture_destroy(derived as *mut kafka_common_KafkaFuture_t);
+                    blocking.finished.load(Ordering::SeqCst)
+                })
+            };
+            std::thread::sleep(Duration::from_millis(50));
+            release_tx.send(()).unwrap();
+            assert!(
+                destroyer.join().unwrap(),
+                "destroy returns only after the function has returned"
+            );
+            assert_eq!(runner.join().unwrap(), 1);
             kafka_common_KafkaFuture_destroy(source);
         }
     }

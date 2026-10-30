@@ -13,17 +13,13 @@
 // limitations under the License.
 
 //! A member to be removed from a consumer group.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.MemberToRemove`.
 
 use crate::common::requests::JoinGroupRequest;
 use crate::leave_group_request_data::MemberIdentity;
 
 /// A struct containing information about the member to be removed.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.MemberToRemove`. Members are
-/// identified by their `group.instance.id` (static membership); the member id
-/// is left as `JoinGroupRequest::UNKNOWN_MEMBER_ID` so the broker resolves it by instance id.
+// Members are identified by their `group.instance.id` (static membership); the member id is left
+// as `JoinGroupRequest::UNKNOWN_MEMBER_ID` so the broker resolves it by instance id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove")]
 pub struct MemberToRemove {
@@ -32,13 +28,17 @@ pub struct MemberToRemove {
 
 impl MemberToRemove {
     /// Creates a `MemberToRemove` for the given `group.instance.id`.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_instance_id` - the `group.instance.id` of the member to remove.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove#MemberToRemove")]
     pub fn new(group_instance_id: impl Into<String>) -> Self {
         Self { group_instance_id: group_instance_id.into() }
     }
 
     /// Converts this member to a wire [`MemberIdentity`] (with an unknown member
-    /// id). Mirrors Java's `MemberToRemove.toMemberIdentity`.
+    /// id).
     #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove#toMemberIdentity")]
     pub(crate) fn to_member_identity(&self) -> MemberIdentity {
         let mut identity = MemberIdentity::new();
@@ -48,7 +48,7 @@ impl MemberToRemove {
         identity
     }
 
-    /// The `group.instance.id` of the member to remove.
+    /// Returns the `group.instance.id` of the member to remove.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberToRemove#groupInstanceId")]
     pub fn group_instance_id(&self) -> &str {
         &self.group_instance_id

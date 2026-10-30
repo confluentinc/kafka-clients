@@ -625,7 +625,7 @@ send path. The symmetric rule on the receive path:
         fn deserialize_with_headers<'a>(
             &'a self,
             topic: &'a str,
-            headers: &'a RecordHeaders,
+            headers: &'a mut RecordHeaders,
             data: &'a [u8],
         ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
             self.deserialize(topic, data) // Java default
@@ -635,14 +635,14 @@ send path. The symmetric rule on the receive path:
         fn deserialize_with_headers_bytes<'a>(
             &'a self,
             topic: &'a str,
-            headers: &'a RecordHeaders,
+            headers: &'a mut RecordHeaders,
             data: &'a Bytes,
         ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
             self.deserialize_with_headers(topic, headers, &data[..]) // Java default
         }
         fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool)
-            -> impl Future<Output = ()> + Send + 'a { /* no-op */ }
-        fn close(&mut self) -> impl Future<Output = ()> + Send { /* no-op */ }
+            -> impl Future<Output = Result<(), Error>> + Send + 'a { /* Ok(()) */ }
+        fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send { /* Ok(()) */ }
     }
 
 Async methods returning `impl Future + Send`; no `#[async_trait]`. `data` is

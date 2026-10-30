@@ -71,15 +71,19 @@ fn box_descriptions(descriptions: HashMap<String, ClassicGroupDescription>) -> *
     )
 }
 
-/// `DescribeClassicGroupsResult.describedGroups()`: an owned map, sorted by
-/// group id, of owned `char *` group ids to owned
-/// `kafka_common_KafkaFuture_t *` whose `get` delivers a
-/// `kafka_admin_ClassicGroupDescription_t *` owned by the future. Freed with
-/// `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from group id to futures which yield group descriptions.
+///
+/// # Returns
+///
+/// A map, sorted by group id, of owned `char *` group ids to owned `kafka_common_KafkaFuture_t *`
+/// whose `get` delivers a `kafka_admin_ClassicGroupDescription_t *` owned by the future.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_described_groups(
@@ -104,15 +108,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_described_group
     })
 }
 
-/// `DescribeClassicGroupsResult.all()`: an owned future whose `get`
-/// delivers a `kafka_Map_t *` owned by the future, of `char *` group ids
-/// (sorted) to `kafka_admin_ClassicGroupDescription_t *`; the future fails
-/// when any description failed. Freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// Return a future which yields all ClassicGroupDescription objects, if all the describes succeed.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_Map_t *` owned by the future, of `char *` group ids
+/// (sorted) to `kafka_admin_ClassicGroupDescription_t *`; the future fails when any description
+/// failed.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
@@ -133,21 +141,22 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
     }
 }
 
-/// `new DescribeClassicGroupsResult(Map<String, KafkaFuture<ClassicGroupDescription>> futures)`:
-/// `futures` is a borrowed map of `const char *` group ids to
-/// `const kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_ClassicGroupDescription_t *`,
-/// copied during the call; the caller keeps ownership of the map, its keys,
-/// its futures and their values. Only futures that are already complete
-/// (`kafka_common_KafkaFuture_is_done`) can be copied across the boundary:
-/// the outcome of each is taken as it stands, and a future still pending
-/// stands as one failed with the translation of `IllegalArgumentException`.
-/// Owned, freed with [`kafka_admin_DescribeClassicGroupsResult_destroy`].
+/// Creates a result from a map of group id to the future of its description.
+///
+/// # Parameters
+///
+/// - `futures` - a map of `const char *` group ids to `const kafka_common_KafkaFuture_t *` whose
+///   value is a `kafka_admin_ClassicGroupDescription_t *`, copied during the call
 ///
 /// # Safety
 ///
-/// `futures` must be null or a valid map whose keys are valid NUL-terminated strings
-/// and whose values are valid future handles, each successful one's value a
-/// valid `kafka_admin_ClassicGroupDescription_t *`.
+/// `futures` must be `NULL` or a valid map whose keys are valid NUL-terminated strings and whose
+/// values are valid future handles, each successful one's value a valid
+/// `kafka_admin_ClassicGroupDescription_t *`. The caller keeps ownership of the map, its keys, its
+/// futures and their values. Each future should already be complete
+/// (`kafka_common_KafkaFuture_is_done`): its outcome is copied as it stands, and one still pending
+/// stands as one failed with `kafka_common_Error_is_local_illegal_argument_error`. The returned
+/// handle is owned and freed with `kafka_admin_DescribeClassicGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_new(
@@ -180,12 +189,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_new(
     box_result(DescribeClassicGroupsResult::new(futures), &FutureCtx::detached())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

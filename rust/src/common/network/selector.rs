@@ -1919,7 +1919,7 @@ impl Selectable for Selector {
 }
 
 /// The level and text with which the error closing a channel is logged: the
-/// `catch` in Java's `Selector.pollSelectionKeys` (`Selector.java:600-626`),
+/// `catch` in Java's `Selector#pollSelectionKeys`,
 /// shared by the read and the write path, which Java handles in one block.
 ///
 /// Routed by typed payload, not by [`io::ErrorKind`], as Java routes by
@@ -1927,11 +1927,11 @@ impl Selectable for Selector {
 ///
 ///   - an authentication failure logs Java's "Failed authentication with
 ///     <desc> (<message>)", or "Failed re-authentication ..." when the channel
-///     had authenticated before (`:614-623`). Like Java's `e.getMessage()` it
+///     had authenticated before (`Selector#pollSelectionKeys`). Like Java's `e.getMessage()` it
 ///     prints the error's message, not its class. Java logs it at INFO; this
 ///     client logs it at ERROR, left as it was;
 ///   - an invalid receive, or any other error of a Kafka class, logs
-///     "Unexpected error" at WARN (`:625`). Java gets there because neither is
+///     "Unexpected error" at WARN. Java gets there because neither is
 ///     an `IOException`: `InvalidReceiveException` is a `KafkaException`, and
 ///     the other such payload is a `SaslAuthenticate` error whose class is not
 ///     an `AuthenticationException` (`UnknownServerException`, say), which the
@@ -1939,7 +1939,7 @@ impl Selectable for Selector {
 ///     as it was, a size header the client refuses left no trace: the client
 ///     closed, reconnected and refetched with nothing in the logs;
 ///   - everything else (reset, broken pipe, EOF, a failed TLS handshake) is an
-///     I/O disconnect, DEBUG (`:612`), as the error is retriable.
+///     I/O disconnect, DEBUG, as the error is retriable.
 fn channel_error_log(desc: &str, e: &io::Error, is_reauthentication: bool) -> (log::Level, String) {
     let is_kafka_class_error = e.get_ref().is_some_and(|inner| inner.is::<crate::common::Error>());
     if let Some(message) = authentication_error_message(e) {
@@ -2876,7 +2876,7 @@ mod tests {
     ///
     /// When it finishes re-authenticating, the channel is ready again but not
     /// reported as connected: Java reports a channel as connected once, when its
-    /// socket connects (`Selector.java:530-533`), and reporting it again would
+    /// socket connects (`Selector#pollSelectionKeys`), and reporting it again would
     /// make the network client fetch its API versions anew.
     #[tokio::test]
     async fn test_reauthenticating_channel_takes_one_completed_receive_per_poll() {
@@ -4689,10 +4689,10 @@ mod tests {
         selector.poll(0).await.unwrap();
     }
 
-    /// The `catch` in Java's `pollSelectionKeys` logs the error closing a channel
-    /// at one of three levels (`Selector.java:600-626`). An invalid receive is a
-    /// `KafkaException`, so it takes the WARN "Unexpected error" branch (`:625`),
-    /// not the DEBUG disconnect every `IOException` gets (`:612`). Both selector
+    /// The `catch` in Java's `Selector#pollSelectionKeys` logs the error closing a channel
+    /// at one of three levels. An invalid receive is a
+    /// `KafkaException`, so it takes the WARN "Unexpected error" branch,
+    /// not the DEBUG disconnect every `IOException` gets. Both selector
     /// paths log through `channel_error_log`, so this pins the level and the text.
     #[test]
     fn test_channel_error_log_routes_as_java_does() {

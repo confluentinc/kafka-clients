@@ -32,7 +32,7 @@ pub struct kafka_common_MetricNameTemplate_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_MetricNameTemplate_t`] points at: the value plus
+/// What a `kafka_common_MetricNameTemplate_t` points at: the value plus
 /// the NUL-terminated strings its getters borrow out.
 struct MetricNameTemplateInner {
     template: MetricNameTemplate,
@@ -76,15 +76,22 @@ pub(crate) unsafe fn metric_name_template_ref<'a>(
     &unsafe { inner(template) }.template
 }
 
-/// `new MetricNameTemplate(String name, String group, String description,
-/// Set<String> tagsNames)`: `tag_names` holds `const char *` in the order
-/// the template keeps; everything is copied. Owned, freed with
-/// [`kafka_common_MetricNameTemplate_destroy`].
+/// Create a new template. Note that the order of the tags will be preserved if the supplied
+/// `tag_names` set has an order.
+///
+/// # Parameters
+///
+/// - `name` - the name of the metric; may not be `NULL`
+/// - `group` - the name of the group; may not be `NULL`
+/// - `description` - the description of the metric; may not be `NULL`
+/// - `tag_names` - the set of metric tag names, a list of `const char *` whose order is kept;
+///   `NULL` reads as empty
 ///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings and `tag_names` null or
-/// a valid list of NUL-terminated strings.
+/// The strings must be valid NUL-terminated strings and `tag_names` `NULL` or a valid list of
+/// NUL-terminated strings; everything is copied. The returned handle is owned, freed with
+/// `kafka_common_MetricNameTemplate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
@@ -114,11 +121,17 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
     )))) as *mut kafka_common_MetricNameTemplate_t
 }
 
-/// `name()`: borrowed from the handle, valid as long as it is.
+/// `name()`.
+///
+/// # Returns
+///
+/// the metric name; never `NULL`
 ///
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+///
+/// The returned string is borrowed from `self_`, valid as long as it is.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_name(
@@ -130,11 +143,17 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_name(
     unsafe { inner(self_) }.name_c.as_ptr()
 }
 
-/// `group()`: borrowed from the handle, valid as long as it is.
+/// `group()`.
+///
+/// # Returns
+///
+/// the group name; never `NULL`
 ///
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+///
+/// The returned string is borrowed from `self_`, valid as long as it is.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_group(
@@ -146,11 +165,17 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_group(
     unsafe { inner(self_) }.group_c.as_ptr()
 }
 
-/// `description()`: borrowed from the handle, valid as long as it is.
+/// `description()`.
+///
+/// # Returns
+///
+/// the metric description; never `NULL`
 ///
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+///
+/// The returned string is borrowed from `self_`, valid as long as it is.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_description(
@@ -162,12 +187,17 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_description(
     unsafe { inner(self_) }.description_c.as_ptr()
 }
 
-/// `tags()`: the tag names in the template's order, as an owned list of
-/// `char *` freed with `kafka_List_destroy`.
+/// `tags()`: the tag names in the template's order, as a list of `char *`.
+///
+/// # Returns
+///
+/// the ordered set of tag names; never `NULL` but possibly empty
 ///
 /// # Safety
 ///
 /// `self_` must be a valid metric-name-template handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_tags(
@@ -179,11 +209,12 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_tags(
     box_string_list(unsafe { metric_name_template_ref(self_) }.tags())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the template.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-name-template handle.
+/// `self_` must be a valid metric-name-template handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricNameTemplate_to_string(

@@ -22,15 +22,9 @@ use std::hash::{Hash, Hasher};
 /// Describes a client quota entity, which is a mapping of entity types to their
 /// names.
 ///
-/// Corresponds to `org.apache.kafka.common.quota.ClientQuotaEntity`.
+/// # Translation notes
 ///
-/// Java models the mapping as a `Map<String, String>` whose *values may be
-/// null*: "If a name is null, then it is mapped to the built-in default entity
-/// name" (e.g. `--entity-type users --entity-default`). Rust cannot store a
-/// null `String`, so the faithful representation of Java's nullable map value
-/// is `Option<String>`: `None` is the built-in default entity (wire-null entity
-/// name), and `Some(name)` is a concretely-named entity (`Some(String::new())`
-/// is the entity literally named `""`, which is distinct from the default).
+/// A `None` name is Java's `null`.
 #[derive(Clone, Debug, Eq)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity")]
 pub struct ClientQuotaEntity {
@@ -49,7 +43,9 @@ impl ClientQuotaEntity {
 
     /// Returns whether the given entity type is one of the built-in types.
     ///
-    /// Mirrors `ClientQuotaEntity.isValidEntityType`.
+    /// # Arguments
+    ///
+    /// - `entity_type` - the entity type to check
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity#isValidEntityType")]
     pub fn is_valid_entity_type(entity_type: &str) -> bool {
         entity_type == ClientQuotaEntity::USER
@@ -58,19 +54,20 @@ impl ClientQuotaEntity {
     }
 
     /// Constructs a quota entity for the given types and names. If a name is
-    /// `None` (Java `null`), then it is mapped to the built-in default entity
+    /// `None`, then it is mapped to the built-in default entity
     /// name.
     ///
-    /// Mirrors `ClientQuotaEntity(Map<String, String>)`.
+    /// # Arguments
+    ///
+    /// - `entries` - maps entity type to its name
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity#ClientQuotaEntity")]
     pub fn new(entries: HashMap<String, Option<String>>) -> Self {
         Self { entries }
     }
 
-    /// Returns the map of entity type to its name. A `None` value denotes the
-    /// built-in default entity (Java's `null` name).
+    /// # Returns
     ///
-    /// Mirrors `ClientQuotaEntity.entries()`.
+    /// map of entity type to its name (`None`: default)
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaEntity#entries")]
     pub fn entries(&self) -> &HashMap<String, Option<String>> {
         &self.entries

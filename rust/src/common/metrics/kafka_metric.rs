@@ -65,37 +65,47 @@ impl KafkaMetric {
     }
 
     /// Get the configuration of this metric.
+    ///
+    /// # Returns
+    ///
+    /// Return the config of this metric
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#config")]
     pub fn config(&self) -> Arc<MetricConfig> {
         Arc::clone(&self.config.lock().expect("metric config mutex poisoned"))
     }
 
     /// Set the metric config.
+    ///
+    /// # Arguments
+    ///
+    /// - `config` - configuration for this metrics
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#config")]
     pub fn set_config(&self, config: Arc<MetricConfig>) {
         *self.config.lock().expect("metric config mutex poisoned") = config;
     }
 
     /// Determine if the metric value provider is of type `Measurable`.
+    ///
+    /// # Returns
+    ///
+    /// true if the metric value provider is of type Measurable, false otherwise.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#isMeasurable")]
     pub fn is_measurable(&self) -> bool {
         self.metric_value_provider.as_measurable().is_some()
     }
 
-    /// Get the underlying [`Measurable`] value provider.
+    /// Get the underlying metrics provider.
     ///
-    /// Returns [`Error::LocalIllegalState`] when the provider is not a
-    /// [`Measurable`] — Java's `measurable()` throws
-    /// `IllegalStateException("Not a measurable: " + class)` in that case
-    /// (`KafkaMetric.java`). Per CLAUDE.md §12.2 an unchecked-but-recoverable
-    /// Java exception becomes a `Result` rather than a panic.
+    /// # Returns
     ///
-    /// Java returns the provider so callers can compare it by identity (see
-    /// `KafkaMetricTest.testIsMeasurable`); Rust returns a borrow of the boxed
-    /// trait object, which is the closest equivalent — trait objects have no
-    /// meaningful value equality, so callers assert on `is_ok()` / the measured
-    /// value instead.
+    /// Return the metric provider
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_state_error` if the underlying metric is not a `Measurable`.
     #[doc(alias = "org.apache.kafka.common.metrics.KafkaMetric#measurable")]
+    // Java's `IllegalStateException` is recoverable, so it becomes a `Result`;
+    // the borrowed trait object stands in for Java's identity-comparable provider.
     pub fn measurable(&self) -> Result<&dyn Measurable, Error> {
         self.metric_value_provider.as_measurable().ok_or_else(|| {
             // Java names the provider's class; a closure has no type name.
@@ -132,8 +142,8 @@ impl Metric for KafkaMetric {
 }
 
 impl std::fmt::Debug for KafkaMetric {
-    /// What [`Display`](std::fmt::Display) renders: the metric name and the
-    /// provider's type, never the provider's state.
+    // What `Display` renders: the metric name and the provider's type, never
+    // the provider's state.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }

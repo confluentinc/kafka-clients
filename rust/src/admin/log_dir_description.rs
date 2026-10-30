@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A description of a log directory on a particular broker.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.LogDirDescription`.
 
 use crate::common::requests::DescribeLogDirsResponse;
 use std::collections::HashMap;
@@ -25,8 +23,6 @@ use crate::common::TopicPartition;
 use super::ReplicaInfo;
 
 /// A description of a log directory on a particular broker.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.LogDirDescription`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription")]
 pub struct LogDirDescription {
@@ -40,8 +36,11 @@ pub struct LogDirDescription {
 impl LogDirDescription {
     /// Creates a new `LogDirDescription` with unknown volume sizes.
     ///
-    /// Corresponds to the two-argument `LogDirDescription(ApiException, Map)`
-    /// constructor.
+    /// # Arguments
+    ///
+    /// - `error` - the error if the log directory is offline or an error occurred, otherwise
+    ///   `None`.
+    /// - `replica_infos` - the replicas of the log directory, by partition.
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription")]
     pub fn new(error: Option<Error>, replica_infos: HashMap<TopicPartition, ReplicaInfo>) -> Self {
         Self::with_total_bytes_usable_bytes_is_cordoned(
@@ -56,8 +55,13 @@ impl LogDirDescription {
     /// Creates a new `LogDirDescription` with the given raw volume sizes and no
     /// cordoning. A raw value of `UNKNOWN_VOLUME_BYTES` (`-1`) maps to `None`.
     ///
-    /// Corresponds to the four-argument
-    /// `LogDirDescription(ApiException, Map, long, long)` constructor.
+    /// # Arguments
+    ///
+    /// - `error` - the error if the log directory is offline or an error occurred, otherwise
+    ///   `None`.
+    /// - `replica_infos` - the replicas of the log directory, by partition.
+    /// - `total_bytes` - the total size of the volume, or `UNKNOWN_VOLUME_BYTES` (`-1`).
+    /// - `usable_bytes` - the usable size of the volume, or `UNKNOWN_VOLUME_BYTES` (`-1`).
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription")]
     pub fn with_total_bytes_usable_bytes(
         error: Option<Error>,
@@ -72,9 +76,14 @@ impl LogDirDescription {
     /// cordoning flag. A raw value of `UNKNOWN_VOLUME_BYTES` (`-1`) maps to
     /// `None`.
     ///
-    /// Corresponds to the five-argument
-    /// `LogDirDescription(ApiException, Map, long, long, boolean)` constructor
-    /// (KIP-1066).
+    /// # Arguments
+    ///
+    /// - `error` - the error if the log directory is offline or an error occurred, otherwise
+    ///   `None`.
+    /// - `replica_infos` - the replicas of the log directory, by partition.
+    /// - `total_bytes` - the total size of the volume, or `UNKNOWN_VOLUME_BYTES` (`-1`).
+    /// - `usable_bytes` - the usable size of the volume, or `UNKNOWN_VOLUME_BYTES` (`-1`).
+    /// - `is_cordoned` - whether the log directory is cordoned.
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription")]
     pub fn with_total_bytes_usable_bytes_is_cordoned(
         error: Option<Error>,
@@ -102,28 +111,30 @@ impl LogDirDescription {
         self.error.as_ref()
     }
 
-    /// A map from topic partition to replica information for that partition in
+    /// Returns a map from topic partition to replica information for that partition in
     /// this log directory.
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#replicaInfos")]
     pub fn replica_infos(&self) -> &HashMap<TopicPartition, ReplicaInfo> {
         &self.replica_infos
     }
 
-    /// The total size in bytes of the volume this log directory is on, or `None`
-    /// if the broker did not return a value.
+    /// Returns the total size of the volume this log directory is on or `None` if the broker did
+    /// not return a value. For volumes larger than `i64::MAX`, `i64::MAX` is returned. This
+    /// value does not include the size of data stored in remote storage.
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#totalBytes")]
     pub fn total_bytes(&self) -> Option<i64> {
         self.total_bytes
     }
 
-    /// The usable size in bytes of the volume this log directory is on, or
-    /// `None` if the broker did not return a value.
+    /// Returns the usable size on the volume this log directory is on or `None` if the broker
+    /// did not return a value. For usable sizes larger than `i64::MAX`, `i64::MAX` is returned.
+    /// This value does not include the size of data stored in remote storage.
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#usableBytes")]
     pub fn usable_bytes(&self) -> Option<i64> {
         self.usable_bytes
     }
 
-    /// Whether this log directory is cordoned or not.
+    /// Returns whether this log directory is cordoned or not.
     #[doc(alias = "org.apache.kafka.clients.admin.LogDirDescription#isCordoned")]
     pub fn is_cordoned(&self) -> bool {
         self.is_cordoned

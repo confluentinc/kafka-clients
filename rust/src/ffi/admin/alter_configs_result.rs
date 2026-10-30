@@ -55,16 +55,21 @@ unsafe fn handle<'a>(self_: *const kafka_admin_AlterConfigsResult_t) -> &'a Resu
     unsafe { result_ref(self_) }
 }
 
-/// `AlterConfigsResult.values()`: an owned map, sorted by the resource's
-/// `toString()`, of owned `kafka_common_config_ConfigResource_t *` keys
-/// (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers
-/// `NULL`). Freed with `kafka_Map_destroy`, which frees the keys and the
-/// futures.
+/// Return a map from resources to futures which can be used to check the status of the operation on
+/// each resource.
+///
+/// # Returns
+///
+/// A map, sorted by the resource's `toString()`, of owned `kafka_common_config_ConfigResource_t *`
+/// keys (compared by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *`
+/// (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_values(
@@ -84,13 +89,18 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_values(
     )
 }
 
-/// `AlterConfigsResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every config alteration succeeded,
-/// freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the alter configs operations succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every config alteration
+/// succeeded.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_all(
@@ -102,12 +112,12 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -101,10 +101,14 @@ def test_async_cancelled_poll_rewinds(kafka_broker: Any,
             await consumer.assign(partitions=[tp])
             polling = asyncio.ensure_future(consumer.poll(timeout=10))
             await asyncio.sleep(0.5)  # the poll waits on the empty partition
+            # The notify hook sets the event from a core task once the poll's
+            # answer, with the records, is queued; a fixed sleep could cancel
+            # before it, leaving nothing to rewind.
+            consumer._pending_event.clear()
             produce(kafka_broker, topic, expected, value_serializer=string_serializer())
-            # The loop blocked: the core's answer, with the records, stays
-            # queued for the loop while the task is cancelled.
-            time.sleep(1.0)
+            # The loop blocked: the core's answer stays queued for the loop
+            # while the task is cancelled.
+            assert consumer._pending_event.wait(DEADLINE), "the poll got no answer"
             polling.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await polling

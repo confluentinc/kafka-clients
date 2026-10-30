@@ -22,7 +22,7 @@
 //! Tests:
 //! 1. `test_sasl_ssl_consume_records` — subscribe → produce → poll returns the
 //!    produced records over a TLS-encrypted, PLAIN-authenticated connection
-//!    on `:9097` (admin/admin-secret).
+//!    on port 9097 (admin/admin-secret).
 //! 2. `test_sasl_ssl_wrong_credentials` — wrong SASL password surfaces as an
 //!    error (it must not hang), mirroring `ssl_sasl_test::test_sasl_wrong_credentials`.
 //!
@@ -76,7 +76,7 @@ fn plain_jaas_config(username: &str, password: &str) -> String {
 }
 
 /// Single-broker cluster with KIP-848 (`group.protocol=consumer`) enabled.
-/// The cluster always exposes the SASL_SSL listener on `:9097`
+/// The cluster always exposes the SASL_SSL listener on port 9097
 /// (see `tests/common/kafka_cluster.rs`); replication factor is 1 for a
 /// single broker.
 fn cluster_config_sasl_ssl_kip848() -> ClusterConfig {
@@ -95,7 +95,7 @@ fn cluster_config_sasl_ssl_kip848() -> ClusterConfig {
     cfg
 }
 
-/// Build a SASL_SSL `ConsumerConfig` (PLAIN, KIP-848) against `:9097`.
+/// Build a SASL_SSL `ConsumerConfig` (PLAIN, KIP-848) against port 9097.
 fn make_sasl_ssl_consumer_config(
     bootstrap: &str,
     group_id: &str,
@@ -121,7 +121,7 @@ fn make_sasl_ssl_consumer_config(
     ConsumerConfig::new(&props).expect("invalid SASL_SSL consumer config")
 }
 
-/// Build a SASL_SSL `ProducerConfig` (PLAIN, acks=all) against `:9097`.
+/// Build a SASL_SSL `ProducerConfig` (PLAIN, acks=all) against port 9097.
 fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> ProducerConfig {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),

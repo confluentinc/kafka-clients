@@ -24,8 +24,6 @@ use std::hash::{Hash, Hasher};
 /// The principal type will always be `"User"` for the simple authorizer that is
 /// enabled by default, but custom authorizers can leverage different principal
 /// types (such as to enable group or role-based ACLs).
-///
-/// Corresponds to `org.apache.kafka.common.security.auth.KafkaPrincipal`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal")]
 pub struct KafkaPrincipal {
@@ -40,7 +38,10 @@ impl KafkaPrincipal {
 
     /// Creates a new principal from a type and name (not token-authenticated).
     ///
-    /// Mirrors `new KafkaPrincipal(principalType, name)`.
+    /// # Arguments
+    ///
+    /// - `principal_type` - the principal type, such as [`Self::USER_TYPE`]
+    /// - `name` - the principal name
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#KafkaPrincipal")]
     pub fn new(principal_type: impl Into<String>, name: impl Into<String>) -> Self {
         Self::with_token_authenticated(principal_type, name, false)
@@ -48,7 +49,11 @@ impl KafkaPrincipal {
 
     /// Creates a new principal from a type, name, and token-authenticated flag.
     ///
-    /// Mirrors `new KafkaPrincipal(principalType, name, tokenAuthenticated)`.
+    /// # Arguments
+    ///
+    /// - `principal_type` - the principal type, such as [`Self::USER_TYPE`]
+    /// - `name` - the principal name
+    /// - `token_authenticated` - whether the principal was authenticated with a delegation token
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#KafkaPrincipal")]
     pub fn with_token_authenticated(
         principal_type: impl Into<String>,
@@ -60,7 +65,7 @@ impl KafkaPrincipal {
 
     /// The anonymous principal (`User:ANONYMOUS`).
     ///
-    /// Mirrors `KafkaPrincipal.ANONYMOUS`. Modeled as a function rather than a
+    /// Modeled as a function rather than a
     /// constant because the name is an owned `String`.
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#ANONYMOUS")]
     pub fn anonymous() -> Self {
@@ -68,16 +73,12 @@ impl KafkaPrincipal {
     }
 
     /// Returns the principal name.
-    ///
-    /// Mirrors `KafkaPrincipal.getName`.
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#getName")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Returns the principal type.
-    ///
-    /// Mirrors `KafkaPrincipal.getPrincipalType`.
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#getPrincipalType")]
     pub fn principal_type(&self) -> &str {
         &self.principal_type
@@ -85,15 +86,15 @@ impl KafkaPrincipal {
 
     /// Sets whether the principal was authenticated with a delegation token.
     ///
-    /// Mirrors `KafkaPrincipal.tokenAuthenticated(boolean)`.
+    /// # Arguments
+    ///
+    /// - `token_authenticated` - whether the principal was authenticated with a delegation token
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated")]
     pub fn set_token_authenticated(&mut self, token_authenticated: bool) {
         self.token_authenticated = token_authenticated;
     }
 
-    /// Whether the principal was authenticated with a delegation token.
-    ///
-    /// Mirrors `KafkaPrincipal.tokenAuthenticated()`.
+    /// Returns whether the principal was authenticated with a delegation token.
     #[doc(alias = "org.apache.kafka.common.security.auth.KafkaPrincipal#tokenAuthenticated")]
     pub fn token_authenticated(&self) -> bool {
         self.token_authenticated

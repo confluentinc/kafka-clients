@@ -117,7 +117,9 @@ def _require(name: str, value: object) -> None:
 
 def _mock_listener(callback: Any) -> ConsumerRebalanceListener | None:
     """``subscribe``'s listener in Java's mock: a ``None`` is refused first
-    (``MockConsumer.java:200,220``); left out (``MISSING``) is no listener."""
+    (``org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)``,
+    ``#subscribe(Collection,ConsumerRebalanceListener)``); left out (``MISSING``) is no
+    listener."""
     if callback is None:
         raise IllegalArgumentError(message="RebalanceListener cannot be None")
     return None if callback is MISSING else callback
@@ -146,8 +148,10 @@ class _Monitor:
     while it awaits the listener (``owner``). A block enters it as
     ``with self._lock.rlock: self._lock.check()``: the C ``RLock``'s own
     ``__enter__`` / ``__exit__``, so no Python frame sits between the acquire and
-    the release and a ``KeyboardInterrupt`` cannot leave the lock held, and the
-    owner check as the block's first statement, so a refusal releases it too.
+    the release and a ``KeyboardInterrupt`` cannot leave the lock held (except on
+    CPython 3.14, which checks for signals after ``__enter__`` returns and before
+    the block starts: CPython gh-148874, fixed in 3.15), and the owner check as
+    the block's first statement, so a refusal releases it too.
     Entering it from any other task or thread while it has an owner raises
     ``ConcurrentModificationError``; the owner, and anyone while there is none,
     enter as the lock lets them.
@@ -616,7 +620,8 @@ class MockConsumerCore(Generic[K, V]):
                              timeout: Duration = MISSING
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
-        # yet.") (MockConsumer.java:611), inside its synchronized body.
+        # yet.") (org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes(Map)),
+        # inside its synchronized body.
         with self._lock.rlock:
             self._lock.check()
             raise UnsupportedOperationError(message="Not implemented yet.")

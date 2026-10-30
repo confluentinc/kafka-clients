@@ -84,12 +84,16 @@ pub(crate) unsafe fn destroy_member_to_remove_element(element: *mut c_void) {
     unsafe { kafka_admin_MemberToRemove_destroy(element as *mut kafka_admin_MemberToRemove_t) };
 }
 
-/// `new MemberToRemove(String groupInstanceId)`: copied. Owned, freed with
-/// [`kafka_admin_MemberToRemove_destroy`].
+/// Creates the member to remove from a group, by its group instance id.
+///
+/// # Parameters
+///
+/// - `group_instance_id` - the group instance id of the static member; copied.
 ///
 /// # Safety
 ///
-/// `group_instance_id` must be a valid NUL-terminated string.
+/// `group_instance_id` must be a valid NUL-terminated string. The returned handle is owned, freed
+/// with [`kafka_admin_MemberToRemove_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberToRemove_new(
@@ -100,12 +104,12 @@ pub unsafe extern "C" fn kafka_admin_MemberToRemove_new(
     box_member_to_remove(MemberToRemove::new(unsafe { c_str_to_string(group_instance_id) }))
 }
 
-/// `groupInstanceId()`: a borrowed string valid as long as the member, never
-/// passed to `kafka_string_destroy`.
+/// Returns the group instance id of the member.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-to-remove handle.
+/// `self_` must be a valid member-to-remove handle. The returned string is borrowed, valid as
+/// long as the member, never passed to `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberToRemove_group_instance_id(
@@ -117,11 +121,11 @@ pub unsafe extern "C" fn kafka_admin_MemberToRemove_group_instance_id(
     unsafe { inner_ref(self_) }.group_instance_id_c.as_ptr()
 }
 
-/// Frees an owned member handle; null is a no-op.
+/// Frees an owned member handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned member handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned member handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

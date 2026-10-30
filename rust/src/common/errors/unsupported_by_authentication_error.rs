@@ -18,14 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Delegation Token requests are not allowed on PLAINTEXT/1-way SSL channels
-    /// and on delegation token authenticated channels.
+    /// Authentication mechanism does not support the requested function.
     ///
-    /// Corresponds to Java's `UnsupportedByAuthenticationException`, error code `Errors::DelegationTokenRequestNotAllowed`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnsupportedByAuthenticationException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::DelegationTokenRequestNotAllowed`.
     #[doc(alias = "org.apache.kafka.common.errors.UnsupportedByAuthenticationException")]
     UnsupportedByAuthenticationError,
     code: Errors::DelegationTokenRequestNotAllowed,

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A request to update/insert a SASL/SCRAM credential for a user.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.UserScramCredentialUpsertion`.
 
 use std::fmt;
 
@@ -27,8 +25,9 @@ use crate::common::config::types::Password;
 ///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
 ///
-/// `Debug` renders the user and the credential info, and
-/// `Password::HIDDEN` in place of the salt and the password.
+/// # Translation notes
+///
+/// `Debug` hides the salt and the password.
 #[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion")]
 pub struct UserScramCredentialUpsertion {
@@ -41,8 +40,13 @@ pub struct UserScramCredentialUpsertion {
 impl UserScramCredentialUpsertion {
     /// Constructor that accepts a string password and generates a random salt.
     ///
-    /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, String)`,
-    /// which encodes the password with UTF-8.
+    /// The password is encoded with UTF-8.
+    ///
+    /// # Arguments
+    ///
+    /// - `user` - the user for which the credential is to be updated/inserted
+    /// - `credential_info` - the mechanism and iterations to be used
+    /// - `password` - the password
     #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#UserScramCredentialUpsertion")]
     pub fn with_str(user: impl Into<String>, credential_info: ScramCredentialInfo, password: &str) -> Self {
         Self::with_bytes(user, credential_info, password.as_bytes().to_vec())
@@ -50,7 +54,11 @@ impl UserScramCredentialUpsertion {
 
     /// Constructor that accepts a byte password and generates a random salt.
     ///
-    /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[])`.
+    /// # Arguments
+    ///
+    /// - `user` - the user for which the credential is to be updated/inserted
+    /// - `credential_info` - the mechanism and iterations to be used
+    /// - `password` - the password
     #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#UserScramCredentialUpsertion")]
     pub fn with_bytes(user: impl Into<String>, credential_info: ScramCredentialInfo, password: Vec<u8>) -> Self {
         let salt = generate_random_salt();
@@ -59,7 +67,12 @@ impl UserScramCredentialUpsertion {
 
     /// Constructor that accepts an explicit salt.
     ///
-    /// Mirrors `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[], byte[])`.
+    /// # Arguments
+    ///
+    /// - `user` - the user for which the credential is to be updated/inserted
+    /// - `credential_info` - the mechanism and iterations to be used
+    /// - `password` - the password
+    /// - `salt` - the salt to be used
     #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialUpsertion#UserScramCredentialUpsertion")]
     pub fn with_salt(
         user: impl Into<String>,

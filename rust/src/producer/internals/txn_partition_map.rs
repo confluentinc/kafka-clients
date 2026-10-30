@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(m.last_acked_offset(&tp(0)), Some(11));
     }
 
-    /// The idempotent-only lazy-create path (Java 90-94): the manager may have
+    /// The idempotent-only lazy-create path of `TxnPartitionMap#updateLastAckedOffset`: the manager may have
     /// been reset while a request was reenqueued, so a non-transactional
     /// producer must get an entry inserted rather than erroring.
     #[test]

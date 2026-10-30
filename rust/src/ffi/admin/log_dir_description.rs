@@ -108,12 +108,12 @@ pub(crate) unsafe fn destroy_log_dir_description_element(element: *mut c_void) {
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` to
-/// `const kafka_admin_ReplicaInfo_t *` into owned copies; null reads as
+/// `const kafka_admin_ReplicaInfo_t *` into owned copies; `NULL` reads as
 /// empty.
 ///
 /// # Safety
 ///
-/// `map` must be null or a valid map whose keys are valid topic-partition
+/// `map` must be `NULL` or a valid map whose keys are valid topic-partition
 /// handles and whose values are valid replica-info handles, all kept alive
 /// and not mutated for this call.
 unsafe fn map_replica_infos(map: *const kafka_Map_t) -> HashMap<TopicPartition, ReplicaInfo> {
@@ -137,20 +137,24 @@ unsafe fn map_replica_infos(map: *const kafka_Map_t) -> HashMap<TopicPartition, 
         .collect()
 }
 
-/// `new LogDirDescription(ApiException error, Map<TopicPartition, ReplicaInfo>
-/// replicaInfos)`. `error` is nullable and **consumed**: the description
-/// takes ownership of the handle, the caller does not destroy it.
-/// `replica_infos` is a borrowed map of `const kafka_common_TopicPartition_t *`
-/// to `const kafka_admin_ReplicaInfo_t *`, copied (null reads as empty).
-/// Owned, freed with [`kafka_admin_LogDirDescription_destroy`].
+/// Creates the description of a log directory.
+///
+/// # Parameters
+///
+/// - `error` - the error describing the log directory, `NULL` for none; consumed.
+/// - `replica_infos` - the replicas in the log directory, a borrowed map of
+///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
+///   `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `error` must be null or an owned error handle not yet destroyed, that no
-/// other call uses at the same time, which this call consumes;
-/// `replica_infos` null or a valid map whose keys are valid topic-partition
+/// `error` must be `NULL` or an owned error handle not yet destroyed, that no
+/// other call uses at the same time, which this call consumes: the description
+/// takes ownership of it, the caller does not destroy it;
+/// `replica_infos` `NULL` or a valid map whose keys are valid topic-partition
 /// handles and whose values are valid replica-info handles, all kept alive
-/// and not mutated for this call.
+/// and not mutated for this call. The returned handle is owned, freed with
+/// [`kafka_admin_LogDirDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
@@ -167,10 +171,16 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
     }))
 }
 
-/// `new LogDirDescription(ApiException error, Map<TopicPartition, ReplicaInfo>
-/// replicaInfos, long totalBytes, long usableBytes)`: as
-/// [`kafka_admin_LogDirDescription_new`], plus the volume sizes (`-1` =
-/// `UNKNOWN_VOLUME_BYTES`, read as empty).
+/// Creates the description of a log directory, with the sizes of its volume.
+///
+/// # Parameters
+///
+/// - `error` - the error describing the log directory, `NULL` for none; consumed.
+/// - `replica_infos` - the replicas in the log directory, a borrowed map of
+///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
+///   `NULL` reads as empty.
+/// - `total_bytes` - the total size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
+/// - `usable_bytes` - the usable size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 ///
 /// # Safety
 ///
@@ -198,10 +208,18 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
     ))
 }
 
-/// `new LogDirDescription(ApiException error, Map<TopicPartition, ReplicaInfo>
-/// replicaInfos, long totalBytes, long usableBytes, boolean isCordoned)`: as
-/// [`kafka_admin_LogDirDescription_with_total_bytes_usable_bytes`], plus the
-/// cordoned flag.
+/// Creates the description of a log directory, with the sizes of its volume and its cordoned
+/// flag.
+///
+/// # Parameters
+///
+/// - `error` - the error describing the log directory, `NULL` for none; consumed.
+/// - `replica_infos` - the replicas in the log directory, a borrowed map of
+///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
+///   `NULL` reads as empty.
+/// - `total_bytes` - the total size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
+/// - `usable_bytes` - the usable size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
+/// - `is_cordoned` - 1 if the log directory is cordoned, else 0.
 ///
 /// # Safety
 ///
@@ -231,13 +249,16 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
     ))
 }
 
-/// `error()`: a borrowed error handle valid as long as the description
-/// (never passed to `kafka_common_Error_destroy`), or null when the log
-/// directory was described without error.
+/// Returns `ApiError` if the log directory is offline or an error occurred, otherwise returns
+/// `NULL`.
+///
+/// - KafkaStorageError - The log directory is offline.
+/// - UnknownServerError - The server experienced an unexpected error when processing the request.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid log-dir-description handle.
+/// `self_` must be a valid log-dir-description handle. The returned error is borrowed, valid as
+/// long as the description, never passed to `kafka_common_Error_destroy`.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
@@ -253,14 +274,17 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
         .map_or(ptr::null(), |error| error as *const ErrorInner as *const kafka_common_Error_t)
 }
 
-/// `replicaInfos()`: an owned map of owned `kafka_common_TopicPartition_t *`
-/// keys (compared by value in `kafka_Map_get`) to owned
-/// `kafka_admin_ReplicaInfo_t *` copies, ordered by topic then partition,
-/// freed with `kafka_Map_destroy`.
+/// A map from topic partition to replica information for that partition in this log directory.
+///
+/// # Returns
+///
+/// A map of `kafka_common_TopicPartition_t *` keys, compared by value in `kafka_Map_get` and
+/// ordered by topic then partition, to `kafka_admin_ReplicaInfo_t *` copies.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid log-dir-description handle.
+/// `self_` must be a valid log-dir-description handle. The returned map is owned, freed together
+/// with its entries by `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_infos(
@@ -288,7 +312,13 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_infos(
     )
 }
 
-/// `totalBytes()`: the volume size, or `-1` for `OptionalLong.empty()`.
+/// The total size of the volume this log directory is on or empty if the broker did not return a
+/// value. For volumes larger than Long.MAX_VALUE, Long.MAX_VALUE is returned. This value does not
+/// include the size of data stored in remote storage.
+///
+/// # Returns
+///
+/// The size, or `-1` for `OptionalLong.empty()`.
 ///
 /// # Safety
 ///
@@ -303,8 +333,13 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
     unsafe { log_dir_description_ref(self_) }.total_bytes().unwrap_or(-1)
 }
 
-/// `usableBytes()`: the usable volume size, or `-1` for
-/// `OptionalLong.empty()`.
+/// The usable size on the volume this log directory is on or empty if the broker did not return a
+/// value. For usable sizes larger than Long.MAX_VALUE, Long.MAX_VALUE is returned. This value
+/// does not include the size of data stored in remote storage.
+///
+/// # Returns
+///
+/// The size, or `-1` for `OptionalLong.empty()`.
 ///
 /// # Safety
 ///
@@ -319,7 +354,11 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
     unsafe { log_dir_description_ref(self_) }.usable_bytes().unwrap_or(-1)
 }
 
-/// `isCordoned()`.
+/// Whether this log directory is cordoned or not.
+///
+/// # Returns
+///
+/// 1 if it is cordoned, else 0.
 ///
 /// # Safety
 ///
@@ -334,11 +373,12 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_is_cordoned(
     i8::from(unsafe { log_dir_description_ref(self_) }.is_cordoned())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the description.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid log-dir-description handle.
+/// `self_` must be a valid log-dir-description handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_to_string(
@@ -349,12 +389,12 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_to_string(
     into_c_string(&unsafe { log_dir_description_ref(self_) }.to_string())
 }
 
-/// Frees an owned log-dir-description handle, with the error it holds; null
+/// Frees an owned log-dir-description handle, with the error it holds; `NULL`
 /// is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards, nor is the error
 /// view `kafka_admin_LogDirDescription_error` handed out.
 #[ffi_guard]

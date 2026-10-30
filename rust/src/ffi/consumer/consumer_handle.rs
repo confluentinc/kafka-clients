@@ -71,7 +71,8 @@ use crate::ffi::common::{
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::consumer_group_metadata::{box_group_metadata, kafka_consumer_ConsumerGroupMetadata_t};
 use crate::ffi::consumer::offset_and_metadata::{
-    kafka_consumer_OffsetAndMetadata_t, map_offset_and_metadata, offset_and_metadata_map, offset_and_metadata_ref,
+    kafka_consumer_OffsetAndMetadata_t, map_offset_and_metadata, nullable_offset_and_metadata_map,
+    offset_and_metadata_ref,
 };
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
 use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
@@ -237,8 +238,20 @@ unsafe fn completion_sink(self_: *const kafka_consumer_ConsumerHandle_t) -> impl
 
 /// `seek(TopicPartition partition, long offset)`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_seek_with_offset`
+/// - `offset` - as for `kafka_consumer_Consumer_seek_with_offset`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_with_offset`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -277,6 +290,21 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_seek_with_offset`
+/// - `offset` - as for `kafka_consumer_Consumer_seek_with_offset`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_seek_with_offset_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_with_offset`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -320,8 +348,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
 
 /// `seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata)`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_seek_with_offset_and_metadata`
+/// - `offset_and_metadata` - as for `kafka_consumer_Consumer_seek_with_offset_and_metadata`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_with_offset_and_metadata`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -364,6 +404,21 @@ pub type kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_seek_with_offset_and_metadata`
+/// - `offset_and_metadata` - as for `kafka_consumer_Consumer_seek_with_offset_and_metadata`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_with_offset_and_metadata`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -411,8 +466,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
 
 /// `seekToBeginning(Collection<TopicPartition>)`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_seek_to_beginning`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_to_beginning`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -451,6 +517,20 @@ pub type kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_seek_to_beginning`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_to_beginning`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -494,8 +574,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
 
 /// `seekToEnd(Collection<TopicPartition>)`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_seek_to_end`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_to_end`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -534,6 +625,20 @@ pub type kafka_consumer_ConsumerHandle_seek_to_end_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_seek_to_end`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_seek_to_end_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_seek_to_end`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -577,8 +682,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
 
 /// `pause(Collection<TopicPartition>)`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_pause`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_pause`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -615,6 +731,20 @@ pub type kafka_consumer_ConsumerHandle_pause_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_pause`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_pause_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_pause`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -658,8 +788,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
 
 /// `resume(Collection<TopicPartition>)`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_resume`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_resume`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -699,6 +840,20 @@ pub type kafka_consumer_ConsumerHandle_resume_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_resume`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_resume_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_resume`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -745,6 +900,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
 /// Blocking; callable from inside a listener. The value is returned; on failure
 /// the error is stored in `*out_err`.
 ///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_position`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_position`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_position`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -779,6 +950,20 @@ pub type kafka_consumer_ConsumerHandle_position_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_position`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_position_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_position`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -825,6 +1010,23 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
 /// Blocking; callable from inside a listener. The value is returned; on failure
 /// the error is stored in `*out_err`.
 ///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_position_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_position_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_position_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_position_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -859,6 +1061,21 @@ pub type kafka_consumer_ConsumerHandle_position_with_timeout_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - as for `kafka_consumer_Consumer_position_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_position_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_position_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_position_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
@@ -900,17 +1117,35 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     )
 }
 
-/// `committed(Set<TopicPartition> partitions)`: an owned map of owned
-/// `kafka_common_TopicPartition_t *` to owned
-/// `kafka_consumer_OffsetAndMetadata_t *`.
+/// `committed(Set<TopicPartition> partitions)`: a map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_committed`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_committed`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_committed`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
@@ -931,7 +1166,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
     // result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -942,9 +1177,26 @@ pub type kafka_consumer_ConsumerHandle_committed_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_committed`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_committed_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_committed`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -973,7 +1225,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     inner.run_cb(
         "kafka_consumer_ConsumerHandle_committed_cb",
         async move { h.committed(&partitions).await },
-        move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets)),
+        move |client, result| {
+            deliver_ptr(client, cb, opaque, result, move |offsets| {
+                nullable_offset_and_metadata_map(&offsets)
+            })
+        },
         // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
         // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
         // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
@@ -986,13 +1242,33 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
 /// `kafka_consumer_ConsumerHandle_committed`, with `timeout` in
 /// milliseconds.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_committed_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_committed_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_committed_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_committed_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
@@ -1014,7 +1290,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
     // result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -1025,9 +1301,27 @@ pub type kafka_consumer_ConsumerHandle_committed_with_timeout_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_committed_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_committed_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_committed_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_committed_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1057,7 +1351,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout_cb
     inner.run_cb(
         "kafka_consumer_ConsumerHandle_committed_with_timeout_cb",
         async move { h.committed_with_timeout(&partitions, ms(timeout)?).await },
-        move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets)),
+        move |client, result| {
+            deliver_ptr(client, cb, opaque, result, move |offsets| {
+                nullable_offset_and_metadata_map(&offsets)
+            })
+        },
         // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
         // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
         // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
@@ -1066,16 +1364,35 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout_cb
     )
 }
 
-/// `partitionsFor(String topic)` from inside a listener: an owned list of
-/// owned `kafka_common_PartitionInfo_t *`.
+/// `partitionsFor(String topic)` from inside a listener: a list of
+/// `kafka_common_PartitionInfo_t *`.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `topic` - as for `kafka_consumer_Consumer_partitions_for`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_partitions_for`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_partitions_for`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `topic` a NUL-terminated string.
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for(
@@ -1106,9 +1423,26 @@ pub type kafka_consumer_ConsumerHandle_partitions_for_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `topic` - as for `kafka_consumer_Consumer_partitions_for`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_partitions_for_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_partitions_for`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The list `cb` receives is owned by `cb`, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1149,13 +1483,33 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_cb(
 /// `kafka_consumer_ConsumerHandle_partitions_for`, with `timeout` in
 /// milliseconds.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `topic` - as for `kafka_consumer_Consumer_partitions_for_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_partitions_for_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_partitions_for_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_partitions_for_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `topic` a NUL-terminated string.
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeout(
@@ -1187,9 +1541,27 @@ pub type kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `topic` - as for `kafka_consumer_Consumer_partitions_for_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_partitions_for_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_partitions_for_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The list `cb` receives is owned by `cb`, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1227,17 +1599,31 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
     )
 }
 
-/// `listTopics()` from inside a listener: an owned map of owned `char *` to
-/// owned `kafka_List_t *` of owned `kafka_common_PartitionInfo_t *`, topics
-/// sorted.
+/// `listTopics()` from inside a listener: a map of `char *` to
+/// `kafka_List_t *` of `kafka_common_PartitionInfo_t *`, topics sorted.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_list_topics`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_list_topics`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle. `out_err` must be a valid slot pointing at
 /// null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics(
@@ -1265,9 +1651,25 @@ pub type kafka_consumer_ConsumerHandle_list_topics_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_list_topics_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_list_topics`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1304,13 +1706,32 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_cb(
 /// `kafka_consumer_ConsumerHandle_list_topics`, with `timeout` in
 /// milliseconds.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timeout` - as for `kafka_consumer_Consumer_list_topics_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_list_topics_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_list_topics_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle. `out_err` must be a valid slot pointing at
 /// null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout(
@@ -1338,9 +1759,26 @@ pub type kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `timeout` - as for `kafka_consumer_Consumer_list_topics_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_list_topics_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1374,16 +1812,35 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout_
     )
 }
 
-/// `beginningOffsets(Collection<TopicPartition> partitions)`: an owned
-/// map of owned `kafka_common_TopicPartition_t *` to owned `int64_t *`.
+/// `beginningOffsets(Collection<TopicPartition> partitions)`: a map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_beginning_offsets`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_beginning_offsets`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_beginning_offsets`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
@@ -1415,9 +1872,26 @@ pub type kafka_consumer_ConsumerHandle_beginning_offsets_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_beginning_offsets`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_beginning_offsets_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_beginning_offsets`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1459,13 +1933,33 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
 /// as `kafka_consumer_ConsumerHandle_beginning_offsets`, with `timeout` in
 /// milliseconds.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_beginning_offsets_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_beginning_offsets_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_beginning_offsets_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_beginning_offsets_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout(
@@ -1498,9 +1992,27 @@ pub type kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_beginning_offsets_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_beginning_offsets_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_beginning_offsets_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1539,16 +2051,35 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
     )
 }
 
-/// `endOffsets(Collection<TopicPartition> partitions)`: an owned map of
-/// owned `kafka_common_TopicPartition_t *` to owned `int64_t *`.
+/// `endOffsets(Collection<TopicPartition> partitions)`: a map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_end_offsets`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_end_offsets`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_end_offsets`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
@@ -1580,9 +2111,26 @@ pub type kafka_consumer_ConsumerHandle_end_offsets_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_end_offsets`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_end_offsets_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_end_offsets`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1624,13 +2172,33 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
 /// `kafka_consumer_ConsumerHandle_end_offsets`, with `timeout` in
 /// milliseconds.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_end_offsets_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_end_offsets_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_end_offsets_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_end_offsets_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout(
@@ -1663,9 +2231,27 @@ pub type kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t =
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
 ///
+/// # Parameters
+///
+/// - `partitions` - as for `kafka_consumer_Consumer_end_offsets_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_end_offsets_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_end_offsets_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1705,17 +2291,37 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
 }
 
 /// `offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch)`: the
-/// input maps `kafka_common_TopicPartition_t *` to `int64_t *`; the owned
-/// result maps owned `kafka_common_TopicPartition_t *` to owned
-/// `kafka_consumer_OffsetAndTimestamp_t *`.
+/// input maps `kafka_common_TopicPartition_t *` to `int64_t *`; the result
+/// maps `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndTimestamp_t *`, `NULL` for a partition with no
+/// offset for its timestamp.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - as for `kafka_consumer_Consumer_offsets_for_times`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_offsets_for_times`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_offsets_for_times`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
@@ -1745,11 +2351,29 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer__execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
+/// blocking form, `NULL` for an unresolved partition.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - as for `kafka_consumer_Consumer_offsets_for_times`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_offsets_for_times_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_offsets_for_times`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1793,13 +2417,33 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
 /// as `kafka_consumer_ConsumerHandle_offsets_for_times`, with `timeout` in
 /// milliseconds.
 ///
-/// Blocking; callable from inside a listener. The owned value is returned; on
-/// failure the error is stored in `*out_err`.
+/// Blocking; callable from inside a listener. On failure the error is stored
+/// in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - as for `kafka_consumer_Consumer_offsets_for_times_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_offsets_for_times_with_timeout`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_offsets_for_times_with_timeout`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_offsets_for_times_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
 /// documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout(
@@ -1830,11 +2474,30 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin: `cb` is queued for
-/// `kafka_consumer_Consumer__execute_callbacks`.
+/// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
+/// blocking form, `NULL` for an unresolved partition.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - as for `kafka_consumer_Consumer_offsets_for_times_with_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_offsets_for_times_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_offsets_for_times_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
+/// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1878,8 +2541,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
 /// `commitSync()` from inside a listener (the canonical "flush offsets in
 /// `onPartitionsRevoked`" use).
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -1914,6 +2583,18 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_sync_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -1953,8 +2634,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
 /// `commitSync(Duration timeout)`: as `kafka_consumer_ConsumerHandle_commit_sync`,
 /// with `timeout` in milliseconds.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `timeout` - as for `kafka_consumer_Consumer_commit_sync_with_timeout`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -1989,6 +2680,19 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `timeout` - as for `kafka_consumer_Consumer_commit_sync_with_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync_with_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2030,8 +2734,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout_
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`,
 /// copied.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `offsets` - as for `kafka_consumer_Consumer_commit_sync_with_offsets`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync_with_offsets`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2072,6 +2786,19 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `offsets` - as for `kafka_consumer_Consumer_commit_sync_with_offsets`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync_with_offsets`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2117,8 +2844,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 /// as `kafka_consumer_ConsumerHandle_commit_sync_with_offsets`, with
 /// `timeout` in milliseconds.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Parameters
+///
+/// - `offsets` - as for `kafka_consumer_Consumer_commit_sync_with_offsets_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_commit_sync_with_offsets_timeout`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync_with_offsets_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2160,6 +2898,20 @@ pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `offsets` - as for `kafka_consumer_Consumer_commit_sync_with_offsets_timeout`
+/// - `timeout` - as for `kafka_consumer_Consumer_commit_sync_with_offsets_timeout`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_sync_with_offsets_timeout`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2204,8 +2956,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 
 /// `commitAsync()`.
 ///
-/// Blocking; callable from inside a listener. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_async`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2240,6 +2998,18 @@ pub type kafka_consumer_ConsumerHandle_commit_async_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_async_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_async`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2289,8 +3059,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
 /// `onComplete` runs before this call returns, on the calling thread, as
 /// Java's `MockConsumer.commitAsync(callback)` invokes it inline.
 ///
-/// Blocking; callable from inside a listener or an `onComplete`. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener or an `onComplete`.
+///
+/// # Parameters
+///
+/// - `callback` - as for `kafka_consumer_Consumer_commit_async_with_callback`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_async_with_callback`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2336,6 +3116,19 @@ pub type kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t =
 
 /// The non-blocking twin: `cb` and the `onComplete` calls the operation
 /// triggers are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `callback` - as for `kafka_consumer_Consumer_commit_async_with_callback`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_async_with_callback`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2396,8 +3189,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
 /// `onComplete` runs before this call returns, on the calling thread, as
 /// Java's `MockConsumer.commitAsync` invokes it inline.
 ///
-/// Blocking; callable from inside a listener or an `onComplete`. Fails with
-/// `LocalIllegalState` once the consumer is destroyed.
+/// Blocking; callable from inside a listener or an `onComplete`.
+///
+/// # Parameters
+///
+/// - `offsets` - as for `kafka_consumer_Consumer_commit_async_with_offsets_callback`
+/// - `callback` - as for `kafka_consumer_Consumer_commit_async_with_offsets_callback`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_async_with_offsets_callback`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2451,6 +3255,20 @@ pub type kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t =
 /// The non-blocking twin: `cb` and the `onComplete` calls the operation
 /// triggers (on a `MockConsumer` handle, this commit's own `onComplete`
 /// first) are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `offsets` - as for `kafka_consumer_Consumer_commit_async_with_offsets_callback`
+/// - `callback` - as for `kafka_consumer_Consumer_commit_async_with_offsets_callback`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_commit_async_with_offsets_callback`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2506,12 +3324,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
     )
 }
 
-/// `assignment()`: an owned list of owned `kafka_common_TopicPartition_t *`,
+/// Returns `assignment()`: a list of `kafka_common_TopicPartition_t *`,
 /// sorted by topic and partition.
+///
+/// On a closed consumer the Rust call panics with Java's `IllegalStateException` message, as
+/// `kafka_consumer_Consumer_assignment` does; the panic reaches the `_err` twin's `out_err` as an
+/// `IllegalStateError` whose message begins `Rust panic caught at the FFI boundary in`, and the
+/// call returns `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
@@ -2522,12 +3348,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
     sorted_topic_partition_list(unsafe { inner(self_) }.handle.assignment().iter())
 }
 
-/// `paused()`: an owned list of owned `kafka_common_TopicPartition_t *`,
+/// Returns `paused()`: a list of `kafka_common_TopicPartition_t *`,
 /// sorted.
+///
+/// On a closed consumer the Rust call panics with Java's `IllegalStateException` message, as
+/// `kafka_consumer_Consumer_paused` does; the panic reaches the `_err` twin's `out_err` as an
+/// `IllegalStateError` whose message begins `Rust panic caught at the FFI boundary in`, and the
+/// call returns `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
@@ -2538,19 +3372,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
     sorted_topic_partition_list(unsafe { inner(self_) }.handle.paused().iter())
 }
 
-/// `groupMetadata()`: an owned handle freed with
-/// `kafka_consumer_ConsumerGroupMetadata_destroy`. Read through the shared
+/// Returns `groupMetadata()`. Read through the shared
 /// group-metadata slot, so it answers from inside a listener while the
 /// consumer's own call is in flight.
 ///
-/// On a consumer without `group.id` the Rust call panics with Java's
-/// `InvalidGroupIdException` message, as the consumer's own `group_metadata` does; the
-/// panic reaches the `_err` twin's `out_err` as an `IllegalStateError` whose message
-/// begins `Rust panic caught at the FFI boundary in`.
+/// On a closed consumer the Rust call panics with Java's `IllegalStateException` message, and on
+/// a consumer without `group.id` with Java's `InvalidGroupIdException` message, as
+/// `kafka_consumer_Consumer_group_metadata` does; the panic reaches the `_err` twin's `out_err` as
+/// an `IllegalStateError` whose message begins `Rust panic caught at the FFI boundary in`, and the
+/// call returns `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_ConsumerGroupMetadata_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_group_metadata(
@@ -2569,6 +3406,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_group_metadata(
 /// Blocking; callable from inside a listener. On failure the error is stored in
 /// `*out_err` and 0 returned, `*out_lag` unwritten; the caller tells an empty
 /// lag from a failure by `*out_err`.
+///
+/// # Parameters
+///
+/// - `topic_partition` - as for `kafka_consumer_Consumer_current_lag`
+/// - `out_lag` - as for `kafka_consumer_Consumer_current_lag`
+///
+/// # Returns
+///
+/// As `kafka_consumer_Consumer_current_lag`.
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_current_lag`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///
@@ -2606,6 +3459,19 @@ pub type kafka_consumer_ConsumerHandle_current_lag_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `topic_partition` - as for `kafka_consumer_Consumer_current_lag`
+/// - `cb` - the completion, as `kafka_consumer_ConsumerHandle_current_lag_cb_t` documents
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - as `kafka_consumer_Consumer_current_lag`;
+/// - `kafka_common_Error_is_local_concurrent_modification_error` outside a callback
+///   the consumer is running;
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed.
 ///
 /// # Safety
 ///

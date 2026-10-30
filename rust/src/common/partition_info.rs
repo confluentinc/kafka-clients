@@ -32,6 +32,14 @@ pub struct PartitionInfo {
 
 impl PartitionInfo {
     /// Creates a new `PartitionInfo` with no offline replicas.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name
+    /// - `partition` - the partition id
+    /// - `leader` - the leader, or `None` if there is no leader
+    /// - `replicas` - all the replicas, the preferred one first
+    /// - `in_sync_replicas` - the in-sync replicas
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#PartitionInfo")]
     pub fn new(
         topic: String,
@@ -44,6 +52,15 @@ impl PartitionInfo {
     }
 
     /// Creates a new `PartitionInfo` with offline replicas.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name
+    /// - `partition` - the partition id
+    /// - `leader` - the leader, or `None` if there is no leader
+    /// - `replicas` - all the replicas, the preferred one first
+    /// - `in_sync_replicas` - the in-sync replicas
+    /// - `offline_replicas` - the offline replicas
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#PartitionInfo")]
     pub fn with_offline_replicas(
         topic: String,
@@ -56,39 +73,39 @@ impl PartitionInfo {
         Self { topic, partition, leader, replicas, in_sync_replicas, offline_replicas }
     }
 
-    /// The topic name.
+    /// Returns the topic name.
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
-    /// The partition id.
+    /// Returns the partition id.
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
-    /// The node currently acting as a leader for this partition, or `None` if there is no leader.
+    /// Returns the node currently acting as a leader for this partition, or `None` if there is no leader.
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#leader")]
     pub fn leader(&self) -> Option<&Node> {
         self.leader.as_ref()
     }
 
-    /// The complete set of replicas for this partition regardless of whether they are alive or up-to-date. The preferred replica
+    /// Returns the complete set of replicas for this partition regardless of whether they are alive or up-to-date. The preferred replica
     /// is the head of the list.
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#replicas")]
     pub fn replicas(&self) -> &[Node] {
         &self.replicas
     }
 
-    /// The subset of the replicas that are in sync, that is caught-up to the leader and ready to
+    /// Returns the subset of the replicas that are in sync, that is caught-up to the leader and ready to
     /// take over as leader if the leader should fail.
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#inSyncReplicas")]
     pub fn in_sync_replicas(&self) -> &[Node] {
         &self.in_sync_replicas
     }
 
-    /// The subset of the replicas that are offline.
+    /// Returns the subset of the replicas that are offline.
     #[doc(alias = "org.apache.kafka.common.PartitionInfo#offlineReplicas")]
     pub fn offline_replicas(&self) -> &[Node] {
         &self.offline_replicas

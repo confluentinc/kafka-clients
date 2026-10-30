@@ -55,11 +55,10 @@
 //!     (`consumer-threading.md` §20 scopes `ClassicKafkaConsumer` out). The
 //!     premise is right and the conclusion does not follow: a classic group does
 //!     not need a classic *consumer*. An admin offset commit creates one —
-//!     `OffsetMetadataManager.validateOffsetCommit` catches
+//!     `org.apache.kafka.coordinator.group.OffsetMetadataManager#validateOffsetCommit` catches
 //!     `GroupIdNotFoundException`, and when the request's generation id is
 //!     negative it calls `getOrMaybeCreateClassicGroup(groupId, true)` and
-//!     accepts the commit
-//!     (`group-coordinator/src/main/java/org/apache/kafka/coordinator/group/OffsetMetadataManager.java:458-467`).
+//!     accepts the commit.
 //!     `GenerationIdOrMemberEpoch` defaults to `-1`
 //!     (`clients/src/main/resources/common/message/OffsetCommitRequest.json:46`)
 //!     and `AlterConsumerGroupOffsetsHandler` never sets it
@@ -75,9 +74,9 @@
 //!     `ConsumerProtocol::deserialize_assignment`:
 //!     `DescribeClassicGroupsHandler` only decodes a member's raw assignment
 //!     bytes when the coordinator populates them, which happens solely in the
-//!     `isInState(STABLE)` branch of `GroupMetadataManager.describeGroups`
-//!     (`group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java:744-757`)
-//!     — a stable classic group with a joined member. That stays covered by the
+//!     `isInState(STABLE)` branch of
+//!     `org.apache.kafka.coordinator.group.GroupMetadataManager#describeGroups` — a stable
+//!     classic group with a joined member. That stays covered by the
 //!     unit tests in `src/consumer/internals/consumer_protocol.rs` and
 //!     `src/admin/internals/describe_classic_groups_handler.rs`.
 //!
@@ -767,9 +766,9 @@ async fn describe_consumer_groups_nonexistent_group<F: AdminBackendFactory>(ctx:
 /// Added, not converted, and it is the only end-to-end exercise of
 /// `describeClassicGroups` this fixture can reach — see the module docs for why a
 /// live classic group is not creatable here. It is nonetheless deterministic
-/// rather than a compromise: `GroupMetadataManager.describeGroups`
-/// (`group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java:735-786`)
-/// resolves the group through `classicGroup(groupId, committedOffset)`, which
+/// rather than a compromise:
+/// `org.apache.kafka.coordinator.group.GroupMetadataManager#describeGroups` resolves
+/// the group through `classicGroup(groupId, committedOffset)`, which
 /// throws `GroupIdNotFoundException` for a group that is not a `ClassicGroup`,
 /// and for request version >= 6 the coordinator then reports
 /// `GROUP_ID_NOT_FOUND` with group state `Dead`.
@@ -845,12 +844,11 @@ async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(
 ///      defect this whole milestone exists for had an unguarded twin on the
 ///      classic path; this scenario guards it.
 ///   3. `describeConsumerGroups`' **classic-fallback value** path.
-///      `DescribeConsumerGroupsHandler.handleError` moves a `GROUP_ID_NOT_FOUND`
-///      group into `useClassicGroupApi` and retries with `DescribeGroups`
-///      (`clients/src/main/java/org/apache/kafka/clients/admin/internals/DescribeConsumerGroupsHandler.java:398-412`);
-///      `handledClassicGroupResponse` then builds a `ConsumerGroupDescription`
+///      `DescribeConsumerGroupsHandler#handleError` moves a `GROUP_ID_NOT_FOUND`
+///      group into `useClassicGroupApi` and retries with `DescribeGroups`;
+///      `DescribeConsumerGroupsHandler#handledClassicGroupResponse` then builds a `ConsumerGroupDescription`
 ///      with `GroupType.CLASSIC` and `isSimpleConsumerGroup =
-///      protocolType.isEmpty()` (`:251-305`). The Rust translation
+///      protocolType.isEmpty()`. The Rust translation
 ///      (`src/admin/internals/describe_consumer_groups_handler.rs`) was
 ///      unit-tested but never crossed a language boundary.
 ///   4. `is_simple_consumer_group == true` on either type. Java *derives* it, so
@@ -864,12 +862,10 @@ async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(
 /// # Why an offset commit creates a classic group
 ///
 /// See the module doc: a negative generation id on an unknown group makes
-/// `OffsetMetadataManager.validateOffsetCommit` create a simple group
-/// (`OffsetMetadataManager.java:458-467`), and the admin handler never sets the
+/// `OffsetMetadataManager#validateOffsetCommit` create a simple group, and the admin handler never sets the
 /// generation id, so `-1` is what the wire carries
 /// (`OffsetCommitRequest.json:46`). Describing that group then takes the
-/// **non-STABLE** branch of `GroupMetadataManager.describeGroups`
-/// (`GroupMetadataManager.java:759-767`), which returns a *value* with an empty
+/// **non-STABLE** branch of `GroupMetadataManager#describeGroups`, which returns a *value* with an empty
 /// protocol type and no members — not the `GROUP_ID_NOT_FOUND` error its sibling
 /// [`describe_classic_groups_rejects_a_kip848_group`] asserts for a KIP-848
 /// group. The two scenarios together pin that the RPC discriminates by group
@@ -1287,10 +1283,9 @@ async fn remove_all_members_from_consumer_group<F: AdminBackendFactory>(ctx: &mu
 /// Java makes the two different at the constructor:
 /// `RemoveMembersFromConsumerGroupOptions(Collection)` throws
 /// `IllegalArgumentException("Invalid empty members has been provided")` on an
-/// empty collection
-/// (`clients/src/main/java/org/apache/kafka/clients/admin/RemoveMembersFromConsumerGroupOptions.java:33-37`),
-/// while the no-argument constructor is the removeAll form; `removeAll()` is then
-/// literally `members.isEmpty()` (`:57-59`).
+/// empty collection, while the no-argument constructor is the removeAll form;
+/// `RemoveMembersFromConsumerGroupOptions#removeAll` is then literally
+/// `members.isEmpty()`.
 ///
 /// **Scope of what this proves, stated exactly.** The rejection is client-side
 /// and happens in the *harness's* input type: `RemoveMembersFromConsumerGroupOptions`
@@ -1357,11 +1352,10 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
         // Error::LocalIllegalArgument(_))`) passes only *because* of an open
         // deferred defect. Java's outcome for the branch this call can land in
         // **is** an `IllegalArgumentException`: `removeAll` resolves its member
-        // list through `getMembersFromGroup`
-        // (`clients/src/main/java/org/apache/kafka/clients/admin/KafkaAdminClient.java:4169-4187`),
-        // and an empty list reaches `LeaveGroupRequest.Builder`, which throws
-        // `IllegalArgumentException("leaving members should not be empty")`
-        // (`clients/src/main/java/org/apache/kafka/common/requests/LeaveGroupRequest.java:45-46`).
+        // list through `org.apache.kafka.clients.admin.KafkaAdminClient#getMembersFromGroup`,
+        // and an empty list reaches
+        // `org.apache.kafka.common.requests.LeaveGroupRequest.Builder#Builder(String,List,short,short)`, which
+        // throws `IllegalArgumentException("leaving members should not be empty")`.
         // Rust reproduces the message at
         // `src/common/requests/leave_group_request.rs:170` but surfaces it as
         // `UNSUPPORTED_VERSION`, because `RequestBuilder::build_version` returns

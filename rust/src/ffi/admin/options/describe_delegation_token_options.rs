@@ -90,9 +90,13 @@ unsafe fn destroy_kafka_principal_element(element: *mut c_void) {
     }
 }
 
-/// `new DescribeDelegationTokenOptions()`: every authorized token, with the
-/// client's default API timeout. Owned, freed with
-/// [`kafka_admin_DescribeDelegationTokenOptions_destroy`].
+/// `new DescribeDelegationTokenOptions()`: every authorized token, with the client's default API
+/// timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_DescribeDelegationTokenOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeDelegationTokenOptions_new() -> *mut kafka_admin_DescribeDelegationTokenOptions_t
@@ -105,6 +109,10 @@ pub extern "C" fn kafka_admin_DescribeDelegationTokenOptions_new() -> *mut kafka
 /// `kafka_common_security_auth_KafkaPrincipal_t *`, copied during the call;
 /// `NULL` is Java's `null`, describing all the tokens the caller owns or may
 /// describe.
+///
+/// # Parameters
+///
+/// - `owners` - The owners that we want to describe delegation tokens for
 ///
 /// # Safety
 ///
@@ -132,14 +140,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_set_owners(
     *options = std::mem::take(options).set_owners(owners);
 }
 
-/// `DescribeDelegationTokenOptions.owners()`: `NULL` when unset (Java's
-/// `null`), else an owned `kafka_List_t` of owned
-/// `kafka_common_security_auth_KafkaPrincipal_t *` in the order they were set,
-/// freed with `kafka_List_destroy`.
+/// `DescribeDelegationTokenOptions.owners()`.
+///
+/// # Returns
+///
+/// The owners, a `kafka_List_t` of `kafka_common_security_auth_KafkaPrincipal_t *` in the order
+/// they were set, or `NULL` when unset (Java's `null`).
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list and its elements are owned by the caller, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_owners(
@@ -160,8 +171,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_owners(
     }
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -179,8 +195,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenOptions_set_timeout_
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///

@@ -37,7 +37,7 @@ use super::{FetchPosition, SubscriptionState};
 /// # Ownership
 ///
 /// One instance is shared three ways, exactly as Java shares it
-/// (`AsyncKafkaConsumer.java:405,517`): the application task holds it to
+/// (in `AsyncKafkaConsumer`'s constructor): the application task holds it to
 /// run [`Self::can_skip_update_fetch_positions`] on the `poll()` critical
 /// path, and the same `Arc` is threaded through
 /// [`OffsetsRequestManager`](super::OffsetsRequestManager) into
@@ -71,8 +71,7 @@ pub(crate) struct PositionsValidator {
 }
 
 impl PositionsValidator {
-    /// Java: `PositionsValidator(LogContext, Time, SubscriptionState, ConsumerMetadata)`
-    /// (`PositionsValidator.java:63`).
+    /// Java: `PositionsValidator#PositionsValidator`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.PositionsValidator#PositionsValidator")]
     pub(crate) fn new(subscriptions: Arc<Mutex<SubscriptionState>>, metadata: Arc<ConsumerMetadata>) -> Self {
         Self {

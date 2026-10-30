@@ -44,6 +44,12 @@ pub(crate) unsafe fn stat_ref<'a>(stat: *const kafka_common_metrics_Stat_t) -> &
 
 /// `record(MetricConfig config, double value, long timeMs)`.
 ///
+/// # Parameters
+///
+/// - `config` - The configuration to use for this metric
+/// - `value` - The value to record
+/// - `time_ms` - The POSIX time in milliseconds this value occurred
+///
 /// # Safety
 ///
 /// `self_` must be a valid stat handle and `config` a valid metric-config

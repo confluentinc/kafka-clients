@@ -41,7 +41,7 @@
 //!
 //! `MockAdminClient` cannot substitute for a real broker here: Java's mock throws
 //! `UnsupportedOperationException` for both quota RPCs
-//! (`MockAdminClient.java:1243-1250`), which the Rust mock mirrors, so the
+//! (`MockAdminClient#describeClientQuotas`, `MockAdminClient#alterClientQuotas`), which the Rust mock mirrors, so the
 //! removal is only observable against a broker that echoes its stored state back.
 
 use std::collections::HashMap;

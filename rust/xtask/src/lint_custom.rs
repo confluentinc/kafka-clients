@@ -19,7 +19,10 @@
 //! that index. A rule reports findings rather than failing fast, so one run
 //! lists every violation of every rule.
 
+mod api_docs;
+mod baseline;
 mod derive_translation;
+mod doc_fill;
 mod ffi_translation;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,6 +44,8 @@ struct Context {
     java: Rc<JavaIndex>,
     /// The `check-ffi-translation` baseline to apply; `None` shows every finding.
     ffi_baseline: Option<PathBuf>,
+    /// The `check-api-docs` baseline to apply; `None` shows every finding.
+    doc_baseline: Option<PathBuf>,
     /// The cbindgen configuration whose `[enum] prefix_with_name` decides how
     /// the C enumerators are spelled; `None` skips that check.
     cbindgen_config: Option<PathBuf>,
@@ -86,12 +91,13 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(derive_translation::DeriveTranslation::new(ctx)),
         Box::new(derive_translation::ThreadSafetyProbe::new()),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
+        Box::new(api_docs::ApiDocs::new(ctx)),
     ]
 }
 
 /// Runs every rule — or the one `args` names — and fails if any of them
-/// reports a finding. `--no-baseline` shows the `check-ffi-translation`
-/// findings the baseline waives.
+/// reports a finding. `--no-baseline` shows the `check-ffi-translation` and
+/// `check-api-docs` findings their baselines waive.
 pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
     let mut only: Option<&str> = None;
     let mut baseline = true;
@@ -109,6 +115,7 @@ pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
     let ctx = Context {
         java: Rc::new(JavaIndex::load()),
         ffi_baseline: baseline.then(|| PathBuf::from(ffi_translation::FFI_BASELINE)),
+        doc_baseline: baseline.then(|| PathBuf::from(api_docs::DOC_BASELINE)),
         cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
     };
     let rules: Vec<Box<dyn Rule>> = rules(&ctx).into_iter().filter(|r| only.is_none_or(|o| o == r.name())).collect();
@@ -165,6 +172,7 @@ pub fn write_ffi_baseline() -> anyhow::Result<()> {
     let ctx = Context {
         java: Rc::new(JavaIndex::load()),
         ffi_baseline: None,
+        doc_baseline: None,
         cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
     };
     let rule = ffi_translation::FfiTranslation::new(&ctx);
@@ -195,6 +203,119 @@ pub fn write_ffi_baseline() -> anyhow::Result<()> {
     }
     fs::write(ffi_translation::FFI_BASELINE, out)?;
     println!("✅ Wrote {} finding(s) to {}", keys.len(), ffi_translation::FFI_BASELINE);
+    Ok(())
+}
+
+/// The `check-api-docs` rule without its baseline, and the crate it
+/// runs on, for the doc commands below.
+fn doc_rule() -> anyhow::Result<(api_docs::ApiDocs, Crate)> {
+    let ctx = Context {
+        java: Rc::new(JavaIndex::load()),
+        ffi_baseline: None,
+        doc_baseline: None,
+        cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
+    };
+    let rule = api_docs::ApiDocs::new(&ctx);
+    if let Some(reason) = rule.skip_reason() {
+        anyhow::bail!("cannot run check-api-docs: {reason}");
+    }
+    let krate = Crate::load(Path::new("src/lib.rs"))?;
+    if !krate.parse_errors.is_empty() {
+        anyhow::bail!(
+            "{} file(s) could not be parsed: {}",
+            krate.parse_errors.len(),
+            krate.parse_errors.join("; ")
+        );
+    }
+    Ok((rule, krate))
+}
+
+/// `cargo xtask doc-baseline`: rewrites [`api_docs::DOC_BASELINE`]
+/// with every current `check-api-docs` finding
+/// (`.claude/rules/documentation.md` §8).
+pub fn write_doc_baseline() -> anyhow::Result<()> {
+    println!("🔧 Writing the check-api-docs baseline...");
+    let (rule, krate) = doc_rule()?;
+    let (findings, _) = rule.findings(&krate);
+    let mut out = String::from(
+        "# check-api-docs findings not burnt down yet (.claude/rules/documentation.md).\n\
+         # One `<kind> <item>` per line; `java-line <file>` waives a whole file.\n\
+         # A line matching no finding any more is itself a finding: delete it. Rewrite with\n\
+         # `cargo xtask doc-baseline`; see everything with\n\
+         # `cargo xtask lint-custom check-api-docs --no-baseline`.\n",
+    );
+    let keys: BTreeSet<String> = findings.iter().map(api_docs::Finding::key).collect();
+    for key in &keys {
+        out.push_str(key);
+        out.push('\n');
+    }
+    fs::write(api_docs::DOC_BASELINE, out)?;
+    println!("✅ Wrote {} finding(s) to {}", keys.len(), api_docs::DOC_BASELINE);
+    Ok(())
+}
+
+/// `cargo xtask javadoc <marker|rust-path|C symbol>`: prints the translated
+/// Javadoc of an item, and the item's size limit.
+pub fn javadoc(args: &[String]) -> anyhow::Result<()> {
+    let [query] = args else {
+        anyhow::bail!("usage: cargo xtask javadoc <org.apache.kafka.… marker | crate::… path | C symbol>");
+    };
+    let (rule, krate) = doc_rule()?;
+    print!("{}", rule.explain(&krate, query)?);
+    Ok(())
+}
+
+/// `cargo xtask doc-fill [--write] <path>...`: inserts the `# Arguments`,
+/// `# Returns` and `# Errors` / `# Panics` text Java's tags give and the docs
+/// of the fns under the paths lack; without `--write` it prints the plan.
+pub fn doc_fill(args: &[String]) -> anyhow::Result<()> {
+    let write = args.iter().any(|a| a == "--write");
+    let paths: Vec<PathBuf> = args.iter().filter(|a| *a != "--write").map(PathBuf::from).collect();
+    if paths.is_empty() {
+        anyhow::bail!("usage: cargo xtask doc-fill [--write] <file or directory under rust/>...");
+    }
+    let (rule, krate) = doc_rule()?;
+    let plan = doc_fill::plan(&rule, &krate, &paths)?;
+    print!("{}", plan.describe());
+    if write {
+        plan.write()?;
+        println!("✅ Filled {} item(s); {} skipped", plan.len(), plan.skipped.len());
+    } else {
+        println!(
+            "{} item(s) to fill, {} skipped; pass --write to apply",
+            plan.len(),
+            plan.skipped.len()
+        );
+    }
+    Ok(())
+}
+
+/// `cargo xtask doc-report`: the open `check-api-docs` findings (the
+/// baseline ignored), counted per top-level module and per kind.
+pub fn doc_report() -> anyhow::Result<()> {
+    let (rule, krate) = doc_rule()?;
+    let (findings, checked) = rule.findings(&krate);
+    let mut by_module: BTreeMap<String, BTreeMap<&str, usize>> = BTreeMap::new();
+    let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
+    for f in &findings {
+        *by_module
+            .entry(api_docs::report_module(&f.file))
+            .or_default()
+            .entry(f.kind)
+            .or_default() += 1;
+        *by_kind.entry(f.kind).or_default() += 1;
+    }
+    println!("check-api-docs: {} finding(s) over {checked} item(s)\n", findings.len());
+    println!("per kind:");
+    for (kind, n) in &by_kind {
+        println!("  {kind:<16} {n:>6}");
+    }
+    println!("\nper module:");
+    for (module, kinds) in &by_module {
+        let total: usize = kinds.values().sum();
+        let detail: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
+        println!("  {module:<24} {total:>6}  ({})", detail.join(", "));
+    }
     Ok(())
 }
 
@@ -4482,6 +4603,8 @@ mod tests {
             is_abstract: false,
             functional_interface: false,
             supertypes: Vec::new(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         }
     }
 
@@ -5792,6 +5915,8 @@ mod enum_translation_tests {
             is_abstract,
             functional_interface: false,
             supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         }
     }
 
@@ -5907,6 +6032,7 @@ mod functional_interface_trait_tests {
             is_default: false,
             param_names: params.iter().map(|_| "p".to_string()).collect(),
             returns_class: false,
+            javadoc: None,
         }
     }
 
@@ -5931,6 +6057,8 @@ mod functional_interface_trait_tests {
             is_abstract: false,
             functional_interface: functional,
             supertypes: Vec::new(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         }
     }
 

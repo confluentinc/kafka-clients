@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The instance ID is still used by another member in the consumer group.
     ///
-    /// Corresponds to Java's `UnreleasedInstanceIdException`, error code `Errors::UnreleasedInstanceId`.
-    ///
-    /// Java `extends` chain:
-    ///    `UnreleasedInstanceIdException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnreleasedInstanceId`. Java `extends` chain:
+    /// `UnreleasedInstanceIdException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnreleasedInstanceIdException")]
     UnreleasedInstanceIdError,
     code: Errors::UnreleasedInstanceId,

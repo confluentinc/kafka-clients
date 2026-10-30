@@ -109,8 +109,8 @@ impl ClientDnsLookup {
         }
     }
 
-    /// The configuration value, Java's private `clientDnsLookup` field
-    /// (`ClientDnsLookup.java:24`), which `toString()` returns.
+    /// The configuration value, Java's private `ClientDnsLookup#clientDnsLookup`
+    /// field, which `toString()` returns.
     pub(crate) fn config_value(self) -> &'static str {
         match self {
             Self::UseAllDnsIps => "use_all_dns_ips",

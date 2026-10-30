@@ -56,7 +56,7 @@ pub struct kafka_producer_Partitioner_t {
 pub(crate) type SharedPartitioner = Mutex<dyn Partitioner<GenericValue, GenericValue>>;
 
 /// `void configure(Map<String, ?> configs)` of a C implementation: the
-/// Java default is a no-op, so the pointer is nullable (CLAUDE.md §4 rule 3).
+/// Java default is a no-op, so the pointer is nullable.
 /// `configs` holds the producer's string configuration and is borrowed for
 /// the call.
 pub type kafka_producer_Partitioner_configure_fn_t =
@@ -243,13 +243,25 @@ impl Partitioner<GenericValue, GenericValue> for CPartitioner {
 
 /// Registers a C implementation of `Partitioner`.
 ///
-/// The caller owns `self_` and keeps it alive while the handle is live and
-/// until every producer the handle was given to has been destroyed, then
-/// frees it; the handle itself is consumed by the `*mut` parameter that
-/// receives it or freed with [`kafka_producer_Partitioner_destroy`].
-/// `configure` and `close` may be `NULL` for the Java default (a no-op).
 /// The functions may be called from any thread, but the calls through one
 /// handle never overlap: the handle serialises them with a mutex.
+///
+/// # Parameters
+///
+/// - `configure` - `configure`, or `NULL` for the Java default (a no-op)
+/// - `partition` - `partition`
+/// - `close` - `close`, or `NULL` for the Java default (a no-op)
+///
+/// # Returns
+///
+/// The partitioner handle.
+///
+/// # Safety
+///
+/// The caller owns `self_` and keeps it alive while the handle is live and
+/// until every producer the handle was given to has been destroyed, then
+/// frees it. The handle itself is consumed by the `*mut` parameter that
+/// receives it or freed with [`kafka_producer_Partitioner_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_Partitioner_new(
@@ -262,12 +274,16 @@ pub extern "C" fn kafka_producer_Partitioner_new(
     Interface::owned(imp) as *mut kafka_producer_Partitioner_t
 }
 
-/// `Partitioner.configure(Map)`: forwards the string configuration to the
-/// implementation.
+/// Configure this class with the given key-value pairs
+///
+/// # Parameters
+///
+/// - `_configs` - the configuration
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `configs` a live map of C strings.
+/// `self_` must be a live handle and `_configs` a live map of the producer's C strings,
+/// borrowed for the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
@@ -286,9 +302,20 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
         .configure(&configs);
 }
 
-/// `Partitioner.partition(...)`: `key` and `value` are the record's
-/// `void *`s (`NULL` for `null`), the byte arrays are borrowed for the call
-/// (`data == NULL` for `null`) and `cluster` is a live cluster handle.
+/// Compute the partition for the given record.
+///
+/// # Parameters
+///
+/// - `topic` - The topic name
+/// - `key` - The key to partition on (or `NULL` if no key)
+/// - `key_bytes` - The serialized key to partition on (or a `NULL` `data` if no key)
+/// - `value` - The value to partition on or `NULL`
+/// - `value_bytes` - The serialized value to partition on or a `NULL` `data`
+/// - `cluster` - The current cluster metadata
+///
+/// # Returns
+///
+/// The partition.
 ///
 /// # Safety
 ///

@@ -66,14 +66,19 @@ unsafe fn handle<'a>(self_: *const kafka_admin_RenewDelegationTokenResult_t) -> 
     unsafe { result_ref(self_) }
 }
 
-/// `expiryTimestamp()`: a borrowed future, valid until the result is
-/// destroyed and never passed to `kafka_common_KafkaFuture_destroy`. Its
-/// `get` delivers an `int64_t *` (owned by the future): the new expiry time
-/// in milliseconds.
+/// Returns a future which yields expiry timestamp
+///
+/// # Returns
+///
+/// A future. Its `get` delivers an `int64_t *` (owned by the future): the
+/// new expiry time in milliseconds.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is borrowed from `self_`, valid until it is destroyed, and is never passed
+/// to `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp(
@@ -85,11 +90,11 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp
 }
 
 /// Frees a result handle, and with it the future `expiry_timestamp` borrows
-/// out; null is a no-op.
+/// out; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

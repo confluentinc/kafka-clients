@@ -101,7 +101,7 @@ impl ConsumerUtils {
     ///
     /// Translates Java's per-connection cap on in-flight requests for the
     /// consumer's `NetworkClient`. Mirrors the comment in
-    /// `ConsumerUtils.java:75` ("A fixed, large enough value will suffice for
+    /// `ConsumerUtils#CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION` ("A fixed, large enough value will suffice for
     /// max.").
     pub(crate) const CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION: i32 = 100;
 
@@ -192,8 +192,7 @@ impl ConsumerUtils {
         Ok(SubscriptionState::new(strategy))
     }
 
-    /// Java: `maybeWrapAsKafkaException(Throwable)`
-    /// (`ConsumerUtils.java:249-254`).
+    /// Java: `ConsumerUtils#maybeWrapAsKafkaException(Throwable)`.
     ///
     /// ```java
     /// public static KafkaException maybeWrapAsKafkaException(Throwable t) {
@@ -239,8 +238,7 @@ impl ConsumerUtils {
         }
     }
 
-    /// Java: `maybeWrapAsKafkaException(Throwable, String)`
-    /// (`ConsumerUtils.java:256`).
+    /// Java: `ConsumerUtils#maybeWrapAsKafkaException(Throwable,String)`.
     ///
     /// ```java
     /// public static KafkaException maybeWrapAsKafkaException(Throwable t, String message) {
@@ -467,7 +465,7 @@ mod tests {
         assert!(ConsumerUtils::create_subscription_state(&cfg).is_err());
     }
 
-    /// Java `maybeWrapAsKafkaException(Throwable)` (`ConsumerUtils.java:249-254`)
+    /// Java `ConsumerUtils#maybeWrapAsKafkaException(Throwable)`
     /// is CONDITIONAL, not an identity: a non-`KafkaException` is wrapped in
     /// `new KafkaException(t)` so that `is_kafka_error()` answers `true`, with
     /// `t` as the cause and `t.toString()` as the wrapper's message.
@@ -515,7 +513,7 @@ mod tests {
         );
     }
 
-    /// Java `maybeWrapAsKafkaException(t, message)` (`ConsumerUtils.java:256`):
+    /// Java `ConsumerUtils#maybeWrapAsKafkaException(Throwable,String)`:
     /// a non-`KafkaException` (`IllegalStateException` /
     /// `IllegalArgumentException`) is wrapped in a new `KafkaException`
     /// whose `getMessage()` is exactly `message` (the cause is preserved

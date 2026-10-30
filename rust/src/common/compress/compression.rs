@@ -86,8 +86,8 @@ impl StatelessCompressionBuilder {
     /// Build the compression codec.
     ///
     /// `const` so that [`Compression::NONE`] can be defined as
-    /// `Compression::none().build()`, exactly as Java defines its `NONE` field
-    /// (`Compression.java:91`). Java's is a static initializer rather than a
+    /// `Compression::none().build()`, exactly as Java defines its `Compression#NONE` field.
+    /// Java's is a static initializer rather than a
     /// compile-time constant, but a stateless builder has nothing to evaluate,
     /// so Rust can do it at compile time and keep the one definition.
     pub const fn build(self) -> Compression {
@@ -126,7 +126,7 @@ impl Builder {
 
 impl Compression {
     /// No compression. Translates Java's `Compression.NONE` constant, which is
-    /// defined as `none().build()` (`Compression.java:91`) — as it is here.
+    /// defined as `none().build()` — as it is here.
     ///
     /// Prefer `Compression::none().build()` at call sites: every codec is then
     /// constructed the same way, through its builder.
@@ -196,16 +196,16 @@ impl Compression {
     /// The size of the buffer a decompression stream is read through: Java's
     /// `decompressionOutputSize()`, the intermediate buffer its
     /// `ChunkedBytesStream` copies the codec's output into, 16 KiB for gzip and
-    /// zstd and 2 KiB for snappy and lz4 (`GzipCompression.java:80-83`,
-    /// `ZstdCompression.java:106-109`, `SnappyCompression.java:67-72`,
-    /// `Lz4Compression.java:67-72`). The consumer reads
+    /// zstd and 2 KiB for snappy and lz4 (`GzipCompression#decompressionOutputSize`,
+    /// `ZstdCompression#decompressionOutputSize`, `SnappyCompression#decompressionOutputSize`,
+    /// `Lz4Compression#decompressionOutputSize`). The consumer reads
     /// [`Self::wrap_for_input`]'s stream through a `ChunkedBytesStream` with a
     /// buffer of this size, as Java's `wrapForInput` does.
     ///
     /// # Errors
     ///
     /// No compression has no such buffer: Java's interface default throws
-    /// `UnsupportedOperationException` (`Compression.java:62`), which
+    /// `UnsupportedOperationException` (`Compression#decompressionOutputSize`), which
     /// `NoCompression` does not override; here
     /// [`Error::LocalUnsupportedOperation`].
     #[doc(alias = "org.apache.kafka.common.compress.Compression#decompressionOutputSize")]
@@ -274,9 +274,9 @@ impl Compression {
     /// already in memory, so gzip and zstd decompress them in place. A
     /// [`std::io::Read`] would make each first copy them through an input
     /// buffer of its own, 32 KiB for gzip and 128 KiB for zstd. Java's gzip
-    /// copies them through 8 KiB (`GzipCompression.java:63-70`), and its zstd
+    /// copies them through 8 KiB (`GzipCompression#wrapForInput`), and its zstd
     /// through a buffer taken from the fetch's pool
-    /// (`ZstdCompression.java:78-97`).
+    /// (`ZstdCompression#wrapForZstdInput`).
     ///
     /// # Arguments
     ///

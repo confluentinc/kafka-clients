@@ -412,7 +412,7 @@ static CLEANUP_REGISTERED: Once = Once::new();
 /// In [`BackendMode::Container`] that is a `docker run` attached to
 /// `broker_network`, so the server can reach the Kafka broker via the
 /// protocol-matched CONTAINER listener advertised on the broker's container
-/// hostname (`<broker_container_name>:9099` PLAINTEXT / `:9100` SSL / `:9101`
+/// hostname (`<broker_container_name>:9099` PLAINTEXT / port 9100 SSL / port 9101
 /// SASL_SSL, per `INTEGRATION_TEST_PROTOCOL`). In [`BackendMode::Native`] it is
 /// a host process, and the tests hand it the host-loopback listener instead
 /// (the gRPC factories' `needs_container_bootstrap()` follows the mode).

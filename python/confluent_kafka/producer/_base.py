@@ -57,6 +57,7 @@ over, and an async one does not block its loop.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -69,6 +70,7 @@ from confluent_kafka._kwargs import SERIALIZER_NAMES, serde_caller
 
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._preview import log_preview_warning
 # The slice waits live in the shared ``_wait`` module; re-exported for the producers.
 from confluent_kafka._wait import WAIT_SLICE_S as WAIT_SLICE_S
 from confluent_kafka._wait import result_sliced as result_sliced
@@ -93,6 +95,8 @@ if TYPE_CHECKING:
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
     from .producer_record import ProducerRecord
+
+_LOG = logging.getLogger("confluent_kafka.producer")
 
 # Java's KafkaProducer.throwIfProducerClosed() message.
 CLOSED_MESSAGE = "Cannot perform operation after producer has been closed"
@@ -230,8 +234,8 @@ def close_timeout_ms(timeout: Duration) -> int | None:
 
 
 def check_record(record: object) -> None:
-    """``send(null)``: Java's ``doSend`` reads ``record.topic()`` after the
-    closed check (``KafkaProducer.java:1069``), a ``NullPointerException``
+    """``send(null)``: Java's ``org.apache.kafka.clients.producer.KafkaProducer#doSend`` reads
+    ``record.topic()`` after the closed check, a ``NullPointerException``
     (``TypeError``, CLAUDE.md, Types)."""
     if record is None:
         raise TypeError("record must not be None")
@@ -491,6 +495,7 @@ class _ProducerState:
         if max_block_ms is not None:
             self._max_block_ms = int(max_block_ms)
         self._after_start()
+        log_preview_warning(_LOG)
 
     def _callback_deadline(self) -> float:
         """The ``time.monotonic()`` deadline of a wait from a delivery
@@ -572,8 +577,8 @@ class _ProducerState:
 
 
 def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
-    """The null arm of Java's ``throwIfInvalidGroupMetadata``
-    (KafkaProducer.java:1578-1585), which the core cannot receive; the
-    generation / member id arm is the core's."""
+    """The null arm of Java's
+    ``org.apache.kafka.clients.producer.KafkaProducer#throwIfInvalidGroupMetadata``, which the core cannot
+    receive; the generation / member id arm is the core's."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)

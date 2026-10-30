@@ -69,16 +69,21 @@ unsafe fn destroy_topic_partition_element(element: *mut c_void) {
     unsafe { kafka_common_TopicPartition_destroy(element as *mut kafka_common_TopicPartition_t) }
 }
 
-/// `DeleteRecordsResult.lowWatermarks()`: an owned map, sorted by topic
-/// then partition, of owned `kafka_common_TopicPartition_t *` keys
-/// (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` whose `get` delivers a
-/// `kafka_admin_DeletedRecords_t *` owned by the future. Freed with
-/// `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from topic partition to futures which can be used to check the status of individual
+/// deletions.
+///
+/// # Returns
+///
+/// A map, sorted by topic then partition, of owned `kafka_common_TopicPartition_t *` keys (compared
+/// by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *` whose `get` delivers a
+/// `kafka_admin_DeletedRecords_t *` owned by the future.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_low_watermarks(
@@ -110,13 +115,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_low_watermarks(
     )
 }
 
-/// `DeleteRecordsResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every deletion succeeded, freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the records deletions succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every deletion succeeded.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
@@ -128,21 +137,23 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// `new DeleteRecordsResult(Map<TopicPartition, KafkaFuture<DeletedRecords>> futures)`:
-/// `futures` is a borrowed map of `const kafka_common_TopicPartition_t *` to
-/// `const kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_DeletedRecords_t *`,
-/// copied during the call; the caller keeps ownership of the map, its keys,
-/// its futures and their values. Only futures that are already complete
-/// (`kafka_common_KafkaFuture_is_done`) can be copied across the boundary:
-/// the outcome of each is taken as it stands, and a future still pending
-/// stands as one failed with the translation of `IllegalArgumentException`.
-/// Owned, freed with [`kafka_admin_DeleteRecordsResult_destroy`].
+/// Creates a result from a map of partition to the future of its deleted records.
+///
+/// # Parameters
+///
+/// - `futures` - a map of `const kafka_common_TopicPartition_t *` to `const
+///   kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_DeletedRecords_t *`, copied during
+///   the call
 ///
 /// # Safety
 ///
-/// `futures` must be null or a valid map whose keys are valid topic-partition handles
-/// and whose values are valid future handles, each successful one's value a
-/// valid `kafka_admin_DeletedRecords_t *`.
+/// `futures` must be `NULL` or a valid map whose keys are valid topic-partition handles and whose
+/// values are valid future handles, each successful one's value a valid
+/// `kafka_admin_DeletedRecords_t *`. The caller keeps ownership of the map, its keys, its futures
+/// and their values. Each future should already be complete (`kafka_common_KafkaFuture_is_done`):
+/// its outcome is copied as it stands, and one still pending stands as one failed with
+/// `kafka_common_Error_is_local_illegal_argument_error`. The returned handle is owned and freed
+/// with `kafka_admin_DeleteRecordsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_new(
@@ -175,12 +186,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_new(
     box_result(DeleteRecordsResult::new(futures), &FutureCtx::detached())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

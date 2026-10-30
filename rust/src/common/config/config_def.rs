@@ -820,7 +820,7 @@ impl ConfigDef {
     }
 
     /// Java's `String.trim()`, which `ConfigDef.parseType` applies to every
-    /// `String` value before parsing it (`ConfigDef.java:707-709`).
+    /// `String` value before parsing it (`org.apache.kafka.common.config.ConfigDef#parseType`).
     ///
     /// Unlike [`str::trim`] it strips every character `<= U+0020` (all ASCII
     /// control characters and the space) and nothing else — in particular not
@@ -830,7 +830,7 @@ impl ConfigDef {
     }
 
     /// The `Type.LIST` arm of Java's `ConfigDef.parseType` for a `String`
-    /// value (`ConfigDef.java:768-777`):
+    /// value (`org.apache.kafka.common.config.ConfigDef#parseType`):
     ///
     /// ```java
     /// if (trimmed.isEmpty())
@@ -1111,7 +1111,7 @@ impl fmt::Display for Range {
 /// Java's `ConfigDef.ValidList`: validates a parsed `LIST` value.
 ///
 /// Java's `ConfigDef.parseValue` calls `ensureValid` directly, without
-/// wrapping (`ConfigDef.java:553`), and `ValidList` throws the
+/// wrapping (`org.apache.kafka.common.config.ConfigDef#parseValue`), and `ValidList` throws the
 /// single-message `ConfigException(String)` for its own checks. So those
 /// errors are [`Error::config_message`], with no `Invalid value ... for
 /// configuration` prefix; an element outside the valid strings fails with
@@ -1224,7 +1224,7 @@ impl ValidList {
     /// with `anyNonDuplicateValues(is_empty_allowed, false)`, which is what
     /// `ConfigDef.parse` does for each such key.
     ///
-    /// As in `ConfigDef.parseValue` (`ConfigDef.java:544-551`), duplicates are
+    /// As in `org.apache.kafka.common.config.ConfigDef#parseValue`, duplicates are
     /// removed first, keeping the order of first occurrence, with a warning;
     /// the deduplicated list is validated and returned. The duplicate check in
     /// [`Self::check_list`] therefore cannot fire here, as in Java.
