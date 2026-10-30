@@ -10,6 +10,8 @@ tools/java-perf-test/bin/
 *.svg
 *.json
 *.jsonl
+# The test selection of `make select-tests`, local to a checkout.
+/test-selection.json
 !design/current/img/*.svg
 *.md.lock
 *.pyc

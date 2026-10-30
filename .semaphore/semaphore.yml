@@ -25,6 +25,12 @@ name: build-test-release
 #
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
+#   0. "Select tests" -- on a pull request, asks the test-selection agent
+#      (`make select-tests`) which tests the pull request's changes can affect
+#      and records its answer as the workflow artifact test-selection.json;
+#      the four verify blocks below start after it and run only those tests.
+#      On any other build, or when the selection fails, it records nothing and
+#      every test runs.
 #   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
 #   2. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
@@ -53,8 +59,9 @@ name: build-test-release
 # duration, so a hung test fails the job early instead of running until the
 # pipeline's default limit.
 #
-# All CI blocks declare `dependencies: []`, so every job starts immediately
-# and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
+# The four verify blocks depend only on "Select tests", and every other CI
+# block declares `dependencies: []`, so the jobs run in parallel once the
+# selection is made. Each rebuilds the Rust library it needs. Sharing one
 # build between blocks via a workflow artifact was tried and reverted: the
 # tarball reached 8.9 GiB, so the transfer cost more than the builds it saved.
 #
@@ -214,6 +221,47 @@ global_job_config:
             || echo "Warning: could not record this job's result; the job stays recorded as running, which create-release-tag.yml refuses"
 
 blocks:
+  - name: "Select tests"
+    # On a pull request build (SEMAPHORE_GIT_PR_NUMBER set, SEMAPHORE_GIT_BRANCH
+    # the branch it targets), selects the tests that the changes from the
+    # target branch can affect (`make select-tests`, see
+    # rust/xtask/src/test_selection.rs) and pushes test-selection.json to the
+    # workflow's artifacts, where the verify blocks pull it from. The checkout
+    # is shallow and has only the pull request's ref, so the target branch is
+    # fetched first for the merge base.
+    #
+    # Every other build pushes nothing, so every test runs there. So does a
+    # failure of any step: the verify blocks wait for this job, so it passes
+    # whenever it can and leaves them to run everything. The selection of an
+    # earlier run of this job is removed first, so that a rerun that cannot
+    # select does not leave it in force.
+    #
+    # The agent is `r2 sandbox claude`, the sandboxed Claude Code that the
+    # translation agent also runs, on the same arm64 machine type.
+    dependencies: []
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-2
+      jobs:
+        - name: "select-tests (Linux arm64)"
+          commands:
+            - |
+              artifact yank workflow test-selection.json >/dev/null 2>&1 || true
+              if [ -z "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then
+                echo "Not a pull request build: no test selection, so every test runs"
+              elif ./.semaphore/dependencies.sh \
+                && git fetch --no-tags --depth=100 origin \
+                  "+refs/heads/${SEMAPHORE_GIT_BRANCH}:refs/remotes/origin/${SEMAPHORE_GIT_BRANCH}" \
+                && make select-tests BASE="origin/${SEMAPHORE_GIT_BRANCH}" AGENT="r2 sandbox claude" AGENT_MODEL=opus; then
+                artifact push workflow test-selection.json --destination test-selection.json --force \
+                  || echo "Could not record the test selection, so every test runs"
+              else
+                echo "The test selection failed, so every test runs"
+              fi
+
   - name: "Verify Rust (Linux amd64)"
     # Runs on every new commit, whether created manually or by the translation
     # agent.
@@ -235,12 +283,31 @@ blocks:
     # Docker resources. See rust/tests/common/test_context.rs
     # (INTEGRATION_TEST_PROTOCOL / TestProtocol) for how a cluster's four
     # listeners are selected per run.
-    dependencies: []
+    #
+    # On a pull request it runs only the tests "Select tests" selected.
+    dependencies: ["Select tests"]
     execution_time_limit:
       minutes: 45
     task:
       prologue:
         commands:
+          # The test selection of "Select tests", if it made one. The test
+          # recipes check that it covers this checkout with a `git diff`
+          # against its merge base, which the shallow clone may lack, so the
+          # merge base is fetched; if it cannot be, every test runs.
+          - |
+            if artifact pull workflow test-selection.json --destination test-selection.json --force >/dev/null 2>&1; then
+              merge_base=$(python3 -c 'import json; print(json.load(open("test-selection.json"))["merge_base"])')
+              if [ -n "${merge_base}" ] && { git cat-file -e "${merge_base}^{commit}" 2>/dev/null \
+                || git fetch --no-tags --depth=1 origin "${merge_base}"; }; then
+                echo "Running only the tests that test-selection.json selects"
+              else
+                rm -f test-selection.json
+                echo "Could not fetch the merge base of the test selection, so every test runs"
+              fi
+            else
+              echo "No test selection, so every test runs"
+            fi
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
@@ -257,8 +324,9 @@ blocks:
             - make test-rust-all-features-sasl-ssl
 
   - name: "Verify language bindings (Linux amd64)"
-    # `dependencies: []` so this starts alongside "Verify Rust" rather than
-    # after it. Each job builds the Rust library itself; sharing one build via
+    # Depends only on "Select tests", so it starts alongside "Verify Rust"
+    # rather than after it, and on a pull request runs only the tests selected
+    # there. Each job builds the Rust library itself; sharing one build via
     # a workflow artifact was tried and reverted -- the tarball came to 8.9 GiB
     # (target/debug is ~12x target/release, and ~48% of it is rustc incremental
     # caches that CI never reuses), so pushing it once and pulling it twice cost
@@ -279,7 +347,7 @@ blocks:
     #
     # Each job is a separate VM with its own broker, so the six jobs do not
     # contend for Docker resources.
-    dependencies: []
+    dependencies: ["Select tests"]
     execution_time_limit:
       minutes: 30
     task:
@@ -287,6 +355,20 @@ blocks:
         # Runs before EACH job in this block; every job is a separate VM with
         # its own checkout.
         commands:
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - |
+            if artifact pull workflow test-selection.json --destination test-selection.json --force >/dev/null 2>&1; then
+              merge_base=$(python3 -c 'import json; print(json.load(open("test-selection.json"))["merge_base"])')
+              if [ -n "${merge_base}" ] && { git cat-file -e "${merge_base}^{commit}" 2>/dev/null \
+                || git fetch --no-tags --depth=1 origin "${merge_base}"; }; then
+                echo "Running only the tests that test-selection.json selects"
+              else
+                rm -f test-selection.json
+                echo "Could not fetch the merge base of the test selection, so every test runs"
+              fi
+            else
+              echo "No test selection, so every test runs"
+            fi
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
@@ -309,7 +391,7 @@ blocks:
             - make test-integration-python-sasl-ssl
 
   - name: "Verify Rust (macOS arm64)"
-    dependencies: []
+    dependencies: ["Select tests"]
     execution_time_limit:
       minutes: 45
     task:
@@ -321,6 +403,20 @@ blocks:
           value: full
       prologue:
         commands:
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - |
+            if artifact pull workflow test-selection.json --destination test-selection.json --force >/dev/null 2>&1; then
+              merge_base=$(python3 -c 'import json; print(json.load(open("test-selection.json"))["merge_base"])')
+              if [ -n "${merge_base}" ] && { git cat-file -e "${merge_base}^{commit}" 2>/dev/null \
+                || git fetch --no-tags --depth=1 origin "${merge_base}"; }; then
+                echo "Running only the tests that test-selection.json selects"
+              else
+                rm -f test-selection.json
+                echo "Could not fetch the merge base of the test selection, so every test runs"
+              fi
+            else
+              echo "No test selection, so every test runs"
+            fi
           - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
@@ -345,7 +441,7 @@ blocks:
     # run on Linux. The TLS and SASL code paths are in the Rust client and are
     # covered on macOS by rust/src/integration_tests/ssl_sasl_test.rs and
     # rust/tests/integration/sasl_ssl_consumer_test.rs in "Verify Rust (macOS arm64)".
-    dependencies: []
+    dependencies: ["Select tests"]
     execution_time_limit:
       minutes: 30
     task:
@@ -357,6 +453,20 @@ blocks:
           value: full
       prologue:
         commands:
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - |
+            if artifact pull workflow test-selection.json --destination test-selection.json --force >/dev/null 2>&1; then
+              merge_base=$(python3 -c 'import json; print(json.load(open("test-selection.json"))["merge_base"])')
+              if [ -n "${merge_base}" ] && { git cat-file -e "${merge_base}^{commit}" 2>/dev/null \
+                || git fetch --no-tags --depth=1 origin "${merge_base}"; }; then
+                echo "Running only the tests that test-selection.json selects"
+              else
+                rm -f test-selection.json
+                echo "Could not fetch the merge base of the test selection, so every test runs"
+              fi
+            else
+              echo "No test selection, so every test runs"
+            fi
           - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
@@ -488,6 +598,7 @@ blocks:
   - name: "Release (Rust): pre-publish package check"
     # A new CI block must be added to this list.
     dependencies:
+      - "Select tests"
       - "Verify Rust (Linux amd64)"
       - "Verify language bindings (Linux amd64)"
       - "Verify Rust (macOS arm64)"

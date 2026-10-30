@@ -22,6 +22,7 @@ mod java;
 mod java_parse;
 mod javadoc;
 mod lint_custom;
+mod test_selection;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -70,6 +71,9 @@ fn main() -> anyhow::Result<()> {
         Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
         Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("select-tests") => test_selection::select(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-cargo-test") => test_selection::cargo_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-run") => test_selection::selected_run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
         // .semaphore/semaphore.yml, rely on the exit status of these tasks.
@@ -778,9 +782,54 @@ fn coverage_lcov() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs the unit and integration tests under coverage. `admin_examples_test`
+/// runs the example binaries from the test binary's target directory, which a
+/// plain `cargo llvm-cov` neither builds them into nor keeps them in, so the
+/// examples and the tests are built by plain `cargo` commands under the
+/// environment of `cargo llvm-cov show-env`, in its target directory, and the
+/// report is made afterwards.
 fn coverage_all() -> anyhow::Result<()> {
     println!("Running full test coverage (unit + integration, requires Docker)...");
-    run_coverage_lcov(&["--features", "integration-tests"])?;
+    fs::create_dir_all("coverage")?;
+    let target_dir = env::current_dir()?.join("target").join("llvm-cov-target");
+    let target_env = [("CARGO_TARGET_DIR".to_owned(), target_dir.display().to_string())];
+    // Every step, `clean` and `report` included, runs under the show-env
+    // environment: without it cargo-llvm-cov puts its own `llvm-cov-target`
+    // under `CARGO_TARGET_DIR` and looks for the profile data there.
+    let mut coverage_env = llvm_cov_show_env(&target_env)?;
+    coverage_env.extend(target_env.iter().cloned());
+    run_command_with_env("cargo", &["llvm-cov", "clean", "--workspace"], &coverage_env)?;
+    run_command_with_env(
+        "cargo",
+        &["build", "--examples", "--features", "integration-tests"],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "confluent-kafka",
+            "--features",
+            "integration-tests",
+        ],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "llvm-cov",
+            "report",
+            "--package",
+            "confluent-kafka",
+            "--ignore-filename-regex",
+            COVERAGE_IGNORE_FILENAME_REGEX,
+            "--lcov",
+            "--output-path",
+            "coverage/lcov.info",
+        ],
+        &coverage_env,
+    )?;
     run_grcov_html()?;
     println!("Coverage report: coverage/html/index.html");
     Ok(())
@@ -1536,6 +1585,45 @@ fn transactional_producer_perf_test() -> anyhow::Result<()> {
     run_command("cargo", &arg_refs)
 }
 
+/// The generated wire code, the `src/bin` tools, the test-only files (always fully run,
+/// so they only inflate the total) and the `Dyn*` client forwarders, whose forwarding
+/// `check-dyn-forwarding` already enforces, left out of every coverage report.
+const COVERAGE_IGNORE_FILENAME_REGEX: &str = concat!(
+    "(target/debug/build/.*/out/(test_)?generated/|src/bin/",
+    "|(_test|_test_utils)\\.rs$|/test_[a-z_]+\\.rs$|src/integration_tests/",
+    "|src/(consumer/dyn_consumer|producer/dyn_producer)\\.rs$)",
+);
+
+/// The environment `cargo llvm-cov show-env` gives for instrumenting the
+/// `confluent-kafka` package, its `KEY=VALUE` lines with the shell quotes
+/// removed, run with `env_vars` set.
+fn llvm_cov_show_env(env_vars: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+    let output = Command::new("cargo")
+        .args(["llvm-cov", "show-env", "--package", "confluent-kafka"])
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Command failed: cargo llvm-cov show-env\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .with_context(|| format!("unexpected cargo llvm-cov show-env line: {line}"))?;
+            let value = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')).unwrap_or(value);
+            if value.contains('\'') {
+                anyhow::bail!("unsupported quoting in cargo llvm-cov show-env line: {line}");
+            }
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
     fs::create_dir_all("coverage")?;
     let mut args = vec![
@@ -1543,7 +1631,7 @@ fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
         "--package",
         "confluent-kafka",
         "--ignore-filename-regex",
-        "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
+        COVERAGE_IGNORE_FILENAME_REGEX,
         "--lcov",
         "--output-path",
         "coverage/lcov.info",
@@ -2230,7 +2318,15 @@ fn package_rust_version() -> anyhow::Result<String> {
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(program).args(args).status()?;
+    run_command_with_env(program, args, &[])
+}
+
+/// [`run_command`] with `env_vars` added to the inherited environment.
+fn run_command_with_env(program: &str, args: &[&str], env_vars: &[(String, String)]) -> anyhow::Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .status()?;
 
     if !status.success() {
         anyhow::bail!("Command failed: {} {}", program, args.join(" "));
@@ -2669,6 +2765,22 @@ fn print_help() {
                     --python-version PEP440 gives the Python packages their own version;
                     Python versions are a separate line that only moves up, so one below
                     a package's current version is refused (rfc/versioning.md)
+  select-tests    Ask an agent which tests the changes from a base branch can affect and write
+                  them to ../test-selection.json (or $TEST_SELECTION, relative to the repository
+                  root); while it exists, the Makefiles' test recipes run only those tests
+                    --base REF       compare with REF (default origin/master)
+                    --agent COMMAND  a command taking Claude Code's --model, --allowedTools and -p
+                                     (default `claude`)
+                    --model MODEL    the agent's model (default opus)
+                    --reuse          keep the file when it was made at HEAD and covers every
+                                     current change
+  selected-cargo-test  `cargo test` restricted to the test selection
+                    --section NAME -- <cargo test arguments>; NAME is `rust`, or a filter list
+                                     such as `c.integration` applying to every test unit
+  selected-run    Run a command only when the test selection selects its section
+                    --section NAME [--default ARG]... [--ctest] [-C DIR] -- <command>; an argument
+                                     `{{}}` stands for the selected entries (the defaults when the whole
+                                     suite is selected); with --ctest for `-R <regex>` of the names
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust

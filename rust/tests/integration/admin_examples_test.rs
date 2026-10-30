@@ -101,19 +101,23 @@ async fn run(name: &str, config: &HashMap<String, String>, args: &[&str]) -> Out
     }
 }
 
-/// Runs the example until its output contains `expected`, for changes the
-/// broker applies asynchronously; returns the last output.
+/// Runs the example until it succeeds with `expected` in its output, for
+/// changes the broker applies asynchronously; returns that output. A failed
+/// run counts as not yet applied: until the change reaches the broker the
+/// example can fail (`ResourceNotFoundError` for a SCRAM user just upserted).
 async fn run_until(name: &str, config: &HashMap<String, String>, args: &[&str], expected: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let output = run(name, config, args).await;
-        let stdout = output.ok();
-        if stdout.contains(expected) {
-            return stdout.to_string();
+        if output.code == 0 && output.stdout.contains(expected) {
+            return output.stdout;
         }
         assert!(
             Instant::now() < deadline,
-            "{expected:?} not in the output of admin_{name}:\n{stdout}"
+            "{expected:?} not in the output of admin_{name} (exit code {})\nstdout:\n{}\nstderr:\n{}",
+            output.code,
+            output.stdout,
+            output.stderr
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -576,9 +580,10 @@ async fn reassignment_and_election_examples() {
     let topic = ctx.topic("reassign_examples");
     run("create_topics", &config, &[&format!("{topic}:1:3")]).await.ok();
 
-    let stdout = run("describe_topics", &config, &[&topic]).await;
-    let leader = field(stdout.ok(), "  partition 0: leader ").to_string();
-    let replicas = between(&stdout.stdout, "replicas [", ']')
+    // The broker answering may not have the new topic's metadata yet.
+    let stdout = run_until("describe_topics", &config, &[&topic], "  partition 0: leader ").await;
+    let leader = field(&stdout, "  partition 0: leader ").to_string();
+    let replicas = between(&stdout, "replicas [", ']')
         .split(',')
         .map(str::to_string)
         .collect::<Vec<_>>();
