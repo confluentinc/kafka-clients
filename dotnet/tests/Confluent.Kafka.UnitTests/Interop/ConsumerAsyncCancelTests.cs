@@ -328,7 +328,7 @@ public sealed class ConsumerAsyncCancelTests
         Assert.True(pending.IsCompleted);
         KafkaException ended = await Assert.ThrowsAsync<KafkaException>(() => pending);
         Assert.Equal(7, ended.Code);
-        Assert.Equal("Failed to get offsets by times in 1500ms", ended.Message);
+        TimedOutMessage.AssertCallerOrReaper("Failed to get offsets by times in 1500ms", ended.Message);
     }
 
     private static Dictionary<string, string> RealConfig() => new()
