@@ -1581,8 +1581,14 @@ fn transactional_producer_perf_test() -> anyhow::Result<()> {
     run_command("cargo", &arg_refs)
 }
 
-/// The generated wire code and the `src/bin` tools, left out of every coverage report.
-const COVERAGE_IGNORE_FILENAME_REGEX: &str = "(target/debug/build/.*/out/(test_)?generated/|src/bin/)";
+/// The generated wire code, the `src/bin` tools, the test-only files (always fully run,
+/// so they only inflate the total) and the `Dyn*` client forwarders, whose forwarding
+/// `check-dyn-forwarding` already enforces, left out of every coverage report.
+const COVERAGE_IGNORE_FILENAME_REGEX: &str = concat!(
+    "(target/debug/build/.*/out/(test_)?generated/|src/bin/",
+    "|(_test|_test_utils)\\.rs$|/test_[a-z_]+\\.rs$|src/integration_tests/",
+    "|src/(consumer/dyn_consumer|producer/dyn_producer)\\.rs$)",
+);
 
 /// The environment `cargo llvm-cov show-env` gives for instrumenting the
 /// `confluent-kafka` package, its `KEY=VALUE` lines with the shell quotes
