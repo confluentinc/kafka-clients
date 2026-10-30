@@ -4,8 +4,8 @@ name: create-release-tag
 # the commit of this master or release branch build for the release of each
 # client whose version is entered, and pushes the tags, which start those
 # releases:
-# semaphore.yml runs on each tag and, once every CI job passes, that client's
-# release blocks publish it.
+# semaphore.yml runs on each tag and that client's release blocks publish it,
+# once the CI blocks they wait for have passed (see those blocks).
 #   - RUST_VERSION: the tag is rust/v<RUST_VERSION>, and "Release (Rust):"
 #     publishes ${CRATE} to crates.io.
 #   - PYTHON_VERSION: the tag is python/v<PYTHON_VERSION>, and "Release
