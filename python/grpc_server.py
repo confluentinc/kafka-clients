@@ -92,7 +92,7 @@ from grpc_translate import (  # noqa: E402
     # The error codes the servicers stamp on errors of their own making, so the
     # Rust client can tell those apart from an error the client reported.
     _LOCAL_ILLEGAL_STATE,
-    _REQUEST_TIMED_OUT,
+    _LOCAL_TIMEOUT,
     _admin_abort_transaction_spec,
     _admin_acl_bindings,
     _admin_acl_filter,
@@ -259,7 +259,7 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
-                code=_REQUEST_TIMED_OUT,
+                code=_LOCAL_TIMEOUT,
                 message="python server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
             LOG.exception("future.get raised")
