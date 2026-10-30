@@ -129,7 +129,8 @@ message ProducerRecord {
 
 message Header {
   string key = 1;
-  bytes value = 2;
+  // Absent for Java's null header value, which is not an empty one.
+  optional bytes value = 2;
 }
 
 message SendRequest {

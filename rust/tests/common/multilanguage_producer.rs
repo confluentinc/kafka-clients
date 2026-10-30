@@ -365,10 +365,7 @@ fn producer_record_to_proto(record: &ProducerRecord<Vec<u8>, Vec<u8>>) -> proto:
     let headers = record
         .headers()
         .into_iter()
-        .map(|h| proto::Header {
-            key: h.key().to_string(),
-            value: h.value().map(|v| v.to_vec()).unwrap_or_default(),
-        })
+        .map(|h| proto::Header { key: h.key().to_string(), value: h.value().map(<[u8]>::to_vec) })
         .collect();
     proto::ProducerRecord {
         topic: record.topic().to_string(),

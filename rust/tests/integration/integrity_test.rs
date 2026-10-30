@@ -38,6 +38,12 @@
 //! consumer; it writes text, so those records are checked against the
 //! partition, offset, key and value Java acked instead.
 //!
+//! The scenarios that check a client run once per client, as the other
+//! multi-language tests do (`integrity_test!`): `<name>__rust` with the Rust
+//! client, and with the `multilanguage-tests` feature `<name>__grpc_python`,
+//! `<name>__grpc_python_async` and `<name>__grpc_c` with a binding's client
+//! behind its gRPC test server (`integrity::clients`), every check the same.
+//!
 //! `self_tests` checks the checker itself, without a broker: failures are
 //! produced on purpose and must be reported.
 //!
@@ -56,6 +62,7 @@ use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig};
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::integrity::checker::{Ledger, Requirements, StreamKind, Verdict};
+use crate::integrity::clients::Clients;
 use crate::integrity::java::JavaReader;
 use crate::integrity::record::{Identity, PayloadProfile, RecordId, TxnIntent, build_record};
 use crate::integrity::workload::{
@@ -96,10 +103,80 @@ async fn context() -> (TestContext, Props) {
     (ctx, base)
 }
 
+/// The client a scenario checks (`integrity_test!`).
+#[derive(Clone, Copy)]
+enum Arm {
+    Rust,
+    #[cfg(feature = "multilanguage-tests")]
+    Grpc(crate::common::backend_pool::BackendKind, &'static str),
+}
+
+/// [`context`] with the clients of `arm`. A binding's server reaches the
+/// brokers at the addresses its mode needs (in a container, the container
+/// listeners), over the run's protocol.
+async fn context_for(arm: Arm) -> (TestContext, Props, Clients) {
+    let (ctx, base) = context().await;
+    let clients = match arm {
+        Arm::Rust => Clients::rust(),
+        #[cfg(feature = "multilanguage-tests")]
+        Arm::Grpc(kind, name) => {
+            use crate::common::backend_pool::{get_or_start, uses_containers};
+            let server = get_or_start(kind, ctx.broker_network_name()).await;
+            let mut props = Props::from([(
+                "bootstrap.servers".to_string(),
+                ctx.protocol_bootstrap_servers_for(uses_containers()).to_string(),
+            )]);
+            ctx.apply_security(&mut props);
+            Clients::grpc(server, name, props).await
+        },
+    };
+    (ctx, base, clients)
+}
+
+/// Expands `async fn $body(arm: Arm)` into one test per client:
+/// `$name__rust`, and with the `multilanguage-tests` feature
+/// `$name__grpc_python`, `$name__grpc_python_async` and `$name__grpc_c`.
+macro_rules! integrity_test {
+    ($name:ident, $body:ident) => {
+        ::paste::paste! {
+            #[expect(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __rust>]() {
+                $body(Arm::Rust).await;
+            }
+
+            #[cfg(feature = "multilanguage-tests")]
+            #[expect(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __grpc_python>]() {
+                $body(Arm::Grpc(crate::common::backend_pool::BackendKind::Python, "python")).await;
+            }
+
+            #[cfg(feature = "multilanguage-tests")]
+            #[expect(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __grpc_python_async>]() {
+                $body(Arm::Grpc(crate::common::backend_pool::BackendKind::PythonAsync, "python_async")).await;
+            }
+
+            #[cfg(feature = "multilanguage-tests")]
+            #[expect(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __grpc_c>]() {
+                $body(Arm::Grpc(crate::common::backend_pool::BackendKind::C, "c")).await;
+            }
+        }
+    };
+}
+
 fn spec() -> RunSpec {
     let mut spec = RunSpec::new(rand::random(), seed());
     spec.watchdog = Duration::from_secs(60);
     spec
+}
+
+fn spec_for(clients: Clients) -> RunSpec {
+    RunSpec { clients, ..spec() }
 }
 
 /// Nothing injects faults on the test broker, so no send and no
@@ -114,10 +191,9 @@ fn assert_pass(verdict: &Verdict) {
 }
 
 /// Every compression codec, the everyday record mix.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_every_codec() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn every_codec(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let mut topics = Vec::new();
     for (writer, codec) in CODECS.iter().enumerate() {
         let topic = ctx.topic(&format!("codec_{codec}"));
@@ -134,13 +210,13 @@ async fn test_integrity_every_codec() {
     spec.requirements = Requirements { min_records_per_stream: 2000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_every_codec, every_codec);
 
 /// Null and empty keys and values, tombstones, repeated header keys and null
 /// header values, uncompressed and compressed.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_record_shapes() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn record_shapes(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let mut topics = Vec::new();
     for (writer, codec) in ["none", "zstd"].iter().enumerate() {
         let topic = ctx.topic(&format!("shapes_{codec}"));
@@ -157,13 +233,13 @@ async fn test_integrity_record_shapes() {
     spec.requirements = Requirements { min_records_per_stream: 3000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_record_shapes, record_shapes);
 
 /// Sizes around the varint and batch boundaries, and records larger than the
 /// consumer's fetch limits (KIP-74: the first batch is returned anyway).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_record_sizes() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn record_sizes(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let boundaries = ctx.topic("sizes_boundaries");
     let large = ctx.topic("sizes_large");
     spec.topics.push(TopicSpec::source(&boundaries, 1, 1));
@@ -189,13 +265,13 @@ async fn test_integrity_record_sizes() {
     spec.requirements = Requirements { min_records_per_stream: 60, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_record_sizes, record_sizes);
 
 /// Transactions, one in three aborted, read with read_committed: every
 /// committed record exactly once, no aborted one ever.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_transactions() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn transactions(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let topic = ctx.topic("txn");
     spec.topics.push(TopicSpec::source(&topic, 3, 1));
     spec.writers.push(
@@ -214,13 +290,13 @@ async fn test_integrity_transactions() {
     };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_transactions, transactions);
 
 /// A consume-transform-produce loop with random aborts copies one topic into
 /// another: every source record appears in the copy exactly once.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_consume_transform_produce() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn consume_transform_produce(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let input = ctx.topic("copy_in");
     let output = ctx.topic("copy_out");
     spec.topics.push(TopicSpec::source(&input, 3, 1));
@@ -238,13 +314,13 @@ async fn test_integrity_consume_transform_produce() {
     spec.requirements = Requirements { min_records_per_stream: 2000, min_copier_aborts: 1, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_consume_transform_produce, consume_transform_produce);
 
 /// Several writers over many partitions, read by a group of three: every
 /// delivery report names the partition and offset the record is read at.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_many_partitions() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn many_partitions(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let topic = ctx.topic("partitions");
     spec.topics.push(TopicSpec::source(&topic, 24, 1));
     for writer in 0..3 {
@@ -254,15 +330,18 @@ async fn test_integrity_many_partitions() {
     spec.requirements = Requirements { min_records_per_stream: 6000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_many_partitions, many_partitions);
 
 /// Members close cleanly and rejoin while records keep coming. Each commits
 /// everything it read before its partitions move, retrying a commit the
 /// rebalance failed (`STALE_MEMBER_EPOCH`) from its revocation listener, so
-/// nothing is read twice.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_consumer_restart_clean() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+/// nothing is read twice. A binding's listener runs in its gRPC server and
+/// cannot commit, so there a failed commit is retried only with the next one,
+/// and a record may be read again, never below the committed offset.
+async fn consumer_restart_clean(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let commits_on_revoke = clients.commits_on_revoke();
+    let mut spec = spec_for(clients);
     let topic = ctx.topic("restart_clean");
     spec.topics.push(TopicSpec::source(&topic, 6, 1));
     spec.writers.push(WriterSpec::new(0, &topic).rate(500).records(5000));
@@ -273,17 +352,19 @@ async fn test_integrity_consumer_restart_clean() {
     spec.requirements = Requirements { min_records_per_stream: 5000, min_clean_restarts: 3, ..requirements() };
     let verdict = run(spec, base).await;
     assert_pass(&verdict);
-    assert_eq!(verdict.counts.redelivered, 0, "a clean handoff re-read records:\n{verdict}");
+    if commits_on_revoke {
+        assert_eq!(verdict.counts.redelivered, 0, "a clean handoff re-read records:\n{verdict}");
+    }
 }
+integrity_test!(test_integrity_consumer_restart_clean, consumer_restart_clean);
 
 /// Members stop polling without `close()` (every other restart, the others
 /// clean), leaving their last batch uncommitted. Once `max.poll.interval.ms`
 /// expires, the next owner resumes at the committed offset: records may be
 /// read again from there, never from below it, and none is lost.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_consumer_restart_hard() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn consumer_restart_hard(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let topic = ctx.topic("restart_hard");
     spec.topics.push(TopicSpec::source(&topic, 6, 1));
     spec.writers.push(WriterSpec::new(0, &topic).rate(400).records(10_000));
@@ -306,14 +387,14 @@ async fn test_integrity_consumer_restart_hard() {
     };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_consumer_restart_hard, consumer_restart_hard);
 
 /// Writers replace their producer every few hundred records or every second:
 /// a new producer id each time, and for the transactional one a new epoch of
 /// the same transactional id.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_producer_restart() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
+async fn producer_restart(arm: Arm) {
+    let (mut ctx, base, clients) = context_for(arm).await;
+    let mut spec = spec_for(clients);
     let plain = ctx.topic("producer_restart");
     let txn = ctx.topic("producer_restart_txn");
     spec.topics.push(TopicSpec::source(&plain, 3, 1));
@@ -334,6 +415,7 @@ async fn test_integrity_producer_restart() {
     spec.requirements = Requirements { min_records_per_stream: 1000, min_producer_restarts: 6, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
+integrity_test!(test_integrity_producer_restart, producer_restart);
 
 /// A deserializer that flips the last byte of every value, standing in for a
 /// client that corrupts what it hands out.

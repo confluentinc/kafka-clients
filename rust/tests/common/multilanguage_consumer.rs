@@ -223,7 +223,9 @@ impl MultilanguageConsumer {
     /// Connect to `channel` and create a server-side consumer from `config`
     /// (empty config selects a MockConsumer server-side).
     pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
-        let mut client = ConsumerServiceClient::new(channel);
+        // A poll returns up to `max.poll.records` records in one reply, which
+        // with large values passes gRPC's 4 MiB default.
+        let mut client = ConsumerServiceClient::new(channel).max_decoding_message_size(usize::MAX);
         let response = client
             .create_consumer(proto::CreateConsumerRequest { config })
             .await
@@ -1003,8 +1005,7 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 }
 
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
-    let headers =
-        RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
+    let headers = RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, h.value)));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
     let options = ConsumerRecordOptionsBuilder::new()
