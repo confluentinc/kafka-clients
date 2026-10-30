@@ -59,25 +59,6 @@ from confluent_kafka import (
 The native extension is `_confluentkafka` (private): the package imports it; it
 is never a public import path.
 
-## `None` is Java's `null`
-
-Every keyword-only parameter mirrors a Java argument, and `None` is Java's
-`null`, never "not given": leaving a parameter out is the only way to choose the
-Java overload without it (`CLAUDE.md`, Python Binding Conventions, Signatures).
-`consumer.close()` is Java's `close()`, while `consumer.close(option=None)` is
-`close(null)` and raises `TypeError("option must not be None")`, as Java's
-`NullPointerException`; `producer.send(record=r, callback=None)` is Java's
-`send(record, null)`. Where Java gives `null` a meaning, `None` keeps it
-(`ProducerRecord(topic=…, partition=None, key=None, value=…)`, an
-`Optional` parameter's `Optional.empty()`). Code written against kafka-python or
-confluent-kafka-python that passes `None` to skip an argument must leave the
-argument out instead; its positional callbacks and serdes take the keyword form
-(Serdes and callbacks), and an `except UnsupportedVersionError` meant for a mock's
-unimplemented method becomes `except UnsupportedOperationError` (Errors). The
-signatures show the private default `MISSING`
-(`help()`, `inspect.signature`): it only marks a parameter some overload omits
-and is never a value to pass.
-
 ## Headers
 
 A record's headers are Java's: `record.headers()` returns a `Headers`
