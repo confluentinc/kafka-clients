@@ -142,6 +142,7 @@ import gc
 import inspect
 import math
 import os
+import re
 import signal
 import sys
 import threading
@@ -981,6 +982,21 @@ TIMED: dict[str, tuple[Callable[..., Any], str]] = {
     "end_offsets": (lambda c, **t: c.end_offsets(partitions=[TP0], **t),
                     "Failed to get offsets by times in {}ms"),
 }
+# A timed wait has a second deadline, on the background task: the reaper
+# (Java's CompletableEventReaper) fails the queued event with its own message,
+# "<event> was N ms past its expiration of <deadline>", when it reaches the
+# deadline first, and the core raises that error unchanged, as Java's
+# ConsumerUtils.getResult does. The two deadlines are milliseconds apart, so a
+# slow runner sees either message.
+REAPED = re.compile(r".+ was \d+ ms past its expiration of \d+")
+
+
+def assert_timed_out(error: BaseException, message: str) -> None:
+    """``error`` carries the caller's ``message`` or the reaper's."""
+    text = str(error)
+    assert text == message or REAPED.fullmatch(text), text
+
+
 # partitionsFor / listTopics: Java throws at once for a zero timeout; the
 # untimed overload waits out default.api.timeout.ms. An expired lookup has
 # either of two messages, depending on which side the deadline reaches first:
@@ -1017,13 +1033,13 @@ def test_a_duration_overload_waits_up_to_its_timeout(method: str) -> None:
         consumer.assign(partitions=[TP0])
         with pytest.raises(KafkaTimeoutError) as e:
             call(consumer)
-        assert str(e.value) == message.format(300)
+        assert_timed_out(e.value, message.format(300))
         with pytest.raises(KafkaTimeoutError) as e:
             call(consumer, timeout=0.2)
-        assert str(e.value) == message.format(200)
+        assert_timed_out(e.value, message.format(200))
         with pytest.raises(KafkaTimeoutError) as e:
             call(consumer, timeout=timedelta(milliseconds=150))
-        assert str(e.value) == message.format(150)
+        assert_timed_out(e.value, message.format(150))
 
 
 @pytest.mark.parametrize("method", sorted(METADATA))
@@ -1119,7 +1135,7 @@ def test_a_timed_call_inside_a_callback_passes_its_timeout(method: str) -> None:
         assert time.monotonic() - started < WAIT
         timed_out, negative = raised
         assert isinstance(timed_out, KafkaTimeoutError)
-        assert str(timed_out) == message.format(200)
+        assert_timed_out(timed_out, message.format(200))
         assert isinstance(negative, IllegalArgumentError)
         assert str(negative) == NEGATIVE[method][1].format(-1000)
 
@@ -1220,7 +1236,7 @@ def test_a_timed_position_inside_a_callback_passes_its_timeout() -> None:
         assert time.monotonic() - started < WAIT
         (error,) = raised
         assert isinstance(error, KafkaTimeoutError)
-        assert str(error) == TIMED["position"][1].format(200)
+        assert_timed_out(error, TIMED["position"][1].format(200))
 
 
 def test_current_lag_waits_for_the_background_task() -> None:
@@ -1352,10 +1368,10 @@ def test_the_async_duration_overloads() -> None:
         for call, message in cases:
             with pytest.raises(KafkaTimeoutError) as e:
                 await call()
-            assert str(e.value) == message.format(300)
+            assert_timed_out(e.value, message.format(300))
             with pytest.raises(KafkaTimeoutError) as e:
                 await call(timeout=0.2)
-            assert str(e.value) == message.format(200)
+            assert_timed_out(e.value, message.format(200))
             with pytest.raises(IllegalArgumentError):
                 await call(timeout=-1)
             with pytest.raises(OverflowError):
@@ -3758,7 +3774,7 @@ def test_an_async_timed_call_inside_a_callback_goes_through_the_handle() -> None
         await consumer.commit(offsets={})
         timed_out, zero = raised
         assert isinstance(timed_out, KafkaTimeoutError)
-        assert str(timed_out) == TIMED["end_offsets"][1].format(200)
+        assert_timed_out(timed_out, TIMED["end_offsets"][1].format(200))
         assert isinstance(zero, KafkaTimeoutError)
         assert str(zero) == METADATA["partitions_for"][1]
         await consumer.close(option=CloseOptions.timeout(timeout=0))
