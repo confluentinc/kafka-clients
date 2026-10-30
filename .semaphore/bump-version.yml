@@ -17,11 +17,18 @@ name: Bump version
 #                      move up, so it is required whenever VERSION's PEP 440
 #                      form is below the current Python version
 #                      (python/pyproject.toml).
+#   DOTNET_VERSION  -- a version for the Confluent.Kafka NuGet package, in
+#                      semver form (e.g. 4.4.0-beta.1), written to
+#                      dotnet/Directory.Build.props. Without it the .NET
+#                      version stays as it is; it only moves up. To change
+#                      only the .NET version, give VERSION and
+#                      PYTHON_VERSION their current values.
 #   BASE_BRANCH     -- the branch to bump and the PR's base; default master.
 #
-# The branch is bump-version/<VERSION>, plus -py<PYTHON_VERSION> when that is
-# given; the job fails if it already exists on origin. Like the translation
-# agent's jobs, it pushes and runs `gh` with the agent's GitHub credentials.
+# The branch is bump-version/<VERSION>, plus -py<PYTHON_VERSION> and
+# -dotnet<DOTNET_VERSION> when those are given; the job fails if it already
+# exists on origin. Like the translation agent's jobs, it pushes and runs `gh`
+# with the agent's GitHub credentials.
 
 agent:
   machine:
@@ -30,8 +37,8 @@ agent:
 blocks:
   - name: Bump version
     task:
-      # No task-level env_vars: declaring VERSION, PYTHON_VERSION or
-      # BASE_BRANCH here would shadow the Task parameters supplied at trigger
+      # No task-level env_vars: declaring VERSION, PYTHON_VERSION,
+      # DOTNET_VERSION or BASE_BRANCH here would shadow the Task parameters supplied at trigger
       # time. Defaults are applied shell-side below.
       jobs:
         - name: bump-version
@@ -41,16 +48,20 @@ blocks:
               : "${VERSION:?VERSION must be set as a Task parameter}"
             # The parameters are free text: accept only version characters, and
             # pass them to make in the environment (below), not on its command
-            # line, where make would expand a $(...) in them.
+            # line, where make would expand a $(...) in them. The pattern tests
+            # the whole value, a line break included, which grep, reading line
+            # by line, would not.
             - |
-              for v in "${VERSION}" "${PYTHON_VERSION:-0}"; do
-                if ! printf '%s' "$v" | grep -Eq '^[0-9A-Za-z.+!-]+$'; then
-                  echo "Refusing to bump: '$v' is not a version" >&2
-                  exit 1
-                fi
+              for v in "${VERSION}" "${PYTHON_VERSION:-0}" "${DOTNET_VERSION:-0}"; do
+                case "$v" in
+                  ''|*[!0-9A-Za-z.+!-]*)
+                    echo "Refusing to bump: '$v' is not a version" >&2
+                    exit 1
+                    ;;
+                esac
               done
             - export BASE_BRANCH="${BASE_BRANCH:-master}"
-            - export BUMP_BRANCH="bump-version/${VERSION}${PYTHON_VERSION:+-py${PYTHON_VERSION}}"
+            - export BUMP_BRANCH="bump-version/${VERSION}${PYTHON_VERSION:+-py${PYTHON_VERSION}}${DOTNET_VERSION:+-dotnet${DOTNET_VERSION}}"
             - |
               if git ls-remote --exit-code --heads origin "${BUMP_BRANCH}" >/dev/null; then
                 echo "Refusing to bump: ${BUMP_BRANCH} already exists on origin; close its PR and delete it first" >&2
@@ -62,7 +73,7 @@ blocks:
             - git checkout -B "${BUMP_BRANCH}" FETCH_HEAD
             # Installs rustup, which installs the toolchain rust/rust-toolchain.toml pins.
             - ./.semaphore/dependencies.sh
-            - export VERSION PYTHON_VERSION="${PYTHON_VERSION:-}"
+            - export VERSION PYTHON_VERSION="${PYTHON_VERSION:-}" DOTNET_VERSION="${DOTNET_VERSION:-}"
             - make bump-version
             - |
               if git diff --quiet; then
@@ -79,10 +90,14 @@ blocks:
               if [ -n "${PYTHON_VERSION:-}" ]; then
                 PYTHON_NOTE=" The Python packages are at ${PYTHON_VERSION}."
               fi
+              DOTNET_NOTE=""
+              if [ -n "${DOTNET_VERSION:-}" ]; then
+                DOTNET_NOTE=" The .NET package is at ${DOTNET_VERSION}."
+              fi
               git commit --no-verify -a -q -F - <<EOF
               Version ${VERSION}
 
-              Set by the "Bump version" Semaphore Task with \`make bump-version\`.${PYTHON_NOTE}
+              Set by the "Bump version" Semaphore Task with \`make bump-version\`.${PYTHON_NOTE}${DOTNET_NOTE}
               EOF
             - git push origin "HEAD:refs/heads/${BUMP_BRANCH}"
             - |
@@ -93,6 +108,12 @@ blocks:
                   echo "The Python packages get \`${PYTHON_VERSION}\`, given as PYTHON_VERSION."
                 else
                   echo "The Python packages get the same version in PEP 440 form."
+                fi
+                echo
+                if [ -n "${DOTNET_VERSION:-}" ]; then
+                  echo "The .NET package gets \`${DOTNET_VERSION}\`, given as DOTNET_VERSION."
+                else
+                  echo "The .NET package keeps its version (no DOTNET_VERSION given)."
                 fi
                 echo
                 echo '```'
