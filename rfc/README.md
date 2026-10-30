@@ -25,7 +25,7 @@ The proposals below break that effort into focused pieces that can be reviewed o
 | [Community contributions](contributions.md) | Where issues and pull requests are raised, the contribution model, and licensing/CLA terms. | Proposed |
 | [Client release and distribution](release-and-distribution.md) | Release cadence aligned to Apache Kafka, per-registry publishing, prebuilt binaries, and supply-chain integrity. | Proposed |
 | [AI-assisted migration](ai-assisted-migration.md) | An agentskills.io skill, model-agnostic, with a deterministic config mapping plus AI for API and behavioral changes. | Proposed |
-| [Client support](support.md) | New features land in the 4.x clients on the Rust core; librdkafka and the 2.x clients keep receiving security and critical fixes. | Draft |
+| [Client support](support.md) | New features land in the 4.x clients on the Rust core; librdkafka and the 2.x clients keep receiving security and critical fixes. | Proposed |
 
 ## Status values
 
