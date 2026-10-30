@@ -916,8 +916,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
       kafka_common_header_Headers_t* headers_view =
           kafka_common_header_internals_RecordHeaders__as_Headers(headers);
       for (const auto& h : rec.headers()) {
-        kafka_Bytes_t header_value{reinterpret_cast<const uint8_t*>(h.value().data()),
-                                   static_cast<int32_t>(h.value().size())};
+        // An unset value is Java's null; `data == NULL` says so to the FFI.
+        kafka_Bytes_t header_value{
+            h.has_value() ? reinterpret_cast<const uint8_t*>(h.value().data()) : nullptr,
+            h.has_value() ? static_cast<int32_t>(h.value().size()) : 0};
         kafka_common_Error_t* header_err = nullptr;
         kafka_common_header_Headers_add_with_key_value(headers_view, h.key().c_str(), header_value,
                                                        &header_err);
