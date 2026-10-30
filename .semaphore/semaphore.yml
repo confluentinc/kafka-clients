@@ -93,8 +93,10 @@ name: build-test-release
 #      and is new, and every CI job passed on that build, then pushes one tag
 #      per client entered, rust/v<version> and python/v<version>.
 #   3. Each tag push runs this pipeline on that tag. CI runs again, and the
-#      release blocks of that client publish it once every CI job has passed:
-#      the crate to crates.io, the wheels to Test PyPI.
+#      release blocks of that client publish it: the crate to crates.io once
+#      "Check crate package (Linux amd64)" has passed, since the rest of CI
+#      already passed on the commit in step 2; the wheels to Test PyPI once
+#      the CI blocks that test them have passed.
 #   4. For a final Python version, run the manual "Publish to PyPI" promotion
 #      (publish-pypi.yml) on that tag build once its Test PyPI blocks have
 #      passed.
@@ -107,9 +109,8 @@ name: build-test-release
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
 # renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of "Release (Rust): pre-publish
-# package check" and, if it tests the Rust library or the Python binding, of
-# "Release (Python): packaging".
+# block that tests the Rust library or the Python binding must also be added
+# to the dependencies of "Release (Python): packaging".
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -462,8 +463,9 @@ blocks:
   # without -dev.N. The two patterns must stay identical in all of the blocks
   # that use them, and the first in create-release-tag.yml.
   #
-  # The blocks run one after another: CI, then "Release (Rust): pre-publish
-  # package check", then "Release (Rust): pre-publish smoke test", then
+  # The blocks run one after another: "Check crate package (Linux amd64)",
+  # then "Release (Rust): pre-publish package check", then
+  # "Release (Rust): pre-publish smoke test", then
   # "Release (Rust): publish to crates.io", each starting only when the block
   # before it has passed. The pre-publish blocks build and test the crate on
   # VMs that hold no secrets, and each records the SHA-256 of the .crate it
@@ -478,16 +480,12 @@ blocks:
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # A new CI block must be added to this list.
+    # Waits for the crate check only. Every CI job already passed on this
+    # commit's branch build before "Create release tag" tagged it
+    # (REQUIRED_CI_JOBS in create-release-tag.yml), so the publish does not
+    # wait for the rest of CI to run again on the tag build.
     dependencies:
-      - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
-      - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
-      - "Check API compatibility (Linux amd64)"
-      - "Audit Rust dependencies (Linux amd64)"
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
