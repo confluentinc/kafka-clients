@@ -49,9 +49,10 @@ from confluent_kafka import IllegalArgumentError, IllegalStateError  # noqa: E40
 from confluent_kafka.common import TopicPartition  # noqa: E402
 from confluent_kafka._errors import to_ffi_id
 from confluent_kafka.common import KafkaError  # noqa: E402
-# The broker wire ``TimeoutException`` (code 7), distinct from the JDK-analog
-# ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
-from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
+# The JDK-analog ``confluent_kafka.TimeoutError`` (code -5), distinct from the
+# broker wire ``TimeoutException`` (code 7). Aliased to avoid shadowing the
+# builtin.
+from confluent_kafka import TimeoutError as _RootTimeout  # noqa: E402
 # The classes whose payload a proto KafkaError carries (see _kafka_error_to_proto).
 from confluent_kafka.common.errors import (  # noqa: E402
     ApiError,
@@ -118,12 +119,15 @@ import admin_service_pb2 as apb  # noqa: E402  (generated)
 # code by reading the typed error class' private ``_ffi_id`` — the same value
 # the generator wrote into ``_error_code.py``. These are the only codes the
 # servers manufacture (LOCAL_ILLEGAL_ARGUMENT / LOCAL_ILLEGAL_STATE /
-# REQUEST_TIMED_OUT); everything else crosses via ``to_ffi_id`` on a real error.
+# LOCAL_TIMEOUT); everything else crosses via ``to_ffi_id`` on a real error.
 _LOCAL_ILLEGAL_ARGUMENT = IllegalArgumentError._ffi_id
 _LOCAL_ILLEGAL_STATE = IllegalStateError._ffi_id
-# ``REQUEST_TIMED_OUT`` is Java's wire code 7; the wire ``TimeoutException``
-# class carries it as ``_ffi_id``.
-_REQUEST_TIMED_OUT = _WireTimeout._ffi_id
+# A server's own bounded wait that expired (the producer future's 120 s): the
+# root ``TimeoutError``, Java's ``java.util.concurrent.TimeoutException``
+# (``LOCAL_TIMEOUT``), not Kafka's wire ``TimeoutException``
+# (``REQUEST_TIMED_OUT``, code 7), which a test may accept as the broker's
+# answer although the send never completed.
+_LOCAL_TIMEOUT = _RootTimeout._ffi_id
 
 
 def _error_code_of(err):
