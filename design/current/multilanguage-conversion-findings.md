@@ -215,9 +215,11 @@ state:
   - `consumer1`'s 2000 ms close, once, on `__grpc_python`: `python backend: Close took too long
     4001`.
 
-  4001 and 8001 are not a fixed step of 2 s: they are the test's own limit firing,
-  `tokio::time::timeout(ms + CLOSE_GRACE_TIME_MS)` in `close_and_validate`. Those closes took at
-  least 2 s past their bound; how long they would have taken is unknown.
+  4001 and 8001 are not a fixed step of 2 s: they are the test's own limit firing, the
+  `tokio::time::timeout(ms + CLOSE_GRACE_TIME_MS)` that `close_and_validate` used until
+  f5687166a. Those closes took at least 2 s past their bound on the monotonic clock; how long they
+  would have taken is unknown. Since f5687166a the test measures with the wall clock, as Java
+  does, and a 300 s hang guard is its only bound.
 - **Java / Rust**: `close(CloseOptions)` with the cluster down returns within the close timeout,
   and with an unbounded timeout within `request.timeout.ms`
   (`AsyncKafkaConsumer#close(Duration)` bounds each close step by the timer). The native client
@@ -254,9 +256,65 @@ state:
   - Suggested measurement: timestamps around the close submit, its completion, `_finish_close` and
     the destroy; `RUST_LOG=debug` for `client_utils` and the network thread; each container arm
     run about 10 times.
+- **Confirmation run (2026-10-30, Actor 120, about 1 hour; incomplete on one point, see the
+  verdict)**: a local, uncommitted copy of the test ran only `checkCloseWithClusterFailure`, with
+  the gRPC skip lifted and wall-clock timestamps around the broker stop and each close. The
+  backend containers got `RUST_LOG=debug` through a temporary `with_env_var` in `backend_pool.rs`
+  (the harness has no `RUST_LOG` pass-through; the FFI starts `env_logger` from it), and their
+  logs were streamed with `docker logs -f -t`. Both files were restored afterwards.
+  - **Overruns, 10 runs per arm, container mode**: `__grpc_python` 3, `__grpc_python_async` 5,
+    `__grpc_c` 3. Then 6 more `__grpc_c` runs with an in-container `getent` loop: 0 of 6, but one
+    unbounded close took 7956 ms against its 8000 ms bound. `MULTILANG_BACKEND_MODE=native`
+    (`__grpc_python`, the same core and binding on the host listeners, which are IP literals):
+    0 of 8, every close 2004-2006 ms and 6004-6009 ms.
+  - **DNS is not slow.** In the backend container a stopped broker's name stops resolving about
+    0.7 s after the stop begins, and every lookup returns fast: across about 600 `getent hosts`
+    samples spanning the whole stop and close window, the maximum was 144 ms and the median 59 ms,
+    "not found" included (a running container's name: about 60 ms). The core logs the same: each
+    reconnect fails within about 100-500 ms with `failed to lookup address information: Name or
+    service not known`. The leading hypothesis, a slow lookup of a stopped container's name, is
+    therefore not what happens.
+  - **Where the time goes, two separate causes:**
+    1. *Wall-clock steps.* In 7 of the 36 container runs (3 x 10, plus the 6 `getent` runs) the container's wall clock stepped
+       back, 0.35-1.9 s, during the stop or the close (WSL2; the `[F3]` timestamps and the
+       `docker logs` timestamps show it). The core's close deadlines use
+       `Time::milliseconds()`, wall-clock as Java's `System.currentTimeMillis()`, while the
+       test then bounded the close with tokio's monotonic clock (it measures with the wall
+       clock, as Java does, since f5687166a). So a step back of 1.9 s makes the
+       close's own 2000 ms commit step run about 3.9 s of real time: in `__grpc_c` run 1 the core
+       logged "Timeout of 2000ms expired" and closed 2.06 s after the close started by its wall
+       clock, while the test's monotonic timeout had already fired at 4.0 s. 5 of the 11 failures
+       had such a step inside the close window.
+    2. *A stall of the core's network threads, in container mode only.* In the failures without
+       a step (python 2, 8, 9; python_async 8; c 2, 5), both consumers' network threads, which
+       otherwise log a reconnect attempt every 100-200 ms, go silent for 1-3.6 s, starting
+       0.4-1 s after the brokers stop. The app-side commit step still ends on time (2000 ms), and
+       close then waits for `LeaveGroupOnClose`, which only the stalled thread can complete; that
+       wait is what overruns. Just before the silence, the threads were setting up connections:
+       for example "Resolved host kafka-broker-2-… as [172.18.0.5]" followed by "Initiating
+       connection … using address 172.18.0.5", for a broker that had just stopped. What blocks
+       the threads was not determined in the timebox: not DNS latency (above), so possibly the
+       connect path to an address that no longer exists on the bridge network. A thread dump of
+       the backend process during the stall, or selector-level trace logging, would decide it.
+- **Verdict (part confirmed, part open)**: the DNS hypothesis is refuted. Part of the overrun
+  comes from the translated test, not from Java: the host's wall clock steps back, the core's
+  close timers read the wall clock as Java's do, and `close_and_validate` measured and bounded the
+  close on the monotonic clock. Java's `submitCloseAndValidate` measures with
+  `System.currentTimeMillis()` and sets no bound, so a step back cannot fail it. This half is
+  fixed in the test (f5687166a: the elapsed time is measured on the wall clock, and only a 300 s
+  hang guard bounds the wait); the native arm was exposed to it too. The rest is a stall of the core's network threads that happens only
+  when the backend reaches the brokers by container name over the Docker network. Native mode,
+  with the same core and binding over the host IP-literal listeners, never reproduced it. Whether
+  that stall is a core divergence (the network thread not honouring `closeTimeout` where Java's
+  would) or a property of the container network path stays open until the blocking call is
+  identified.
 - **Failing assertion**:
-  `assert!(time_taken_ms < ms + CLOSE_GRACE_TIME_MS, "{backend} backend: Close took too long {time_taken_ms}")`,
-  reached through the bounding `tokio::time::timeout`'s
-  `panic!("{backend} backend: Close took too long {}", ...)` in `close_and_validate`.
-- **State**: skipped in the body on the gRPC arms (e8370c9b3; the `__rust` arm runs); needs owner
-  (the diagnosis to confirm).
+  `assert!(time_taken_ms < ms as i64 + CLOSE_GRACE_TIME_MS, "{backend} backend: Close took too long {time_taken_ms}")`
+  in `close_and_validate`, `time_taken_ms` on the wall clock since f5687166a. Until f5687166a it was reached through the bounding
+  `tokio::time::timeout`'s `panic!("{backend} backend: Close took too long {}", ...)`; since then
+  the time is wall clock and the wait is bounded only by the 300 s hang guard. One `__grpc_c` run
+  with the skip lifted locally (not committed) passed after that change.
+- **State**: skipped in the body on the gRPC arms (e8370c9b3; the `__rust` arm runs); needs owner.
+  The confirmation run refuted the DNS hypothesis and found two causes: the wall-clock half is
+  fixed in the test (f5687166a); what blocks the network threads in container mode is still to be
+  identified (see the verdict).
