@@ -15,6 +15,8 @@
 using System;
 using System.Collections;
 using System.Reflection;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 
 using Proto = Confluent.Kafka.Test;
 

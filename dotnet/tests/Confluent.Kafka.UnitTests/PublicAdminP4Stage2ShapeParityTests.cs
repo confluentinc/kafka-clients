@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -147,7 +148,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Same(typeof(ListOffsetsResult), info.DeclaringType);
         Assert.True(info.IsNested, "Java declares it nested (ListOffsetsResult.java:70)");
         Assert.True(info.IsSealed);
-        Assert.Equal("Confluent.Kafka.Admin", info.Namespace);
 
         ConstructorInfo only = Assert.Single(info.GetConstructors());
         Assert.Equal(
@@ -250,7 +250,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal(
             new[] { "ReadCommitted", "ReadUncommitted" },
             Enum.GetNames(typeof(IsolationLevel)).OrderBy(name => name, StringComparer.Ordinal));
-        Assert.Equal("Confluent.Kafka", typeof(IsolationLevel).Namespace);
     }
 
     [Fact]

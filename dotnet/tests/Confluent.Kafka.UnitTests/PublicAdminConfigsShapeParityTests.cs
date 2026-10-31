@@ -21,6 +21,8 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -270,7 +272,6 @@ public sealed class PublicAdminConfigsShapeParityTests
     public void AlterConfigOpType_IsFlattened_WithExactlyJavasFourMembers()
     {
         Assert.Null(typeof(AlterConfigOpType).DeclaringType);
-        Assert.Equal("Confluent.Kafka.Admin", typeof(AlterConfigOpType).Namespace);
         Assert.Equal(
             new[] { "Append", "Delete", "Set", "Subtract" },
             Enum.GetNames(typeof(AlterConfigOpType)).OrderBy(name => name, StringComparer.Ordinal));
@@ -621,23 +622,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.DoesNotContain(
             typeof(IAdmin).Assembly.GetExportedTypes(),
             type => type.Name.IndexOf("IncrementalAlterConfigsResult", StringComparison.Ordinal) >= 0);
-    }
-
-    [Fact]
-    public void TheNamespaceSplit_FollowsJavasPackages()
-    {
-        foreach (Type type in new[]
-                 {
-                     typeof(AlterConfigOp), typeof(AlterConfigOpType), typeof(DescribeConfigsResult),
-                     typeof(AlterConfigsResult), typeof(DescribeConfigsOptions), typeof(AlterConfigsOptions),
-                     typeof(ConfigEntry), typeof(Config),
-                 })
-        {
-            Assert.Equal("Confluent.Kafka.Admin", type.Namespace);
-        }
-
-        Assert.Equal("Confluent.Kafka", typeof(ConfigResource).Namespace);
-        Assert.Equal("Confluent.Kafka", typeof(ConfigResourceType).Namespace);
     }
 
     private static PropertyInfo Property(Type type, string name) => type.GetProperty(name)!;

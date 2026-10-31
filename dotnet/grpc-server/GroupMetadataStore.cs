@@ -14,6 +14,7 @@
 
 using System.Collections.Concurrent;
 using System.Threading;
+using Confluent.Kafka.Consumer;
 
 namespace Confluent.Kafka.GrpcServer;
 

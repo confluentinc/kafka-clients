@@ -18,6 +18,10 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Record;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

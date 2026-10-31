@@ -18,6 +18,8 @@ using System.Linq;
 using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

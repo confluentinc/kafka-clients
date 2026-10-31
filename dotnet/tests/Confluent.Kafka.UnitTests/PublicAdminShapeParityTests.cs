@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -29,7 +30,8 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 /// <remarks>
 /// These are reflection assertions: a widened signature still compiles and passes every behavioural test, as
-/// <c>Task&lt;TopicMetadataAndConfig&gt;</c> where <c>Task</c> was meant, or <c>int</c> where <c>short</c> was.
+/// <c>Task&lt;CreateTopicsResult.TopicMetadataAndConfig&gt;</c> where <c>Task</c> was meant, or <c>int</c> where
+/// <c>short</c> was.
 /// </remarks>
 public sealed class PublicAdminShapeParityTests
 {
@@ -63,11 +65,11 @@ public sealed class PublicAdminShapeParityTests
 
         Assert.Equal(
             typeof(int),
-            typeof(TopicMetadataAndConfig)
-                .GetMethod(nameof(TopicMetadataAndConfig.ReplicationFactor), Type.EmptyTypes)!
+            typeof(CreateTopicsResult.TopicMetadataAndConfig)
+                .GetMethod(nameof(CreateTopicsResult.TopicMetadataAndConfig.ReplicationFactor), Type.EmptyTypes)!
                 .ReturnType);
 
-        ConstructorInfo metadataCtor = typeof(TopicMetadataAndConfig).GetConstructor(
+        ConstructorInfo metadataCtor = typeof(CreateTopicsResult.TopicMetadataAndConfig).GetConstructor(
             new[] { typeof(Uuid), typeof(int), typeof(int), typeof(Config) })!;
         Assert.NotNull(metadataCtor);
 

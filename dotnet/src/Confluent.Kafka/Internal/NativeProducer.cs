@@ -20,7 +20,9 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Internal;
 

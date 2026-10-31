@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -30,13 +31,13 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="CreateTopicsResult"/>
 public sealed class AsyncCreateTopicsResult
 {
-    private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>>? _values;
+    private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>? _values;
 
     private readonly CreateTopicsRefinements? _native;
 
     // Internal, unlike Java's protected constructor: a recorded deviation. The dictionary is held
     // by reference, as Java holds its map, and every view reads it when called.
-    internal AsyncCreateTopicsResult(IReadOnlyDictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> futures)
+    internal AsyncCreateTopicsResult(IReadOnlyDictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> futures)
     {
         _values = futures ?? throw new ArgumentNullException(nameof(futures));
     }
@@ -82,7 +83,7 @@ public sealed class AsyncCreateTopicsResult
             // as Java's `Collectors.toMap` does.
             Dictionary<string, AsyncKafkaFuture> erased =
                 new Dictionary<string, AsyncKafkaFuture>(_values!.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, AsyncKafkaFuture<TopicMetadataAndConfig>> entry in _values)
+            foreach (KeyValuePair<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> entry in _values)
             {
                 erased.Add(entry.Key, entry.Value.Erase());
             }
@@ -143,7 +144,7 @@ public sealed class AsyncCreateTopicsResult
     public AsyncKafkaFuture<int> ReplicationFactor(string topic) =>
         _native is null ? Apply(topic, static value => value.ReplicationFactor()) : new AsyncKafkaFuture<int>(_native.ReplicationFactor(topic));
 
-    private AsyncKafkaFuture<TResult> Apply<TResult>(string topic, Func<TopicMetadataAndConfig, TResult> map)
+    private AsyncKafkaFuture<TResult> Apply<TResult>(string topic, Func<CreateTopicsResult.TopicMetadataAndConfig, TResult> map)
     {
         // The topic is checked at the call: a usage error is not an operation outcome.
         if (topic is null)
@@ -151,7 +152,7 @@ public sealed class AsyncCreateTopicsResult
             throw new ArgumentNullException(nameof(topic));
         }
 
-        if (!_values!.TryGetValue(topic, out AsyncKafkaFuture<TopicMetadataAndConfig> source))
+        if (!_values!.TryGetValue(topic, out AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig> source))
         {
             throw new ArgumentException(
                 string.Format(

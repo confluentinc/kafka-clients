@@ -17,6 +17,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
 using Xunit;

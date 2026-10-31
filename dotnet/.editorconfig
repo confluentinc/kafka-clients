@@ -32,6 +32,10 @@ dotnet_separate_import_directive_groups = false
 # File-scoped namespaces (CLAUDE.md §3 sketch).
 csharp_style_namespace_declarations = file_scoped:warning
 
+# Namespaces match folders (IDE0130), so a public type's folder is its Java package (CLAUDE.md §2).
+dotnet_style_namespace_match_folder = true
+dotnet_diagnostic.IDE0130.severity = warning
+
 # this. and Me. preferences — do not qualify (dotnet/runtime style).
 dotnet_style_qualification_for_field = false:warning
 dotnet_style_qualification_for_property = false:warning

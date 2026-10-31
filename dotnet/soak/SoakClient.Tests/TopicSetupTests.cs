@@ -21,6 +21,7 @@ using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.Soak.Tests;

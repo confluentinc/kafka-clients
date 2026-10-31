@@ -14,6 +14,7 @@
 
 using System;
 using System.Threading;
+using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.UnitTests;
 

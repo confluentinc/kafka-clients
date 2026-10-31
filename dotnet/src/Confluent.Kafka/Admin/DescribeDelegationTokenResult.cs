@@ -13,9 +13,10 @@
 // limitations under the License.
 
 using System.Collections.Generic;
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Token = Confluent.Kafka.DelegationToken;
+using Token = Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken;
 
 namespace Confluent.Kafka.Admin;
 

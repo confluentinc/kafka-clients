@@ -19,6 +19,7 @@ using System.Reflection;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

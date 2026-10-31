@@ -20,8 +20,12 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 using Xunit.Abstractions;
 

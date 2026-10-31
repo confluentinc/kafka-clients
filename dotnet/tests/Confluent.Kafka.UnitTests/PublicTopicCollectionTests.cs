@@ -17,14 +17,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Checks <see cref="TopicCollection"/>, Java's <c>TopicCollection</c>: the closed hierarchy that keeps topic names and
-/// topic ids apart, its copying factories and read-only accessors, its namespace, and <see cref="AclOperation"/>'s
-/// wire codes.
+/// topic ids apart, its copying factories and read-only accessors, and <see cref="AclOperation"/>'s wire codes.
 /// </summary>
 public sealed class PublicTopicCollectionTests
 {
@@ -129,16 +130,6 @@ public sealed class PublicTopicCollectionTests
         ArgumentNullException byId =
             Assert.Throws<ArgumentNullException>(() => TopicCollection.OfTopicIds(null!));
         Assert.Equal("topics", byId.ParamName);
-    }
-
-    [Fact]
-    public void LivesAtTheRootNamespace_LikeItsJavaPackage()
-    {
-        Assert.Equal("Confluent.Kafka", typeof(TopicCollection).Namespace);
-        Assert.Equal("Confluent.Kafka", typeof(AclOperation).Namespace);
-        Assert.Equal("Confluent.Kafka", typeof(TopicPartitionInfo).Namespace);
-
-        Assert.Equal("Confluent.Kafka.Admin", typeof(Admin.TopicDescription).Namespace);
     }
 
     [Fact]

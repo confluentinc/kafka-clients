@@ -17,6 +17,7 @@ using System.Collections;
 using System.Reflection;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Consumer;
 using Xunit;
 
 using Proto = Confluent.Kafka.Test;

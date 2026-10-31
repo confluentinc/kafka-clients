@@ -16,6 +16,11 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;

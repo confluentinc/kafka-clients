@@ -58,4 +58,12 @@
     <None Include="$(AbiHeaderPath)" Link="confluent_kafka_bindings.h" CopyToOutputDirectory="PreserveNewest" Visible="false" Condition="Exists('$(AbiHeaderPath)')" />
   </ItemGroup>
 
+  <!-- The kafka submodule's client sources, for PublicNamespaceLayoutTests. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KafkaSourceRoot</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../kafka/clients/src'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

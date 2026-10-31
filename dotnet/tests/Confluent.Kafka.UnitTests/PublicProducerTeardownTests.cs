@@ -16,6 +16,8 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

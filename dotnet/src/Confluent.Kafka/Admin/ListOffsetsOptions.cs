@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -42,7 +43,7 @@ public sealed class ListOffsetsOptions
 
     /// <summary>
     /// The read isolation the query observes — Java's <c>isolationLevel()</c>. Defaults to
-    /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/>, as Java's does.
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadUncommitted"/>, as Java's does.
     /// </summary>
     public IsolationLevel IsolationLevel
     {

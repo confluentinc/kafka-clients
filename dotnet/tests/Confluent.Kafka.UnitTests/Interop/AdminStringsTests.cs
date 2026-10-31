@@ -20,6 +20,11 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Common.Security.Auth;
+using Confluent.Kafka.Common.Security.Token.Delegation;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

@@ -16,6 +16,8 @@ using System;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Internal;
 
 using Xunit;

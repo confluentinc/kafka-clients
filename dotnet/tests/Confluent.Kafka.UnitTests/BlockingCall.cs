@@ -15,6 +15,7 @@
 using System;
 using System.Threading;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

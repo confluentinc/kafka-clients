@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.GrpcServer.Chaos;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 

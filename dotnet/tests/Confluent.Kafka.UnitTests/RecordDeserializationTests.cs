@@ -17,9 +17,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Record;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Xunit;
 
-using Origin = Confluent.Kafka.RecordDeserializationException.DeserializationExceptionOrigin;
+using Origin = Confluent.Kafka.Common.Errors.RecordDeserializationException.DeserializationExceptionOrigin;
 
 namespace Confluent.Kafka.UnitTests;
 

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System.Threading.Tasks;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.UnitTests;
 

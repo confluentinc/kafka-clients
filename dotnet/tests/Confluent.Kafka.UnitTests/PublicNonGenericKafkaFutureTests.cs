@@ -18,8 +18,10 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -420,7 +422,6 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.True(type.IsValueType);
         Assert.True(type.IsPublic);
         Assert.False(type.IsGenericType);
-        Assert.Equal("Confluent.Kafka", type.Namespace);
         Assert.Contains(
             type.CustomAttributes,
             attribute => attribute.AttributeType.FullName == "System.Runtime.CompilerServices.IsReadOnlyAttribute");
@@ -430,10 +431,10 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.Equal(
             new[]
             {
-                "Confluent.Kafka.KafkaFuture WhenComplete(System.Action`1[System.Exception])",
-                "Confluent.Kafka.KafkaFuture`1[TR] ThenApply(System.Func`1[TR])",
+                "Confluent.Kafka.Common.KafkaFuture WhenComplete(System.Action`1[System.Exception])",
+                "Confluent.Kafka.Common.KafkaFuture`1[TR] ThenApply(System.Func`1[TR])",
                 "System.Boolean Cancel(System.Boolean)",
-                "System.Boolean Equals(Confluent.Kafka.KafkaFuture)",
+                "System.Boolean Equals(Confluent.Kafka.Common.KafkaFuture)",
                 "System.Boolean Equals(System.Object)",
                 "System.Boolean get_IsCancelled()",
                 "System.Boolean get_IsCompletedExceptionally()",
@@ -459,11 +460,11 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.Equal(
             new[]
             {
-                "Confluent.Kafka.KafkaFuture AllOf(Confluent.Kafka.KafkaFuture[])",
-                "Confluent.Kafka.KafkaFuture AllOf(Confluent.Kafka.KafkaFuture`1[T][])",
-                "Confluent.Kafka.KafkaFuture`1[TU] CompletedFuture(TU)",
-                "System.Boolean op_Equality(Confluent.Kafka.KafkaFuture, Confluent.Kafka.KafkaFuture)",
-                "System.Boolean op_Inequality(Confluent.Kafka.KafkaFuture, Confluent.Kafka.KafkaFuture)",
+                "Confluent.Kafka.Common.KafkaFuture AllOf(Confluent.Kafka.Common.KafkaFuture[])",
+                "Confluent.Kafka.Common.KafkaFuture AllOf(Confluent.Kafka.Common.KafkaFuture`1[T][])",
+                "Confluent.Kafka.Common.KafkaFuture`1[TU] CompletedFuture(TU)",
+                "System.Boolean op_Equality(Confluent.Kafka.Common.KafkaFuture, Confluent.Kafka.Common.KafkaFuture)",
+                "System.Boolean op_Inequality(Confluent.Kafka.Common.KafkaFuture, Confluent.Kafka.Common.KafkaFuture)",
             },
             Signatures(type, BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 

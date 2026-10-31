@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -339,23 +340,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
 
             // Java's default is the client default, which is null here, not 0.
             Assert.Null((int?)timeout.GetValue(Activator.CreateInstance(type)));
-        }
-    }
-
-    [Fact]
-    public void TheNamespaceSplit_FollowsJavasPackages()
-    {
-        Assert.Equal("Confluent.Kafka", typeof(TopicPartitionReplica).Namespace);
-
-        foreach (Type type in new[]
-                 {
-                     typeof(LogDirDescription), typeof(ReplicaInfo), typeof(DescribeLogDirsResult),
-                     typeof(AlterReplicaLogDirsResult), typeof(DescribeReplicaLogDirsResult),
-                     typeof(DescribeReplicaLogDirsResult.ReplicaLogDirInfo), typeof(DescribeLogDirsOptions),
-                     typeof(AlterReplicaLogDirsOptions), typeof(DescribeReplicaLogDirsOptions),
-                 })
-        {
-            Assert.Equal("Confluent.Kafka.Admin", type.Namespace);
         }
     }
 

@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -162,9 +163,6 @@ public sealed class PublicAdminP4ShapeParityTests
         Assert.Equal(
             new[] { "Preferred", "Unclean" },
             Enum.GetNames(typeof(ElectionType)).OrderBy(name => name, StringComparer.Ordinal));
-
-        // Java's package is org.apache.kafka.common, so the root namespace, not Confluent.Kafka.Admin.
-        Assert.Equal("Confluent.Kafka", typeof(ElectionType).Namespace);
     }
 
     [Fact]
@@ -183,8 +181,6 @@ public sealed class PublicAdminP4ShapeParityTests
             typeof(IReadOnlyList<int>),
             typeof(NewPartitionReassignment).GetProperty(
                 nameof(NewPartitionReassignment.TargetReplicas))!.PropertyType);
-
-        Assert.Equal("Confluent.Kafka.Admin", typeof(NewPartitionReassignment).Namespace);
 
         List<int> replicas = new List<int> { 3, 1, 2 };
         NewPartitionReassignment reassignment = new NewPartitionReassignment(replicas);

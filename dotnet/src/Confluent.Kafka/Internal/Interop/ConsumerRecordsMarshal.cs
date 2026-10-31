@@ -16,6 +16,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Record;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 
 namespace Confluent.Kafka.Internal.Interop;
 
@@ -238,7 +244,7 @@ internal static class ConsumerRecordsMarshal
                 headers.Add(new Header(Utf8Marshal.PtrToString(key) ?? string.Empty, CopyBytes(value)));
             }
 
-            return new Headers(headers);
+            return Headers.Wrap(headers);
         }
         finally
         {

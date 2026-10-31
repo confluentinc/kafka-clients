@@ -15,6 +15,10 @@
 using System;
 using System.Collections.Generic;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Producer;
 using Google.Protobuf;
 
 using Proto = Confluent.Kafka.Test;

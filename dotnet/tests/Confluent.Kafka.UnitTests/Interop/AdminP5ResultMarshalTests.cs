@@ -20,6 +20,9 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

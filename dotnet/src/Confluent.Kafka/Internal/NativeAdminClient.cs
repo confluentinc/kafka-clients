@@ -19,6 +19,8 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Internal;

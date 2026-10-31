@@ -14,6 +14,9 @@
 
 using System;
 using System.Collections.Generic;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 

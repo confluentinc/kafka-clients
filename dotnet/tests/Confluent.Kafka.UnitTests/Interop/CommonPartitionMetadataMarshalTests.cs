@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;

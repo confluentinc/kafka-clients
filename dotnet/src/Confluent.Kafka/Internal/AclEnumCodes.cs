@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Resource;
 
 namespace Confluent.Kafka.Internal;
 

@@ -20,6 +20,9 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Security.Auth;
+using Confluent.Kafka.Common.Security.Token.Delegation;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -280,12 +283,6 @@ public sealed class PublicAdminP7ShapeParityTests
                 .OrderBy(value => (int)value)
                 .Select(value => value.ToString()));
     }
-
-    [Fact]
-    public void TokenValueTypes_LiveInTheRootNamespace() =>
-        Assert.All(
-            new[] { typeof(KafkaPrincipal), typeof(TokenInformation), typeof(DelegationToken) },
-            type => Assert.Equal("Confluent.Kafka", type.Namespace));
 
     [Fact]
     public void DescribeUserScramCredentialsResult_IsNotDisposable() =>

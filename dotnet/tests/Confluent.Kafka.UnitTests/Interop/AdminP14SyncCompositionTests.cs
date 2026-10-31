@@ -19,6 +19,14 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Common.Resource;
+using Confluent.Kafka.Common.Security.Auth;
+using Confluent.Kafka.Common.Security.Token.Delegation;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -94,8 +102,8 @@ public sealed class AdminP14SyncCompositionTests
                     Config gammaConfig = new Config(new[] { new ConfigEntry("cleanup.policy", "compact") });
                     Uuid betaId = new Uuid(0x0102030405060708L, 0x1112131415161718L);
                     harness.SetResult("alpha", Metadata(3, 2));
-                    harness.SetResult("beta", new TopicMetadataAndConfig(betaId, 1, 1, Empty()));
-                    harness.SetResult("gamma", new TopicMetadataAndConfig(Uuid.Zero, 5, 3, gammaConfig));
+                    harness.SetResult("beta", new CreateTopicsResult.TopicMetadataAndConfig(betaId, 1, 1, Empty()));
+                    harness.SetResult("gamma", new CreateTopicsResult.TopicMetadataAndConfig(Uuid.Zero, 5, 3, gammaConfig));
 
                     Assert.Equal(s_topics, harness.ValuesKeys());
                     foreach (string topic in s_topics)
@@ -233,10 +241,11 @@ public sealed class AdminP14SyncCompositionTests
 
             case "memoization":
                 {
-                    // Created, but with no metadata: each typed accessor of TopicMetadataAndConfig throws a FRESH
-                    // KafkaException per call, so a projection applied twice would hand out two instances.
+                    // Created, but with no metadata: each typed accessor of CreateTopicsResult.TopicMetadataAndConfig
+                    // throws a FRESH KafkaException per call, so a projection applied twice would hand out two
+                    // instances.
                     KafkaException stored = new KafkaException(7, "Topic metadata unavailable.", isRetriable: true);
-                    harness.SetResult("alpha", new TopicMetadataAndConfig(stored));
+                    harness.SetResult("alpha", new CreateTopicsResult.TopicMetadataAndConfig(stored));
 
                     AssertReturned(await harness.Values("alpha").Outcome());
 
@@ -2696,8 +2705,8 @@ public sealed class AdminP14SyncCompositionTests
         return map;
     }
 
-    private static TopicMetadataAndConfig Metadata(int numPartitions, int replicationFactor) =>
-        new TopicMetadataAndConfig(Uuid.Zero, numPartitions, replicationFactor, Empty());
+    private static CreateTopicsResult.TopicMetadataAndConfig Metadata(int numPartitions, int replicationFactor) =>
+        new CreateTopicsResult.TopicMetadataAndConfig(Uuid.Zero, numPartitions, replicationFactor, Empty());
 
     private static DelegationToken Token(string tokenId) =>
         new DelegationToken(
@@ -2752,13 +2761,13 @@ public sealed class AdminP14SyncCompositionTests
             nameof(CreateTopicsResult.ReplicationFactor),
         };
 
-        private readonly Dictionary<string, Action<TopicMetadataAndConfig>> _complete;
+        private readonly Dictionary<string, Action<CreateTopicsResult.TopicMetadataAndConfig>> _complete;
         private readonly Dictionary<string, Action<Exception>> _fail;
         private readonly CreateTopicsResult? _sync;
         private readonly AsyncCreateTopicsResult? _async;
 
         private CreateTopicsHarness(
-            Dictionary<string, Action<TopicMetadataAndConfig>> complete,
+            Dictionary<string, Action<CreateTopicsResult.TopicMetadataAndConfig>> complete,
             Dictionary<string, Action<Exception>> fail,
             CreateTopicsResult? sync,
             AsyncCreateTopicsResult? async)
@@ -2771,39 +2780,39 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static CreateTopicsHarness For(string flavour)
         {
-            Dictionary<string, Action<TopicMetadataAndConfig>> complete =
-                new Dictionary<string, Action<TopicMetadataAndConfig>>(StringComparer.Ordinal);
+            Dictionary<string, Action<CreateTopicsResult.TopicMetadataAndConfig>> complete =
+                new Dictionary<string, Action<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.Ordinal);
             Dictionary<string, Action<Exception>> fail = new Dictionary<string, Action<Exception>>(StringComparer.Ordinal);
 
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
-                Dictionary<string, KafkaFuture<TopicMetadataAndConfig>> futures =
-                    new Dictionary<string, KafkaFuture<TopicMetadataAndConfig>>(StringComparer.Ordinal);
+                Dictionary<string, KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> futures =
+                    new Dictionary<string, KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.Ordinal);
                 foreach (string topic in s_topics)
                 {
-                    KafkaFutureImpl<TopicMetadataAndConfig> impl = new KafkaFutureImpl<TopicMetadataAndConfig>();
+                    KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> impl = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
                     complete.Add(topic, value => impl.Complete(value));
                     fail.Add(topic, failure => impl.CompleteWithError(failure));
-                    futures.Add(topic, new KafkaFuture<TopicMetadataAndConfig>(impl));
+                    futures.Add(topic, new KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(impl));
                 }
 
                 return new CreateTopicsHarness(complete, fail, new CreateTopicsResult(futures), null);
             }
 
-            Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> asyncFutures =
-                new Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>>(StringComparer.Ordinal);
+            Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> asyncFutures =
+                new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.Ordinal);
             foreach (string topic in s_topics)
             {
-                KafkaFutureImpl<TopicMetadataAndConfig> impl = new KafkaFutureImpl<TopicMetadataAndConfig>();
+                KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> impl = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
                 complete.Add(topic, value => impl.Complete(value));
                 fail.Add(topic, failure => impl.CompleteWithError(failure));
-                asyncFutures.Add(topic, new AsyncKafkaFuture<TopicMetadataAndConfig>(impl));
+                asyncFutures.Add(topic, new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(impl));
             }
 
             return new CreateTopicsHarness(complete, fail, null, new AsyncCreateTopicsResult(asyncFutures));
         }
 
-        internal void SetResult(string topic, TopicMetadataAndConfig value) => _complete[topic](value);
+        internal void SetResult(string topic, CreateTopicsResult.TopicMetadataAndConfig value) => _complete[topic](value);
 
         internal void SetException(string topic, Exception failure) => _fail[topic](failure);
 

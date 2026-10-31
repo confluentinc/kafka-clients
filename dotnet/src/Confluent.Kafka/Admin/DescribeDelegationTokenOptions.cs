@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 
+using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;

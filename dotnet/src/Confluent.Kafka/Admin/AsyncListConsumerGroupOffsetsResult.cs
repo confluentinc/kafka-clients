@@ -17,6 +17,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

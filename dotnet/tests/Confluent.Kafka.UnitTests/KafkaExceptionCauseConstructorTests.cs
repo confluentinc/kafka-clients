@@ -14,6 +14,8 @@
 
 using System;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -81,9 +83,12 @@ public sealed class KafkaExceptionCauseConstructorTests
         KafkaException parameterless = type == nameof(SerializationException)
             ? new SerializationException()
             : new KafkaException();
+        string expected = type == nameof(SerializationException)
+            ? "Exception of type 'Confluent.Kafka.Common.Errors.SerializationException' was thrown."
+            : "Exception of type 'Confluent.Kafka.Common.KafkaException' was thrown.";
 
         Assert.Equal(type, exception.GetType().Name);
-        Assert.Equal($"Exception of type 'Confluent.Kafka.{type}' was thrown.", exception.Message);
+        Assert.Equal(expected, exception.Message);
         Assert.Equal(parameterless.Message, exception.Message);
         Assert.Null(exception.InnerException);
         Assert.Equal(0, exception.Code);

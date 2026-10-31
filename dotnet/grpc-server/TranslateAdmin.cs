@@ -18,6 +18,14 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Common.Resource;
+using Confluent.Kafka.Common.Security.Auth;
+using Confluent.Kafka.Common.Security.Token.Delegation;
+using Confluent.Kafka.Consumer;
 using Google.Protobuf;
 
 using Proto = Confluent.Kafka.Test;

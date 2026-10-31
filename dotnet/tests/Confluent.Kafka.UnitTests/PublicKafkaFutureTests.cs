@@ -19,8 +19,10 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -485,7 +487,6 @@ public sealed class PublicKafkaFutureTests
 
         Assert.True(type.IsValueType);
         Assert.True(open.IsPublic);
-        Assert.Equal("Confluent.Kafka", open.Namespace);
 
         Assert.Contains(
             open.CustomAttributes,
@@ -500,16 +501,16 @@ public sealed class PublicKafkaFutureTests
         Assert.Equal(
             new[]
             {
-                "Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata] WhenComplete("
-                    + "Confluent.Kafka.KafkaFuture+BiConsumer`2[Confluent.Kafka.RecordMetadata,System.Exception])",
-                "Confluent.Kafka.KafkaFuture`1[TR] ThenApply("
-                    + "Confluent.Kafka.KafkaFuture+BaseFunction`2[Confluent.Kafka.RecordMetadata,TR])",
-                "Confluent.Kafka.RecordMetadata Get()",
-                "Confluent.Kafka.RecordMetadata Get(System.Threading.CancellationToken)",
-                "Confluent.Kafka.RecordMetadata Get(System.TimeSpan)",
-                "Confluent.Kafka.RecordMetadata GetNow(Confluent.Kafka.RecordMetadata)",
+                "Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata] WhenComplete("
+                    + "Confluent.Kafka.Common.KafkaFuture+BiConsumer`2[Confluent.Kafka.Producer.RecordMetadata,System.Exception])",
+                "Confluent.Kafka.Common.KafkaFuture`1[TR] ThenApply("
+                    + "Confluent.Kafka.Common.KafkaFuture+BaseFunction`2[Confluent.Kafka.Producer.RecordMetadata,TR])",
+                "Confluent.Kafka.Producer.RecordMetadata Get()",
+                "Confluent.Kafka.Producer.RecordMetadata Get(System.Threading.CancellationToken)",
+                "Confluent.Kafka.Producer.RecordMetadata Get(System.TimeSpan)",
+                "Confluent.Kafka.Producer.RecordMetadata GetNow(Confluent.Kafka.Producer.RecordMetadata)",
                 "System.Boolean Cancel(System.Boolean)",
-                "System.Boolean Equals(Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata])",
+                "System.Boolean Equals(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
                 "System.Boolean Equals(System.Object)",
                 "System.Boolean get_IsCancelled()",
                 "System.Boolean get_IsCompletedExceptionally()",
@@ -531,11 +532,11 @@ public sealed class PublicKafkaFutureTests
         Assert.Equal(
             new[]
             {
-                "Confluent.Kafka.KafkaFuture op_Implicit(Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata])",
-                "System.Boolean op_Equality(Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata], "
-                    + "Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata])",
-                "System.Boolean op_Inequality(Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata], "
-                    + "Confluent.Kafka.KafkaFuture`1[Confluent.Kafka.RecordMetadata])",
+                "Confluent.Kafka.Common.KafkaFuture op_Implicit(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
+                "System.Boolean op_Equality(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata], "
+                    + "Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
+                "System.Boolean op_Inequality(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata], "
+                    + "Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
             },
             Signatures(type, BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 

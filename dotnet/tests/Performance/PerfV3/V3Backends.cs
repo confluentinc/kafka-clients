@@ -17,6 +17,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Performance.V3;
 

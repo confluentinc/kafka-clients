@@ -13,13 +13,16 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Record;
 using Xunit;
 
-using Origin = Confluent.Kafka.RecordDeserializationException.DeserializationExceptionOrigin;
+using Origin = Confluent.Kafka.Common.Errors.RecordDeserializationException.DeserializationExceptionOrigin;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -40,7 +43,7 @@ public sealed class RecordDeserializationExceptionTests
             TimestampType.CreateTime,
             new byte[] { (byte)'k' },
             new byte[] { (byte)'v' },
-            new[] { new Header("h", new byte[] { (byte)'1' }) },
+            new Headers(new[] { new Header("h", new byte[] { (byte)'1' }) }),
             "m",
             cause);
 
@@ -92,20 +95,13 @@ public sealed class RecordDeserializationExceptionTests
     }
 
     [Fact]
-    public void Headers_KeepsAHeadersInstance_AndCopiesAnyOtherSequence()
+    public void Headers_KeepsTheHeadersInstance()
     {
-        RecordDeserializationException kept = new RecordDeserializationException(
-            Origin.Key, s_tp, 0, 0, TimestampType.CreateTime, null, null, Headers.Empty, "m", null);
-        Assert.Same(Headers.Empty, kept.Headers);
+        Headers headers = new Headers(new[] { new Header("a", null) });
+        RecordDeserializationException e = new RecordDeserializationException(
+            Origin.Key, s_tp, 0, 0, TimestampType.CreateTime, null, null, headers, "m", null);
 
-        List<Header> list = new List<Header> { new Header("a", null) };
-        RecordDeserializationException copied = new RecordDeserializationException(
-            Origin.Key, s_tp, 0, 0, TimestampType.CreateTime, null, null, list, "m", null);
-        list.Add(new Header("b", null));
-
-        Header only = Assert.Single(copied.Headers!);
-        Assert.Equal("a", only.Key);
-        Assert.Null(only.Value);
+        Assert.Same(headers, e.Headers);
     }
 
     [Fact]
