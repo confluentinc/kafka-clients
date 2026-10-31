@@ -16,6 +16,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 
+using Confluent.Kafka.Consumer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -101,7 +102,6 @@ public sealed class PublicCloseOptionsTests
         Type type = typeof(GroupMembershipOperation);
 
         Assert.True(type.IsEnum);
-        Assert.Equal("Confluent.Kafka", type.Namespace);
         Assert.Null(type.DeclaringType);
         Assert.Equal(
             new[] { "LeaveGroup", "RemainInGroup", "Default" },

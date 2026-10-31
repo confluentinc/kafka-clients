@@ -16,6 +16,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 
+using Confluent.Kafka.Consumer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

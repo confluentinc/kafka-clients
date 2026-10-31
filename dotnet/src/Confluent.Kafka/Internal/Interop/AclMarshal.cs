@@ -16,6 +16,9 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Resource;
 
 namespace Confluent.Kafka.Internal.Interop;
 

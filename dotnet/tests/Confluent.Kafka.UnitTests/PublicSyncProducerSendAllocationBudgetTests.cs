@@ -15,6 +15,9 @@
 using System;
 using System.Text;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 using Xunit;
 #if NET8_0_OR_GREATER
 using Xunit.Abstractions;

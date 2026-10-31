@@ -17,6 +17,10 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

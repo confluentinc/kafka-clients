@@ -15,6 +15,9 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Security.Auth;
+using Confluent.Kafka.Common.Security.Token.Delegation;
 
 namespace Confluent.Kafka.Internal.Interop;
 

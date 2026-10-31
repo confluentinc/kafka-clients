@@ -15,6 +15,9 @@
 using System;
 using System.Text;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

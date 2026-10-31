@@ -18,6 +18,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Internal;

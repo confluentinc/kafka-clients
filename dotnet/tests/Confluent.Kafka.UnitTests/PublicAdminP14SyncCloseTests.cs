@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
 using Confluent.Kafka.UnitTests.Interop;
 
 using Xunit;

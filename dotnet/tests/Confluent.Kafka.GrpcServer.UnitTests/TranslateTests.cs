@@ -14,6 +14,8 @@
 
 using System;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Xunit;

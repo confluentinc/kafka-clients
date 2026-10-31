@@ -14,6 +14,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using Confluent.Kafka.Common;
 
 namespace Confluent.Kafka.Internal.Interop;
 

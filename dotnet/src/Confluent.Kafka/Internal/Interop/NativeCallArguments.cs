@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Confluent.Kafka.Common;
 
 namespace Confluent.Kafka.Internal.Interop;
 
@@ -116,7 +117,7 @@ internal sealed class NativeCallArguments : IDisposable
         return Track(handle, Kind.Node, ref outErr);
     }
 
-    internal IntPtr Node(Confluent.Kafka.Node node)
+    internal IntPtr Node(Confluent.Kafka.Common.Node node)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.NodeWithRackIsFenced(
@@ -124,7 +125,7 @@ internal sealed class NativeCallArguments : IDisposable
         return Track(handle, Kind.Node, ref outErr);
     }
 
-    internal IntPtr NodeList(IReadOnlyList<Confluent.Kafka.Node> nodes)
+    internal IntPtr NodeList(IReadOnlyList<Confluent.Kafka.Common.Node> nodes)
     {
         IntPtr list = List();
         for (int i = 0; i < nodes.Count; i++)
@@ -179,7 +180,7 @@ internal sealed class NativeCallArguments : IDisposable
         return Track(handle, Kind.PartitionInfo, ref outErr);
     }
 
-    internal IntPtr TopicPartitionInfo(Confluent.Kafka.TopicPartitionInfo info)
+    internal IntPtr TopicPartitionInfo(Confluent.Kafka.Common.TopicPartitionInfo info)
     {
         IntPtr leader = info.Leader is null ? IntPtr.Zero : Node(info.Leader);
         IntPtr replicas = NodeList(info.Replicas);

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.Soak.Tests;

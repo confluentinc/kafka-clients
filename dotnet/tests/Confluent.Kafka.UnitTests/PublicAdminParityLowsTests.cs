@@ -18,6 +18,8 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Internal;
 
 using Xunit;

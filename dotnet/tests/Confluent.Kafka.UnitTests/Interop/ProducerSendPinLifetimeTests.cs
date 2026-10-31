@@ -16,8 +16,10 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal.Interop;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;

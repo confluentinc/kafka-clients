@@ -16,6 +16,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
@@ -136,7 +138,7 @@ public sealed class ConsumerGroupDescription
     public GroupType Type { get; }
 
     /// <summary>
-    /// The group state, or <see cref="Confluent.Kafka.GroupState.Unknown"/> if the state is
+    /// The group state, or <see cref="Confluent.Kafka.Common.GroupState.Unknown"/> if the state is
     /// too new for this client to parse — Java's <c>groupState()</c>.
     /// </summary>
     public GroupState GroupState { get; }

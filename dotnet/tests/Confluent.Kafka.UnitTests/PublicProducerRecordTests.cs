@@ -15,6 +15,7 @@
 using System;
 using System.Text;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

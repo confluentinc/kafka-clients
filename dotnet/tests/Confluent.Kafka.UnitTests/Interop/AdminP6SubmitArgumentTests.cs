@@ -18,6 +18,10 @@ using System.Linq;
 using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

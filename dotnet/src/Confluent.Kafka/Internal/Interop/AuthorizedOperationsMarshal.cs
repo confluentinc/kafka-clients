@@ -14,6 +14,8 @@
 
 using System;
 using System.Collections.Generic;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
 
 namespace Confluent.Kafka.Internal.Interop;
 

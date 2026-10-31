@@ -16,6 +16,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 

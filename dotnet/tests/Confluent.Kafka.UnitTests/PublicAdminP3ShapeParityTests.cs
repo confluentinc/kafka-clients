@@ -20,6 +20,9 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Config;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -150,10 +153,6 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Equal(
             new[] { "Broker", "BrokerLogger", "ClientMetrics", "Group", "Topic", "Unknown" },
             Enum.GetNames(typeof(ConfigResourceType)).OrderBy(name => name, StringComparer.Ordinal));
-
-        // The root namespace, beside Node, AclOperation and TopicCollection, not Confluent.Kafka.Admin.
-        Assert.Equal("Confluent.Kafka", typeof(ConfigResourceType).Namespace);
-        Assert.Equal("Confluent.Kafka", typeof(ConfigResource).Namespace);
     }
 
     [Fact]

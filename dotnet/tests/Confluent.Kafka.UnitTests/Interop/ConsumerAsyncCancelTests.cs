@@ -20,6 +20,9 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

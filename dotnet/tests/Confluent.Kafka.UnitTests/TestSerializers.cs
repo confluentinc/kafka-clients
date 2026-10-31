@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.UnitTests;
 

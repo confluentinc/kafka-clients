@@ -85,7 +85,9 @@ bindings/dotnet/
 ├─ Directory.Build.props · .editorconfig · .gitignore
 ├─ src/
 │  └─ Confluent.Kafka/    ← the library project (named for the package id, §4)
-│     ├─ <public API — flat at the root; topical folders (e.g. Admin/) as families grow>
+│     ├─ Producer/ · Consumer/ · Admin/   ← public API: one folder per Java package, `clients` dropped
+│     ├─ Common/  + Acl/ · Config/ · Errors/ · Header/ · Quota/ · Record/ · Resource/ ·
+│     │            Security/Auth/ · Security/Token/Delegation/ · Serialization/
 │     └─ Internal/                       ← internal scaffolding — the ONLY non-public folder
 │        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
 └─ tests/
@@ -97,25 +99,70 @@ bindings/dotnet/
 the assembly.) **`Internal/` is the visibility marker — the *only* folder that
 implies non-public:** every type under it is explicitly `internal` (and `sealed`
 where practical), and `Internal/Interop/` is the only place `unsafe` appears.
-Wanting a type under `Internal/` to be `public` is the signal it belongs in the
-public tree. Public API lives **at or below** the library project root: flat at
-the root while the surface is small, moving into **topical** folders (with the
-matching child namespace) once a family gets large — in .NET, folders
-conventionally mirror namespaces/topics, *not* accessibility, and a flat root
-does not scale (ckd needed `Admin/` for 107 public types, plus `Exceptions/`,
-and its root is still ~90 files). So a public `Admin/` folder is expected and
-correct; what is never allowed is a public type under `Internal/`. There is no
-inner `src/` inside the project: the outer top-level `src/` *is* the library
-project's parent.
+Wanting a type under `Internal/` to be `public` is the signal it belongs in the public tree.
+**Every public type lives in the namespace of its Java package, and its file in the folder that
+mirrors that namespace** (M20/P1, ledger 253): drop `org.apache.kafka.`, then `clients.`, PascalCase
+each remaining segment, and prefix `Confluent.Kafka.`, as the Rust core names its modules (root
+`CLAUDE.md` §2). So `org.apache.kafka.clients.producer.KafkaProducer` is
+`Confluent.Kafka.Producer.KafkaProducer` in `Producer/KafkaProducer.cs`,
+`org.apache.kafka.common.acl.AclBinding` is `Confluent.Kafka.Common.Acl.AclBinding` in
+`Common/Acl/AclBinding.cs`, and `org.apache.kafka.common.security.token.delegation.DelegationToken`
+is `Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken`. No public type is declared in
+`Confluent.Kafka` itself. IDE0130 (`.editorconfig`) makes a namespace that does not match its folder
+a build error, and `PublicNamespaceLayoutTests` checks every exported type against its Java
+package, read from `kafka/`. There is no inner `src/` inside the project: the outer top-level
+`src/` *is* the library project's parent.
 
-- **library project root** (`src/Confluent.Kafka/`) — **all public
-  API** (namespace `Confluent.Kafka`), whatever the C# kind: the
-  client types *and* supporting value types / enums (`ProducerRecord`,
-  `RecordMetadata`, `Headers`, `TopicPartition`, later `ConsumerRecord` /
-  `OffsetAndMetadata` / enums). If a user can name it, it lives here — flat while
-  the surface is small, in a **topical** subfolder with the matching child
-  namespace (e.g. `Admin/` → `Confluent.Kafka.Admin`, ckd's
-  precedent) once a family grows.
+- **A Java package the binding does not have yet** gets its own namespace and folder when its first
+  public type arrives (`org.apache.kafka.common.metrics` → `Common/Metrics/`), never the nearest
+  existing one, as Python does.
+- **One file per Java top-level class**, named after the C# type, with the class's Java nested types
+  nested in it. A C# type that only completes a Java class sits in that class's file: the
+  non-generic `KafkaFuture` (Java's `KafkaFuture<Void>`) beside `KafkaFuture<T>`, and a static class
+  holding a Java enum's methods beside the enum (`GroupStateExtensions`, `ScramMechanisms`,
+  `UpgradeTypes`). A Java nested type leaves its outer class only where C# cannot keep Java's name
+  inside it (CS0102: a member of the outer type has that name), and then sits beside it, in the same
+  namespace: `GroupMembershipOperation` (Java `CloseOptions.GroupMembershipOperation`, ledger 109),
+  `ConfigResourceType` (Java `ConfigResource.Type`, M15/P3 D16), `AlterConfigOpType` (Java
+  `AlterConfigOp.OpType`).
+- **A .NET-only public type** lives in the namespace and folder of the Java-backed type it pairs
+  with: an async peer with its sync type (`AsyncKafkaProducer`, `IAsyncProducer` and
+  `IAsyncDeliveryCallback` in `Producer/`; every `Async*Result`, `AsyncKafkaAdminClient`,
+  `AsyncMockAdminClient` and `IAsyncAdmin` in `Admin/`; `AsyncKafkaFuture` in `Common/`), a base
+  class carrying Java's default methods with its interface (`ConsumerRebalanceListenerBase`), the
+  shared consumer surface with `IConsumer` (`IConsumerCommon`), the Rust-only `ConsumerHandle` with
+  the consumer (the core's `consumer::ConsumerHandle`), and a C#-only enum with the type that takes
+  it (`ClientQuotaMatchType` with `ClientQuotaFilterComponent` in `Common/Quota/`). *(Python keeps an
+  async class in its sync class's module.)*
+- **Errors** follow the same rule. A Java exception class becomes a class of the same name in the
+  namespace of its Java package: `common.errors` → `Confluent.Kafka.Common.Errors`
+  (`SerializationException`, `RecordDeserializationException`), `common` → `Confluent.Kafka.Common`
+  (`KafkaException`, `InvalidRecordException`), `clients.consumer` → `Confluent.Kafka.Consumer`
+  (`CommitFailedException`), `clients.producer` → `Confluent.Kafka.Producer`
+  (`BufferExhaustedException`), `common.config` → `Confluent.Kafka.Common.Config`
+  (`ConfigException`). Two Java classes of one name stay apart in their two namespaces, as Java's
+  do: `Confluent.Kafka.Consumer.OffsetOutOfRangeException` and
+  `Confluent.Kafka.Common.Errors.OffsetOutOfRangeException`, and likewise `InvalidOffsetException`;
+  code that needs both qualifies one. A Java built-in exception keeps mapping to its .NET built-in
+  (§3, the `KafkaException` hierarchy row); there is no root exception type. A Kafka error named
+  like a `System` type (`TimeoutException`) is ambiguous in a file that also imports `System`
+  (CS0104): qualify it, or alias it
+  (`using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;`).
+- **Names that are also namespaces.** A type may share its name with a namespace, as Java's class
+  and package do (`Confluent.Kafka.Common.Header.Header`). Inside any `Confluent.Kafka.Common.*`
+  namespace the simple name `Header` means the namespace `Confluent.Kafka.Common.Header` (CS0118),
+  whatever the `using` lines say; write `Header.Header` there. The same holds for any later type
+  named like a namespace segment under `Common` (`Record`, `Config`). CA1724 stays at its default,
+  off.
+- **`using` lines.** A file imports each namespace it uses with one `using` line outside its
+  namespace (IDE0065), in `dotnet format`'s order; there is no `global using`. Code in a
+  `Confluent.Kafka.*` namespace (the tests, the gRPC server, soak, perf) imports them like user code
+  does: no public type is reachable through the enclosing `Confluent.Kafka` namespace.
+
+- **public folders** (`src/Confluent.Kafka/Producer/`, `Consumer/`, `Admin/`, `Common/` and its
+  subfolders) — **all public API**, whatever the C# kind: the client types *and* the supporting
+  value types, enums, interfaces and exceptions, each in its Java package's folder and namespace
+  (above). If a user can name it, it lives here.
 - `Internal/` — **internal** managed scaffolding
   (`Confluent.Kafka.Internal`): the completion bridge (`CompletionThread`, one drain
   thread per client that has one, ffi §0.3; `KafkaFutureImpl` and `Completion`; the
@@ -148,7 +195,8 @@ were **removed**, bytes users write `<byte[], byte[]>` + `Serdes.ByteArray`, exa
 the consumer M6/P1b):
 
 ```csharp
-namespace Confluent.Kafka;   // same id/assembly as ckd — revisit before publish, §4
+namespace Confluent.Kafka.Producer;   // §2: Java's org.apache.kafka.clients.producer; KafkaException
+                                      // and AsyncKafkaFuture are in Confluent.Kafka.Common
 
 public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V>`
     public string Topic { get; }
@@ -601,7 +649,7 @@ where it is needed, in one concise code comment (§4 Comments).
 
 | Decision | Default | Why / when |
 |---|---|---|
-| **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
+| **Namespace / package id** | **`Confluent.Kafka`** — the assembly and package id (same identity as ckd, which this client is meant to replace), and the root of the namespaces: each public type is in its Java package's namespace below it (§2), none in `Confluent.Kafka` itself. ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
 | **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; closes, joins the client's drain thread and destroys on the closing thread, §4 **Close/Dispose**, without blocking a thread) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` where Java keeps it (no `Async` suffix — mirrors Java). The consumer's `close(Duration)` is deprecated in Java and not translated: the consumer has `Close()` and `Close(CloseOptions)` over `close_with_options[_cb]` (decision 22). The producer has it (M19/P1, ledger 82): `void Close(TimeSpan)` on `IProducer` and `Task Close(TimeSpan, CancellationToken)` on `IAsyncProducer`, over `kafka_producer_Producer_close_with_timeout_cb`. The timeout bounds the drain of the queued sends and the close; the delivery reports are then awaited without a bound, as Java's `close(Duration)` joins its I/O thread. A negative timeout throws `ArgumentOutOfRangeException` with Java's message, "The timeout cannot be negative.", on `KafkaProducer` and `AsyncKafkaProducer`, before the closed check, as in Java; the mocks close as for zero, as Java's mock never reads the timeout. `TimeSpan.Zero` is valid. Admin (M15/P14): `IAsyncAdmin : IAsyncDisposable, IDisposable` follows this default; the sync `IAdmin : IDisposable` only (as `IProducer` / `IConsumer`), with a blocking `void Close()` and `void Close(TimeSpan)`. `IAsyncAdmin` has `Task Close(CancellationToken)` and `Task Close(TimeSpan, CancellationToken)` (ledger 175). `Close()` and `Dispose` call `kafka_admin_Admin_close_cb`, and `Close(TimeSpan)` calls `kafka_admin_Admin_close_with_timeout_cb`. The sync flavour waits on a `Completion` (decision 4a), as Python's sync admin does. The async flavour completes its `Task` from the `cb`, and its token ends only the caller's wait. A negative timeout throws `ArgumentOutOfRangeException` with Java's message before the closed check (ledgers 82, 174). The mocks' `Close` does nothing and reads no timeout, as Java's mock (decision 21, ledger 174); `Dispose` still frees the native mock. | first client type |
 | **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** the `Send` token never cancels the record. Already cancelled at the call: `Send` throws `OperationCanceledException` and nothing is sent. If it fires while a queued record waits, the first stage (the `ValueTask` that hands back the future) still waits for the hand-over, up to `max.block.ms`, then ends with `OperationCanceledException` carrying the token, whatever the outcome, as Python's `send` does. A record the producer took is still sent, and its delivery callback fires once; a record `Close` fails runs none. After the hand-over, and for a record taken or refused inside the call, the token does nothing. `Get(token)` ends only that wait, and `Cancel(bool)` on a send's future returns `false` (Java's `FutureRecordMetadata`). CKD's token cancels the one Task it returns. **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `dotnet/.claude/rules/bindings.md §2`). | first async method |
 | **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |

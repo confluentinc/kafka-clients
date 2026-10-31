@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

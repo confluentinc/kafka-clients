@@ -16,6 +16,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Xunit;

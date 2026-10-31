@@ -18,6 +18,9 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Grpc.Core;
 
 using Proto = Confluent.Kafka.Test;

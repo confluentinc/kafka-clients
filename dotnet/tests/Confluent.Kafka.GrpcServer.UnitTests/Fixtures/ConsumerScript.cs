@@ -18,6 +18,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Consumer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 

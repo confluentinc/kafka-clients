@@ -19,6 +19,9 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Resource;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

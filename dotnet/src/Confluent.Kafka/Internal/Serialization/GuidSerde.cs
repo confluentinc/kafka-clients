@@ -16,6 +16,8 @@ using System;
 using System.Globalization;
 using System.Text;
 
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Internal.Serialization;

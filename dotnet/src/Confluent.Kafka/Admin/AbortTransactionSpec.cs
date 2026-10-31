@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Globalization;
+using Confluent.Kafka.Common;
 
 namespace Confluent.Kafka.Admin;
 

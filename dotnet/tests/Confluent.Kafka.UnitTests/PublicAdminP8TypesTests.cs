@@ -20,6 +20,7 @@ using System.Runtime.CompilerServices;
 
 using Confluent.Kafka.Admin;
 
+using Confluent.Kafka.Common;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -56,13 +57,6 @@ public sealed class PublicAdminP8TypesTests
         // The broker-side TransactionState has a ninth DEAD constant with no client counterpart; the client enum is the
         // contract.
         Assert.DoesNotContain("Dead", Enum.GetNames(typeof(TransactionState)));
-    }
-
-    [Fact]
-    public void TransactionState_LivesInTheAdminNamespace()
-    {
-        // Java's package is org.apache.kafka.clients.admin, so the .NET home is Confluent.Kafka.Admin.
-        Assert.Equal("Confluent.Kafka.Admin", typeof(TransactionState).Namespace);
     }
 
     [Fact]

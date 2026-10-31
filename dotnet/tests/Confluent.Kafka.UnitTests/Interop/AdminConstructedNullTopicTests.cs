@@ -16,6 +16,8 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 
 using Xunit;

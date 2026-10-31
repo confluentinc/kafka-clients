@@ -20,8 +20,10 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 
+using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.UnitTests;
 

@@ -16,6 +16,10 @@ using System;
 using System.Globalization;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

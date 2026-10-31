@@ -16,6 +16,8 @@ using System;
 using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 

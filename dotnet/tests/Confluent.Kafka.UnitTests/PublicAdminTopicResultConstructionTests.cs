@@ -20,6 +20,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
 using Xunit;
@@ -43,7 +44,7 @@ public sealed class PublicAdminTopicResultConstructionTests
     {
         AssertOnlyInternalConstructor(
             typeof(CreateTopicsResult),
-            (typeof(IReadOnlyDictionary<string, KafkaFuture<TopicMetadataAndConfig>>), "futures", NullableAnnotation.NotAnnotated));
+            (typeof(IReadOnlyDictionary<string, KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>), "futures", NullableAnnotation.NotAnnotated));
 
         AssertOnlyInternalConstructor(
             typeof(DeleteTopicsResult),
@@ -110,13 +111,13 @@ public sealed class PublicAdminTopicResultConstructionTests
     public async Task CreateTopicsResult_Fabricated_RoundTrips()
     {
         Uuid topicId = new Uuid(0x0102030405060708L, 0x1112131415161718L);
-        KafkaFutureImpl<TopicMetadataAndConfig> created = KafkaFutureImpl.CompletedFuture(
-            new TopicMetadataAndConfig(topicId, 3, 2, new Config(Array.Empty<ConfigEntry>())));
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> created = KafkaFutureImpl.CompletedFuture(
+            new CreateTopicsResult.TopicMetadataAndConfig(topicId, 3, 2, new Config(Array.Empty<ConfigEntry>())));
 
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(
-            new Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>>
+            new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>
             {
-                ["t"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(created),
+                ["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(created),
             });
 
         int numPartitions = 0;
@@ -134,13 +135,13 @@ public sealed class PublicAdminTopicResultConstructionTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException fault = new KafkaException("fabricated failure");
-        KafkaFutureImpl<TopicMetadataAndConfig> failed = TestFutures.Failed<TopicMetadataAndConfig>(fault);
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.Failed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
 
         AsyncCreateTopicsResult mixed = new AsyncCreateTopicsResult(
-            new Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>>
+            new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>
             {
-                ["ok"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(created),
-                ["bad"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(failed),
+                ["ok"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(created),
+                ["bad"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(failed),
             });
 
         Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
@@ -153,12 +154,12 @@ public sealed class PublicAdminTopicResultConstructionTests
     [Fact]
     public async Task CreateTopicsResult_CallerMapMutatedAfterConstruction_AllViewsAgree()
     {
-        Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> map = new Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>>();
+        Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> map = new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>();
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
         Assert.Empty(result.Values);
 
-        KafkaFutureImpl<TopicMetadataAndConfig> pending = new KafkaFutureImpl<TopicMetadataAndConfig>();
-        map["t"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(pending);
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> pending = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
+        map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(pending);
 
         KeyValuePair<string, AsyncKafkaFuture> added = Assert.Single(result.Values);
         Assert.Equal("t", added.Key);
@@ -172,16 +173,16 @@ public sealed class PublicAdminTopicResultConstructionTests
         await TestTimeout.Run(() => all, s_deadline);
         Assert.Equal(3, await TestTimeout.Run(() => partitions, s_deadline));
 
-        KafkaFutureImpl<TopicMetadataAndConfig> replacement = KafkaFutureImpl.CompletedFuture(Metadata(5));
-        map["t"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(replacement);
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> replacement = KafkaFutureImpl.CompletedFuture(Metadata(5));
+        map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(replacement);
 
         Assert.Same(replacement.GetAsync(), Assert.Single(result.Values).Value.Get());
         Assert.Equal(5, await TestTimeout.Run(() => result.NumPartitions("t").Get(), s_deadline));
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException fault = new KafkaException("fabricated late failure");
-        KafkaFutureImpl<TopicMetadataAndConfig> failed = TestFutures.Failed<TopicMetadataAndConfig>(fault);
-        map["late"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(failed);
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.Failed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
+        map["late"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(failed);
 
         Assert.Equal(new[] { "late", "t" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
         Assert.Same(fault, await Assert.ThrowsAsync<KafkaException>(
@@ -195,14 +196,14 @@ public sealed class PublicAdminTopicResultConstructionTests
     [Fact]
     public void CreateTopicsResult_Values_EachAccessReflectsTheMapAtThatMoment()
     {
-        KafkaFutureImpl<TopicMetadataAndConfig> a = KafkaFutureImpl.CompletedFuture(Metadata(1));
-        KafkaFutureImpl<TopicMetadataAndConfig> b = KafkaFutureImpl.CompletedFuture(Metadata(2));
-        Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> map =
-            new Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> { ["a"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(a) };
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> a = KafkaFutureImpl.CompletedFuture(Metadata(1));
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> b = KafkaFutureImpl.CompletedFuture(Metadata(2));
+        Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> map =
+            new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> { ["a"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(a) };
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
 
         IReadOnlyDictionary<string, AsyncKafkaFuture> first = result.Values;
-        map["b"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(b);
+        map["b"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(b);
         IReadOnlyDictionary<string, AsyncKafkaFuture> second = result.Values;
         map.Remove("a");
         IReadOnlyDictionary<string, AsyncKafkaFuture> third = result.Values;
@@ -221,11 +222,11 @@ public sealed class PublicAdminTopicResultConstructionTests
     [Fact]
     public async Task CreateTopicsResult_CaseInsensitiveCallerMap_SplitsAsJavaDoes()
     {
-        KafkaFutureImpl<TopicMetadataAndConfig> created = KafkaFutureImpl.CompletedFuture(Metadata(3));
-        Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>> map =
-            new Dictionary<string, AsyncKafkaFuture<TopicMetadataAndConfig>>(StringComparer.OrdinalIgnoreCase)
+        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> created = KafkaFutureImpl.CompletedFuture(Metadata(3));
+        Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> map =
+            new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.OrdinalIgnoreCase)
             {
-                ["t"] = new AsyncKafkaFuture<TopicMetadataAndConfig>(created),
+                ["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(created),
             };
         Assert.True(map.ContainsKey("T"));
 
@@ -341,16 +342,16 @@ public sealed class PublicAdminTopicResultConstructionTests
         const int Code = 7;
         const string Message = "Topic metadata unavailable: request timed out.";
         KafkaException stored = new KafkaException(Code, Message, isRetriable: true);
-        TopicMetadataAndConfig metadata = new TopicMetadataAndConfig(stored);
+        CreateTopicsResult.TopicMetadataAndConfig metadata = new CreateTopicsResult.TopicMetadataAndConfig(stored);
 
         Assert.False(metadata.HasMetadata);
 
         (string Name, Action Call)[] accessors =
         {
-            (nameof(TopicMetadataAndConfig.Config), () => metadata.Config()),
-            (nameof(TopicMetadataAndConfig.TopicId), () => metadata.TopicId()),
-            (nameof(TopicMetadataAndConfig.NumPartitions), () => metadata.NumPartitions()),
-            (nameof(TopicMetadataAndConfig.ReplicationFactor), () => metadata.ReplicationFactor()),
+            (nameof(CreateTopicsResult.TopicMetadataAndConfig.Config), () => metadata.Config()),
+            (nameof(CreateTopicsResult.TopicMetadataAndConfig.TopicId), () => metadata.TopicId()),
+            (nameof(CreateTopicsResult.TopicMetadataAndConfig.NumPartitions), () => metadata.NumPartitions()),
+            (nameof(CreateTopicsResult.TopicMetadataAndConfig.ReplicationFactor), () => metadata.ReplicationFactor()),
         };
 
         foreach ((string name, Action call) in accessors)
@@ -377,8 +378,8 @@ public sealed class PublicAdminTopicResultConstructionTests
         public int GetHashCode(string obj) => RuntimeHelpers.GetHashCode(obj);
     }
 
-    private static TopicMetadataAndConfig Metadata(int numPartitions) =>
-        new TopicMetadataAndConfig(Uuid.Zero, numPartitions, 1, new Config(Array.Empty<ConfigEntry>()));
+    private static CreateTopicsResult.TopicMetadataAndConfig Metadata(int numPartitions) =>
+        new CreateTopicsResult.TopicMetadataAndConfig(Uuid.Zero, numPartitions, 1, new Config(Array.Empty<ConfigEntry>()));
 
     private static void AssertOnlyInternalConstructor(Type type, params (Type Type, string Name, byte Flag)[] expected)
     {

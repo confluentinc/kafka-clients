@@ -14,6 +14,12 @@
 
 using System;
 using System.Collections.Generic;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Common.Resource;
+using Confluent.Kafka.Consumer;
 
 namespace Confluent.Kafka.Admin;
 
@@ -702,7 +708,7 @@ public interface IAdmin : IDisposable
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
     /// <see cref="ListOffsetsOptions.IsolationLevel"/>
-    /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/>.
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadUncommitted"/>.
     /// </param>
     /// <returns>
     /// One future per partition, each carrying that partition's own
@@ -718,8 +724,8 @@ public interface IAdmin : IDisposable
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.IsolationLevel</c> is not one of
-    /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/> /
-    /// <see cref="Confluent.Kafka.IsolationLevel.ReadCommitted"/> — a value Java's enum
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadUncommitted"/> /
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadCommitted"/> — a value Java's enum
     /// parameter cannot express, but a C# cast can.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
@@ -1209,7 +1215,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="hmac">
     /// The token's MAC, passed back <b>verbatim</b> from
-    /// <see cref="Confluent.Kafka.DelegationToken.Hmac"/>. ⚠ It may contain interior zero
+    /// <see cref="Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac"/>. ⚠ It may contain interior zero
     /// bytes, so it must never be treated as a NUL-terminated string.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>

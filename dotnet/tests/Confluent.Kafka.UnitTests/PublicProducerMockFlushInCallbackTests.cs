@@ -19,8 +19,11 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;

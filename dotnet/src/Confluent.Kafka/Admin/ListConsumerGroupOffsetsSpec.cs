@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using Confluent.Kafka.Common;
 
 namespace Confluent.Kafka.Admin;
 

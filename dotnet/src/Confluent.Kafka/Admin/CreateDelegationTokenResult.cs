@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Token = Confluent.Kafka.DelegationToken;
+using Token = Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken;
 
 namespace Confluent.Kafka.Admin;
 

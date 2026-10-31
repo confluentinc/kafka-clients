@@ -14,6 +14,7 @@
 
 using System;
 using System.Globalization;
+using Confluent.Kafka.Common;
 
 namespace Confluent.Kafka.Admin;
 

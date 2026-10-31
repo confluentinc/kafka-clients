@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Xunit;

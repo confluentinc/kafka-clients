@@ -13,6 +13,9 @@
 // limitations under the License.
 
 using System;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Internal;
 

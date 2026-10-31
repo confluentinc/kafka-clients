@@ -16,6 +16,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 using Proto = Confluent.Kafka.Test;

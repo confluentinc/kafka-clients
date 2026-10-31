@@ -15,6 +15,7 @@
 using System;
 using System.Globalization;
 using System.Text;
+using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.Soak;
 
