@@ -174,7 +174,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
 
         release.SetResult(true);
         Assert.Null(await TestTimeout.Run(() => invoked, s_deadline));
-        Assert.True(registration.IsReleased);
+        AssertReleasedAfterTheReport(registration);
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(delivered!);
         Assert.Equal(s_tp0, entry.Key);
         Assert.Equal(9, entry.Value.Offset);
@@ -191,7 +191,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         outcome.SetException(thrown);
 
         Assert.Same(thrown, await TestTimeout.Run(() => invoked, s_deadline));
-        Assert.True(registration.IsReleased);
+        AssertReleasedAfterTheReport(registration);
     }
 
     [Fact]
@@ -203,7 +203,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         outcome.SetCanceled();
 
         Assert.IsAssignableFrom<OperationCanceledException>(await TestTimeout.Run(() => invoked, s_deadline));
-        Assert.True(registration.IsReleased);
+        AssertReleasedAfterTheReport(registration);
     }
 
     [Fact]
@@ -436,7 +436,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
 
             release.SetResult(true);
             await TestTimeout.Run(() => commit, s_deadline);
-            Assert.True(registration.IsReleased);
+            AssertReleasedAfterTheReport(registration);
         }
         finally
         {
@@ -514,6 +514,12 @@ public sealed class ConsumerCommitCallbackBridgeTests
     }
 
     private static ConsumerCallbackReporter Reporter() => new ConsumerCallbackReporter(IntPtr.Zero);
+
+    // An async callback's registration is released just after its report, which is what ends the invoke or the commit.
+    private static void AssertReleasedAfterTheReport(CommitCallbackRegistration registration) =>
+        Assert.True(
+            SpinWait.SpinUntil(() => registration.IsReleased, s_deadline),
+            "the registration was not released after the callback's report");
 
     private static (CommitCallbackRegistration Registration, Task<Exception?> Invoked) InvokeOnAPendingTask(
         TaskCompletionSource<bool> outcome)
