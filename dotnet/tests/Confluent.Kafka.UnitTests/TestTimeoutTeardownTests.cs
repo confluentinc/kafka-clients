@@ -43,7 +43,7 @@ public sealed class TestTimeoutTeardownTests
 
         TimeoutException hung = await Assert.ThrowsAsync<TimeoutException>(() => TestTimeout.DisposeAsync(target, s_short));
 
-        Assert.Equal(Hung("NeverEndingAsyncDisposable"), hung.Message);
+        Assert.StartsWith(Hung("NeverEndingAsyncDisposable"), hung.Message, StringComparison.Ordinal);
         Assert.Equal(1, target.Calls);
     }
 
@@ -59,7 +59,7 @@ public sealed class TestTimeoutTeardownTests
                 {
                     TimeoutException hung = await Assert.ThrowsAsync<TimeoutException>(() => TestTimeout.DisposeAsync(target, s_short));
 
-                    Assert.Equal(Hung("BlockingAsyncDisposable"), hung.Message);
+                    Assert.StartsWith(Hung("BlockingAsyncDisposable"), hung.Message, StringComparison.Ordinal);
                     Assert.NotEqual(Environment.CurrentManagedThreadId, target.ThreadId);
                 },
                 s_outer);
@@ -82,7 +82,7 @@ public sealed class TestTimeoutTeardownTests
                 {
                     TimeoutException hung = Assert.Throws<TimeoutException>(() => TestTimeout.Dispose(target, s_short));
 
-                    Assert.Equal(Hung("BlockingDisposable"), hung.Message);
+                    Assert.StartsWith(Hung("BlockingDisposable"), hung.Message, StringComparison.Ordinal);
                     Assert.NotEqual(Environment.CurrentManagedThreadId, target.ThreadId);
                 },
                 s_outer);
@@ -105,7 +105,7 @@ public sealed class TestTimeoutTeardownTests
                 {
                     TimeoutException hung = Assert.Throws<TimeoutException>(() => TestTimeout.Teardown(target, () => gate.Wait(), s_short));
 
-                    Assert.Equal(Hung("GenericTarget<Byte[], String>"), hung.Message);
+                    Assert.StartsWith(Hung("GenericTarget<Byte[], String>"), hung.Message, StringComparison.Ordinal);
                 },
                 s_outer);
         }
@@ -123,7 +123,7 @@ public sealed class TestTimeoutTeardownTests
         TimeoutException hung = await Assert.ThrowsAsync<TimeoutException>(
             () => TestTimeout.TeardownAsync(target, () => new TaskCompletionSource<bool>().Task, s_short));
 
-        Assert.Equal(Hung("GenericTarget<Int32, Int64>"), hung.Message);
+        Assert.StartsWith(Hung("GenericTarget<Int32, Int64>"), hung.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -166,7 +166,7 @@ public sealed class TestTimeoutTeardownTests
     }
 
     private static string Hung(string type) =>
-        $"Teardown of {type} did not complete within {s_short} — treated as a hang (fail fast).";
+        $"Teardown of {type} did not complete within {s_short} — treated as a hang (fail fast). Diagnostics: the action ";
 
     /// <summary>A target whose <c>DisposeAsync</c> returns a task that never completes.</summary>
     private sealed class NeverEndingAsyncDisposable : IAsyncDisposable

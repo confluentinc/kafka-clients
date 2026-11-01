@@ -13,7 +13,10 @@
 // limitations under the License.
 
 using System;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Confluent.Kafka.UnitTests;
@@ -24,7 +27,8 @@ namespace Confluent.Kafka.UnitTests;
 /// a pool thread, so a call that blocks before it returns its Task is bounded too. The teardown helpers bound a
 /// client's <c>Dispose</c>, <c>DisposeAsync</c> or <c>Close</c> the same way, under <see cref="TeardownBound"/>, and
 /// name the client's type when it hangs; <see cref="Disposal"/> and <see cref="AsyncDisposal"/> stand in for a
-/// <c>using</c> or <c>await using</c> declaration.
+/// <c>using</c> or <c>await using</c> declaration. A timeout's message ends with diagnostics: whether the action started
+/// and when, and the thread pool's and the process's thread counts, to tell a pool that never ran it from a hung call.
 /// </summary>
 internal static class TestTimeout
 {
@@ -32,30 +36,36 @@ internal static class TestTimeout
 
     internal static void Run(Action action, TimeSpan timeout)
     {
-        Task task = Task.Run(action);
+        StartProbe probe = new StartProbe();
+        Task task = Task.Run(
+            () =>
+            {
+                probe.Start();
+                action();
+            });
         if (!task.Wait(timeout))
         {
-            throw new TimeoutException(
-                $"Operation did not complete within {timeout} — treated as a hang (fail fast).");
+            throw new TimeoutException(TimedOut(timeout, probe));
         }
 
         task.GetAwaiter().GetResult();
     }
 
-    internal static async Task Run(Func<Task> action, TimeSpan timeout)
+    internal static Task Run(Func<Task> action, TimeSpan timeout) => RunBounded(action, timeout, probe: null);
+
+    internal static Task RunOffThisThread(Func<Task> action, TimeSpan timeout)
     {
-        Task task = action();
-        Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
-        if (winner != task)
-        {
-            throw new TimeoutException(
-                $"Operation did not complete within {timeout} — treated as a hang (fail fast).");
-        }
-
-        await task.ConfigureAwait(false);
+        StartProbe probe = new StartProbe();
+        return RunBounded(
+            () => Task.Run(
+                () =>
+                {
+                    probe.Start();
+                    return action();
+                }),
+            timeout,
+            probe);
     }
-
-    internal static Task RunOffThisThread(Func<Task> action, TimeSpan timeout) => Run(() => Task.Run(action), timeout);
 
     internal static void Dispose(IDisposable? target, TimeSpan? bound = null)
     {
@@ -76,10 +86,16 @@ internal static class TestTimeout
     internal static void Teardown(object target, Action teardown, TimeSpan? bound = null)
     {
         TimeSpan timeout = bound ?? TeardownBound;
-        Task task = Task.Run(teardown);
+        StartProbe probe = new StartProbe();
+        Task task = Task.Run(
+            () =>
+            {
+                probe.Start();
+                teardown();
+            });
         if (!((IAsyncResult)task).AsyncWaitHandle.WaitOne(timeout))
         {
-            throw Hung(target, timeout);
+            throw Hung(target, timeout, probe);
         }
 
         task.GetAwaiter().GetResult();
@@ -88,11 +104,17 @@ internal static class TestTimeout
     internal static async Task TeardownAsync(object target, Func<Task> teardown, TimeSpan? bound = null)
     {
         TimeSpan timeout = bound ?? TeardownBound;
-        Task task = Task.Run(teardown);
+        StartProbe probe = new StartProbe();
+        Task task = Task.Run(
+            () =>
+            {
+                probe.Start();
+                return teardown();
+            });
         Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw Hung(target, timeout);
+            throw Hung(target, timeout, probe);
         }
 
         await task.ConfigureAwait(false);
@@ -104,21 +126,91 @@ internal static class TestTimeout
         Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw new TimeoutException(
-                $"Operation did not complete within {timeout} — treated as a hang (fail fast).");
+            throw new TimeoutException(TimedOut(timeout, probe: null));
         }
 
         return await task.ConfigureAwait(false);
     }
 
-    private static TimeoutException Hung(object target, TimeSpan timeout) =>
+    private static async Task RunBounded(Func<Task> action, TimeSpan timeout, StartProbe? probe)
+    {
+        Task task = action();
+        Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
+        if (winner != task)
+        {
+            throw new TimeoutException(TimedOut(timeout, probe));
+        }
+
+        await task.ConfigureAwait(false);
+    }
+
+    private static string TimedOut(TimeSpan timeout, StartProbe? probe) =>
+        $"Operation did not complete within {timeout} — treated as a hang (fail fast). {StartProbe.Describe(probe)}";
+
+    private static TimeoutException Hung(object target, TimeSpan timeout, StartProbe probe) =>
         new TimeoutException(
-            $"Teardown of {NameOf(target.GetType())} did not complete within {timeout} — treated as a hang (fail fast).");
+            $"Teardown of {NameOf(target.GetType())} did not complete within {timeout} — treated as a hang (fail fast). "
+            + StartProbe.Describe(probe));
 
     private static string NameOf(Type type) =>
         type.IsGenericType
             ? type.Name.Substring(0, type.Name.IndexOf('`')) + "<" + string.Join(", ", type.GetGenericArguments().Select(NameOf)) + ">"
             : type.Name;
+
+    /// <summary>
+    /// Records when a bounded action started on the thread pool, and describes it, with the pool's and the process's
+    /// thread counts, when the bound expires.
+    /// </summary>
+    internal sealed class StartProbe
+    {
+        private readonly Stopwatch _sinceQueued = Stopwatch.StartNew();
+        private long _startedAfterMs = -1;
+
+        internal void Start() => Interlocked.CompareExchange(ref _startedAfterMs, _sinceQueued.ElapsedMilliseconds, -1);
+
+        internal static string Describe(StartProbe? probe)
+        {
+            if (probe is null)
+            {
+                return $"Diagnostics: {PoolAndProcess()}.";
+            }
+
+            long started = Interlocked.Read(ref probe._startedAfterMs);
+            long now = probe._sinceQueued.ElapsedMilliseconds;
+            string action = started < 0
+                ? $"the action never started in {now} ms"
+                : $"the action started {started} ms after it was queued and ran {now - started} ms";
+            return $"Diagnostics: {action}; {PoolAndProcess()}.";
+        }
+
+        private static string PoolAndProcess()
+        {
+            ThreadPool.GetAvailableThreads(out int availableWorkers, out _);
+            ThreadPool.GetMaxThreads(out int maxWorkers, out _);
+            ThreadPool.GetMinThreads(out int minWorkers, out _);
+#if NETCOREAPP3_0_OR_GREATER
+            string counts = $"{ThreadPool.ThreadCount} threads, {ThreadPool.PendingWorkItemCount} queued work items, ";
+#else
+            string counts = string.Empty;
+#endif
+            return $"thread pool: {counts}{maxWorkers - availableWorkers} of {maxWorkers} workers busy, minimum {minWorkers}; "
+                + $"process: {OsThreads()} threads, {Environment.ProcessorCount} processors";
+        }
+
+        private static string OsThreads()
+        {
+            try
+            {
+                using Process self = Process.GetCurrentProcess();
+                return $"{self.Threads.Count}";
+            }
+            catch (Exception e) when (e is NotSupportedException or InvalidOperationException or Win32Exception
+                or UnauthorizedAccessException)
+            {
+                return "unknown";
+            }
+        }
+    }
 
     /// <summary>The <see cref="Disposal"/> stand-in: its <c>Dispose</c> bounds the target's <c>Dispose</c>.</summary>
     private sealed class BoundedDisposal : IDisposable
