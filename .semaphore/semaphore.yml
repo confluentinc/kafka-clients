@@ -401,6 +401,9 @@ blocks:
         always:
           commands:
             - colima stop || true
+            # Temporary, with CONFLUENT_KAFKA_DOTNET_HANG_DIR below: uploads the native stacks a .NET test sampled
+            # when its TestTimeout bound expired. The folder exists only after such a timeout.
+            - 'if [ -d /tmp/confluent-kafka-dotnet-hangs ]; then artifact push job --expire-in 2w /tmp/confluent-kafka-dotnet-hangs || true; fi'
       jobs:
         - name: "verify-c (macOS arm64)"
           env_vars:
@@ -422,6 +425,11 @@ blocks:
             # tests. The commands below are dependencies-macos.sh's Colima bring-up.
             - name: MACOS_SKIP_COLIMA
               value: "true"
+            # Temporary, until the cause of the macOS teardown stalls is found: a .NET unit test whose TestTimeout
+            # bound expires samples the process's native stacks into this folder (TestTimeout.NativeStacks), and the
+            # block's epilogue uploads it as a job artifact.
+            - name: CONFLUENT_KAFKA_DOTNET_HANG_DIR
+              value: /tmp/confluent-kafka-dotnet-hangs
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"

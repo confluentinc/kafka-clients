@@ -13,9 +13,13 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -28,7 +32,8 @@ namespace Confluent.Kafka.UnitTests;
 /// client's <c>Dispose</c>, <c>DisposeAsync</c> or <c>Close</c> the same way, under <see cref="TeardownBound"/>, and
 /// name the client's type when it hangs; <see cref="Disposal"/> and <see cref="AsyncDisposal"/> stand in for a
 /// <c>using</c> or <c>await using</c> declaration. A timeout's message ends with diagnostics: whether the action started
-/// and when, and the thread pool's and the process's thread counts, to tell a pool that never ran it from a hung call.
+/// and when, and the thread pool's and the process's thread counts, to tell a pool that never ran it from a hung call;
+/// on macOS CI it also ends with the native stacks of the threads inside the native library (<see cref="NativeStacks"/>).
 /// </summary>
 internal static class TestTimeout
 {
@@ -145,12 +150,13 @@ internal static class TestTimeout
     }
 
     private static string TimedOut(TimeSpan timeout, StartProbe? probe) =>
-        $"Operation did not complete within {timeout} — treated as a hang (fail fast). {StartProbe.Describe(probe)}";
+        $"Operation did not complete within {timeout} — treated as a hang (fail fast). {StartProbe.Describe(probe)}"
+        + NativeStacks.Capture(timeout);
 
     private static TimeoutException Hung(object target, TimeSpan timeout, StartProbe probe) =>
         new TimeoutException(
             $"Teardown of {NameOf(target.GetType())} did not complete within {timeout} — treated as a hang (fail fast). "
-            + StartProbe.Describe(probe));
+            + StartProbe.Describe(probe) + NativeStacks.Capture(timeout));
 
     private static string NameOf(Type type) =>
         type.IsGenericType
@@ -210,6 +216,143 @@ internal static class TestTimeout
                 return "unknown";
             }
         }
+    }
+
+    /// <summary>
+    /// Temporary, until the cause of the macOS CI teardown stalls is found: when a bound of at least
+    /// <see cref="MinimumBound"/> expires on macOS and <see cref="DirectoryVariable"/> names a folder, samples the
+    /// native stacks of every thread of this process with <c>/usr/bin/sample</c>, writes them to that folder, and
+    /// summarizes the threads inside the native library.
+    /// </summary>
+    internal static class NativeStacks
+    {
+        internal const string DirectoryVariable = "CONFLUENT_KAFKA_DOTNET_HANG_DIR";
+        internal static readonly TimeSpan MinimumBound = TimeSpan.FromSeconds(5);
+        private const string Sampler = "/usr/bin/sample";
+        private const string Library = "(in libconfluent_kafka.dylib)";
+        private const int MaxSamples = 3;
+        private const int DeepestFrames = 12;
+        private const int MaxSummaryLines = 150;
+        private static readonly Regex s_threadHeader = new Regex(@"^ {4}\d+ Thread_", RegexOptions.Compiled);
+        private static readonly Regex s_address = new Regex(@"\s+\+ \d+\s+\[0x[0-9a-f]+\]$|\s+\[0x[0-9a-f]+\]$", RegexOptions.Compiled);
+        private static readonly Regex s_waiting = new Regex(@"close|destroy|teardown|block_on|dispose", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+#if NET5_0_OR_GREATER
+        private static readonly TimeSpan s_samplerBound = TimeSpan.FromSeconds(90);
+        private static int s_taken;
+#endif
+
+        internal static bool ShouldSample(TimeSpan bound, string? directory, bool isMacOs) =>
+            isMacOs && bound >= MinimumBound && !string.IsNullOrEmpty(directory);
+
+        internal static string Capture(TimeSpan bound)
+        {
+#if NET5_0_OR_GREATER
+            string? directory = Environment.GetEnvironmentVariable(DirectoryVariable);
+            if (!ShouldSample(bound, directory, OperatingSystem.IsMacOS()) || !File.Exists(Sampler)
+                || Interlocked.Increment(ref s_taken) > MaxSamples)
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(directory!);
+                string file = Path.Combine(
+                    directory!,
+                    $"sample-{Environment.ProcessId}-{DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss.fff", CultureInfo.InvariantCulture)}.txt");
+                ProcessStartInfo start = new ProcessStartInfo(Sampler)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                foreach (string argument in new[] { $"{Environment.ProcessId}", "2", "-mayDie", "-file", file })
+                {
+                    start.ArgumentList.Add(argument);
+                }
+
+                using Process sampler = Process.Start(start)!;
+                Task<string> output = sampler.StandardOutput.ReadToEndAsync();
+                Task<string> errors = sampler.StandardError.ReadToEndAsync();
+                if (!sampler.WaitForExit((int)s_samplerBound.TotalMilliseconds))
+                {
+                    sampler.Kill();
+                    return $" Native stacks: {Sampler} did not finish within {s_samplerBound}.";
+                }
+
+                if (sampler.ExitCode != 0 || !File.Exists(file))
+                {
+                    return $" Native stacks: {Sampler} exited with {sampler.ExitCode}: {errors.Result.Trim()} {output.Result.Trim()}";
+                }
+
+                return $"{Environment.NewLine}Native stacks (macOS sample, full file {file}):{Environment.NewLine}"
+                    + Summarize(File.ReadAllLines(file));
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or Win32Exception
+                or InvalidOperationException or NotSupportedException)
+            {
+                return $" Native stacks: {Sampler} failed: {e.Message}";
+            }
+#else
+            return string.Empty;
+#endif
+        }
+
+        /// <summary>
+        /// Keeps the threads of a <c>sample</c> call graph that run inside the native library, the ones whose stack
+        /// mentions a close, a destroy or a wait on the runtime first, each as its header and its deepest frames.
+        /// </summary>
+        internal static string Summarize(IReadOnlyList<string> lines)
+        {
+            List<List<string>> threads = new List<List<string>>();
+            bool inGraph = false;
+            foreach (string line in lines)
+            {
+                if (line.StartsWith("Call graph:", StringComparison.Ordinal))
+                {
+                    inGraph = true;
+                    continue;
+                }
+
+                if (!inGraph)
+                {
+                    continue;
+                }
+
+                if (line.Length == 0 || line.StartsWith("Total number in stack", StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                if (s_threadHeader.IsMatch(line))
+                {
+                    threads.Add(new List<string> { line.Trim() });
+                }
+                else if (threads.Count > 0)
+                {
+                    threads[threads.Count - 1].Add(line);
+                }
+            }
+
+            IEnumerable<List<string>> inLibrary = threads
+                .Where(thread => thread.Any(frame => frame.IndexOf(Library, StringComparison.Ordinal) >= 0))
+                .OrderBy(thread => thread.Any(frame => s_waiting.IsMatch(frame)) ? 0 : 1);
+            List<string> summary = new List<string>();
+            foreach (List<string> thread in inLibrary)
+            {
+                summary.Add(thread[0]);
+                summary.AddRange(thread.Skip(Math.Max(1, thread.Count - DeepestFrames)).Select(Frame));
+                if (summary.Count >= MaxSummaryLines)
+                {
+                    summary.Add("(summary cut; see the full file)");
+                    break;
+                }
+            }
+
+            return summary.Count == 0 ? "(no thread inside the native library)" : string.Join(Environment.NewLine, summary);
+        }
+
+        private static string Frame(string line) => "  " + s_address.Replace(line.TrimStart(' ', '+', '!', ':', '|'), string.Empty);
     }
 
     /// <summary>The <see cref="Disposal"/> stand-in: its <c>Dispose</c> bounds the target's <c>Dispose</c>.</summary>

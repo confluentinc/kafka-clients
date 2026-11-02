@@ -86,5 +86,70 @@ public sealed class TestTimeoutDiagnosticsTests
             timedOut.Message);
     }
 
+    [Fact]
+    public void NativeStacks_AreSampledOnlyOnMacOS_ForALongBound_IntoAGivenFolder()
+    {
+        TimeSpan longBound = TimeSpan.FromSeconds(30);
+
+        Assert.True(TestTimeout.NativeStacks.ShouldSample(longBound, "/tmp/hangs", isMacOs: true));
+        Assert.True(TestTimeout.NativeStacks.ShouldSample(TestTimeout.NativeStacks.MinimumBound, "/tmp/hangs", isMacOs: true));
+        Assert.False(TestTimeout.NativeStacks.ShouldSample(s_short, "/tmp/hangs", isMacOs: true));
+        Assert.False(TestTimeout.NativeStacks.ShouldSample(longBound, null, isMacOs: true));
+        Assert.False(TestTimeout.NativeStacks.ShouldSample(longBound, string.Empty, isMacOs: true));
+        Assert.False(TestTimeout.NativeStacks.ShouldSample(longBound, "/tmp/hangs", isMacOs: false));
+    }
+
+    [Fact]
+    public void NativeStacks_KeepTheThreadsInTheNativeLibrary_TheClosingOneFirst_WithoutAddresses()
+    {
+        string[] sample =
+        {
+            "Analysis of sampling dotnet (pid 1) every 1 millisecond",
+            "Call graph:",
+            "    10 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)",
+            "    + 10 start  (in dyld) + 1904  [0x1]",
+            "    +   10 main  (in dotnet) + 10  [0x2]",
+            "    10 Thread_2: tokio-runtime-worker",
+            "    + 10 thread_start  (in libsystem_pthread.dylib) + 8  [0x3]",
+            "    +   10 tokio::runtime::scheduler::multi_thread::worker::run::h1  (in libconfluent_kafka.dylib) + 20  [0x4]",
+            "    +     10 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x5]",
+            "    10 Thread_3: .NET TP Worker",
+            "    + 10 ???  (in <unknown binary>)  [0x6]",
+            "    +   10 kafka_admin_Admin_destroy_err  (in libconfluent_kafka.dylib) + 48  [0x7]",
+            "    +   ! 10 tokio::runtime::blocking::shutdown::Receiver::wait::h2  (in libconfluent_kafka.dylib) + 52  [0x8]",
+            "    +   !   10 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x9]",
+            string.Empty,
+            "Total number in stack (recursive counted multiple, when >=5):",
+            "    10 Thread_9: not in the call graph  (in libconfluent_kafka.dylib)",
+        };
+
+        string expected = string.Join(
+            Environment.NewLine,
+            "10 Thread_3: .NET TP Worker",
+            "  10 ???  (in <unknown binary>)",
+            "  10 kafka_admin_Admin_destroy_err  (in libconfluent_kafka.dylib)",
+            "  10 tokio::runtime::blocking::shutdown::Receiver::wait::h2  (in libconfluent_kafka.dylib)",
+            "  10 __psynch_cvwait  (in libsystem_kernel.dylib)",
+            "10 Thread_2: tokio-runtime-worker",
+            "  10 thread_start  (in libsystem_pthread.dylib)",
+            "  10 tokio::runtime::scheduler::multi_thread::worker::run::h1  (in libconfluent_kafka.dylib)",
+            "  10 __psynch_cvwait  (in libsystem_kernel.dylib)");
+        Assert.Equal(expected, TestTimeout.NativeStacks.Summarize(sample));
+    }
+
+    [Fact]
+    public void NativeStacks_WithoutAThreadInTheNativeLibrary_SaySo()
+    {
+        string[] sample =
+        {
+            "Call graph:",
+            "    10 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)",
+            "    + 10 start  (in dyld) + 1904  [0x1]",
+            string.Empty,
+        };
+
+        Assert.Equal("(no thread inside the native library)", TestTimeout.NativeStacks.Summarize(sample));
+    }
+
     private static string Escaped(TimeSpan timeout) => Regex.Escape(timeout.ToString());
 }
