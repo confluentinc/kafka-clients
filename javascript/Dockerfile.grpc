@@ -55,11 +55,12 @@ RUN cd /workspace/javascript && \
 
 # The gRPC packages, at the versions pinned in package.json's devDependencies
 # (the single source of truth, shared with the native `make -C javascript
-# grpc-native`). Installed by name into their own prefix rather than with a bare
-# `npm install`, which would also run the package's own gypfile build.
+# grpc-native`). Installed by name into a prefix of their own rather than by a
+# bare `npm install` of the package, which would add its other devDependencies.
 RUN mkdir -p /workspace/grpc-deps && \
     cd /workspace/grpc-deps && \
-    npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund \
+    echo '{"private": true}' > package.json && \
+    npm install --prefix /workspace/grpc-deps --no-save --no-package-lock --ignore-scripts --no-audit --no-fund \
         $(node -p "Object.entries(require('/workspace/javascript/package.json').devDependencies || {}) \
             .filter(([name]) => name.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')") && \
     test -d node_modules/@grpc/grpc-js && test -d node_modules/@grpc/proto-loader

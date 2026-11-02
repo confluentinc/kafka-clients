@@ -152,7 +152,10 @@ test('every source file carries the Apache 2.0 header of Confluent Inc.', () => 
     ...dirs.flatMap((d) => walk(path.join(ROOT, d)).map((f) => `${d}/${f}`)),
     'binding.gyp',
     'Makefile',
-  ].filter((f) => /\.(js|ts|c|h)$|^binding\.gyp$|^Makefile$/.test(f));
+    'grpc_server.js',
+    'grpc_translate.js',
+    'Dockerfile.grpc',
+  ].filter((f) => /\.(js|ts|c|h)$|^binding\.gyp$|^Makefile$|^Dockerfile\.grpc$/.test(f));
   for (const file of files) {
     const head = fs.readFileSync(path.join(ROOT, file), 'utf8').split('\n').slice(0, 6).join('\n');
     assert.match(head, /Copyright \d{4} Confluent Inc\./, file);

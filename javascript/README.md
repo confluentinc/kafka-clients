@@ -48,6 +48,25 @@ Without a runnable `tsc`, `test-typing` is skipped with a message.
 library and header; the addon links the library dynamically with an rpath to
 that directory.
 
+### The Rust multilanguage suite
+
+The Rust integration tests' `multilanguage_test!` producer cases also run
+against this client, as their `__grpc_js` arm, through `grpc_server.js` (a gRPC
+server over `rust/multilanguage-test-server/proto`'s `ProducerService`; it is
+not part of the published package):
+
+```bash
+make test-integration-javascript-native  # from the repository root: the server as a host process
+make test-integration-javascript         # Linux only: the server in a container (Dockerfile.grpc)
+```
+
+The native arm needs `@grpc/grpc-js` and `@grpc/proto-loader` (devDependencies);
+`make -C javascript grpc-native` installs them under
+`rust/target/grpc-native/javascript`, or `MULTILANG_JS_NODE_PATH` names a
+`node_modules` that already holds them. The transaction, `partitionsFor` and
+metrics cases are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`),
+as the producer has none of them yet.
+
 ## Layout
 
 The package root exports the module namespaces, one per Java package, and each
