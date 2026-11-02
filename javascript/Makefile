@@ -31,6 +31,19 @@ NODE_GYP ?= $(shell command -v node-gyp 2>/dev/null || \
 NODE_PREFIX ?= $(realpath $(dir $(realpath $(shell command -v $(NODE))))..)
 NODEDIR_FLAG = $(if $(wildcard $(NODE_PREFIX)/include/node/node_api.h),--nodedir=$(NODE_PREFIX),)
 
+# TypeScript (a devDependency): `make types` generates the committed .d.ts
+# files from lib/'s JSDoc, and test-typing checks them. TSC is the command that
+# runs tsc, TS_TYPE_ROOTS the directory holding @types/node.
+TSC ?= node_modules/.bin/tsc
+TS_TYPE_ROOTS ?= node_modules/@types
+export TSC TS_TYPE_ROOTS
+
+# node --test takes files: the test directories one and two levels deep.
+UNIT_TESTS = test/unit/*.test.js test/unit/*/*.test.js
+STATIC_TESTS = test/static/*.test.js
+TYPING_TESTS = test/typing/*.test.js
+INTEGRATION_TESTS = test/integration/*.test.js
+
 # The integration test's scratch broker (test-integration starts one unless
 # KAFKA_BOOTSTRAP_SERVERS is already set).
 KAFKA_IMAGE ?= apache/kafka:4.3.1
@@ -41,21 +54,33 @@ KAFKA_PORT ?= 39092
 # $(CONFLUENT_KAFKA_LIB_DIR) and its header under $(CONFLUENT_KAFKA_INCLUDE_DIR):
 # the repository root's Makefile orders that (`build-javascript` depends on the
 # Rust build); run standalone, build it first.
-.PHONY: build test test-unit test-integration clean
+.PHONY: build types test test-static test-unit test-typing test-integration clean
 
 build:
 	$(NODE_GYP) rebuild $(NODEDIR_FLAG)
 
-test: test-unit test-integration
+types:
+	$(NODE) scripts/gen_types.js --write
+
+test: test-static test-unit test-typing test-integration
+
+# Header conformance and the package layout: no build needed.
+test-static:
+	$(NODE) --test $(STATIC_TESTS)
 
 test-unit: build
-	$(NODE) --test test/unit/*.test.js
+	$(NODE) --test $(UNIT_TESTS)
+
+# The committed .d.ts are up to date and type-check under --strict; skipped,
+# with a visible message, when $(TSC) cannot be run.
+test-typing:
+	$(NODE) --test $(TYPING_TESTS)
 
 # Against KAFKA_BOOTSTRAP_SERVERS when set; otherwise against a scratch broker
 # this target starts with `docker run` and removes afterwards.
 test-integration: build
 	@if [ -n "$$KAFKA_BOOTSTRAP_SERVERS" ]; then \
-	  $(NODE) --test test/integration/*.test.js; \
+	  $(NODE) --test $(INTEGRATION_TESTS); \
 	else \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  docker run -d --rm --name $(KAFKA_CONTAINER) -p $(KAFKA_PORT):9092 \
@@ -69,7 +94,7 @@ test-integration: build
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) \
-	    $(NODE) --test test/integration/*.test.js || status=$$?; \
+	    $(NODE) --test $(INTEGRATION_TESTS) || status=$$?; \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  exit $$status; \
 	fi

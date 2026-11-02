@@ -27,6 +27,7 @@
       "target_name": "confluent_kafka_js",
       "sources": [
         "src/addon.c",
+        "src/callback_queue.c",
         "src/error.c",
         "src/producer.c",
         "src/record.c"

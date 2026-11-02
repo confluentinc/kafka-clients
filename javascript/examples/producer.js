@@ -13,14 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // Produces one record and prints its RecordMetadata.
 //
 // Usage: node examples/producer.js <bootstrap-servers> <topic> [key] [value]
 
-const { KafkaProducer, ProducerRecord } = require('..');
+// The package's own name resolves inside the package (Node's self-reference
+// through package.json `exports`), so this runs without an npm install.
+const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
 
 async function main(argv) {
   const [bootstrap, topic, key = null, value = 'hello from Node.js'] = argv;

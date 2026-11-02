@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
+// The common namespace: the public classes of Java's org.apache.kafka.common
+// this client has.
 
-const native = require('../../lib/_native');
+const { KafkaError } = require('./kafka_error');
+const { KafkaFuture } = require('./kafka_future');
 
-test('the addon loads and links libconfluent_kafka', () => {
-  assert.equal(native.probe(), true);
-});
+module.exports = { KafkaError, KafkaFuture };

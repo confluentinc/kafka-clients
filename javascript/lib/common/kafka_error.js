@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // KafkaError: every kafka_common_Error_t the C FFI hands out (Java's
@@ -20,51 +19,64 @@
 // reports beside it, flattened into one class as the core's Error enum is).
 
 /**
- * An error from the Kafka client.
+ * An error from the Kafka client: every error the C FFI reports.
  *
  * `code` is the `kafka_common_Error_e` value identifying the error's class,
  * `name` its enumerator name (`TOPIC_AUTHORIZATION_FAILED`,
  * `LOCAL_ILLEGAL_STATE`, ...), `message` the client's text. `retriable` and
  * `apiError` answer Java's `instanceof RetriableException` /
  * `instanceof ApiException`; `cause` is the error's cause, Java's
- * `getCause()`.
+ * `getCause()`. KafkaErrors are made by the client.
  */
 class KafkaError extends Error {
   /**
+   * The `kafka_common_Error_e` value identifying the error's class.
+   * @readonly
+   * @type {number}
+   */
+  code;
+
+  /**
+   * Java's `instanceof RetriableException`.
+   * @readonly
+   * @type {boolean}
+   */
+  retriable;
+
+  /**
+   * Java's `instanceof ApiException`.
+   * @readonly
+   * @type {boolean}
+   */
+  apiError;
+
+  /**
+   * Made by the client, through `_from` (private).
+   *
+   * @private
    * @param {{code: number, name: string | null, message: string, retriable?: boolean,
    *          apiError?: boolean, cause?: unknown}} fields
    */
   constructor({ code, name, message, retriable = false, apiError = false, cause }) {
     super(message, cause === undefined ? undefined : { cause: KafkaError._from(cause) });
+    // The enumerator name of `code` (`TOPIC_AUTHORIZATION_FAILED`, `LOCAL_ILLEGAL_STATE`, ...).
     Object.defineProperty(this, 'name', { value: name || 'KafkaError', enumerable: false, configurable: true, writable: true });
-    /** @type {number} */
     this.code = code;
-    /** @type {boolean} */
     this.retriable = retriable;
-    /** @type {boolean} */
     this.apiError = apiError;
   }
 
-  /** A KafkaError from the plain object the native layer builds (private). */
+  /**
+   * A KafkaError from the plain object the native layer builds (private).
+   *
+   * @private
+   * @param {any} fields
+   * @returns {any}
+   */
   static _from(fields) {
     if (fields instanceof Error || fields === null || typeof fields !== 'object') return fields;
     return new KafkaError(fields);
   }
 }
 
-// `kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT` / `_LOCAL_ILLEGAL_STATE`: the
-// core's codes for Java's IllegalArgumentException / IllegalStateException.
-const LOCAL_ILLEGAL_ARGUMENT = -3;
-const LOCAL_ILLEGAL_STATE = -4;
-
-/** A binding-side check where Java throws `IllegalArgumentException` (private). */
-function illegalArgument(message) {
-  return new KafkaError({ code: LOCAL_ILLEGAL_ARGUMENT, name: 'LOCAL_ILLEGAL_ARGUMENT', message });
-}
-
-/** A binding-side check where Java throws `IllegalStateException` (private). */
-function illegalState(message) {
-  return new KafkaError({ code: LOCAL_ILLEGAL_STATE, name: 'LOCAL_ILLEGAL_STATE', message });
-}
-
-module.exports = { KafkaError, illegalArgument, illegalState };
+module.exports = { KafkaError };

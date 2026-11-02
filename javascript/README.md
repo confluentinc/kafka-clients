@@ -4,7 +4,8 @@ A Node.js client for Apache Kafka built on the C FFI of the Confluent Kafka
 Rust client, in the same way as the Python client in `../python`. It is a
 Node-API addon written in plain C (`src/`), so one build works on every Node
 release supporting Node-API version 8, under a thin CommonJS layer (`lib/`)
-with TypeScript declarations (`index.d.ts`).
+with TypeScript declarations (a `.d.ts` beside every public module, generated
+from its JSDoc).
 
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
 `RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
@@ -28,20 +29,52 @@ slice covers the producer only; the package is private and not published.
 
 ```bash
 make -C javascript build             # or, from the repository root: make build-javascript
+make -C javascript test-static       # header conformance and package layout, no build needed
 make -C javascript test-unit         # no broker needed
+make -C javascript test-typing       # the .d.ts are up to date and type-check (needs tsc)
 make -C javascript test-integration  # starts a scratch broker with docker, or uses
                                      # KAFKA_BOOTSTRAP_SERVERS when it is set
+make -C javascript types             # regenerate lib/**/*.d.ts from the JSDoc (needs tsc)
 ```
+
+`make test` runs all four. TypeScript and `@types/node` are devDependencies
+(`npm install`, no lockfile yet); `TSC` (default `node_modules/.bin/tsc`) and
+`TS_TYPE_ROOTS` (default `node_modules/@types`) point at other copies, e.g.
+`make -C javascript types TSC="node /path/to/typescript/bin/tsc" TS_TYPE_ROOTS=/path/to/@types`.
+Without a runnable `tsc`, `test-typing` is skipped with a message.
 
 `CONFLUENT_KAFKA_LIB_DIR` (default `../rust/target/release`) and
 `CONFLUENT_KAFKA_INCLUDE_DIR` (default `../rust/target/include`) select the
 library and header; the addon links the library dynamically with an rpath to
 that directory.
 
+## Layout
+
+The package root exports the module namespaces, one per Java package, and each
+namespace is also an entry point of its own:
+
+```js
+const { producer, common } = require('confluent-kafka-javascript-rust');
+const { KafkaProducer, ProducerRecord, RecordMetadata } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaError, KafkaFuture } = require('confluent-kafka-javascript-rust/common');
+```
+
+```
+lib/index.js           the namespaces { producer, common }
+lib/producer/          KafkaProducer, ProducerRecord, RecordMetadata, Callback (a type)
+lib/common/            KafkaError, KafkaFuture
+lib/_*.js              private helpers (not exported)
+src/                   the addon: util.h, addon.c, callback_queue.c, error.c, record.c, producer.c
+test/static|unit|typing|integration
+```
+
+The addon builds as `build/Release/confluent_kafka_js.node`; installing the
+package runs no build (`"gypfile": false`, no install scripts).
+
 ## Example
 
 ```js
-const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust');
+const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
 
 const producer = new KafkaProducer({ 'bootstrap.servers': 'localhost:9092' });
 const future = await producer.send(                    // resolves at hand-over

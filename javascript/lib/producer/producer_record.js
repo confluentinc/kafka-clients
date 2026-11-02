@@ -12,14 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // Java's ProducerRecord<K, V> over bytes: a key and a value are a Buffer, a
 // Uint8Array, a string (encoded as UTF-8 at send, Java's StringSerializer) or
 // null.
 
-const { illegalArgument } = require('../common/kafka_error');
+const { illegalArgument } = require('../_errors');
+
+/**
+ * A key, value or header value: bytes, or a string encoded as UTF-8.
+ *
+ * @typedef {Buffer | Uint8Array | string} Data
+ */
+
+/**
+ * A record header, Java's Header.
+ *
+ * @typedef {object} Header
+ * @property {string} key The header's key
+ * @property {Data | null} value The header's value
+ */
+
+/**
+ * Options of {@link ProducerRecord}'s constructor: Java's overloaded
+ * constructors in one.
+ *
+ * @typedef {object} ProducerRecordOptions
+ * @property {string} topic The topic the record will be appended to
+ * @property {number | null} [partition] The partition to which the record should be sent
+ * @property {number | null} [timestamp] The timestamp of the record, in milliseconds since epoch;
+ *   null: the producer assigns its current time
+ * @property {Data | null} [key] The key that will be included in the record
+ * @property {Data | null} [value] The record contents
+ * @property {Iterable<Header> | null} [headers] The headers that will be included in the record
+ */
 
 const INT32_MAX = 2 ** 31 - 1;
 
@@ -90,16 +117,10 @@ class ProducerRecord {
    * object; a field left out is what Java's shorter overload passes (`null`,
    * no headers).
    *
-   * @param {object} options
-   * @param {string} options.topic The topic the record will be appended to
-   * @param {number | null} [options.partition] The partition to which the record should be sent
-   * @param {number | null} [options.timestamp] The timestamp of the record, in milliseconds since
-   *   epoch. If null, the producer will assign the timestamp using System.currentTimeMillis().
-   * @param {Buffer | Uint8Array | string | null} [options.key] The key that will be included in the record
-   * @param {Buffer | Uint8Array | string | null} [options.value] The record contents
-   * @param {Iterable<{key: string, value: Buffer | Uint8Array | string | null}> | null} [options.headers]
-   *   the headers that will be included in the record
-   * @throws {KafkaError} `LOCAL_ILLEGAL_ARGUMENT` when the topic is null, or the timestamp or the
+   * @param {ProducerRecordOptions} options The topic, and optionally the partition, the timestamp
+   *   (in milliseconds since epoch; if null, the producer will assign the timestamp using
+   *   System.currentTimeMillis()), the key, the value and the headers of the record
+   * @throws {import('../common/kafka_error').KafkaError} `LOCAL_ILLEGAL_ARGUMENT` when the topic is null, or the timestamp or the
    *   partition is negative, as Java's IllegalArgumentException
    * @throws {TypeError} when an argument has the wrong type
    */
@@ -133,17 +154,17 @@ class ProducerRecord {
     return this.#topic;
   }
 
-  /** @returns {ReadonlyArray<{key: string, value: Buffer | Uint8Array | string | null}>} The headers */
+  /** @returns {ReadonlyArray<Readonly<Header>>} The headers */
   get headers() {
     return this.#headers;
   }
 
-  /** @returns {Buffer | Uint8Array | string | null} The key (or null if no key is specified) */
+  /** @returns {Data | null} The key (or null if no key is specified) */
   get key() {
     return this.#key;
   }
 
-  /** @returns {Buffer | Uint8Array | string | null} The value */
+  /** @returns {Data | null} The value */
   get value() {
     return this.#value;
   }
@@ -158,6 +179,7 @@ class ProducerRecord {
     return this.#partition;
   }
 
+  /** @returns {string} */
   toString() {
     const headers = this.#headers.map((h) => `RecordHeader(key = ${h.key}, value = ${show(h.value)})`).join(', ');
     return (
@@ -170,6 +192,9 @@ class ProducerRecord {
   /**
    * The arguments of the native send (private): topic, partition and
    * timestamp (-1 for null), key and value bytes, header pairs or null.
+   *
+   * @private
+   * @returns {any[]}
    */
   _toNative() {
     return [

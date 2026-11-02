@@ -12,28 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
-// Public exports of the Node.js client: the producer slice of Java's API.
+// The package root: the module namespaces, Java's packages
+// (`require('confluent-kafka-javascript-rust').producer` is
+// `org.apache.kafka.clients.producer`, `.common` is `org.apache.kafka.common`).
+// Each is also its own entry point (`require('confluent-kafka-javascript-rust/producer')`).
 
-const native = require('./_native');
-const { KafkaError } = require('./common/kafka_error');
-const { KafkaFuture } = require('./common/kafka_future');
-const { KafkaProducer } = require('./producer/kafka_producer');
-const { ProducerRecord } = require('./producer/producer_record');
-const { RecordMetadata } = require('./producer/record_metadata');
+const producer = require('./producer');
+const common = require('./common');
 
-// The native layer builds its errors and metadata through these.
-native.setFactories(
-  (fields) => KafkaError._from(fields),
-  (fields) => new RecordMetadata(fields),
-);
-
-module.exports = {
-  KafkaError,
-  KafkaFuture,
-  KafkaProducer,
-  ProducerRecord,
-  RecordMetadata,
-};
+module.exports = { producer, common };

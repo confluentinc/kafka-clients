@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // A producer's configuration object -> the `[key, value]` strings the C FFI's
