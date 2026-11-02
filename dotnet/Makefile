@@ -200,7 +200,7 @@ test-soak-dotnet: build-dotnet
 # checked as a release package is (check-nupkg.py), except for the platform
 # floors (glibc 2.28, macOS 11.0) a local build does not meet: a package to test
 # the packaging, never one to release. The release package, with the natives of
-# all four RIDs, is packed by semaphore.yml's "Release (.NET): pack" block.
+# all three RIDs, is packed by semaphore.yml's "Release (.NET): pack" block.
 #
 # package-check-dotnet installs that package from a local feed into a project
 # outside the repository, with an empty NuGet cache, and runs the smoke program

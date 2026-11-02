@@ -24,7 +24,8 @@ and `clients`: `KafkaProducer` is in `Confluent.Kafka.Producer`, `Serdes` in
 
 Windows, and so .NET Framework, macOS x64 (Intel) and musl-based Linux (Alpine) are not supported
 yet. On them the package installs and a project builds, but creating a client, a mock one included,
-throws `DllNotFoundException`, because the package has no native library for them.
+throws `DllNotFoundException`: the package has no native library for Windows or macOS x64, and its
+Linux libraries need glibc.
 
 ## Producing
 

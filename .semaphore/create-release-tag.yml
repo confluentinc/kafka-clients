@@ -36,8 +36,10 @@ name: create-release-tag
 #     optionally by .devN), or <Version> in dotnet/Directory.Build.props
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N,
 #     -dev.N or -rc.N);
-#   - on a release branch <major>.<minor>.x, the rust version is of that
-#     <major>.<minor>, the only one its publish block accepts from the branch;
+#   - on a release branch <major>.<minor>.x, only rust is entered, and its
+#     version is of that <major>.<minor>, the only one its publish block
+#     accepts from the branch; the python and dotnet release blocks accept
+#     only a commit of master;
 #   - the tag does not yet exist, and the version is new: for rust, unless it
 #     is a dev version, higher than every version on crates.io; for python, not
 #     yet on Test PyPI or PyPI; for dotnet, not yet on nuget.org;
@@ -176,6 +178,10 @@ blocks:
                   && [ "$(printf '%s' "${version}" | cut -d. -f1-2).x" != "${SEMAPHORE_GIT_BRANCH}" ]; then
                   refuse "${version_param} '${version}' is not of release branch ${SEMAPHORE_GIT_BRANCH}; release it from master or from its own release branch"
                 fi
+                # publish-wheels.sh and release-nupkg.sh refuse a tag that is not on master.
+                if [ "${client}" != rust ] && [ "${SEMAPHORE_GIT_BRANCH}" != master ]; then
+                  refuse "${version_param} is entered on release branch ${SEMAPHORE_GIT_BRANCH}, but ${client} is released only from master"
+                fi
               done
             # Tags are never moved or reused, because a published version
             # cannot be replaced. A tag whose release was not published may be
@@ -202,7 +208,7 @@ blocks:
             # unlisted ones included, in the lowercase normalized form that a
             # version matching the pattern above already has. A rust
             # dev version is never published, so it is not compared with
-            # crates.io; a python dev version only with Test PyPI. `fetch` writes the body of a URL to a file, or
+            # crates.io. `fetch` writes the body of a URL to a file, or
             # empties the file if the URL does not exist; it fails on any other
             # status, and on an empty body, which no existing page has.
             - |
