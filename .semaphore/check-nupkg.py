@@ -16,8 +16,8 @@
 #
 #
 # Checks the Confluent.Kafka NuGet package, and the native libraries it carries, before anything
-# is recorded or published. Used by .semaphore/pack-nupkg.sh, .semaphore/build-dotnet-native.sh,
-# .semaphore/publish-nupkg.sh and create-release-tag.yml. Standard library only.
+# is recorded. Used by .semaphore/pack-nupkg.sh, .semaphore/build-dotnet-native.sh,
+# .semaphore/release-nupkg.sh and create-release-tag.yml. Standard library only.
 #
 # Usage, from the repository root:
 #   check-nupkg.py version
@@ -28,10 +28,8 @@
 #       architecture, the system libraries it loads, and its platform floor (glibc 2.28 on Linux,
 #       macOS 11.0 on macOS).
 #   check-nupkg.py package <nupkg> --version <v> --rids "<rid> ..." [--commit <sha>] [--dev]
-#                  [--published]
 #       Checks the package: its file name, the exact list of its entries and how they are stored,
 #       its nuspec, its assemblies, and each native library as `native` does.
-#       --published: the package as the gallery serves it, which adds its repository signature.
 #
 # --dev is for a package built from a developer's or a CI job's own native (make
 # package-check-dotnet): the platform floors are not checked, since that native was not built for
@@ -75,7 +73,6 @@ DEPENDENCY_EXCLUDE = "Build,Analyzers"
 NATIVE_FILES = {
     "linux-x64": "libconfluent_kafka.so",
     "linux-arm64": "libconfluent_kafka.so",
-    "osx-x64": "libconfluent_kafka.dylib",
     "osx-arm64": "libconfluent_kafka.dylib",
 }
 
@@ -251,7 +248,7 @@ def check_elf(rid, name, data, dev):
 
 
 def check_macho(rid, name, data, dev):
-    cputype, subtype = {"osx-x64": (0x01000007, 3), "osx-arm64": (0x0100000C, 0)}[rid]  # *_ALL subtypes
+    cputype, subtype = {"osx-arm64": (0x0100000C, 0)}[rid]  # *_ALL subtypes
     file_cputype, file_subtype, filetype, ncmds, sizeofcmds = struct.unpack_from("<IIIII", data, 4)
     problems = []
     if file_cputype != cputype:
@@ -416,7 +413,7 @@ def check_nuspec(text, version, commit):
     return problems
 
 
-def check_package(path, version, rids, commit, dev, published):
+def check_package(path, version, rids, commit, dev):
     problems = []
     name = os.path.basename(path)
     if name != f"{PACKAGE_ID}.{version}.nupkg":
@@ -452,8 +449,6 @@ def check_package(path, version, rids, commit, dev, published):
             if rid not in NATIVE_FILES:
                 fail(f"--rids names {rid}, which is not one of {', '.join(NATIVE_FILES)}")
             expected.add(f"runtimes/{rid}/native/{NATIVE_FILES[rid]}")
-        if published:
-            expected.add(".signature.p7s")
         core_properties = [n for n in names if re.fullmatch(r"package/services/metadata/core-properties/[^/]+\.psmdcp", n)]
         if len(core_properties) != 1:
             problems.append(f"the package has {len(core_properties)} core-properties entries, not 1")
@@ -515,7 +510,6 @@ def main():
     package.add_argument("--rids", required=True)
     package.add_argument("--commit")
     package.add_argument("--dev", action="store_true")
-    package.add_argument("--published", action="store_true")
     args = parser.parse_args()
 
     if args.command == "version":
@@ -537,7 +531,7 @@ def main():
     rids = args.rids.split()
     if not rids or len(set(rids)) != len(rids):
         fail("--rids must list each RID once")
-    problems = check_package(args.nupkg, args.version, rids, args.commit, args.dev, args.published)
+    problems = check_package(args.nupkg, args.version, rids, args.commit, args.dev)
     if problems:
         fail(f"{args.nupkg}:\n  " + "\n  ".join(problems))
     print(f"{args.nupkg} is {PACKAGE_ID} {args.version} with the natives of {' '.join(rids)}")

@@ -18,13 +18,13 @@ and `clients`: `KafkaProducer` is in `Confluent.Kafka.Producer`, `Serdes` in
 
 - .NET 8 and .NET 10; the .NET Standard 2.0 assembly serves other .NET runtimes on these platforms
 - Linux x64 and arm64, with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu 20.04 and later)
-- macOS x64 and arm64: the native library needs macOS 11 or later, and each .NET version has its
-  own macOS minimum ([.NET 8](https://github.com/dotnet/core/blob/main/release-notes/8.0/supported-os.md),
+- macOS arm64 (Apple silicon): the native library needs macOS 11 or later, and each .NET version
+  has its own macOS minimum ([.NET 8](https://github.com/dotnet/core/blob/main/release-notes/8.0/supported-os.md),
   [.NET 10](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md))
 
-Windows, and so .NET Framework, and musl-based Linux (Alpine) are not supported yet. On them the
-package installs and a project builds, but creating a client, a mock one included, throws
-`DllNotFoundException`, because the package has no native library for them.
+Windows, and so .NET Framework, macOS x64 (Intel) and musl-based Linux (Alpine) are not supported
+yet. On them the package installs and a project builds, but creating a client, a mock one included,
+throws `DllNotFoundException`, because the package has no native library for them.
 
 ## Producing
 

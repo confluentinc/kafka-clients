@@ -95,16 +95,13 @@ name: build-test-release
 #     are manual, so a version reaches an index only when someone promotes it.
 #     The PyPI project is shared with confluent-kafka-python, the
 #     librdkafka-based client.
-#   - dotnet/v<version> publishes the Confluent.Kafka NuGet package. The
+#   - dotnet/v<version> releases the Confluent.Kafka NuGet package. The
 #     version is <Version> in dotnet/Directory.Build.props, and may carry an
-#     -alpha.N, -beta.N, -rc.N or -dev.N suffix. As for Python, the tag build
-#     builds and tests the package but publishes nothing. Every version goes
-#     to the NuGet test gallery (int.nugettest.org) first, through the manual
-#     "Publish to NuGet test gallery" promotion of the tag build, and is
-#     checked there; it then goes to nuget.org through the manual "Publish to
-#     NuGet" promotion of that test gallery pipeline. The id is shared with
-#     confluent-kafka-dotnet, the librdkafka-based client, whose versions are
-#     2.x.
+#     -alpha.N, -beta.N, -rc.N or -dev.N suffix. The tag build builds and
+#     tests the package and records it in the workflow's artifacts, but
+#     publishes nothing: it is uploaded to nuget.org by hand. The id is shared
+#     with confluent-kafka-dotnet, the librdkafka-based client, whose versions
+#     are 2.x.
 #   - A Rust dev version (rust/v0.2.0-dev.1) publishes nothing. Its tag build
 #     runs CI and the blocks that package and test the crate (recorded in the
 #     workflow's artifacts), and skips every publish block.
@@ -129,16 +126,14 @@ name: build-test-release
 #   5. For a final Python version, run the manual "Publish to PyPI" promotion
 #      (publish-pypi.yml) on that Test PyPI pipeline once its blocks have
 #      passed.
-#   6. For the NuGet package, run the manual "Publish to NuGet test gallery"
-#      promotion (publish-nuget-test.yml) on that tag build once its packaging
-#      block has passed. It publishes it to the NuGet test gallery and checks
-#      it there.
-#   7. Then run the manual "Publish to NuGet" promotion (publish-nuget.yml) on
-#      that test gallery pipeline once its blocks have passed.
-# A release tag pushed by other means follows the same path from step 3. The
-# release blocks are skipped on every other build, and the Python and NuGet
-# promotions publish nothing there, so the crate is the only package published
-# without a manual step.
+#   6. For the NuGet package, once the packaging block of that tag build has
+#      passed, download nuget/release/Confluent.Kafka.<version>.nupkg from the
+#      workflow's artifacts and upload it to nuget.org by hand. Its SHA-256 is
+#      in nuget/release/SHA256SUMS.
+# A release tag pushed by other means follows the same path from step 3. On
+# every other build the release blocks are skipped, except the .NET blocks that
+# build and test the package, and the Python promotions publish nothing, so the
+# crate is the only package published without a manual step.
 #
 # Every job records its result and the commit it tested as
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
@@ -582,10 +577,11 @@ blocks:
     # of every CI job before it tags a commit. The release blocks that need CI
     # depend on it: "Release (Rust): pre-publish package check", "Release
     # (Python): packaging" and "Release (.NET): packaging". A new CI block must
-    # be added to this list. Semaphore treats a skipped block as passed, so
-    # this block runs on every tag build, which covers every block that
-    # depends on it. It is skipped on branch builds, so it records no CI
-    # result there.
+    # be added to this list, except the .NET package blocks, which "Release
+    # (.NET): packaging" waits for itself (see the .NET release blocks' header).
+    # Semaphore treats a skipped block as passed, so this block runs on every
+    # tag build, which covers every block that depends on it. It is skipped on
+    # branch builds, so it records no CI result there.
     dependencies:
       - "Verify Rust (Linux amd64)"
       - "Verify language bindings (Linux amd64)"
@@ -1378,14 +1374,18 @@ blocks:
           commands:
             - bash .semaphore/publish-wheels.sh package
 
-  # .NET release blocks. They run only on the build of a .NET release tag,
+  # .NET release blocks. The native library, pack and package verification
+  # blocks (1 to 3 below) run on every build, as the CI blocks do, so that every
+  # commit builds and tests the package; their jobs are in REQUIRED_CI_JOBS of
+  # create-release-tag.yml. They are left out of "Release: CI passed", because
+  # only "Release (.NET): packaging" needs them, and it waits for them itself.
+  # The packaging block runs only on the build of a .NET release tag,
   # dotnet/v<version> where <version> is <major>.<minor>.<patch> with an
   # optional -alpha.N, -beta.N, -dev.N or -rc.N suffix (NuGet's SemVer 2.0),
-  # and are skipped on every other build. The pattern must stay identical in
-  # all of the blocks that use it, here, in publish-nuget-test.yml and in
-  # publish-nuget.yml, and in the scripts that check it: publish-nupkg.sh
-  # (check_tag) and create-release-tag.yml for the tag, and, for the version
-  # without its dotnet/v prefix, check-nupkg.py (VERSION_PATTERN) and
+  # and is skipped on every other build. The pattern must stay identical in
+  # that block and in the scripts that check it: release-nupkg.sh
+  # (release_version) and create-release-tag.yml for the tag, and, for the
+  # version without its dotnet/v prefix, check-nupkg.py (VERSION_PATTERN) and
   # test-nupkg.sh. The version is <Version> in dotnet/Directory.Build.props.
   #
   # The package is Confluent.Kafka.<version>.nupkg: the managed assembly for
@@ -1397,7 +1397,7 @@ blocks:
   #      the way the Python wheels' library is built: on Linux in the
   #      manylinux_2_28 image, so that it needs glibc 2.28 at most; on macOS
   #      for macOS 11.0. It records the library and its C ABI header.
-  #   2. "Release (.NET): pack" packs the four libraries with the managed
+  #   2. "Release (.NET): pack" packs the three libraries with the managed
   #      assembly (.semaphore/pack-nupkg.sh), checks the package
   #      (check-nupkg.py) and records it.
   #   3. "Release (.NET): package verification (<platform>)" tests that
@@ -1408,35 +1408,23 @@ blocks:
   #      self-contained publish runs; and the binding's unit tests run against
   #      the package. It records the SHA-256 of the tested package.
   #   4. "Release (.NET): packaging" depends on the CI blocks that test the
-  #      Rust library and the .NET binding, and on the four verification
+  #      Rust library and the .NET binding, and on the three verification
   #      blocks, so it starts only when all of them have passed. It checks the
   #      tag, the version and the package id, and records the tested package
-  #      as the release, with its checksum (.semaphore/publish-nupkg.sh
-  #      package). The tag build ends here; it publishes nothing.
-  #   5. The manual "Publish to NuGet test gallery" promotion of the tag build
-  #      (publish-nuget-test.yml) pushes the release to int.nugettest.org, and
-  #      its post-publish blocks check the package the gallery serves and
-  #      install it from there. It refuses unless the packaging block passed.
-  #   6. The manual "Publish to NuGet" promotion of that pipeline
-  #      (publish-nuget.yml) pushes the same package to nuget.org and checks it
-  #      there. It refuses unless it passed the test gallery's checks in this
-  #      workflow.
-  # No VM of this pipeline holds a NuGet key, and the publishes build nothing:
-  # the package is pushed only if it is byte-identical to the tested one. A
-  # gallery adds its repository signature to the package it serves, so the
-  # post-publish checks compare it entry by entry
-  # (.semaphore/check-published-nupkg.py).
+  #      as the release, nuget/release/<package> with its checksum in
+  #      nuget/release/SHA256SUMS (.semaphore/release-nupkg.sh). The tag build
+  #      ends here.
+  # The pipeline publishes nothing, and no VM of it holds a NuGet key: the
+  # recorded release is downloaded from the tag build's artifacts and uploaded
+  # to nuget.org by hand.
   #
   # The package has no Windows library yet (dotnet/README.md): CI builds and
   # tests one for win-x64 and win-x86 ("Verify language bindings (Windows
   # amd64)"), and these blocks do not build them yet.
   #
-  # As for the wheels, to resume an interrupted release, rerun the failed
-  # blocks of the pipeline that failed: the tag build or either promotion.
+  # To resume an interrupted release, rerun the failed blocks of the tag build.
   - name: "Release (.NET): native library (Linux amd64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1458,8 +1446,6 @@ blocks:
 
   - name: "Release (.NET): native library (Linux arm64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1479,38 +1465,8 @@ blocks:
             - artifact push workflow "/tmp/native/${NUGET_RID}/libconfluent_kafka.so" --destination "nuget/native/${NUGET_RID}/libconfluent_kafka.so" --force
             - artifact push workflow "/tmp/native/${NUGET_RID}/confluent_kafka_bindings.h" --destination "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --force
 
-  - name: "Release (.NET): native library (macOS amd64)"
-    dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 60
-    task:
-      agent:
-        machine:
-          type: s1-macos-15-amd64-6
-      env_vars:
-        - name: NUGET_RID
-          value: osx-x64
-        # The oldest macOS the package supports (dotnet/README.md), for the Rust library and
-        # the C code it compiles (aws-lc) alike; check-nupkg.py refuses a library that needs a
-        # newer one.
-        - name: MACOSX_DEPLOYMENT_TARGET
-          value: "11.0"
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "Build the native library (macOS amd64)"
-          commands:
-            - sh .semaphore/build-dotnet-native.sh /tmp/native
-            - artifact push workflow "/tmp/native/${NUGET_RID}/libconfluent_kafka.dylib" --destination "nuget/native/${NUGET_RID}/libconfluent_kafka.dylib" --force
-            - artifact push workflow "/tmp/native/${NUGET_RID}/confluent_kafka_bindings.h" --destination "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --force
-
   - name: "Release (.NET): native library (macOS arm64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1539,10 +1495,7 @@ blocks:
     dependencies:
       - "Release (.NET): native library (Linux amd64)"
       - "Release (.NET): native library (Linux arm64)"
-      - "Release (.NET): native library (macOS amd64)"
       - "Release (.NET): native library (macOS arm64)"
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1557,21 +1510,21 @@ blocks:
             # nothing else.
             - |
               for native in linux-x64/libconfluent_kafka.so linux-arm64/libconfluent_kafka.so \
-                  osx-x64/libconfluent_kafka.dylib osx-arm64/libconfluent_kafka.dylib; do
+                  osx-arm64/libconfluent_kafka.dylib; do
                 mkdir -p "/tmp/natives/${native%/*}" \
                   && artifact pull workflow "nuget/native/${native}" --destination "/tmp/natives/${native}" \
                   || exit 1
               done
-            # The version packed is <Version> in dotnet/Directory.Build.props; the packaging
-            # block checks it against the tag again before anything is released.
-            - test "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" = "$(python3 .semaphore/check-nupkg.py version)"
+            # The version packed is <Version> in dotnet/Directory.Build.props. On a .NET release
+            # tag build it must be the tag's; the packaging block checks it again before
+            # anything is released.
+            - NUGET_VERSION=$(python3 .semaphore/check-nupkg.py version) && export NUGET_VERSION
+            - case "${SEMAPHORE_GIT_TAG_NAME:-}" in dotnet/v*) test "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" = "${NUGET_VERSION}" ;; esac
             - sh .semaphore/pack-nupkg.sh /tmp/natives /tmp/package
-            - artifact push workflow "/tmp/package/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg" --destination "nuget/built/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg" --force
+            - artifact push workflow "/tmp/package/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --destination "nuget/built/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --force
 
   - name: "Release (.NET): package verification (Linux amd64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1592,7 +1545,8 @@ blocks:
             - ./.semaphore/install-dotnet.sh
             # test-nupkg.sh takes a directory that holds the package and nothing else.
             - mkdir -p /tmp/package
-            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg"
+            - NUGET_VERSION=$(python3 .semaphore/check-nupkg.py version) && export NUGET_VERSION
+            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg"
             # The C ABI header of the library this platform loads, for the unit tests' ABI
             # conformance test.
             - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
@@ -1601,8 +1555,6 @@ blocks:
 
   - name: "Release (.NET): package verification (Linux arm64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1623,38 +1575,8 @@ blocks:
             - ./.semaphore/install-dotnet.sh
             # test-nupkg.sh takes a directory that holds the package and nothing else.
             - mkdir -p /tmp/package
-            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg"
-            # The C ABI header of the library this platform loads, for the unit tests' ABI
-            # conformance test.
-            - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
-            - sh .semaphore/test-nupkg.sh /tmp/package /tmp/confluent_kafka_bindings.h /tmp/tested.sha256
-            - artifact push workflow /tmp/tested.sha256 --destination "nuget/tested/${NUGET_PLATFORM}" --force
-
-  - name: "Release (.NET): package verification (macOS amd64)"
-    dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 60
-    task:
-      agent:
-        machine:
-          type: s1-macos-15-amd64-6
-      env_vars:
-        - name: NUGET_PLATFORM
-          value: macos-amd64
-        - name: NUGET_RID
-          value: osx-x64
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "Test the package (macOS amd64)"
-          commands:
-            - ./.semaphore/install-dotnet.sh
-            # test-nupkg.sh takes a directory that holds the package and nothing else.
-            - mkdir -p /tmp/package
-            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg"
+            - NUGET_VERSION=$(python3 .semaphore/check-nupkg.py version) && export NUGET_VERSION
+            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg"
             # The C ABI header of the library this platform loads, for the unit tests' ABI
             # conformance test.
             - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
@@ -1663,8 +1585,6 @@ blocks:
 
   - name: "Release (.NET): package verification (macOS arm64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1685,7 +1605,8 @@ blocks:
             - ./.semaphore/install-dotnet.sh
             # test-nupkg.sh takes a directory that holds the package and nothing else.
             - mkdir -p /tmp/package
-            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg"
+            - NUGET_VERSION=$(python3 .semaphore/check-nupkg.py version) && export NUGET_VERSION
+            - artifact pull workflow "nuget/built/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --destination "/tmp/package/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg"
             # The C ABI header of the library this platform loads, for the unit tests' ABI
             # conformance test.
             - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
@@ -1695,12 +1616,11 @@ blocks:
   - name: "Release (.NET): packaging"
     # Starts only when the package was tested on every platform, and every CI
     # block has passed ("Release: CI passed"). The checks this block makes are
-    # listed in publish-nupkg.sh; it loads no key.
+    # listed in release-nupkg.sh; it loads no key.
     dependencies:
       - "Release: CI passed"
       - "Release (.NET): package verification (Linux amd64)"
       - "Release (.NET): package verification (Linux arm64)"
-      - "Release (.NET): package verification (macOS amd64)"
       - "Release (.NET): package verification (macOS arm64)"
     run:
       when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
@@ -1711,14 +1631,14 @@ blocks:
         # The platforms of the verification blocks above, whose checksums are
         # recorded under nuget/tested/<platform>.
         - name: NUGET_PLATFORMS
-          value: linux-amd64 linux-arm64 macos-amd64 macos-arm64
+          value: linux-amd64 linux-arm64 macos-arm64
       prologue:
         commands:
           - . .semaphore/job-start.sh
       jobs:
         - name: "Package the tested package"
           commands:
-            - bash .semaphore/publish-nupkg.sh package
+            - bash .semaphore/release-nupkg.sh
 
 promotions:
   - name: Start translation plan
@@ -1752,12 +1672,11 @@ promotions:
         - name: DOTNET_VERSION
           required: false
           description: "The version of the Confluent.Kafka NuGet package to
-            publish: <Version> in dotnet/Directory.Build.props at this commit
+            release: <Version> in dotnet/Directory.Build.props at this commit
             (for example 4.4.0 or 4.4.0-rc.1). The tag build builds and tests
-            the package; its \"Publish to NuGet test gallery\" promotion
-            publishes it to the NuGet test gallery, and that pipeline's
-            \"Publish to NuGet\" promotion then to nuget.org. Leave empty to
-            not release the package."
+            the package and records it in its artifacts, from which it is
+            uploaded to nuget.org by hand. Leave empty to not release the
+            package."
   # Manual. Publishes a Python version to Test PyPI and checks it there
   # (publish-testpypi.yml). Run it on the build of its python/v<version> tag
   # once "Release (Python): packaging" has passed. Its blocks are skipped on
@@ -1767,15 +1686,6 @@ promotions:
   # (publish-pypi.yml) then publishes the same wheels to PyPI.
   - name: Publish to Test PyPI
     pipeline_file: publish-testpypi.yml
-  # Manual. Publishes a .NET version to the NuGet test gallery and checks it
-  # there (publish-nuget-test.yml). Run it on the build of its dotnet/v<version>
-  # tag once "Release (.NET): packaging" has passed. Its blocks are skipped on
-  # any other build, and its publish job refuses unless that block recorded the
-  # package in this workflow, so starting it from a failed or unrelated pipeline
-  # publishes nothing. Its own "Publish to NuGet" promotion (publish-nuget.yml)
-  # then publishes the same package to nuget.org.
-  - name: Publish to NuGet test gallery
-    pipeline_file: publish-nuget-test.yml
   - name: Ask agent
     pipeline_file: ask.yml
     parameters:
