@@ -764,7 +764,11 @@ PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
   factory, built on rustls.
 - `SslConfigs` (`common/config/ssl_configs.rs`): certificate, key and
   truststore configuration. Without a truststore Mozilla's root certificates
-  are trusted (the default `webpki-roots` cargo feature).
+  are trusted (the default `webpki-roots` cargo feature); with the
+  `platform-verifier` feature the platform verifier decides instead
+  (`rustls-platform-verifier`). The C library and the Python wheel are built
+  with `platform-verifier` and without `webpki-roots` (`rust/Makefile`
+  `build-cdylib`), so no bundle is compiled into them.
 - `SslTransportLayer`: async TLS transport through tokio-rustls.
 - `SslChannelBuilder`: the TLS channel factory.
 - TLS 1.2 and 1.3 are supported.
@@ -926,7 +930,8 @@ Verified against `Cargo.toml`.
 | futures-util | 0.3 | Future combinators |
 | tokio-rustls | 0.26 | Async TLS |
 | rustls | 0.23 | TLS implementation (TLS 1.2 + 1.3); PEM cert/key parsing via its re-exported `pki_types::pem::PemObject` |
-| webpki-roots | 1.0.10 | Optional (`webpki-roots` feature, default): Mozilla's root certificates, trusted when no truststore is set |
+| rustls-platform-verifier | 0.7 | Optional (`platform-verifier` feature): the platform's certificate verifier when no truststore is configured (Java: the JDK default trust store): the OS verifier on macOS and Windows, the OS root store on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override it) |
+| webpki-roots | 1.0.10 | Optional (`webpki-roots` feature, default): Mozilla's root certificates, trusted when no truststore is set and the `platform-verifier` feature is off |
 | aws-lc-rs | 1 | rustls crypto provider, and PBKDF2-HMAC for `ScramFormatter::hi` (already a transitive dependency through rustls, so no extra compiled crate) |
 | bytes | 1 | Buffer handling on the receive path |
 | flate2 / snap / lz4_flex / zstd | 1 / 1 / 0.11 / 0.13 | Record-batch compression codecs |

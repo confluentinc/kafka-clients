@@ -4,6 +4,18 @@ All notable changes to the `confluent-kafka` Python package are documented in th
 
 Before GA the public API is not stable, and an interface may change even in a minor release.
 
+## [Unreleased]
+
+### Security
+
+- Without `ssl.truststore.location` or `ssl.truststore.certificates`, the
+  broker certificate is verified by the operating system's certificate
+  verifier (its root certificates on Linux, where `SSL_CERT_FILE` /
+  `SSL_CERT_DIR` override them), as the Java client uses the JDK's default
+  trust store (the core's `platform-verifier` feature); the wheel no longer
+  ships Mozilla's root bundle. On Linux a host without a CA bundle must set
+  one of the truststore keys or `SSL_CERT_FILE`.
+
 ## [4.4.0b1] - 2026-10-30
 
 First preview release of the 4.4.0 Python client built on a new Rust core. Its

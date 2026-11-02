@@ -45,7 +45,8 @@ Options:
                     the tree this script lives in.
   --workdir <dir>   Where --ref clones to. Default: ./soak-build.
   --venv <dir>      Virtualenv to create/use. Default: <source>/venv-soak.
-  --profile <p>     cargo profile: release (default) or debug.
+  --profile <p>     release (default: the library the wheel ships, built by
+                    `make -C rust build-cdylib`) or debug.
   --no-venv         Install into the active Python environment.
   --sha <sha>       Commit the sources correspond to. REQUIRED in practice for
                     --src builds of a tree with no .git (an scp'd copy), which
@@ -147,17 +148,26 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Build the Rust client with the FFI feature
 #
-# Produces rust/target/<profile>/libconfluent_kafka.{so,dylib,a} and
+# Produces rust/target/<cargo profile>/libconfluent_kafka.{so,dylib,a} and
 # rust/target/include/confluent_kafka_bindings.h (the cbindgen header of `_err`
-# twins the C extension includes).
+# twins the C extension includes). A release build is the library the C
+# library and the Python wheel ship, `make -C rust build-cdylib` in
+# target/release-cdylib/, when the source tree has that target; an older ref
+# builds `cargo build --features ffi --release` as it did.
 # ---------------------------------------------------------------------------
-CARGO_ARGS=(build --features ffi)
-[[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
+CARGO_PROFILE="$PROFILE"
+if [[ "$PROFILE" == "release" ]] && grep -q '^build-cdylib:' "$ROOT/rust/Makefile"; then
+    CARGO_PROFILE="release-cdylib"
+    echo ">>> make -C rust build-cdylib"
+    make -C "$ROOT/rust" build-cdylib
+else
+    CARGO_ARGS=(build --features ffi)
+    [[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
+    echo ">>> cargo ${CARGO_ARGS[*]}"
+    ( cd "$ROOT/rust" && cargo "${CARGO_ARGS[@]}" )
+fi
 
-echo ">>> cargo ${CARGO_ARGS[*]}"
-( cd "$ROOT/rust" && cargo "${CARGO_ARGS[@]}" )
-
-LIB_DIR="$ROOT/rust/target/$PROFILE"
+LIB_DIR="$ROOT/rust/target/$CARGO_PROFILE"
 if ! ls "$LIB_DIR"/libconfluent_kafka.* >/dev/null 2>&1; then
     echo "ERROR: no libconfluent_kafka.* in $LIB_DIR after the cargo build" >&2
     exit 1
@@ -300,7 +310,7 @@ MANIFEST_GIT_DESCRIBE="$GIT_DESCRIBE" \
 MANIFEST_GIT_BRANCH="$GIT_BRANCH" \
 MANIFEST_GIT_REF_REQUESTED="${GIT_REF:-<local source>}" \
 MANIFEST_SOURCE_ROOT="$ROOT" \
-MANIFEST_CARGO_PROFILE="$PROFILE" \
+MANIFEST_CARGO_PROFILE="$CARGO_PROFILE" \
 MANIFEST_RUSTC_VERSION="$RUSTC_VERSION" \
 MANIFEST_CARGO_VERSION="$CARGO_VERSION" \
 MANIFEST_PYTHON_VERSION="$PYTHON_VERSION" \

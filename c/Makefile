@@ -2,6 +2,14 @@ REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 BUILD_DIR = build
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
+# The directory of the Rust library the binding links. The repository root's
+# Makefile passes target/release-cdylib, the library `make -C rust build-cdylib`
+# builds, as it ships; `devel-build` passes target/debug. Left empty, `build`
+# keeps the directory the build directory was configured with, so `test-unit`
+# after `devel-build` tests the debug library, and a fresh build directory uses
+# the first of target/release-cdylib, target/release and target/debug that
+# holds the library (CMakeLists.txt). `grpc-native` defaults to release-cdylib.
+RUST_LIB_DIR ?=
 # Native (non-container) gRPC server builds for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for them in MULTILANG_BACKEND_MODE=native.
@@ -25,10 +33,12 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 build:
 	cmake -S . -B $(BUILD_DIR) \
 		-DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) \
+		$(if $(RUST_LIB_DIR),-DRUST_LIB_DIR=$(RUST_LIB_DIR)) \
 		-DCMAKE_C_FLAGS="$(CFLAGS_EXTRA)"
 	cmake --build $(BUILD_DIR)
 
-devel-build: build
+devel-build:
+	$(MAKE) build RUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/debug
 
 # CTest unit suite, then the C-backend arm of the Rust multilanguage
 # integration suite.
@@ -41,7 +51,7 @@ test-unit: build
 # then run the `__grpc_c` tests of the Rust harness against it.
 #
 # Cross-arch guard: Dockerfile.grpc COPYs the *host-built*
-# rust/target/release/libconfluent_kafka.a (+ confluent_kafka.h) straight into
+# rust/target/release-cdylib/libconfluent_kafka.a (+ confluent_kafka.h) straight into
 # a Linux container and links it with the container's GNU ld. On a non-Linux
 # host that artifact is the wrong object format (Mach-O on macOS), so the image
 # cannot build/link. Cross-compiling host->Linux is out of scope for a dev-box
@@ -57,7 +67,7 @@ test-integration:
 		printf 'SKIP C test-integration: host is %s, not Linux.\n' "$$(uname -s)"; \
 		printf '\n'; \
 		printf 'The C gRPC-server image COPYs the host-built\n'; \
-		printf '  rust/target/release/libconfluent_kafka.a\n'; \
+		printf '  rust/target/release-cdylib/libconfluent_kafka.a\n'; \
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
 		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
@@ -77,7 +87,7 @@ producer-perf-test: build
 	./$(BUILD_DIR)/producer_perf_test
 
 # C++ gRPC server image for the multilang test harness. Context is the repo
-# root; requires libconfluent_kafka.a already built in rust/target/release/.
+# root; requires libconfluent_kafka.a already built in rust/target/release-cdylib/.
 # Needs only the Rust release artifacts: the Dockerfile runs cmake on
 # grpc_server/ inside the container, so the host-side `build` contributes
 # nothing the image consumes.
@@ -92,7 +102,7 @@ grpc-image:
 # packages (headers, protoc, grpc_cpp_plugin, pkg-config) on the host.
 grpc-native:
 	cmake -S grpc_server -B $(GRPC_NATIVE_DIR)/c-build -DCMAKE_BUILD_TYPE=Release \
-		-DRUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/release \
+		-DRUST_LIB_DIR=$(or $(RUST_LIB_DIR),$(RUST_PROJECT_ROOT)/target/release-cdylib) \
 		-DRUST_INCLUDE_DIR=$(RUST_PROJECT_ROOT)/target/include \
 		-DPROTO_DIR=$(GRPC_PROTO_DIR)
 	cmake --build $(GRPC_NATIVE_DIR)/c-build --parallel

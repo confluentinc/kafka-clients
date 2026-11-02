@@ -572,8 +572,8 @@ manifest would otherwise record `"git_sha": "unknown"`, defeating its whole
 purpose in exactly the mode this README recommends — `build.sh` warns loudly at
 build time when that happens, and the soak repeats the warning at every startup
 for the life of the run),
-runs `cargo build --release --features ffi` (which produces
-`rust/target/include/confluent_kafka.h` and `rust/target/release/libconfluent_kafka.*`),
+runs `make -C rust build-cdylib`, the build of the library the wheel ships (which produces
+`rust/target/include/confluent_kafka.h` and `rust/target/release-cdylib/libconfluent_kafka.*`),
 creates a venv, installs `requirements.txt`, then installs the bindings with
 `CONFLUENT_KAFKA_LIB_DIR` pointing at the cargo output — that order is
 mandatory, since the C extension compiles against the generated header and
