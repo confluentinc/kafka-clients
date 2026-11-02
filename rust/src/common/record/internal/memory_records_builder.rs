@@ -635,6 +635,13 @@ impl MemoryRecordsBuilder {
     /// of the batch.
     fn reset_buffer_to_initial_position(&mut self) {
         let initial_position = self.initial_position;
+        // A closed builder's buffer is frozen and `built_records` still views it, so thawing it
+        // would copy the whole batch only to truncate the copy. Shortening the builder's own
+        // view moves its position as Java's does and leaves the other views unchanged.
+        if let ByteBufferOutputStream::Frozen(frozen) = &mut self.buffer_stream {
+            frozen.truncate(initial_position);
+            return;
+        }
         self.with_written_buffer(|buffer| buffer.truncate(initial_position));
     }
 
@@ -2504,6 +2511,27 @@ mod frozen_buffer_tests {
         assert_eq!(0, taken.capacity(), "the live view keeps the allocation");
         assert_eq!(expected.buffer(), records.buffer(), "the view is intact");
         assert_eq!(5, records.records().count());
+    }
+
+    /// Aborting a closed batch whose `MemoryRecords` view is still alive (an in-flight batch
+    /// aborted on a fatal error or a forced close) shortens the builder's own view instead of
+    /// copying the batch, and the pool gets the original allocation back once the view is gone.
+    #[test]
+    fn test_abort_after_close_keeps_the_allocation() {
+        let mut builder = new_builder();
+        append_records(&mut builder);
+        let records = builder.build();
+        let written_at = records.buffer().as_ptr();
+        let written = records.buffer().to_vec();
+
+        builder.abort();
+        assert_eq!(0, builder.buffer().unwrap().len());
+        assert_eq!(&written[..], records.buffer(), "the live view is intact");
+        drop(records);
+
+        let reclaimed = builder.take_buffer();
+        assert_eq!(written_at, reclaimed.as_ptr(), "the pool must get the same allocation back");
+        assert_eq!(CAPACITY, reclaimed.capacity());
     }
 
     /// Reopening a batch whose views are gone rewrites the header in the same allocation.
