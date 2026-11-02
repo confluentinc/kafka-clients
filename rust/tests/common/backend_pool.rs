@@ -154,6 +154,17 @@ impl BackendKind {
         }
     }
 
+    /// The make target (run from the repository root) that builds this
+    /// backend's container image. `build-grpc-images` builds the Python,
+    /// Python-async and C images; the JavaScript image is left out of it on
+    /// purpose (see the root `Makefile`), so it names its own target.
+    fn image_make_target(self) -> &'static str {
+        match self {
+            BackendKind::Python | BackendKind::PythonAsync | BackendKind::C => "build-grpc-images",
+            BackendKind::Javascript => "build-grpc-images-javascript",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             BackendKind::Python => "python",
@@ -501,10 +512,11 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
     let container = image.start().await.unwrap_or_else(|e| {
         panic!(
             "failed to start {} gRPC backend container (image {}:dev) on network {}: {e}\n\
-             Build it with `make build-grpc-images`.",
+             Build it with `make {}`.",
             kind.label(),
             kind.image_repository(),
             broker_network,
+            kind.image_make_target(),
         )
     });
 
