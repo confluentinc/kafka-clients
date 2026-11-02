@@ -113,7 +113,20 @@ if ($toolchainFile -notmatch '(?m)^channel\s*=\s*"([^"]+)"') {
     throw 'No channel in rust/rust-toolchain.toml'
 }
 $channel = $Matches[1]
-Invoke-Native rustup @('toolchain', 'install', $channel, '--profile', 'minimal', '--component', 'clippy', '--component', 'rustfmt', '--target', $triple)
+# Windows can still hold a file rustup has just extracted (os error 32, as when a scanner reads
+# it), and rustup then rolls the install back; the install is retried.
+for ($attempt = 1; ; $attempt++) {
+    try {
+        Invoke-Native rustup @('toolchain', 'install', $channel, '--profile', 'minimal', '--component', 'clippy', '--component', 'rustfmt', '--target', $triple)
+        break
+    } catch {
+        if ($attempt -ge 3) {
+            throw
+        }
+        Write-Output "$_; retrying in 30 seconds (attempt $attempt of 3)"
+        Start-Sleep -Seconds 30
+    }
+}
 
 Write-Output "== Native library ($triple)"
 # A RUSTFLAGS variable would replace the static C runtime flags of rust/.cargo/config.toml.

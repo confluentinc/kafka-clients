@@ -1177,34 +1177,6 @@ blocks:
             - sh .semaphore/build-wheels.sh
             - artifact push workflow wheelhouse --destination "pypi/wheels/${WHEEL_PLATFORM}" --force
 
-  - name: "Release (Python): wheels (macOS amd64)"
-    dependencies: []
-    run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 60
-    task:
-      agent:
-        machine:
-          type: s1-macos-15-amd64-6
-      env_vars:
-        - name: WHEEL_PLATFORM
-          value: macos-amd64
-        # The oldest macOS the wheels support, for the Rust library and the
-        # extension alike.
-        - name: MACOSX_DEPLOYMENT_TARGET
-          value: "11.0"
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "Build the wheels (macOS amd64)"
-          commands:
-            # cibuildwheel requires Python 3.11 or later.
-            - sem-version python 3.13
-            - sh .semaphore/build-wheels.sh
-            - artifact push workflow wheelhouse --destination "pypi/wheels/${WHEEL_PLATFORM}" --force
-
   - name: "Release (Python): wheels (macOS arm64)"
     dependencies: []
     run:
@@ -1289,34 +1261,6 @@ blocks:
             - sh .semaphore/test-wheels.sh wheelhouse /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
 
-  - name: "Release (Python): wheel verification (macOS amd64)"
-    dependencies: ["Release (Python): wheels (macOS amd64)"]
-    run:
-      when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
-    execution_time_limit:
-      minutes: 60
-    task:
-      agent:
-        machine:
-          type: s1-macos-15-amd64-6
-      env_vars:
-        - name: WHEEL_PLATFORM
-          value: macos-amd64
-      prologue:
-        commands:
-          - . .semaphore/job-start.sh
-      jobs:
-        - name: "Test the wheels (macOS amd64)"
-          commands:
-            # test-wheels.sh takes a directory that holds the wheels and
-            # nothing else, and refuses any other file.
-            - artifact pull workflow "pypi/wheels/${WHEEL_PLATFORM}" --destination /tmp/built
-            - mkdir wheelhouse && find /tmp/built -type f -exec cp {} wheelhouse/ \;
-            # Some unit tests read the Java sources in the kafka submodule.
-            - git submodule update --init --depth=1 kafka
-            - sh .semaphore/test-wheels.sh wheelhouse /tmp/tested.sha256
-            - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
-
   - name: "Release (Python): wheel verification (macOS arm64)"
     dependencies: ["Release (Python): wheels (macOS arm64)"]
     run:
@@ -1353,7 +1297,6 @@ blocks:
       - "Release: CI passed"
       - "Release (Python): wheel verification (Linux amd64)"
       - "Release (Python): wheel verification (Linux arm64)"
-      - "Release (Python): wheel verification (macOS amd64)"
       - "Release (Python): wheel verification (macOS arm64)"
     run:
       when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
@@ -1365,7 +1308,7 @@ blocks:
         # under pypi/wheels/<platform> and their checksums under
         # pypi/tested/<platform>.
         - name: WHEEL_PLATFORMS
-          value: linux-amd64 linux-arm64 macos-amd64 macos-arm64
+          value: linux-amd64 linux-arm64 macos-arm64
       prologue:
         commands:
           - . .semaphore/job-start.sh
@@ -1550,6 +1493,8 @@ blocks:
             # The C ABI header of the library this platform loads, for the unit tests' ABI
             # conformance test.
             - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
+            # Some unit tests read the Java sources in the kafka submodule.
+            - git submodule update --init --depth=1 kafka
             - sh .semaphore/test-nupkg.sh /tmp/package /tmp/confluent_kafka_bindings.h /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "nuget/tested/${NUGET_PLATFORM}" --force
 
@@ -1580,6 +1525,8 @@ blocks:
             # The C ABI header of the library this platform loads, for the unit tests' ABI
             # conformance test.
             - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
+            # Some unit tests read the Java sources in the kafka submodule.
+            - git submodule update --init --depth=1 kafka
             - sh .semaphore/test-nupkg.sh /tmp/package /tmp/confluent_kafka_bindings.h /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "nuget/tested/${NUGET_PLATFORM}" --force
 
@@ -1610,6 +1557,8 @@ blocks:
             # The C ABI header of the library this platform loads, for the unit tests' ABI
             # conformance test.
             - artifact pull workflow "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --destination /tmp/confluent_kafka_bindings.h
+            # Some unit tests read the Java sources in the kafka submodule.
+            - git submodule update --init --depth=1 kafka
             - sh .semaphore/test-nupkg.sh /tmp/package /tmp/confluent_kafka_bindings.h /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "nuget/tested/${NUGET_PLATFORM}" --force
 
