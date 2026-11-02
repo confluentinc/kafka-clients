@@ -25,6 +25,7 @@
 # library and run. With a package directory, the binding's unit tests then run against the
 # package too, on the runner: the unit-test project's -p:ConfluentKafkaPackageVersion swaps its
 # project reference for the package, so the assembly and the native library both come from it.
+# Some of them read the Java sources of the kafka submodule, which must be checked out.
 # Must be POSIX sh. Needs .NET SDK 10 and the .NET 8 runtime (.semaphore/install-dotnet.sh), in
 # $HOME/.dotnet or on PATH, and Docker on Linux.
 #
@@ -150,6 +151,9 @@ case "${1:-}" in
         ;;
 esac
 [ -f dotnet/tools/PackageSmoke/PackageSmoke.csproj ] || die "run from the repository root"
+if [ "$mode" = full ] && [ ! -d kafka/clients/src/main/java ]; then
+    die "the unit tests read the Java sources of the kafka submodule; run git submodule update --init kafka"
+fi
 python3 - "$VERSION" <<'PYTHON' || die "'$VERSION' is not a release version"
 import re, sys
 sys.exit(re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?", sys.argv[1]) is None)
@@ -251,6 +255,8 @@ if [ "$mode" = full ]; then
     tar -C dotnet --exclude bin --exclude obj -cf "$work/unit.tar" Directory.Build.props Confluent.Kafka.snk \
         .editorconfig tests/Confluent.Kafka.UnitTests
     tar -C "$work/unit" -xf "$work/unit.tar"
+    # Where the project looks for the kafka submodule, ../../../kafka from its directory.
+    ln -s "$(pwd -P)/kafka" "$work/kafka"
     write_nuget_config "$work/unit" "$FEED"
     project="$work/unit/tests/Confluent.Kafka.UnitTests/Confluent.Kafka.UnitTests.csproj"
     retry dotnet restore --configfile "$work/unit/nuget.config" "$project" -p:ConfluentKafkaPackageVersion="$VERSION"
