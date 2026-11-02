@@ -16,6 +16,11 @@ Not published: the package is `private`.
   from `common`, `KafkaFuture` and `KafkaError`, over the Rust client's C FFI.
 - `send(record, callback?)` resolves at hand-over with a `KafkaFuture` whose
   `get()` settles at delivery; `flush()` and `close({timeoutMs}?)`.
+- A producer whose `close()` never completed is force-closed (Java's
+  `close(Duration.ZERO)`) when it is garbage collected or its worker or
+  process ends: its unsent records fail, and no JS callback or future runs for
+  them. `await producer.close()` before teardown when records must be
+  delivered.
 
 ### Package
 

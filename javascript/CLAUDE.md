@@ -131,10 +131,14 @@ These decide every question, in this order:
   the pending callbacks then only free their contexts. Before the destroy it
   force-closes the producer, `close(Duration.ZERO)` (D11): destroy would
   otherwise close an unclosed producer gracefully itself, blocking the JS
-  thread up to `max.block.ms` + `delivery.timeout.ms` (two minutes by
-  default) for records no broker may take, so a `worker.terminate()` would
-  stall. Unsent records fail at once instead; their delivery callbacks run,
-  inline, without JS, and still report through `__set_callback_result`
+  thread up to `max.block.ms` + `delivery.timeout.ms` (60 s + 120 s, three
+  minutes by default) for records no broker may take, so a
+  `worker.terminate()` would stall. Unsent records fail instead, as soon as
+  the I/O task leaves a wait it is in (for a node's connection, up to
+  `socket.connection.setup.timeout.max.ms`), as with Java's
+  `close(Duration.ZERO)`, whose Sender waits the same way; their delivery
+  callbacks run, inline, without JS, and still report through
+  `__set_callback_result`
   (`destroying` is set only after the close). `await producer.close()` is
   unaffected: a completed close leaves nothing for the finalizer to do.
 
@@ -214,8 +218,10 @@ These decide every question, in this order:
   `"gypfile": false`, no install scripts, `files` without the build inputs,
   the tests and the gRPC harness.
 - Tests: `test/static` (no build),
-  `test/unit/<module>/<java_test_class_snake>.test.js` for a Java test class
-  (`KafkaProducerTest` -> `kafka_producer.test.js`), other unit tests
+  `test/unit/<module>/<file>.test.js` for a Java test class, named after the
+  `lib/<module>/<file>.js` it tests: the Java test class without its `Test`
+  suffix, snake_cased (`KafkaProducerTest` -> `producer/kafka_producer.test.js`;
+  `test/static/layout.test.js` checks it), other unit tests
   named after what they test, `test/typing`,
   `test/integration` (broker-backed). Tests and examples import the package by
   its own name (`require('confluent-kafka-javascript-rust/producer')`, Node's

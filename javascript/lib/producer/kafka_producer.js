@@ -284,6 +284,11 @@ class KafkaProducer {
    * producer's state and changes nothing, as Java's close(Duration) checks it
    * first.
    *
+   * Await it before teardown: a producer whose close never completed is
+   * force-closed, as by `close({timeoutMs: 0})`, when it is garbage collected
+   * or its worker or process ends; its unsent records then fail, and no JS
+   * callback or future runs for them.
+   *
    * @param {CloseOptions} [options] `timeoutMs`: the maximum time to wait for the producer to
    *   complete any pending requests. A timeout of zero means do not wait.
    * @returns {Promise<void>} rejecting with `LOCAL_ILLEGAL_ARGUMENT` for a negative `timeoutMs`

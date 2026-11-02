@@ -138,6 +138,17 @@ must not be modified or detached (transferred) until its `send()` Promise
 settles; it may be reused after that. A string key or value is encoded into a
 `Buffer` of the client's own and is unaffected.
 
+**Close the producer before teardown.** A producer whose `close()` never
+completed is force-closed, as Java's `close(Duration.ZERO)`, when it is
+garbage collected or its worker or process ends (`worker.terminate()`,
+`process.exit()`): its unsent records fail, and no JS callback or future runs
+for them. The force-close can still block the thread briefly, while the
+client's I/O task finishes a wait it is in (for a broker connection, up to
+`socket.connection.setup.timeout.max.ms`). So when records must be delivered,
+`await producer.close()` (or at least `flush()`) before ending a worker or the
+process; Java's daemon I/O thread loses unsent records at JVM exit the same
+way.
+
 `examples/producer.js` produces one record, awaiting its hand-over and then
 its delivery, and prints its metadata:
 

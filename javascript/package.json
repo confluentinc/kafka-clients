@@ -20,6 +20,16 @@
       "default": "./lib/common/index.js"
     }
   },
+  "typesVersions": {
+    "*": {
+      "producer": [
+        "lib/producer/index.d.ts"
+      ],
+      "common": [
+        "lib/common/index.d.ts"
+      ]
+    }
+  },
   "engines": {
     "node": ">=18"
   },

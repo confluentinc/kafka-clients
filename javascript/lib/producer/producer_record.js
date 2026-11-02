@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// `Data` names Node's Buffer: the directive carries @types/node into the
+// generated producer_record.d.ts (`preserve`, as tsc >= 5.5 drops it from
+// declarations otherwise), so a project whose tsconfig restricts `types`
+// still resolves it.
+/// <reference types="node" preserve="true" />
+
 'use strict';
 
 // Java's ProducerRecord<K, V> over bytes: a key and a value are a Buffer, a
