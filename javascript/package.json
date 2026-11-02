@@ -1,0 +1,26 @@
+{
+  "name": "confluent-kafka-javascript-rust",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
+  "license": "Apache-2.0",
+  "main": "lib/index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "gypfile": true,
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "test": "node --test test/unit/*.test.js",
+    "test:unit": "node --test test/unit/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js"
+  },
+  "files": [
+    "binding.gyp",
+    "index.d.ts",
+    "lib/",
+    "scripts/",
+    "src/"
+  ]
+}
