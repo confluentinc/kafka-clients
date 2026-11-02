@@ -54,8 +54,9 @@ name: build-test-release
 #   8. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
 #      against the RustSec advisory database; a vulnerable dependency fails.
 #   9. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
-#      blocks, which run only on a release tag of their package (see the
-#      comments above them).
+#      blocks, which run only on a release tag of their package, except the
+#      .NET blocks that build and test the package, which run on every build
+#      (see the comments above them).
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -107,8 +108,9 @@ name: build-test-release
 #     workflow's artifacts), and skips every publish block.
 # To release a package:
 #   1. Merge the change that sets its version to master, or, for a patch or
-#      pre-release of an earlier line, to its release branch <major>.<minor>.x
-#      (1.0.x), where the fixes are backported.
+#      pre-release of an earlier line of the crate, to its release branch
+#      <major>.<minor>.x (1.0.x), where the fixes are backported. The wheels
+#      and the NuGet package are released only from master.
 #   2. On the build of that commit, run the manual "Create release tag"
 #      promotion (create-release-tag.yml) and enter the version of each client
 #      to release, RUST_VERSION, PYTHON_VERSION and DOTNET_VERSION; a client
@@ -128,8 +130,9 @@ name: build-test-release
 #      passed.
 #   6. For the NuGet package, once the packaging block of that tag build has
 #      passed, download nuget/release/Confluent.Kafka.<version>.nupkg from the
-#      workflow's artifacts and upload it to nuget.org by hand. Its SHA-256 is
-#      in nuget/release/SHA256SUMS.
+#      workflow's artifacts and upload it to nuget.org by hand. Before the
+#      upload, compare its SHA-256 with the one the "Package the tested
+#      package" job printed in its log, which no later job can change.
 # A release tag pushed by other means follows the same path from step 3. On
 # every other build the release blocks are skipped, except the .NET blocks that
 # build and test the package, and the Python promotions publish nothing, so the
@@ -1107,11 +1110,11 @@ blocks:
   #      (.semaphore/test-wheels.sh) on a VM that never built them, so that
   #      only the library inside each wheel can be loaded, and records the
   #      SHA-256 of each tested wheel.
-  #   3. "Release (Python): packaging" depends on the CI blocks that test the
-  #      Rust library and the Python binding, and on the four verification
-  #      blocks, so it starts only when all of them have passed. It checks the tag and the version, and records the tested
-  #      wheels as the release, with their checksums. The tag build ends here;
-  #      it publishes nothing.
+  #   3. "Release (Python): packaging" depends on "Release: CI passed" and on
+  #      the three verification blocks, so it starts only when every CI block
+  #      and all of them have passed. It checks the tag and the version, and
+  #      records the tested wheels as the release, with their checksums. The
+  #      tag build ends here; it publishes nothing.
   #   4. The manual "Publish to Test PyPI" promotion of the tag build
   #      (publish-testpypi.yml) uploads the release, and its post-publish
   #      blocks verify the wheels as users receive them from Test PyPI. It
@@ -1350,10 +1353,11 @@ blocks:
   #      on Linux also in a container of each supported distribution; a
   #      self-contained publish runs; and the binding's unit tests run against
   #      the package. It records the SHA-256 of the tested package.
-  #   4. "Release (.NET): packaging" depends on the CI blocks that test the
-  #      Rust library and the .NET binding, and on the three verification
-  #      blocks, so it starts only when all of them have passed. It checks the
-  #      tag, the version and the package id, and records the tested package
+  #   4. "Release (.NET): packaging" depends on "Release: CI passed" and on
+  #      the three verification blocks, so it starts only when every CI block
+  #      and all of them have passed. It checks the tag, the version, the
+  #      package id and that nuget.org does not have the version yet, and
+  #      records the tested package
   #      as the release, nuget/release/<package> with its checksum in
   #      nuget/release/SHA256SUMS (.semaphore/release-nupkg.sh). The tag build
   #      ends here.
@@ -1420,8 +1424,9 @@ blocks:
         - name: NUGET_RID
           value: osx-arm64
         # The oldest macOS the package supports (dotnet/README.md), for the Rust library and
-        # the C code it compiles (aws-lc) alike; check-nupkg.py refuses a library that needs a
-        # newer one.
+        # the C code it compiles (aws-lc) alike; build-dotnet-native.sh refuses to build without
+        # it. check-nupkg.py refuses a library whose own minimum is newer, but cannot see the
+        # minimum of the C objects linked into it, so this variable is what sets theirs.
         - name: MACOSX_DEPLOYMENT_TARGET
           value: "11.0"
       prologue:

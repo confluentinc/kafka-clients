@@ -140,15 +140,21 @@ try {
 $library = Join-Path $repo "rust\target\$triple\release\confluent_kafka.dll"
 Write-Output "$library, $((Get-Item $library).Length) bytes"
 $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
-if ($dumpbin) {
-    $dependents = & $dumpbin /nologo /dependents $library
-    $dependents | Write-Output
-    $crt = $dependents | Where-Object { $_ -match '(?i)^\s*(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)' }
-    if ($crt) {
-        throw "confluent_kafka.dll imports the C runtime ($($crt.Trim() -join ', ')): it must link it statically"
-    }
-} else {
-    Write-Output 'Warning: dumpbin.exe not found; the C runtime dependency is not checked'
+if (-not $dumpbin) {
+    throw 'dumpbin.exe not found: the C runtime dependency of confluent_kafka.dll cannot be checked'
+}
+$dependents = & $dumpbin /nologo /dependents $library
+$dependents | Write-Output
+if ($LASTEXITCODE -ne 0) {
+    throw "dumpbin exited with $LASTEXITCODE"
+}
+# Every Windows DLL imports KERNEL32.dll; without it the listing was not read.
+if (-not ($dependents | Where-Object { $_ -match '(?i)^\s*kernel32\.dll\s*$' })) {
+    throw 'dumpbin listed no KERNEL32.dll import: the C runtime dependency of confluent_kafka.dll was not checked'
+}
+$crt = $dependents | Where-Object { $_ -match '(?i)^\s*(vcruntime|msvcp|ucrtbase|api-ms-win-crt-)' }
+if ($crt) {
+    throw "confluent_kafka.dll imports the C runtime ($($crt.Trim() -join ', ')): it must link it statically"
 }
 
 Write-Output "== .NET ($Platform)"
