@@ -74,8 +74,9 @@ example, the new client defaults to the KIP-848 consumer group protocol.
 
 ## Versions before the proposal is adopted
 
-Until this proposal is adopted, the Rust crates and the Python packages are on separate
-version lines, and `cargo xtask bump-version` (`make bump-version`) keeps them so:
+Until this proposal is adopted, the Rust crates, the Python packages and the .NET package
+are on separate version lines, and `cargo xtask bump-version` (`make bump-version`) keeps
+them so:
 
 - **Rust crates** follow plain semantic versioning from the first release (`0.1.1`,
   `0.2.0-beta.1`, ...), not aligned to Apache Kafka. `cargo xtask api-compat` enforces
@@ -86,7 +87,15 @@ version lines, and `cargo xtask bump-version` (`make bump-version`) keeps them s
   Without `--python-version` (`PYTHON_VERSION=`) the packages get the PEP 440 form of the
   crate version, which is refused while that is the lower one; pass the Python version
   explicitly, for example `make bump-version VERSION=0.2.0 PYTHON_VERSION=4.4.0`.
+- **The .NET package** (`Confluent.Kafka`, `<Version>` in `dotnet/Directory.Build.props`)
+  follows its own SemVer line, which tracks Apache Kafka like the Python one
+  (`4.4.0-alpha.1`). Its major version starts at 4, above the 2.x versions of the
+  librdkafka-based client that shares the package id. It changes only with
+  `--dotnet-version` (`DOTNET_VERSION=`) and only moves up. To change it alone, give the
+  crates and the Python packages their current versions, for example
+  `make bump-version VERSION=0.3.0-beta.1 PYTHON_VERSION=4.4.0a1.dev2 DOTNET_VERSION=4.4.0-beta.1`.
 
 Versions only move forward: the command refuses a version below the current one, in SemVer
-order for the crates and PEP 440 order for the Python packages, where a pre-release comes
-before its release, so a pre-release `X.Y.Z-beta.N` is cut before `X.Y.Z`, never after.
+order for the crates and the .NET package and PEP 440 order for the Python packages, where a
+pre-release comes before its release, so a pre-release `X.Y.Z-beta.N` is cut before `X.Y.Z`,
+never after.
