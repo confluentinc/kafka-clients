@@ -171,63 +171,33 @@ global_job_config:
     # in dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj.
     - name: NUGET_PACKAGE
       value: Confluent.Kafka
+  # Shell-neutral, because the Windows blocks run it too and their shell is PowerShell. Each
+  # block's task prologue starts with the rest for its shell: `. .semaphore/job-start.sh` on Linux
+  # and macOS (the "Run on branch" switch, the `running` result of the epilogue's comment below,
+  # and Python 3.10), `.semaphore/job-start.ps1` on Windows. A new block must start its prologue
+  # with one of them.
   prologue:
     commands:
       - checkout
-      # When the Task is triggered manually with a "Run on branch" override,
-      # Semaphore exposes the desired branch as SEMAPHORE_GIT_BRANCH_CHECKOUT
-      # but `checkout` still lands on the build's original ref. Switch to the
-      # requested branch so submodule init + pip install operate against the
-      # right tree.
-      - |
-        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
-          echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
-          # Semaphore's shallow single-branch clone doesn't create
-          # refs/remotes/origin/<other-branch>, so origin/<branch> isn't a
-          # valid start point. Use FETCH_HEAD (which the explicit fetch
-          # above does update) and -B so re-runs reset an existing local
-          # branch instead of failing.
-          git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
-          git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
-        fi
-      # Replaces this job's previous result with `running` (see the epilogue
-      # below), so that a rerun that is still running, was stopped, or could not
-      # upload its result does not leave an earlier `passed` in place. On a
-      # build of master or of a release branch <major>.<minor>.x, the only
-      # kinds create-release-tag.yml tags, a job that
-      # cannot record `running` fails before it runs anything, because an
-      # earlier `passed` of this job would otherwise still count. Elsewhere it
-      # only warns, so that an artifact store outage does not fail pull
-      # requests.
-      - |
-        marker=$(printf '%s' "${SEMAPHORE_JOB_NAME}" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
-        if ! { result_file=$(mktemp) \
-          && printf 'running %s %s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "${SEMAPHORE_JOB_ID}" > "${result_file}" \
-          && artifact push workflow "${result_file}" --destination "ci-result/${marker}" --force; }; then
-          if [ "${SEMAPHORE_GIT_REF_TYPE}" = "branch" ] \
-            && [[ "${SEMAPHORE_GIT_BRANCH}" == master || "${SEMAPHORE_GIT_BRANCH}" =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
-            echo "Could not record that this job started, so an earlier result of this job could still be counted by create-release-tag.yml; rerun the job" >&2
-            exit 1
-          fi
-          echo "Warning: could not record that this job started; an earlier result of this job remains recorded"
-        fi
-      - sem-version python 3.10
   # Records the CI results that create-release-tag.yml checks before creating
   # a release tag. Each job writes `<result> <commit tested> <job id>` to
   # ci-result/<job name> in the workflow's artifacts: `running` when it starts
-  # (the prologue above), then `passed` or `failed` when it ends. Because each
+  # (.semaphore/job-start.sh), then `passed` or `failed` when it ends. Because each
   # write replaces the previous one, only the latest run of a job counts. The
   # commit is the working tree's HEAD rather than SEMAPHORE_GIT_SHA, so a job
-  # that switched branches
-  # (see the prologue) cannot attest to the commit being tagged. Results are
+  # that switched branches (see .semaphore/job-start.sh) cannot attest to the
+  # commit being tagged. Results are
   # recorded on every build; create-release-tag.yml decides which builds may be
   # tagged. The job name is reduced to characters that are safe in an artifact
   # path, and LC_ALL=C ensures that Linux and macOS (BSD tr) map multibyte
   # characters such as the em dash identically; create-release-tag.yml applies
   # the same mapping. A failed upload here produces only a warning: if the
   # final result cannot be recorded, the job stays `running` (on a master or
-  # release branch build the prologue guarantees that it was recorded), and
-  # create-release-tag.yml refuses to tag the commit.
+  # release branch build job-start.sh guarantees that it was recorded), and
+  # create-release-tag.yml refuses to tag the commit. On Windows these bash
+  # commands fail in PowerShell, which does not change the job's result; the
+  # Windows blocks record theirs in their own epilogue (.semaphore/ci-result.ps1),
+  # which runs before this one.
   epilogue:
     on_pass:
       commands:
@@ -274,6 +244,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
@@ -328,6 +299,7 @@ blocks:
         # Runs before EACH job in this block; every job is a separate VM with
         # its own checkout.
         commands:
+          - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
@@ -377,6 +349,7 @@ blocks:
           value: full
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
@@ -420,6 +393,7 @@ blocks:
           value: full
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
@@ -477,6 +451,39 @@ blocks:
             # on the make's own command line.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make test-integration-dotnet-native
 
+  - name: "Verify language bindings (Windows amd64)"
+    # The .NET client on Windows, whose package is to carry a win-x64 and a
+    # win-x86 library: each job builds the library of its platform, then runs
+    # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
+    # net10.0 in a process of that platform
+    # (.semaphore/verify-dotnet-windows.ps1). The broker-backed tests and the
+    # multilanguage arms run on Linux and macOS only: they need Linux
+    # containers, which the Windows agents do not run. The agent's shell is
+    # PowerShell, so the block starts with job-start.ps1 and records its result
+    # in its own epilogue (see the global prologue and epilogue).
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "verify-dotnet (Windows amd64)"
+          commands:
+            - .\.semaphore\verify-dotnet-windows.ps1 -Platform x64
+        - name: "verify-dotnet (Windows x86)"
+          commands:
+            - .\.semaphore\verify-dotnet-windows.ps1 -Platform x86
+
   - name: "Check Rust docs (Linux amd64)"
     # Its own block so a documentation failure is attributable at a glance and
     # does not wait behind the test suite. `make doc-check` runs `cargo doc`
@@ -486,6 +493,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "doc-check (Linux amd64)"
@@ -501,6 +509,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "package-check (Linux amd64)"
@@ -526,6 +535,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
           - sudo apt install -y abigail-tools
           # The prebuilt release, pinned by version and checksum.
@@ -555,6 +565,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           - ./.semaphore/dependencies.sh
           # The prebuilt release, pinned by version and checksum.
           - curl -sSfL -o /tmp/cargo-audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz
@@ -580,6 +591,7 @@ blocks:
       - "Verify language bindings (Linux amd64)"
       - "Verify Rust (macOS arm64)"
       - "Verify language bindings (macOS arm64)"
+      - "Verify language bindings (Windows amd64)"
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
@@ -589,6 +601,9 @@ blocks:
     execution_time_limit:
       minutes: 10
     task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "CI passed"
           commands:
@@ -627,6 +642,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           # The version is read from rust/Cargo.toml rather than from the tag,
           # so a tag that names another version is refused, with a clear
           # message, by "Release (Rust): publish to crates.io". record_tested_crate
@@ -697,6 +713,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           # The version is read from rust/Cargo.toml rather than from the tag,
           # so a tag that names another version is refused, with a clear
           # message, by "Release (Rust): publish to crates.io". record_tested_crate
@@ -757,6 +774,7 @@ blocks:
     task:
       prologue:
         commands:
+          - . .semaphore/job-start.sh
           # Helper functions for the checks below and for the job commands.
           # Semaphore runs a job's prologue and commands in a single shell
           # session, so the functions remain available to the job.
@@ -797,8 +815,8 @@ blocks:
           # block's `run` condition already limits it to release tags; the check
           # is repeated here, before the token is loaded, so that the publish
           # does not depend on that condition alone. A build whose jobs were
-          # redirected to another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the
-          # global prologue) did not test the tagged commit.
+          # redirected to another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see
+          # .semaphore/job-start.sh) did not test the tagged commit.
           - |
             release_tag_pattern='^rust/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'
             if [ "${SEMAPHORE_GIT_REF_TYPE}" != "tag" ]; then
@@ -1008,6 +1026,9 @@ blocks:
     execution_time_limit:
       minutes: 40
     task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "crates.io index and download match the upload"
           execution_time_limit:
@@ -1108,9 +1129,7 @@ blocks:
   # The publish and checksum logic, shared by both indexes, is in
   # .semaphore/publish-wheels.sh and .semaphore/check-published-wheels.py.
   #
-  # There are no Windows wheels: a Windows agent runs its commands in
-  # PowerShell, which cannot run the bash in this file's global prologue and
-  # epilogue.
+  # There are no Windows wheels yet.
   #
   # As for the crate, to resume an interrupted release, rerun the failed blocks
   # of the pipeline that failed: the tag build or either promotion.
@@ -1127,6 +1146,9 @@ blocks:
       env_vars:
         - name: WHEEL_PLATFORM
           value: linux-amd64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the wheels (Linux amd64)"
           commands:
@@ -1148,6 +1170,9 @@ blocks:
       env_vars:
         - name: WHEEL_PLATFORM
           value: linux-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the wheels (Linux arm64)"
           commands:
@@ -1173,6 +1198,9 @@ blocks:
         # extension alike.
         - name: MACOSX_DEPLOYMENT_TARGET
           value: "11.0"
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the wheels (macOS amd64)"
           commands:
@@ -1198,6 +1226,9 @@ blocks:
         # extension alike.
         - name: MACOSX_DEPLOYMENT_TARGET
           value: "11.0"
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the wheels (macOS arm64)"
           commands:
@@ -1219,6 +1250,9 @@ blocks:
       env_vars:
         - name: WHEEL_PLATFORM
           value: linux-amd64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the wheels (Linux amd64)"
           commands:
@@ -1244,6 +1278,9 @@ blocks:
       env_vars:
         - name: WHEEL_PLATFORM
           value: linux-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the wheels (Linux arm64)"
           commands:
@@ -1269,6 +1306,9 @@ blocks:
       env_vars:
         - name: WHEEL_PLATFORM
           value: macos-amd64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the wheels (macOS amd64)"
           commands:
@@ -1294,6 +1334,9 @@ blocks:
       env_vars:
         - name: WHEEL_PLATFORM
           value: macos-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the wheels (macOS arm64)"
           commands:
@@ -1327,6 +1370,9 @@ blocks:
         # pypi/tested/<platform>.
         - name: WHEEL_PLATFORMS
           value: linux-amd64 linux-arm64 macos-amd64 macos-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Package the tested wheels"
           commands:
@@ -1381,9 +1427,9 @@ blocks:
   # post-publish checks compare it entry by entry
   # (.semaphore/check-published-nupkg.py).
   #
-  # There is no Windows library yet (dotnet/README.md): a Windows agent runs
-  # its commands in PowerShell, which cannot run the bash in this file's global
-  # prologue and epilogue.
+  # The package has no Windows library yet (dotnet/README.md): CI builds and
+  # tests one for win-x64 and win-x86 ("Verify language bindings (Windows
+  # amd64)"), and these blocks do not build them yet.
   #
   # As for the wheels, to resume an interrupted release, rerun the failed
   # blocks of the pipeline that failed: the tag build or either promotion.
@@ -1400,6 +1446,9 @@ blocks:
       env_vars:
         - name: NUGET_RID
           value: linux-x64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the native library (Linux amd64)"
           commands:
@@ -1420,6 +1469,9 @@ blocks:
       env_vars:
         - name: NUGET_RID
           value: linux-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the native library (Linux arm64)"
           commands:
@@ -1445,6 +1497,9 @@ blocks:
         # newer one.
         - name: MACOSX_DEPLOYMENT_TARGET
           value: "11.0"
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the native library (macOS amd64)"
           commands:
@@ -1470,6 +1525,9 @@ blocks:
         # newer one.
         - name: MACOSX_DEPLOYMENT_TARGET
           value: "11.0"
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Build the native library (macOS arm64)"
           commands:
@@ -1488,6 +1546,9 @@ blocks:
     execution_time_limit:
       minutes: 20
     task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Pack the package"
           commands:
@@ -1522,6 +1583,9 @@ blocks:
           value: linux-amd64
         - name: NUGET_RID
           value: linux-x64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the package (Linux amd64)"
           commands:
@@ -1550,6 +1614,9 @@ blocks:
           value: linux-arm64
         - name: NUGET_RID
           value: linux-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the package (Linux arm64)"
           commands:
@@ -1578,6 +1645,9 @@ blocks:
           value: macos-amd64
         - name: NUGET_RID
           value: osx-x64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the package (macOS amd64)"
           commands:
@@ -1606,6 +1676,9 @@ blocks:
           value: macos-arm64
         - name: NUGET_RID
           value: osx-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Test the package (macOS arm64)"
           commands:
@@ -1639,6 +1712,9 @@ blocks:
         # recorded under nuget/tested/<platform>.
         - name: NUGET_PLATFORMS
           value: linux-amd64 linux-arm64 macos-amd64 macos-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
       jobs:
         - name: "Package the tested package"
           commands:
