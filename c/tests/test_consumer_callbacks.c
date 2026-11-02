@@ -35,6 +35,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
@@ -1677,6 +1678,73 @@ static void test_subscribe_with_topics_listener_cb(void) {
     fixture_destroy(&f);
 }
 
+// On a KafkaConsumer, `subscribe([])` is `unsubscribe()`: it keeps the
+// listener registered by the earlier `subscribe`, which `close()` may still
+// call, and a listener given with the empty list is not registered. So the
+// caller frees each `self_` at its documented release point: the new
+// listener's right away, the kept one's only once the consumer is destroyed.
+// A freed `self_` is poisoned first, so a call through one would read
+// garbage. Without a broker the group never assigns, so no method runs; the
+// Python broker test (test_listener_release_broker.py) drives the close-time
+// call itself.
+static void test_empty_subscribe_keeps_the_listener_until_destroy(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_Map_t *props = kafka_Map_new();
+    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"127.0.0.1:1");
+    kafka_Map_put(props, (void *)"group.id", (void *)"listener-release-test-group");
+    kafka_Map_put(props, (void *)"group.protocol", (void *)"consumer");
+    kafka_consumer_ConsumerConfig_t *config = kafka_consumer_ConsumerConfig_new(props, &err);
+    assert_ok(err, "ConsumerConfig_new");
+    kafka_Map_destroy(props);
+    kafka_consumer_KafkaConsumer_t *kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &err);
+    assert_ok(err, "KafkaConsumer_new");
+    kafka_consumer_ConsumerConfig_destroy(config);
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_KafkaConsumer__as_Consumer(kc);
+
+    listener_probe_t *kept = malloc(sizeof(*kept));
+    listener_probe_t *ignored = malloc(sizeof(*ignored));
+    TEST_ASSERT_NOT_NULL(kept);
+    TEST_ASSERT_NOT_NULL(ignored);
+    probe_init(kept, consumer, 1);
+    probe_init(ignored, consumer, 1);
+
+    kafka_consumer_ConsumerRebalanceListener_t *listener = probe_listener(kept, 1);
+    kafka_List_t *topics = kafka_List_new();
+    kafka_List_add(topics, (void *)"t");
+    kafka_consumer_Consumer_subscribe_with_topics_listener(consumer, topics, listener, &err);
+    assert_ok(err, "Consumer_subscribe_with_topics_listener");
+    kafka_List_destroy(topics);
+    kafka_consumer_ConsumerRebalanceListener_destroy(listener);
+
+    // `subscribe([], ignored)`: replaces nothing, so `ignored` may go now.
+    listener = probe_listener(ignored, 1);
+    kafka_List_t *empty = kafka_List_new();
+    kafka_consumer_Consumer_subscribe_with_topics_listener(consumer, empty, listener, &err);
+    assert_ok(err, "Consumer_subscribe_with_topics_listener([])");
+    kafka_consumer_ConsumerRebalanceListener_destroy(listener);
+    memset(ignored, 0xAB, sizeof(*ignored));
+    free(ignored);
+
+    // A listenerless `subscribe([])` keeps it too.
+    kafka_consumer_Consumer_subscribe_with_topics(consumer, empty, &err);
+    assert_ok(err, "Consumer_subscribe_with_topics([])");
+    kafka_List_destroy(empty);
+    kafka_List_t *subs = consumer_subscription(consumer);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_List_size(subs));
+    kafka_List_destroy(subs);
+
+    kafka_consumer_CloseOptions_t *options = kafka_consumer_CloseOptions_new_with_timeout(0);
+    kafka_consumer_Consumer_close_with_options(consumer, options, &err);
+    assert_ok(err, "Consumer_close_with_options");
+    kafka_consumer_CloseOptions_destroy(options);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&kept->revoked) + atomic_load(&kept->assigned));
+    kafka_consumer_KafkaConsumer_destroy(kc);
+
+    // The consumer is destroyed: the kept listener's release point.
+    memset(kept, 0xAB, sizeof(*kept));
+    free(kept);
+}
+
 // `MockConsumer_destroy` with a never-pumped `rebalance_cb` in flight runs
 // the queued listener invocation and the completion exactly once, on the
 // destroying thread.
@@ -1961,6 +2029,7 @@ int main(void) {
     RUN_TEST(test_local_callback_error_releases_its_opaque_once);
     RUN_TEST(test_listener_local_callback_error_releases_its_opaque_once);
     RUN_TEST(test_subscribe_with_topics_listener_cb);
+    RUN_TEST(test_empty_subscribe_keeps_the_listener_until_destroy);
     RUN_TEST(test_destroy_runs_pending_rebalance_cb_listener_and_completion_once);
     return UNITY_END();
 }

@@ -16,7 +16,7 @@
 //!
 //! Each invocation expands to four `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers — one per backend — that call the same generic test body. The
-//! body must be `async fn body<F: ProducerBackendFactory>(factory: &F)`.
+//! body must be `async fn body<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F)`.
 //!
 //! Naming convention: `name__rust`, `name__grpc_python`,
 //! `name__grpc_python_async`, `name__grpc_c`. The double underscore is
@@ -30,10 +30,22 @@
 //! joining a job that has no image for it. `__rust` deliberately lacks the
 //! infix — it drives the native client with no container and no gRPC hop.
 //!
+//! The three container-backed arms are individually `#[cfg(feature =
+//! "multilanguage-tests")]` and the macro itself is available with only
+//! `integration-tests`, the shape [`crate::multilanguage_admin_test`] has.
+//! Under `integration-tests` alone (`make test-integration`, `verify-sandbox`)
+//! an invocation expands to the `__rust` arm only, which drives the production
+//! `Producer` trait against the same broker, so converting a Rust-only
+//! integration test into a scenario costs no coverage at any feature level.
+//!
+//! Every arm prints one timing line to stderr when it ends, through
+//! [`crate::common::arm_timer::ArmTimer`], which shows in CI logs for passing
+//! tests too.
+//!
 //! Example:
 //!
 //! ```ignore
-//! async fn produce_single_record_inner<F: ProducerBackendFactory>(factory: &F) {
+//! async fn produce_single_record_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
 //!     // ... shared assertions ...
 //! }
 //! multilanguage_test!(test_produce_single_record, produce_single_record_inner);
@@ -51,26 +63,40 @@
 ///
 /// Two-arg form delegates to three-arg with the default config; existing
 /// callers don't change.
+///
+/// Leading outer attributes (`#[ignore = "<reason>"]`) are applied to every
+/// arm: the form for a scenario that exposes a defect in the shared Rust core,
+/// which every backend reaches.
 #[macro_export]
 macro_rules! multilanguage_test {
-    ($name:ident, $body:ident) => {
-        $crate::multilanguage_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
+    ($(#[$attr:meta])* $name:ident, $body:ident) => {
+        $crate::multilanguage_test!(
+            $(#[$attr])* $name,
+            $body,
+            $crate::common::cluster_config::ClusterConfig::default()
+        );
     };
-    ($name:ident, $body:ident, $cluster_config:expr) => {
+    ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
             // Double underscore is intentional so backend labels are
             // easy to grep in cargo test output, hence non_snake_case.
+            $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "rust");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let factory = $crate::common::backend_factory::RustNativeFactory;
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_python");
                 // Create the TestContext first so the broker network
                 // exists before we attempt to attach the python
                 // container to it.
@@ -81,13 +107,17 @@ macro_rules! multilanguage_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_python_async");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::PythonAsync,
@@ -95,13 +125,17 @@ macro_rules! multilanguage_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::PythonAsyncGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
 
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_c");
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,
@@ -109,7 +143,8 @@ macro_rules! multilanguage_test {
                 )
                 .await;
                 let factory =
-                    $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
+                    $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
         }

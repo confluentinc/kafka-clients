@@ -1,7 +1,10 @@
 REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 BUILD_DIR = build
-GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
+# The tag of the gRPC image; rust/tests/common/backend_pool.rs reads the same
+# variable. Override it per worktree so concurrent sessions do not share images.
+MULTILANG_IMAGE_TAG ?= dev
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:$(MULTILANG_IMAGE_TAG)
 # Native (non-container) gRPC server builds for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for them in MULTILANG_BACKEND_MODE=native.
@@ -60,7 +63,7 @@ test-integration:
 		printf '  rust/target/release/libconfluent_kafka.a\n'; \
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-c gRPC arm jobs.\n'; \
 		printf 'Run it natively on this host with: %smake test-integration-c-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \

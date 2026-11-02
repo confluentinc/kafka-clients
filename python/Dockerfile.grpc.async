@@ -21,7 +21,7 @@
 # rust/multilanguage-test-server/ and python/. The Makefile target sets this for you:
 #   make -C python grpc-image-async
 #
-# Tags the result as confluent-kafka-rust/python-async-grpc-server:dev.
+# Tags the result as confluent-kafka-rust/python-async-grpc-server:$MULTILANG_IMAGE_TAG, `dev` by default.
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build _confluentkafka.so against the prebuilt Rust shared lib

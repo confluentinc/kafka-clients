@@ -16,14 +16,23 @@
 //! `kafka/clients/clients-integration-tests/src/test/java/org/apache/kafka/clients/consumer/PlaintextConsumerCloseTest.java`
 //! (Apache Kafka 4.3.1).
 //!
+//! The translated tests run as multilanguage scenarios: each one runs against
+//! the native Rust consumer and, through the gRPC backends, the Python (sync
+//! and asyncio) and C consumers ([`multilanguage_consumer_test!`]); each name
+//! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
+//! are native fixtures; only the consumer, and the duration of its close, are
+//! under test. On a gRPC arm the measured close includes one gRPC round trip,
+//! which is far below the margins the assertions use.
+//!
 //! # Methods classification
 //!
 //! ## Translated (CONSUMER / KIP-848 arm)
 //!
 //! - `testAsyncConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs` →
-//!   [`test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms`]
+//!   `test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms`
 //! - `testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs` →
-//!   [`test_async_consumer_close_with_timeout_ignores_fetch_max_wait_ms`]
+//!   `test_async_consumer_close_with_timeout_ignores_fetch_max_wait_ms`
 //!
 //! ## SKIPped (classic group protocol — `consumer-threading.md` §20)
 //!
@@ -47,20 +56,20 @@ use std::time::Instant;
 use confluent_kafka::admin::AdminClient;
 use confluent_kafka::admin::AdminClientConfig;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::consumer::CloseOptions;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
+use crate::multilanguage_consumer_test;
 
 /// `ConsumerConfig.DEFAULT_FETCH_MAX_WAIT_MS`.
 const DEFAULT_FETCH_MAX_WAIT_MS: u128 = ConsumerConfig::DEFAULT_FETCH_MAX_WAIT_MS as u128;
@@ -125,23 +134,31 @@ async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize
 /// `ClientsTestUtils.consumeRecords(consumer, numRecords)`:
 /// `poll(100ms)` until at least `numRecords` records are consumed, failing
 /// after 60 s.
-async fn consume_records(consumer: &mut BytesConsumer, num_records: usize) {
+async fn consume_records(consumer: &mut BytesConsumer, num_records: usize, backend: &str) {
     let deadline = Instant::now() + CONSUME_RECORDS_TIMEOUT;
     let mut consumed = 0;
     while consumed < num_records {
         assert!(
             Instant::now() < deadline,
-            "Timed out before consuming expected {num_records} records."
+            "Timed out before consuming expected {num_records} records. ({backend} backend)"
         );
-        let records = consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
+        let records = consumer
+            .poll(Duration::from_millis(100))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
         consumed += records.count();
     }
 }
 
 /// `PlaintextConsumerCloseTest#calculateConsumerCloseDelay`, for
-/// the CONSUMER group protocol. Returns the wall-clock duration of the close
-/// call alone, in milliseconds.
-async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: CloseOperation) -> u128 {
+/// the CONSUMER group protocol, with the consumer built by `factory`. Returns
+/// the wall-clock duration of the close call alone, in milliseconds.
+async fn calculate_consumer_close_delay<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    close_operation: CloseOperation,
+) -> u128 {
+    let backend = factory.name();
     let topic_name = ctx.topic("calculate-consumer-close-delay");
     let group_id = ctx.group_id("group_test");
     let num_records = 100;
@@ -158,26 +175,27 @@ async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: 
 
     send_records(ctx, &TopicPartition::new(topic_name.clone(), 0), num_records).await;
 
-    let props = HashMap::from([
+    let mut props = HashMap::from([
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("group.id".to_string(), group_id),
-        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
     ]);
-    let mut consumer: BytesConsumer = Box::new(
-        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            ConsumerConfig::new(&props).expect("valid consumer config"),
-            ByteArrayDeserializer::default(),
-            ByteArrayDeserializer::default(),
-        )
-        .expect("KafkaConsumer::new should succeed"),
-    );
+    ctx.apply_security(&mut props);
+    let mut consumer: BytesConsumer = factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: create consumer: {e}"));
 
     consumer
         .subscribe_with_topics(vec![topic_name])
         .await
-        .expect("subscribe should succeed");
-    consume_records(&mut consumer, num_records).await;
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    consume_records(&mut consumer, num_records, backend).await;
 
     let start = Instant::now();
     // Java's lambda (`Consumer::close` / `close(CloseOptions)`) cannot fail the
@@ -189,7 +207,7 @@ async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: 
             consumer.close_with_options(CloseOptions::new_with_timeout(timeout)).await
         },
     }
-    .expect("close should succeed");
+    .unwrap_or_else(|e| panic!("{backend} backend: close should succeed: {e}"));
     let close_ms = start.elapsed().as_millis();
 
     admin.close().await;
@@ -198,31 +216,48 @@ async fn calculate_consumer_close_delay(ctx: &mut TestContext, close_operation: 
 
 /// Translates `PlaintextConsumerCloseTest#testAsyncConsumerCloseWithDefaultTakesAtLeastFetchMaxWaitMs`,
 /// via `testCloseWithDefaultTakesAtLeastFetchMaxWaitMs`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms() {
-    let mut ctx = TestContext::new(kip848_3_broker(2)).await;
-    let close_ms = calculate_consumer_close_delay(&mut ctx, CloseOperation::Default).await;
+async fn async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let close_ms = calculate_consumer_close_delay(ctx, factory, CloseOperation::Default).await;
     assert!(
         close_ms >= DEFAULT_FETCH_MAX_WAIT_MS,
-        "Closing a consumer with the default close() should take longer than {DEFAULT_FETCH_MAX_WAIT_MS} ms, but actually took {close_ms} ms"
+        "Closing a consumer with the default close() should take longer than {DEFAULT_FETCH_MAX_WAIT_MS} ms, but actually took {close_ms} ms ({} backend)",
+        factory.name()
     );
     ctx.cleanup().await;
 }
 
+multilanguage_consumer_test!(
+    test_async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms,
+    async_consumer_close_with_default_takes_at_least_fetch_max_wait_ms,
+    kip848_3_broker(2)
+);
+
 /// Translates `PlaintextConsumerCloseTest#testAsyncConsumerCloseWithTimeoutIgnoresFetchMaxWaitMs`,
 /// via `testCloseWithTimeoutIgnoresFetchMaxWaitMs`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_close_with_timeout_ignores_fetch_max_wait_ms() {
-    let mut ctx = TestContext::new(kip848_3_broker(2)).await;
+async fn async_consumer_close_with_timeout_ignores_fetch_max_wait_ms<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let timeout_ms = 100;
 
     // Close the Consumer with a specified timeout that's much shorter than the default fetch timeout
     // to ensure the fetch.max.wait.ms is effectively ignored.
     let close_ms =
-        calculate_consumer_close_delay(&mut ctx, CloseOperation::WithTimeout(Duration::from_millis(timeout_ms))).await;
+        calculate_consumer_close_delay(ctx, factory, CloseOperation::WithTimeout(Duration::from_millis(timeout_ms)))
+            .await;
     assert!(
         close_ms <= DEFAULT_FETCH_MAX_WAIT_MS,
-        "Closing a consumer with a timeout of {timeout_ms} ms should take less than {DEFAULT_FETCH_MAX_WAIT_MS} ms, but actually took {close_ms} ms"
+        "Closing a consumer with a timeout of {timeout_ms} ms should take less than {DEFAULT_FETCH_MAX_WAIT_MS} ms, but actually took {close_ms} ms ({} backend)",
+        factory.name()
     );
     ctx.cleanup().await;
 }
+
+multilanguage_consumer_test!(
+    test_async_consumer_close_with_timeout_ignores_fetch_max_wait_ms,
+    async_consumer_close_with_timeout_ignores_fetch_max_wait_ms,
+    kip848_3_broker(2)
+);

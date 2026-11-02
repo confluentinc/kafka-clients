@@ -924,8 +924,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
 }
 
 /// `subscribe(Collection<String> topics)`: `topics` is a list of
-/// `char *`, copied during the call. Replaces the listener registered by
-/// an earlier `subscribe_*`, releasing its `self`.
+/// `char *`, copied during the call. A successful call replaces the listener
+/// registered by an earlier `subscribe_*`, releasing its `self`, except that on
+/// a `KafkaConsumer` an empty `topics` is `unsubscribe()`, which keeps it.
+/// After a failed call the caller keeps that `self` alive: a `KafkaConsumer`
+/// may still call it.
 ///
 /// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
@@ -1031,8 +1034,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
 
 /// `subscribe(Collection<String> topics, ConsumerRebalanceListener listener)`:
 /// the listener registration is copied during the call (its handle may
-/// be destroyed afterwards); its `self` must stay alive until the next
-/// `subscribe_*`, `unsubscribe` or the consumer's destruction releases it.
+/// be destroyed afterwards); its `self` must stay alive until a later
+/// successful `subscribe_*` replaces it, or the consumer is destroyed. A
+/// `KafkaConsumer` also releases it when `close` returns, and its empty
+/// `topics` is `unsubscribe()`, which keeps the earlier listener and does not
+/// register this one. A `MockConsumer` keeps it after `close`: its `rebalance`
+/// and `lose_partitions` still call it, as Java's mock does.
 ///
 /// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
@@ -1392,8 +1399,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
     }
 }
 
-/// `unsubscribe()`: releases the registered listener after invoking
-/// `onPartitionsLost` / `onPartitionsRevoked` as Java does.
+/// `unsubscribe()`: invokes `onPartitionsLost` / `onPartitionsRevoked` as
+/// Java does, and keeps the registered listener, which `close` may still call.
 ///
 /// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in

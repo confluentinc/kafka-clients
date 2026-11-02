@@ -24,21 +24,27 @@
 //! broker closes a connection whose session has expired when it next receives
 //! anything but a re-authentication, so a client that does not re-authenticate
 //! loses the requests it has in flight once per session lifetime.
+//!
+//! Both tests are multilanguage scenarios ([`multilanguage_test!`]): the
+//! producer also runs on the Python (sync, asyncio) and C backends, over the
+//! SASL_PLAINTEXT or SASL_SSL listener its backend reaches (the CONTAINER
+//! listener of that protocol for a containerized backend), and each name gains
+//! the backend suffix (`__rust`, `__grpc_python`, `__grpc_python_async`,
+//! `__grpc_c`).
 
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::serialization::StringSerializer;
-use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
-use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
 use crate::common::test_context::TestContext;
+use crate::multilanguage_test;
 
 /// The session lifetime the broker gives each SASL connection.
 const SESSION_LIFETIME_MS: u64 = 2_000;
@@ -68,69 +74,109 @@ fn sasl_plain_props(bootstrap: &str, security_protocol: &str) -> HashMap<String,
     ])
 }
 
-/// Sends one record every 100 ms for three and a half session lifetimes, with
-/// retries off, so a record whose connection the broker closes under it fails
-/// rather than being resent. Before the client re-authenticated, a send
-/// shortly after the first session expired failed with "Disconnected from
-/// node".
-async fn produce_across_session_lifetimes(ctx: &mut TestContext, mut props: HashMap<String, String>) {
-    let topic = ctx.topic("sasl_reauthentication_topic");
+/// `props` with the producer settings of [`produce_across_session_lifetimes`].
+fn with_producer_props(mut props: HashMap<String, String>) -> HashMap<String, String> {
     props.extend([
         ("client.id".to_string(), "sasl-reauthentication-producer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("enable.idempotence".to_string(), "false".to_string()),
         ("retries".to_string(), "0".to_string()),
     ]);
-    let producer = KafkaProducer::<String, String>::new(
-        ProducerConfig::new(&props).expect("valid producer config"),
-        StringSerializer::new(),
-        StringSerializer::new(),
-    )
-    .expect("producer constructs");
+    props
+}
+
+/// Sends one record every 100 ms for three and a half session lifetimes, with
+/// retries off, so a record whose connection the broker closes under it fails
+/// rather than being resent. Before the client re-authenticated, a send
+/// shortly after the first session expired failed with "Disconnected from
+/// node".
+async fn produce_across_session_lifetimes<P: Producer<Vec<u8>, Vec<u8>>>(
+    ctx: &mut TestContext,
+    producer: P,
+    backend: &str,
+) {
+    let topic = ctx.topic("sasl_reauthentication_topic");
 
     // The first send creates the topic.
     let deadline = Instant::now() + Duration::from_millis(7 * SESSION_LIFETIME_MS / 2);
     let mut sent = 0;
     while Instant::now() < deadline {
         producer
-            .send(ProducerRecord::new(topic.clone(), Some(format!("value-{sent}"))))
+            .send(ProducerRecord::new(topic.clone(), Some(format!("value-{sent}").into_bytes())))
             .await
-            .unwrap_or_else(|e| panic!("record {sent} must be accepted: {e:?}"))
+            .unwrap_or_else(|e| panic!("{backend} backend: record {sent} must be accepted: {e:?}"))
             .get_with_timeout(Duration::from_secs(30))
             .await
-            .unwrap_or_else(|e| panic!("record {sent} must be acknowledged: {e:?}"));
+            .unwrap_or_else(|e| panic!("{backend} backend: record {sent} must be acknowledged: {e:?}"));
         sent += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(sent > 20, "only {sent} records sent");
+    assert!(sent > 20, "{backend} backend: only {sent} records sent");
 
-    producer.close().await.expect("close");
+    producer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
 }
 
 /// A producer over SASL_PLAINTEXT keeps its connection to the partition leader
 /// across several session lifetimes by re-authenticating it, as Java's does.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sasl_plain_producer_reauthenticates_before_its_session_expires() {
-    let mut ctx = TestContext::new(cluster_config()).await;
-    let props = sasl_plain_props(ctx.sasl_plaintext_bootstrap_servers(), "SASL_PLAINTEXT");
-    produce_across_session_lifetimes(&mut ctx, props).await;
+async fn sasl_plain_producer_reauthenticates_before_its_session_expires<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
+    let bootstrap = if factory.needs_container_bootstrap() {
+        ctx.container_sasl_plaintext_bootstrap_servers()
+    } else {
+        ctx.sasl_plaintext_bootstrap_servers()
+    };
+    let props = with_producer_props(sasl_plain_props(bootstrap, "SASL_PLAINTEXT"));
+    let producer = factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: producer constructs: {e}"));
+    produce_across_session_lifetimes(ctx, producer, backend).await;
     ctx.cleanup().await;
 }
 
-/// As [`test_sasl_plain_producer_reauthenticates_before_its_session_expires`],
+multilanguage_test!(
+    test_sasl_plain_producer_reauthenticates_before_its_session_expires,
+    sasl_plain_producer_reauthenticates_before_its_session_expires,
+    cluster_config()
+);
+
+/// As [`sasl_plain_producer_reauthenticates_before_its_session_expires`],
 /// over SASL_SSL: the re-authentication's handshake and token, and the
 /// responses that arrive during it, go through TLS, which can hold several
 /// decrypted frames at once.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sasl_ssl_producer_reauthenticates_before_its_session_expires() {
-    let mut ctx = TestContext::new(cluster_config()).await;
-    let mut props = sasl_plain_props(ctx.sasl_ssl_bootstrap_servers(), "SASL_SSL");
+async fn sasl_ssl_producer_reauthenticates_before_its_session_expires<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
+    let bootstrap = if factory.needs_container_bootstrap() {
+        ctx.container_sasl_ssl_bootstrap_servers()
+    } else {
+        ctx.sasl_ssl_bootstrap_servers()
+    };
+    let mut props = sasl_plain_props(bootstrap, "SASL_SSL");
     props.extend([
         ("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string()),
-        // Tests connect via 127.0.0.1; disable hostname verification, as the
-        // other SASL_SSL suites do.
+        // The native producer connects via 127.0.0.1; disable hostname
+        // verification, as the other SASL_SSL suites do.
         ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
     ]);
-    produce_across_session_lifetimes(&mut ctx, props).await;
+    let producer = factory
+        .create(with_producer_props(props))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: producer constructs: {e}"));
+    produce_across_session_lifetimes(ctx, producer, backend).await;
     ctx.cleanup().await;
 }
+
+multilanguage_test!(
+    test_sasl_ssl_producer_reauthenticates_before_its_session_expires,
+    sasl_ssl_producer_reauthenticates_before_its_session_expires,
+    cluster_config()
+);

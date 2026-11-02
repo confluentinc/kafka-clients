@@ -360,7 +360,7 @@ async fn build_grpc_workload(
         Backend::Rust => unreachable!("rust handled by build_workload"),
     };
     let handle = get_or_start(kind, broker_network).await;
-    let channel = handle.streaming_channel().await;
+    let channel = handle.untimed_channel().await;
     Ok(Box::new(RemoteWorkload::new(spec.clone(), ctx, verifier, channel)))
 }
 

@@ -34,8 +34,13 @@ Importing this module requires the generated proto stubs (`producer_service_pb2`
 arrange that before importing us.
 """
 
+import asyncio
 import datetime as _dt
+import functools
+import inspect
+import logging
 import threading  # noqa: E402  (CallbackLog's lock)
+import time  # noqa: E402  (the SLEEP listener step)
 
 # The gRPC integration servers speak the new ``confluent_kafka`` package
 # (CLAUDE.md, Python Binding Conventions, Modules), not the retired top-level
@@ -44,12 +49,24 @@ from confluent_kafka import IllegalArgumentError, IllegalStateError  # noqa: E40
 from confluent_kafka.common import TopicPartition  # noqa: E402
 from confluent_kafka._errors import to_ffi_id
 from confluent_kafka.common import KafkaError  # noqa: E402
-# The broker wire ``TimeoutException`` (code 7), distinct from the JDK-analog
-# ``confluent_kafka.TimeoutError`` (code -5). Aliased to avoid the name clash.
-from confluent_kafka.common.errors import TimeoutError as _WireTimeout  # noqa: E402
+# The JDK-analog ``confluent_kafka.TimeoutError`` (code -5), distinct from the
+# broker wire ``TimeoutException`` (code 7). Aliased to avoid shadowing the
+# builtin.
+from confluent_kafka import TimeoutError as _RootTimeout  # noqa: E402
+# The classes whose payload a proto KafkaError carries (see _kafka_error_to_proto).
+from confluent_kafka.common.errors import (  # noqa: E402
+    ApiError,
+    UnknownServerError,
+    GroupAuthorizationError,
+    InvalidTopicError,
+    TopicAuthorizationError,
+)
+from confluent_kafka.consumer import OffsetOutOfRangeError as _ConsumerOffsetOutOfRangeError  # noqa: E402
 from confluent_kafka.consumer import (  # noqa: E402
+    AsyncConsumerRebalanceListener,
     CloseOptions,
     ConsumerRebalanceListener,
+    NoOffsetForPartitionError,
     OffsetAndMetadata,
     SubscriptionPattern,
 )
@@ -102,12 +119,15 @@ import admin_service_pb2 as apb  # noqa: E402  (generated)
 # code by reading the typed error class' private ``_ffi_id`` — the same value
 # the generator wrote into ``_error_code.py``. These are the only codes the
 # servers manufacture (LOCAL_ILLEGAL_ARGUMENT / LOCAL_ILLEGAL_STATE /
-# REQUEST_TIMED_OUT); everything else crosses via ``to_ffi_id`` on a real error.
+# LOCAL_TIMEOUT); everything else crosses via ``to_ffi_id`` on a real error.
 _LOCAL_ILLEGAL_ARGUMENT = IllegalArgumentError._ffi_id
 _LOCAL_ILLEGAL_STATE = IllegalStateError._ffi_id
-# ``REQUEST_TIMED_OUT`` is Java's wire code 7; the wire ``TimeoutException``
-# class carries it as ``_ffi_id``.
-_REQUEST_TIMED_OUT = _WireTimeout._ffi_id
+# A server's own bounded wait that expired (the producer future's 120 s): the
+# root ``TimeoutError``, Java's ``java.util.concurrent.TimeoutException``
+# (``LOCAL_TIMEOUT``), not Kafka's wire ``TimeoutException``
+# (``REQUEST_TIMED_OUT``, code 7), which a test may accept as the broker's
+# answer although the send never completed.
+_LOCAL_TIMEOUT = _RootTimeout._ffi_id
 
 
 def _error_code_of(err):
@@ -162,6 +182,32 @@ class _AdminEncodeError(RuntimeError):
     """
 
 
+def _fill_error_payload(proto, err):
+    """The class-specific payload of a proto KafkaError, read through the
+    error's own getters, and the bit that tells a bare ``KafkaError`` (Java's
+    ``KafkaException``) from ``UnknownServerError``, which share code -1."""
+    if isinstance(err, TopicAuthorizationError):
+        proto.unauthorized_topics.extend(sorted(err.unauthorized_topics()))
+    if isinstance(err, InvalidTopicError):
+        proto.invalid_topics.extend(sorted(err.invalid_topics()))
+    if isinstance(err, GroupAuthorizationError) and err.group_id() is not None:
+        proto.group_id = err.group_id()
+    if isinstance(err, NoOffsetForPartitionError):
+        proto.partitions.extend(_callback_log_partition(p) for p in err.partitions())
+    if isinstance(err, _ConsumerOffsetOutOfRangeError):
+        proto.offset_out_of_range_partitions.extend(
+            pb.PartitionOffset(partition=_callback_log_partition(tp), offset=offset)
+            for tp, offset in err.offset_out_of_range_partitions().items())
+    proto.bare_kafka_error = proto.code == UnknownServerError._ffi_id and not isinstance(err, ApiError)
+    # The cause, one level deep (Java's getCause()), when it is a client error.
+    cause = err.__cause__
+    if isinstance(cause, KafkaError) or hasattr(type(cause), "_ffi_id"):
+        code = _error_code_of(cause)
+        proto.cause.code = code
+        proto.cause.message = str(cause) or ""
+        proto.cause.bare_kafka_error = code == UnknownServerError._ffi_id and not isinstance(cause, ApiError)
+
+
 def _kafka_error_to_proto(err):
     """Translate a ``confluent_kafka`` KafkaError (or generic Exception) into a
     proto KafkaError.
@@ -188,7 +234,9 @@ def _kafka_error_to_proto(err):
     # (``TimeoutError``, ``IllegalStateError``, ...) the core names with an id of
     # its own. Both resolve to their FFI code via ``_error_code_of``.
     if isinstance(err, KafkaError) or hasattr(type(err), "_ffi_id"):
-        return pb.KafkaError(code=_error_code_of(err), message=str(err) or "")
+        proto = pb.KafkaError(code=_error_code_of(err), message=str(err) or "")
+        _fill_error_payload(proto, err)
+        return proto
     # Unexpected non-Kafka exception: this is the server's own bookkeeping
     # failure, not an error the client reported, so it is fabricated as
     # LocalIllegalState. That is inventing an error rather than guessing at
@@ -240,23 +288,25 @@ def _proto_to_producer_record(proto_record):
     ``timestamp`` are ``None`` when unset (Java's null), not the old ``-1``
     sentinel.
 
-    The producer send path DOES carry ProducerRecord headers end-to-end now (the
-    native record + FFI struct + Rust send preserve them — B1), but the gRPC
-    *producer* proto ``ProducerRecord`` has no ``headers`` field, so this
-    translation cannot forward them; they default to empty on this arm. Adding a
-    headers field to the producer proto is a separate gRPC-contract change. (The
-    consumer arm's proto DOES carry headers — see ``_consumer_record_to_proto``.)"""
+    The proto's ``headers`` become the record's headers, in order, as
+    ``(key, value)`` pairs the ``ProducerRecord`` turns into ``Header``s. As the
+    C server does, a record without headers takes Java's headerless
+    constructor; a header value is always bytes, since the proto has no null
+    header value."""
     value = proto_record.value if proto_record.HasField("value") else None
     key = proto_record.key if proto_record.HasField("key") else None
     partition = proto_record.partition if proto_record.HasField("partition") else None
     timestamp = proto_record.timestamp if proto_record.HasField("timestamp") else None
-    return ProducerRecord(
+    fields = dict(
         topic=proto_record.topic,
         value=value,
         key=key,
         partition=partition,
         timestamp=timestamp,
     )
+    if proto_record.headers:
+        fields["headers"] = [(h.key, bytes(h.value)) for h in proto_record.headers]
+    return ProducerRecord(**fields)
 
 
 def _member(obj, name):
@@ -391,12 +441,34 @@ def _group_metadata_to_proto(group_metadata):
     )
 
 
+# The largest whole-millisecond count a ``timedelta`` holds (about 2.7 million
+# years); Java's ``Long.MAX_VALUE`` ms is beyond it.
+_TIMEDELTA_MAX_MS = _dt.timedelta.max // _dt.timedelta(milliseconds=1)
+
+
+def _duration_of_ms(ms):
+    """Java's ``Duration.ofMillis(ms)`` as the ``timedelta`` the binding takes.
+
+    A ``timedelta`` of whole milliseconds, which the binding reads exactly; a
+    float of seconds would round a large count (``Long.MAX_VALUE`` ms becomes
+    2^63 ms, which the binding rejects with ``OverflowError``). A count beyond
+    what a ``timedelta`` holds, such as ``Long.MAX_VALUE`` ms (Java's unbounded
+    wait), becomes ``timedelta.max`` (``timedelta.min`` for a negative one): an
+    equally unbounded wait that still fits a signed 64-bit millisecond count."""
+    if ms > _TIMEDELTA_MAX_MS:
+        return _dt.timedelta.max
+    if ms < -_TIMEDELTA_MAX_MS:
+        return _dt.timedelta.min
+    return _dt.timedelta(milliseconds=ms)
+
+
 def _consumer_timeout(request):
     """The optional ``timeout_ms`` of a ConsumerService request as the keyword
-    arguments of the binding's timed overload: ``{"timeout": seconds}``, or ``{}``
-    when absent, which leaves the argument out and selects the Java overload
-    without a ``Duration`` (a ``None`` would be Java's null ``Duration``)."""
-    return {"timeout": request.timeout_ms / 1000.0} if request.HasField("timeout_ms") else {}
+    arguments of the binding's timed overload: ``{"timeout": Duration}`` (see
+    ``_duration_of_ms``), or ``{}`` when absent, which leaves the argument out
+    and selects the Java overload without a ``Duration`` (a ``None`` would be
+    Java's null ``Duration``)."""
+    return {"timeout": _duration_of_ms(request.timeout_ms)} if request.HasField("timeout_ms") else {}
 
 
 def _consumer_subscribe_kwargs(request, listener):
@@ -422,7 +494,7 @@ def _consumer_close_options(request):
     operation = CloseOptions.GroupMembershipOperation[request.group_membership_operation]
     if request.HasField("close_timeout_ms"):
         return {"option": CloseOptions(operation=operation,
-                                       timeout=request.close_timeout_ms / 1000.0)}
+                                       timeout=_duration_of_ms(request.close_timeout_ms))}
     return {"option": CloseOptions(operation=operation)}
 
 
@@ -506,6 +578,8 @@ def _record_to_proto(r):
         value=value,
         headers=headers,
         leader_epoch=leader_epoch if leader_epoch is not None else None,
+        serialized_key_size=r.serialized_key_size(),
+        serialized_value_size=r.serialized_value_size(),
     )
 
 
@@ -529,6 +603,7 @@ KIND_REVOKED = "revoked"
 KIND_LOST = "lost"
 KIND_COMMIT = "commit"
 KIND_DELIVERY = "delivery"
+KIND_LISTENER_ACTION = "listener_action"
 
 
 def _offset_key(topic, partition):
@@ -550,7 +625,8 @@ class CallbackLog:
         self._entries = {}
         self._lock = threading.Lock()
 
-    def append(self, client_id, kind, partitions=(), offsets=None, error=""):
+    def append(self, client_id, kind, partitions=(), offsets=None, exception=None,
+               error="", method="", result_partitions=(), step=""):
         """Record one invocation.
 
         Args:
@@ -558,14 +634,37 @@ class CallbackLog:
             kind: one of the ``KIND_*`` constants.
             partitions: iterable of ``TopicPartition`` (or ``(topic, partition)``).
             offsets: optional ``{"<topic>-<partition>": offset}`` mapping.
-            error: error message, or "" when the callback saw no error.
+            exception: the error the callback saw, or ``None``; logged as its
+                message and its FFI error code.
+            error: a message of the server's own, for an error with no
+                exception object; logged with ``_LOCAL_ILLEGAL_STATE``.
+            method: ``KIND_LISTENER_ACTION`` only, the listener method the
+                action ran in (``KIND_ASSIGNED`` / ``KIND_REVOKED``).
+            result_partitions: ``KIND_LISTENER_ACTION`` only, the partitions
+                the ASSIGNMENT step read.
+            step: ``KIND_LISTENER_ACTION`` only, the step's name.
         """
+        detail = None
+        if exception is not None:
+            detail = _kafka_error_to_proto(exception)
+            message, code = str(exception), detail.code
+        elif error:
+            detail = pb.KafkaError(code=_LOCAL_ILLEGAL_STATE, message=error)
+            message, code = error, _LOCAL_ILLEGAL_STATE
+        else:
+            message, code = "", 0
         entry = pb.CallbackLogEntry(
             kind=kind,
             partitions=[_callback_log_partition(p) for p in partitions],
             offsets=dict(offsets or {}),
-            error=error or "",
+            error=message,
+            error_code=code,
+            method=method,
+            step=step,
+            result_partitions=[_callback_log_partition(p) for p in result_partitions],
         )
+        if detail is not None:
+            entry.error_detail.CopyFrom(detail)
         with self._lock:
             self._entries.setdefault(client_id, []).append(entry)
 
@@ -622,6 +721,246 @@ class LoggingRebalanceListener(ConsumerRebalanceListener):
         self._log.append(self._client_id, KIND_LOST, partitions)
 
 
+_STEP_NAMES = {
+    cpb.LISTENER_STEP_ASSIGNMENT: "ASSIGNMENT",
+    cpb.LISTENER_STEP_BEGINNING_OFFSETS: "BEGINNING_OFFSETS",
+    cpb.LISTENER_STEP_POSITION: "POSITION",
+    cpb.LISTENER_STEP_SEEK: "SEEK",
+    cpb.LISTENER_STEP_PAUSE: "PAUSE",
+    cpb.LISTENER_STEP_SLEEP: "SLEEP",
+    cpb.LISTENER_STEP_COMMIT_SYNC_POSITION: "COMMIT_SYNC_POSITION",
+    cpb.LISTENER_STEP_FAIL: "FAIL",
+}
+
+_TRIGGERS = (
+    cpb.LISTENER_TRIGGER_ALWAYS,
+    cpb.LISTENER_TRIGGER_FIRST_N_CALLS,
+    cpb.LISTENER_TRIGGER_WHEN_CONTAINS,
+    cpb.LISTENER_TRIGGER_ONCE_WHEN_CONTAINS,
+)
+
+
+class _ListenerScript:
+    """One method's ``ListenerScript``: its trigger, with the trigger's state,
+    and its steps."""
+
+    def __init__(self, proto):
+        if proto.trigger not in _TRIGGERS:
+            raise IllegalArgumentError(message=f"unknown listener trigger {proto.trigger}")
+        for step in proto.steps:
+            if step.kind not in _STEP_NAMES:
+                raise IllegalArgumentError(message=f"unknown listener step {step.kind}")
+        self.trigger = proto.trigger
+        self.first_n_calls = proto.first_n_calls
+        self.partition = _tp(proto.partition) if proto.HasField("partition") else None
+        self.steps = list(proto.steps)
+        self._calls = 0
+        self._done = False
+
+    def triggered(self, partitions):
+        """Whether this invocation runs the script; counts the invocation."""
+        self._calls += 1
+        if self.trigger == cpb.LISTENER_TRIGGER_ALWAYS:
+            return True
+        if self.trigger == cpb.LISTENER_TRIGGER_FIRST_N_CALLS:
+            return self._calls <= self.first_n_calls
+        if self.partition not in partitions:
+            return False
+        if self.trigger == cpb.LISTENER_TRIGGER_ONCE_WHEN_CONTAINS:
+            if self._done:
+                return False
+            self._done = True
+        return True
+
+
+class ListenerAction:
+    """A ``ListenerActionRequest``: the script of each listener method, which a
+    logging listener runs from inside that method on the invocations the
+    script's trigger selects, after logging the invocation.
+
+    Each step is logged as one ``KIND_LISTENER_ACTION`` entry, encoded as
+    producer_service.proto's CallbackLogEntry says. A failing step is logged
+    with its error and ends the script; the listener still returns normally,
+    except for a FAIL step, which raises ``IllegalArgumentError`` with its message
+    once logged. The C server and the Rust native backend run the same scripts
+    through their consumer handles.
+    """
+
+    def __init__(self, scripts):
+        self._scripts = scripts
+
+    @staticmethod
+    def from_request(request):
+        """The request's scripts, ``None`` when it has none; raises
+        ``IllegalArgumentError`` for an unspecified trigger or step."""
+        scripts = {}
+        for kind, field in ((KIND_ASSIGNED, "on_assigned"), (KIND_REVOKED, "on_revoked"),
+                            (KIND_LOST, "on_lost")):
+            if request.HasField(field):
+                scripts[kind] = _ListenerScript(getattr(request, field))
+        return ListenerAction(scripts) if scripts else None
+
+    def _script_for(self, method, partitions):
+        script = self._scripts.get(method)
+        return script if script is not None and script.triggered(partitions) else None
+
+    def run_sync(self, consumer, log, client_id, method, partitions):
+        """Run ``method``'s script on a sync consumer, from inside its listener."""
+        script = self._script_for(method, partitions)
+        if script is None:
+            return
+        positions = {}
+        for step in script.steps:
+            fields = {}
+            try:
+                if step.kind == cpb.LISTENER_STEP_ASSIGNMENT:
+                    fields["assignment"] = consumer.assignment()
+                elif step.kind == cpb.LISTENER_STEP_BEGINNING_OFFSETS:
+                    fields["offsets"] = _offsets_by_key(
+                        consumer.beginning_offsets(partitions=[_tp(p) for p in step.partitions]))
+                elif step.kind == cpb.LISTENER_STEP_POSITION:
+                    fields["offsets"] = self._position(step, positions,
+                                                       consumer.position(partition=_tp(step.partition)))
+                elif step.kind == cpb.LISTENER_STEP_SEEK:
+                    consumer.seek(partition=_tp(step.partition), offset=step.value)
+                elif step.kind == cpb.LISTENER_STEP_PAUSE:
+                    consumer.pause(partitions=[_tp(p) for p in step.partitions])
+                elif step.kind == cpb.LISTENER_STEP_SLEEP:
+                    time.sleep(step.value / 1000.0)
+                elif step.kind == cpb.LISTENER_STEP_COMMIT_SYNC_POSITION:
+                    offsets = self._commit_offsets(step, positions)
+                    consumer.commit(offsets=offsets)
+                    fields["offsets"] = _committed_by_key(offsets)
+                else:  # LISTENER_STEP_FAIL
+                    raise IllegalArgumentError(message=step.message)
+            except Exception as e:  # noqa: BLE001  (logged; only FAIL fails the listener)
+                self._log_step(log, client_id, method, partitions, step, exception=e)
+                if step.kind == cpb.LISTENER_STEP_FAIL:
+                    raise
+                return
+            self._log_step(log, client_id, method, partitions, step, **fields)
+
+    async def run_async(self, consumer, log, client_id, method, partitions):
+        """``run_sync`` for an asyncio consumer: the consumer's coroutines are
+        awaited, and SLEEP awaits ``asyncio.sleep``."""
+        script = self._script_for(method, partitions)
+        if script is None:
+            return
+        positions = {}
+        for step in script.steps:
+            fields = {}
+            try:
+                if step.kind == cpb.LISTENER_STEP_ASSIGNMENT:
+                    fields["assignment"] = consumer.assignment()
+                elif step.kind == cpb.LISTENER_STEP_BEGINNING_OFFSETS:
+                    fields["offsets"] = _offsets_by_key(
+                        await consumer.beginning_offsets(partitions=[_tp(p) for p in step.partitions]))
+                elif step.kind == cpb.LISTENER_STEP_POSITION:
+                    fields["offsets"] = self._position(
+                        step, positions, await consumer.position(partition=_tp(step.partition)))
+                elif step.kind == cpb.LISTENER_STEP_SEEK:
+                    await consumer.seek(partition=_tp(step.partition), offset=step.value)
+                elif step.kind == cpb.LISTENER_STEP_PAUSE:
+                    await consumer.pause(partitions=[_tp(p) for p in step.partitions])
+                elif step.kind == cpb.LISTENER_STEP_SLEEP:
+                    await asyncio.sleep(step.value / 1000.0)
+                elif step.kind == cpb.LISTENER_STEP_COMMIT_SYNC_POSITION:
+                    offsets = self._commit_offsets(step, positions)
+                    await consumer.commit(offsets=offsets)
+                    fields["offsets"] = _committed_by_key(offsets)
+                else:  # LISTENER_STEP_FAIL
+                    raise IllegalArgumentError(message=step.message)
+            except Exception as e:  # noqa: BLE001  (logged; only FAIL fails the listener)
+                self._log_step(log, client_id, method, partitions, step, exception=e)
+                if step.kind == cpb.LISTENER_STEP_FAIL:
+                    raise
+                return
+            self._log_step(log, client_id, method, partitions, step, **fields)
+
+    @staticmethod
+    def _position(step, positions, position):
+        tp = _tp(step.partition)
+        positions[tp] = position
+        return {_offset_key(tp.topic(), tp.partition()): position}
+
+    @staticmethod
+    def _commit_offsets(step, positions):
+        tp = _tp(step.partition)
+        if tp not in positions:
+            raise IllegalStateError(
+                message=f"no position was read for {tp} before COMMIT_SYNC_POSITION")
+        return {tp: OffsetAndMetadata(offset=positions[tp])}
+
+    @staticmethod
+    def _log_step(log, client_id, method, partitions, step, *, assignment=(), offsets=None,
+                  exception=None):
+        log.append(client_id, KIND_LISTENER_ACTION, partitions=partitions, offsets=offsets,
+                   exception=exception, method=method, step=_STEP_NAMES[step.kind],
+                   result_partitions=sorted(assignment, key=lambda p: (p.topic(), p.partition())))
+
+
+def _offsets_by_key(offsets):
+    """``{TopicPartition: int}`` -> the CallbackLogEntry.offsets mapping."""
+    return {_offset_key(tp.topic(), tp.partition()): offset for tp, offset in offsets.items()}
+
+
+def _committed_by_key(offsets):
+    """``{TopicPartition: OffsetAndMetadata}`` -> the CallbackLogEntry.offsets
+    mapping."""
+    return {_offset_key(tp.topic(), tp.partition()): oam.offset() for tp, oam in offsets.items()}
+
+
+class ActionLoggingRebalanceListener(LoggingRebalanceListener):
+    """A ``LoggingRebalanceListener`` that also runs a ``ListenerAction``'s
+    scripts on its consumer from inside its methods, after logging each
+    invocation, as Java's listener calls back into the consumer it captured
+    (consumer-threading §31). For the sync consumers."""
+
+    def __init__(self, log, client_id, consumer, action):
+        super().__init__(log, client_id)
+        self._consumer = consumer
+        self._action = action
+
+    def on_partitions_assigned(self, partitions):
+        super().on_partitions_assigned(partitions)
+        self._action.run_sync(self._consumer, self._log, self._client_id, KIND_ASSIGNED, partitions)
+
+    def on_partitions_revoked(self, partitions):
+        super().on_partitions_revoked(partitions)
+        self._action.run_sync(self._consumer, self._log, self._client_id, KIND_REVOKED, partitions)
+
+    def on_partitions_lost(self, partitions):
+        super().on_partitions_lost(partitions)
+        self._action.run_sync(self._consumer, self._log, self._client_id, KIND_LOST, partitions)
+
+
+class AsyncActionLoggingRebalanceListener(AsyncConsumerRebalanceListener):
+    """The asyncio twin of ``ActionLoggingRebalanceListener``: its methods are
+    ``async def``, so the asyncio consumer awaits them on the event loop and
+    the scripts await the consumer's coroutines. It logs the plain kinds
+    exactly as ``LoggingRebalanceListener`` does, ``lost`` included."""
+
+    def __init__(self, log, client_id, consumer, action):
+        self._log = log
+        self._client_id = client_id
+        self._consumer = consumer
+        self._action = action
+
+    async def on_partitions_assigned(self, partitions):
+        self._log.append(self._client_id, KIND_ASSIGNED, partitions)
+        await self._action.run_async(self._consumer, self._log, self._client_id, KIND_ASSIGNED,
+                                     partitions)
+
+    async def on_partitions_revoked(self, partitions):
+        self._log.append(self._client_id, KIND_REVOKED, partitions)
+        await self._action.run_async(self._consumer, self._log, self._client_id, KIND_REVOKED,
+                                     partitions)
+
+    async def on_partitions_lost(self, partitions):
+        self._log.append(self._client_id, KIND_LOST, partitions)
+        await self._action.run_async(self._consumer, self._log, self._client_id, KIND_LOST,
+                                     partitions)
+
 def make_logging_commit_callback(log, client_id):
     """A real ``OffsetCommitCallback`` (``callback=``) recording the committed
     offsets.
@@ -639,7 +978,7 @@ def make_logging_commit_callback(log, client_id):
             partitions=list(offsets.keys()),
             offsets={_offset_key(tp.topic(), tp.partition()): oam.offset()
                      for tp, oam in offsets.items()},
-            error="" if exception is None else str(exception),
+            exception=exception,
         )
 
     return on_complete
@@ -669,7 +1008,7 @@ def make_logging_delivery_callback(log, client_id):
             KIND_DELIVERY,
             partitions=partitions,
             offsets=offsets,
-            error="" if exception is None else str(exception),
+            exception=exception,
         )
 
     return delivery_callback
@@ -721,17 +1060,19 @@ def _admin_timeout(request):
     Python backends while the C++ server passed the value verbatim — a latent
     2-vs-2 split on a field every admin request type already populates.
     ``_ms``/``_close_ms`` divide a ``timedelta`` by ``timedelta(milliseconds=1)``,
-    which is exact integer arithmetic, so this round-trips."""
+    which is exact integer arithmetic, so this round-trips. (An ``Integer``
+    ``timeoutMs`` always fits a ``timedelta``.)"""
     return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
 
 
 def _admin_close_timeout(request):
     """`optional int64 timeout_ms` -> the `timeout` the admin facade's close() takes.
 
-    Absent is Java's no-argument `close()`. Shared by both servers' Close
+    Absent is Java's no-argument `close()`: `None` here, which the admin
+    facades' close() turns into a call without the argument. Shared by both servers' Close
     handlers, which previously each divided by 1000.0 inline and inherited the
     same 1 ms truncation as `_admin_timeout`."""
-    return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
+    return _duration_of_ms(request.timeout_ms) if request.HasField("timeout_ms") else None
 
 
 def _admin_retry_on_quota(request):
@@ -1782,10 +2123,11 @@ def _admin_scram_alterations(protos):
 
     `is_deletion` is the discriminant and cannot be inferred: both forms carry a
     user and a mechanism, so "password is absent" would conflate a deletion with
-    a malformed upsertion. A None salt selects the admin facade's (and Java's)
-    salt-generating constructor, while a present-but-empty one selects the
-    salt-supplying constructor with a zero-length salt -- so `HasField("salt")`
-    is the test, not truthiness.
+    a malformed upsertion. An absent salt leaves the `salt` keyword out, which
+    selects Java's salt-generating constructor (an explicit `salt=None` is
+    Java's null salt and raises `TypeError`), while a present-but-empty one
+    selects the salt-supplying constructor with a zero-length salt -- so
+    `HasField("salt")` is the test, not truthiness.
     """
     out = []
     for p in protos:
@@ -1795,10 +2137,14 @@ def _admin_scram_alterations(protos):
         else:
             info = ka.ScramCredentialInfo(
                 mechanism=ka.ScramMechanism.from_type(type=p.mechanism), iterations=p.iterations)
-            out.append(ka.UserScramCredentialUpsertion(
-                user=p.user, credential_info=info,
-                password=p.password if p.HasField("password") else b"",
-                salt=p.salt if p.HasField("salt") else None))
+            # An absent salt is Java's three-argument constructor (a random
+            # salt): leave the keyword out, since an explicit salt=None is
+            # Java's null salt and raises TypeError.
+            fields = dict(user=p.user, credential_info=info,
+                          password=p.password if p.HasField("password") else b"")
+            if p.HasField("salt"):
+                fields["salt"] = p.salt
+            out.append(ka.UserScramCredentialUpsertion(**fields))
     return out
 
 
@@ -2696,7 +3042,13 @@ class SyncAdminFacade:
         return call
 
     def close(self, timeout=None):
-        self._admin.close(timeout=timeout)
+        """Java's ``close()`` when ``timeout`` is ``None`` (the request had no
+        ``timeout_ms``), else ``close(Duration)``: the binding reads an explicit
+        ``timeout=None`` as a null ``Duration`` and raises ``TypeError``."""
+        if timeout is None:
+            self._admin.close()
+        else:
+            self._admin.close(timeout=timeout)
 
 
 class AsyncAdminFacade:
@@ -2716,7 +3068,11 @@ class AsyncAdminFacade:
         return call
 
     async def close(self, timeout=None):
-        await self._admin.close(timeout=timeout)
+        """As :meth:`SyncAdminFacade.close`."""
+        if timeout is None:
+            await self._admin.close()
+        else:
+            await self._admin.close(timeout=timeout)
 
 
 def _admin_mock_brokers(num_brokers):
@@ -2745,3 +3101,97 @@ def admin_create_async(config, num_brokers):
         return AsyncAdminFacade(
             ka.AsyncMockAdminClient(brokers=brokers, controller=brokers[0]), mock=True)
     return AsyncAdminFacade(ka.AsyncAdmin.create(configs=config))
+
+
+# ---------------------------------------------------------------------------
+# Errors as replies
+#
+# A binding error that escapes a handler becomes a gRPC transport failure, not
+# the error the client reported: the Rust harness treats a transport failure
+# as a broken server. Every unary handler whose reply has a KafkaError `error`
+# field is therefore wrapped so that a binding error the handler raises — a
+# ``KafkaError`` or a root class with an FFI code such as ``IllegalStateError``,
+# ``IllegalArgumentError`` or ``TimeoutError``, or the cause of an
+# ``ExecutionError`` — is returned as that reply's error, with its FFI code
+# (``_kafka_error_to_proto``). Any other exception is a server bug and stays a
+# transport failure, so the harness reports it instead of matching it as an
+# error class. Handlers that already return the error themselves are
+# unaffected.
+# ---------------------------------------------------------------------------
+
+_LOG = logging.getLogger("grpc_translate")
+
+_PROTO_MODULES = {
+    "producer_service.proto": pb,
+    "consumer_service.proto": cpb,
+    "admin_service.proto": apb,
+}
+
+
+def _binding_error(e):
+    """The binding error ``e`` is, or ``None`` for anything else.
+
+    A binding error is what ``_kafka_error_to_proto`` maps to a real class: a
+    ``KafkaError``, a root class with an ``_ffi_id`` (``IllegalStateError``,
+    ``IllegalArgumentError``, ``TimeoutError``, ...) or this server's own
+    ``AdminRequestError``. An ``ExecutionError`` (Java's
+    ``ExecutionException``, raised by ``KafkaFuture.get()``) is the error of
+    the future, which it carries as ``__cause__``: the reply carries that cause,
+    as the Rust ``KafkaFuture::get`` returns the future's error itself, when the
+    cause is a binding error. Anything else — a server bug, a plain Python
+    exception — is not the binding's answer.
+    """
+    if isinstance(e, ExecutionError):
+        return _binding_error(e.__cause__) if e.__cause__ is not None else None
+    if isinstance(e, (KafkaError, AdminRequestError)) or hasattr(type(e), "_ffi_id"):
+        return e
+    return None
+
+
+def _replying(fn, reply_cls, name):
+    """Wrap ``fn`` so a binding error it raises comes back as ``reply_cls``'s
+    error. Anything else is re-raised: it stays a transport failure, on which
+    the Rust harness panics with this server's text."""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def handler(self, request, context):
+            try:
+                return await fn(self, request, context)
+            except Exception as e:
+                error = _binding_error(e)
+                if error is None:
+                    raise
+                _LOG.info("%s raised %r; returning it as the reply's error", name, error)
+                return reply_cls(error=_kafka_error_to_proto(error))
+        return handler
+
+    @functools.wraps(fn)
+    def handler(self, request, context):
+        try:
+            return fn(self, request, context)
+        except Exception as e:
+            error = _binding_error(e)
+            if error is None:
+                raise
+            _LOG.info("%s raised %r; returning it as the reply's error", name, error)
+            return reply_cls(error=_kafka_error_to_proto(error))
+    return handler
+
+
+def install_error_replies(servicer_cls, module, service_name):
+    """Wrap every unary handler of ``servicer_cls`` whose reply has a top-level
+    KafkaError ``error`` field (see the section comment). Returns the class."""
+    kafka_error = pb.KafkaError.DESCRIPTOR.full_name
+    for method in module.DESCRIPTOR.services_by_name[service_name].methods:
+        fn = servicer_cls.__dict__.get(method.name)
+        if fn is None or method.client_streaming or method.server_streaming:
+            continue
+        out = method.output_type
+        field = out.fields_by_name.get("error")
+        if field is None or field.message_type is None or field.message_type.full_name != kafka_error:
+            continue
+        reply_cls = getattr(_PROTO_MODULES[out.file.name], out.name, None)
+        if reply_cls is None:
+            continue
+        setattr(servicer_cls, method.name, _replying(fn, reply_cls, method.name))
+    return servicer_cls

@@ -205,7 +205,7 @@ impl Drop for StreamRegistration {
 
 impl RemoteWorkload {
     /// `channel` must have no per-request timeout: the workload's stream stays
-    /// open for the whole run (see `BackendHandle::streaming_channel`).
+    /// open for the whole run (see `BackendHandle::untimed_channel`).
     pub fn new(spec: WorkloadSpec, ctx: WorkloadContext, verifier: Arc<dyn Verifier>, channel: Channel) -> Self {
         let client = ChaosWorkloadServiceClient::new(channel)
             // A 1 MiB-record producer's batches can exceed tonic's 4 MiB

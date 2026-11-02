@@ -106,6 +106,9 @@ using confluent::kafka::test::CurrentLagResponse;
 using confluent::kafka::test::GroupMetadataResponse;
 using confluent::kafka::test::ListTopicsResponse;
 using confluent::kafka::test::LongOffsetMap;
+using confluent::kafka::test::ListenerActionRequest;
+using confluent::kafka::test::ListenerScript;
+using confluent::kafka::test::ListenerStep;
 using confluent::kafka::test::LongOffsetsResponse;
 using confluent::kafka::test::OffsetAndTimestampMap;
 using confluent::kafka::test::OffsetAndTimestampResponse;
@@ -348,14 +351,80 @@ KafkaError make_synthetic_error(
   return err;
 }
 
+void copy_partitions_into(::google::protobuf::RepeatedPtrField<CallbackLogPartition>* dst,
+                          const kafka_List_t* partitions);
+
+// Copies an owned list of `char *` into a repeated string field, then frees it.
+void take_string_list(::google::protobuf::RepeatedPtrField<std::string>* dst, kafka_List_t* list) {
+  if (list == nullptr) return;
+  const int32_t n = kafka_List_size(list);
+  for (int32_t i = 0; i < n; i++) {
+    const char* s = static_cast<const char*>(kafka_List_get(list, i));
+    dst->Add(s ? std::string(s) : std::string());
+  }
+  kafka_List_destroy(list);
+}
+
+// Fills a proto KafkaError from a BORROWED error handle: its FFI code and
+// message, the class-specific payload read through the error's views (each
+// borrowed from `err`; the lists and maps they return are owned and freed
+// here), and the bit that tells a bare KafkaException from
+// UnknownServerException, which share code -1.
+void fill_proto_error_borrowed(KafkaError* dst, const kafka_common_Error_t* err) {
+  const char* msg = kafka_common_Error_message(err);
+  dst->set_code(kafka_common_Error__enum(err));
+  dst->set_message(msg ? std::string(msg) : std::string());
+  if (const auto* view = kafka_common_Error_topic_authorization_error(err)) {
+    take_string_list(dst->mutable_unauthorized_topics(),
+                     kafka_common_TopicAuthorizationError_unauthorized_topics(view));
+  }
+  if (const auto* view = kafka_common_Error_invalid_topic(err)) {
+    take_string_list(dst->mutable_invalid_topics(), kafka_common_InvalidTopicError_invalid_topics(view));
+  }
+  if (const auto* view = kafka_common_Error_group_authorization_error(err)) {
+    if (const char* group_id = kafka_common_GroupAuthorizationError_group_id(view)) dst->set_group_id(group_id);
+  }
+  if (const auto* view = kafka_common_Error_consumer_no_offset_for_partition(err)) {
+    kafka_List_t* partitions = kafka_common_ConsumerNoOffsetForPartitionError_partitions(view);
+    copy_partitions_into(dst->mutable_partitions(), partitions);
+    kafka_List_destroy(partitions);
+  }
+  if (const auto* view = kafka_common_Error_consumer_offset_out_of_range(err)) {
+    // Owned map of owned TopicPartition -> owned `int64_t *`.
+    kafka_Map_t* offsets = kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(view);
+    const int32_t n = kafka_Map_size(offsets);
+    for (int32_t i = 0; i < n; i++) {
+      const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(offsets, i));
+      const char* topic = kafka_common_TopicPartition_topic(tp);
+      auto* entry = dst->add_offset_out_of_range_partitions();
+      entry->mutable_partition()->set_topic(topic ? topic : "");
+      entry->mutable_partition()->set_partition(kafka_common_TopicPartition_partition(tp));
+      entry->set_offset(*static_cast<const int64_t*>(kafka_Map_value(offsets, i)));
+    }
+    kafka_Map_destroy(offsets);
+  }
+  dst->set_bare_kafka_error(dst->code() == kafka_common_Error_UNKNOWN_SERVER_ERROR &&
+                            kafka_common_Error_is_api_error(err) == 0);
+  // The cause, one level deep; borrowed from `err`, so not freed here.
+  if (const kafka_common_Error_t* cause = kafka_common_Error_source(err)) {
+    const char* cause_msg = kafka_common_Error_message(cause);
+    auto* dst_cause = dst->mutable_cause();
+    dst_cause->set_code(kafka_common_Error__enum(cause));
+    dst_cause->set_message(cause_msg ? std::string(cause_msg) : std::string());
+    dst_cause->set_bare_kafka_error(dst_cause->code() == kafka_common_Error_UNKNOWN_SERVER_ERROR &&
+                                    kafka_common_Error_is_api_error(cause) == 0);
+  }
+}
+
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
 //
-// `kafka_common_Error__enum` identifies the error's class on its own -- the
-// codes are injective -- so nothing else has to be inferred here. This is what
-// retired `guess_variant_from_message`, which substring-matched the message
-// text to recover a class the code could not carry, on the two producer paths
-// that bothered; every consumer path shipped an unclassified error.
+// `kafka_common_Error__enum` identifies the error's class (with
+// `bare_kafka_error` for the one code two classes share), so nothing else has
+// to be inferred here. This is what retired `guess_variant_from_message`,
+// which substring-matched the message text to recover a class the code could
+// not carry, on the two producer paths that bothered; every consumer path
+// shipped an unclassified error.
 //
 // `is_retriable` and `is_fatal` are gone from the proto: no reader consumed
 // them, both are derivable from the code, and this was the server's only
@@ -366,9 +435,7 @@ void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err) {
     *dst = make_synthetic_error("null error handle");
     return;
   }
-  const char* msg = kafka_common_Error_message(err);
-  dst->set_code(kafka_common_Error__enum(err));
-  dst->set_message(msg ? std::string(msg) : std::string());
+  fill_proto_error_borrowed(dst, err);
   kafka_common_Error_destroy(err);
 }
 
@@ -494,6 +561,7 @@ constexpr const char* KIND_REVOKED = "revoked";
 constexpr const char* KIND_LOST = "lost";
 constexpr const char* KIND_COMMIT = "commit";
 constexpr const char* KIND_DELIVERY = "delivery";
+constexpr const char* KIND_LISTENER_ACTION = "listener_action";
 
 // The CallbackLogEntry.offsets key for a partition.
 std::string offset_key(const std::string& topic, int32_t partition) {
@@ -557,9 +625,11 @@ class CallbackLog {
 // (CLAUDE.md §4 rule 3: the caller owns it and keeps it alive until the
 // registration is released), and the release points differ per interface:
 //
-//   - a rebalance listener's `self` must live until the next `subscribe_*`,
-//     `unsubscribe` or the consumer's destruction, and a later re-subscribe
-//     must be able to reuse the same state;
+//   - a rebalance listener's `self` must live until a later successful
+//     `subscribe_*` replaces it or the consumer is destroyed (a KafkaConsumer
+//     also releases it when `close` returns; `unsubscribe`, `assign` and its
+//     empty-topics `subscribe_*` keep it), and a later re-subscribe must be
+//     able to reuse the same state;
 //   - a commit callback's `self` must live until `onComplete` fired (or the
 //     consumer was destroyed);
 //   - a delivery callback's `self` must live until the callback fired, so a
@@ -602,22 +672,33 @@ struct LogState {
 // thread that is inside the consumer's poll() / close() / unsubscribe(), and
 // the membership state machine does not advance until the report
 // (consumer-threading.md §31).
+// Copies a BORROWED list of `kafka_common_TopicPartition_t *` into a repeated
+// CallbackLogPartition field; nothing is destroyed.
+void copy_partitions_into(::google::protobuf::RepeatedPtrField<CallbackLogPartition>* dst,
+                          const kafka_List_t* partitions) {
+  if (partitions == nullptr) return;
+  const int32_t n = kafka_List_size(partitions);
+  for (int32_t i = 0; i < n; i++) {
+    const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
+    CallbackLogPartition* p = dst->Add();
+    const char* topic = kafka_common_TopicPartition_topic(tp);
+    p->set_topic(topic ? topic : "");
+    p->set_partition(kafka_common_TopicPartition_partition(tp));
+  }
+}
+
+// Appends the `kind` entry of one rebalance-listener invocation.
+void append_rebalance(LogState* state, const kafka_List_t* partitions, const char* kind) {
+  CallbackLogEntry entry;
+  entry.set_kind(kind);
+  copy_partitions_into(entry.mutable_partitions(), partitions);
+  state->log->append(state->client_id, std::move(entry));
+}
+
 void log_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_id,
                    const char* kind) {
   auto* state = static_cast<LogState*>(self);
-  CallbackLogEntry entry;
-  entry.set_kind(kind);
-  if (partitions != nullptr) {
-    const int32_t n = kafka_List_size(partitions);
-    for (int32_t i = 0; i < n; i++) {
-      const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
-      CallbackLogPartition* p = entry.add_partitions();
-      const char* topic = kafka_common_TopicPartition_topic(tp);
-      p->set_topic(topic ? topic : "");
-      p->set_partition(kafka_common_TopicPartition_partition(tp));
-    }
-  }
-  state->log->append(state->client_id, std::move(entry));
+  append_rebalance(state, partitions, kind);
   kafka_consumer_Consumer__set_callback_result(state->consumer, callback_id, nullptr, nullptr);
 }
 
@@ -639,11 +720,16 @@ extern "C" void log_partitions_lost(void* self, const kafka_List_t* partitions,
   log_rebalance(self, partitions, callback_id, KIND_LOST);
 }
 
-// Copies a BORROWED error's message into `entry`; nothing is destroyed.
+// Copies a BORROWED error into `entry` (its message, FFI code and, as
+// `error_detail`, the whole proto KafkaError); nothing is
+// destroyed.
 void copy_error_into(CallbackLogEntry* entry, const kafka_common_Error_t* error) {
   if (error == nullptr) return;
   const char* msg = kafka_common_Error_message(error);
   entry->set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
+  entry->set_error_code(kafka_common_Error__enum(error));
+  // The whole error, as a reply carries one (payload included).
+  fill_proto_error_borrowed(entry->mutable_error_detail(), error);
 }
 
 // Copies a BORROWED offsets map (`kafka_common_TopicPartition_t *` ->
@@ -983,12 +1069,17 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // send cloned the record.
     kafka_producer_ProducerRecord_destroy(record);
     if (send_err != nullptr) {
-      // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
-      // FFI stores the error in `send_err`, which we forward verbatim. A pre-accumulator
-      // rejection also queued the delivery callback (with placeholder
-      // metadata beside the error, as Java does), so pump it into the log.
+      // send itself failed, Java's send throwing (LocalIllegalState, a
+      // serialization error, ...). The FFI stores the error in `send_err`,
+      // which we forward verbatim. An ApiException such as RecordTooLarge
+      // does not come here: as Java's doSend, the producer hands it to the
+      // callback and returns a failed future, which the get() below reports.
+      // Pump any callback queued meanwhile into the log.
       pump_callbacks(producer);
       fill_proto_error(resp->mutable_error(), send_err);
+      // NULL with `out_err`: send itself failed (Java's send throwing), as
+      // opposed to a future that fails below.
+      resp->set_raised_by_send(true);
       return grpc::Status::OK;
     }
 
@@ -1461,6 +1552,243 @@ struct OffsetMapHandles {
   std::vector<kafka_consumer_OffsetAndMetadata_t*> offsets;
 };
 
+// ---------------------------------------------------------------------------
+// Listener scripts (ConsumerService.SetListenerAction)
+//
+// The `self` of a logging listener that also runs a script per method: on the
+// invocations the script's trigger selects it runs the steps in order, logging
+// each as a KIND_LISTENER_ACTION entry (encoding in producer_service.proto's
+// CallbackLogEntry; grpc_translate.py's ListenerAction runs the same scripts
+// through the Python binding). The consumer calls go through its reentrancy
+// handle, `kafka_consumer_Consumer_handle`: the consumer itself is held by the
+// blocking call (poll / unsubscribe / close) that is running the listener on
+// this thread. A failing step is logged and ends the script; the listener
+// still reports success, except for a FAIL step, whose LocalIllegalArgument error
+// it reports, failing the callback as a throwing Java listener does.
+//
+// One heap instance per registration, owned by the service's
+// `action_states_` for the whole session, like LogState: a registration's
+// `self` must outlive its release point (a later successful subscribe_* that replaces it, or the consumer's destruction; a KafkaConsumer's close also releases it),
+// and there is no destroy hook. Its handle is
+// released at Close, after the consumer is destroyed (the C API lets the
+// handle outlive the consumer, so nothing the consumer runs can find it gone).
+// ---------------------------------------------------------------------------
+
+struct ActionListenerState {
+  LogState* log;
+  // The SetListenerAction request whose scripts this listener runs.
+  ListenerActionRequest spec;
+  kafka_consumer_ConsumerHandle_t* handle;
+  // Per method (assigned, revoked, lost): invocations so far, and whether a
+  // ONCE_WHEN_CONTAINS script has run.
+  int32_t calls[3] = {0, 0, 0};
+  bool done[3] = {false, false, false};
+};
+
+void copy_error_into(CallbackLogEntry* entry, const kafka_common_Error_t* error);
+
+bool list_contains(const kafka_List_t* partitions, const std::string& topic, int32_t partition) {
+  if (partitions == nullptr) return false;
+  const int32_t n = kafka_List_size(partitions);
+  for (int32_t i = 0; i < n; i++) {
+    const auto* tp = static_cast<const kafka_common_TopicPartition_t*>(kafka_List_get(partitions, i));
+    const char* t = kafka_common_TopicPartition_topic(tp);
+    if (kafka_common_TopicPartition_partition(tp) == partition && t != nullptr && topic == t) return true;
+  }
+  return false;
+}
+
+// The ListenerStepKind name without its prefix, the entry's `step`.
+const char* listener_step_name(int kind) {
+  switch (kind) {
+    case confluent::kafka::test::LISTENER_STEP_ASSIGNMENT: return "ASSIGNMENT";
+    case confluent::kafka::test::LISTENER_STEP_BEGINNING_OFFSETS: return "BEGINNING_OFFSETS";
+    case confluent::kafka::test::LISTENER_STEP_POSITION: return "POSITION";
+    case confluent::kafka::test::LISTENER_STEP_SEEK: return "SEEK";
+    case confluent::kafka::test::LISTENER_STEP_PAUSE: return "PAUSE";
+    case confluent::kafka::test::LISTENER_STEP_SLEEP: return "SLEEP";
+    case confluent::kafka::test::LISTENER_STEP_COMMIT_SYNC_POSITION: return "COMMIT_SYNC_POSITION";
+    case confluent::kafka::test::LISTENER_STEP_FAIL: return "FAIL";
+    default: return nullptr;
+  }
+}
+
+// Whether a SetListenerAction script is well formed: a known trigger and
+// known steps. Anything else is rejected before it is stored.
+bool listener_script_valid(const ListenerScript& script) {
+  switch (script.trigger()) {
+    case confluent::kafka::test::LISTENER_TRIGGER_ALWAYS:
+    case confluent::kafka::test::LISTENER_TRIGGER_FIRST_N_CALLS:
+    case confluent::kafka::test::LISTENER_TRIGGER_WHEN_CONTAINS:
+    case confluent::kafka::test::LISTENER_TRIGGER_ONCE_WHEN_CONTAINS:
+      break;
+    default:
+      return false;
+  }
+  for (const auto& step : script.steps()) {
+    if (listener_step_name(step.kind()) == nullptr) return false;
+  }
+  return true;
+}
+
+// Whether this invocation of method `i` runs `script`; counts the invocation.
+bool listener_script_triggered(ActionListenerState* state, int i, const ListenerScript& script,
+                               const kafka_List_t* partitions) {
+  const int32_t call = ++state->calls[i];
+  switch (script.trigger()) {
+    case confluent::kafka::test::LISTENER_TRIGGER_ALWAYS:
+      return true;
+    case confluent::kafka::test::LISTENER_TRIGGER_FIRST_N_CALLS:
+      return call <= script.first_n_calls();
+    case confluent::kafka::test::LISTENER_TRIGGER_WHEN_CONTAINS:
+      return list_contains(partitions, script.partition().topic(), script.partition().partition());
+    case confluent::kafka::test::LISTENER_TRIGGER_ONCE_WHEN_CONTAINS:
+      if (state->done[i] ||
+          !list_contains(partitions, script.partition().topic(), script.partition().partition())) {
+        return false;
+      }
+      state->done[i] = true;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Runs one step, filling `entry`'s result; returns its error (owned) or null.
+// `positions` holds the positions the POSITION steps of this invocation read.
+kafka_common_Error_t* run_listener_step(ActionListenerState* state, const ListenerStep& step,
+                                        CallbackLogEntry* entry,
+                                        std::unordered_map<std::string, int64_t>* positions) {
+  kafka_common_Error_t* err = nullptr;
+  const std::string key = offset_key(step.partition().topic(), step.partition().partition());
+  switch (step.kind()) {
+    case confluent::kafka::test::LISTENER_STEP_ASSIGNMENT: {
+      // Owned list of owned handles, sorted; destroying it frees both.
+      kafka_List_t* assignment = kafka_consumer_ConsumerHandle_assignment(state->handle);
+      copy_partitions_into(entry->mutable_result_partitions(), assignment);
+      kafka_List_destroy(assignment);
+      break;
+    }
+    case confluent::kafka::test::LISTENER_STEP_BEGINNING_OFFSETS: {
+      TpList tps(step.partitions());
+      // Owned map of owned TopicPartition -> owned `int64_t *`.
+      kafka_Map_t* offsets = kafka_consumer_ConsumerHandle_beginning_offsets(state->handle, tps.list, &err);
+      if (err == nullptr) {
+        const int32_t n = kafka_Map_size(offsets);
+        for (int32_t i = 0; i < n; i++) {
+          const auto* k = static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(offsets, i));
+          const char* topic = kafka_common_TopicPartition_topic(k);
+          (*entry->mutable_offsets())[offset_key(topic ? topic : "", kafka_common_TopicPartition_partition(k))] =
+              *static_cast<const int64_t*>(kafka_Map_value(offsets, i));
+        }
+        kafka_Map_destroy(offsets);
+      }
+      break;
+    }
+    case confluent::kafka::test::LISTENER_STEP_POSITION: {
+      kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartition_new(step.partition().topic().c_str(), step.partition().partition());
+      const int64_t position = kafka_consumer_ConsumerHandle_position(state->handle, tp, &err);
+      kafka_common_TopicPartition_destroy(tp);
+      if (err == nullptr) {
+        (*positions)[key] = position;
+        (*entry->mutable_offsets())[key] = position;
+      }
+      break;
+    }
+    case confluent::kafka::test::LISTENER_STEP_SEEK: {
+      kafka_common_TopicPartition_t* tp =
+          kafka_common_TopicPartition_new(step.partition().topic().c_str(), step.partition().partition());
+      kafka_consumer_ConsumerHandle_seek_with_offset(state->handle, tp, step.value(), &err);
+      kafka_common_TopicPartition_destroy(tp);
+      break;
+    }
+    case confluent::kafka::test::LISTENER_STEP_PAUSE: {
+      TpList tps(step.partitions());
+      kafka_consumer_ConsumerHandle_pause(state->handle, tps.list, &err);
+      break;
+    }
+    case confluent::kafka::test::LISTENER_STEP_SLEEP:
+      std::this_thread::sleep_for(std::chrono::milliseconds(step.value()));
+      break;
+    case confluent::kafka::test::LISTENER_STEP_COMMIT_SYNC_POSITION: {
+      auto read = positions->find(key);
+      if (read == positions->end()) {
+        const std::string msg = "no position was read for " + step.partition().topic() + "-" +
+                                std::to_string(step.partition().partition()) +
+                                " before COMMIT_SYNC_POSITION";
+        return kafka_common_Error_local_illegal_state(msg.c_str());
+      }
+      ::google::protobuf::RepeatedPtrField<OffsetMapEntry> entries;
+      OffsetMapEntry* e = entries.Add();
+      *e->mutable_partition() = step.partition();
+      e->mutable_offset()->set_offset(read->second);
+      OffsetMapHandles offsets(entries);
+      if (offsets.error != nullptr) return offsets.take_error();
+      kafka_consumer_ConsumerHandle_commit_sync_with_offsets(state->handle, offsets.map, &err);
+      if (err == nullptr) (*entry->mutable_offsets())[key] = read->second;
+      break;
+    }
+    case confluent::kafka::test::LISTENER_STEP_FAIL:
+      return kafka_common_Error_local_illegal_argument(step.message().c_str());
+    default:
+      return kafka_common_Error_local_illegal_state("c server: unknown listener step");
+  }
+  return err;
+}
+
+// Runs method `i`'s script for this invocation if its trigger selects it,
+// logging each step. Returns the error (owned) a FAIL step makes the listener
+// report, or null.
+kafka_common_Error_t* run_listener_script(ActionListenerState* state, int i,
+                                          const kafka_List_t* partitions, const char* method) {
+  const ListenerScript* script = nullptr;
+  if (i == 0 && state->spec.has_on_assigned()) script = &state->spec.on_assigned();
+  if (i == 1 && state->spec.has_on_revoked()) script = &state->spec.on_revoked();
+  if (i == 2 && state->spec.has_on_lost()) script = &state->spec.on_lost();
+  if (script == nullptr || !listener_script_triggered(state, i, *script, partitions)) return nullptr;
+  std::unordered_map<std::string, int64_t> positions;
+  for (const auto& step : script->steps()) {
+    CallbackLogEntry entry;
+    entry.set_kind(KIND_LISTENER_ACTION);
+    entry.set_method(method);
+    entry.set_step(listener_step_name(step.kind()));
+    copy_partitions_into(entry.mutable_partitions(), partitions);
+    kafka_common_Error_t* err = run_listener_step(state, step, &entry, &positions);
+    copy_error_into(&entry, err);
+    state->log->log->append(state->log->client_id, std::move(entry));
+    if (err != nullptr) {
+      if (step.kind() == confluent::kafka::test::LISTENER_STEP_FAIL) return err;
+      kafka_common_Error_destroy(err);
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+void action_rebalance(void* self, const kafka_List_t* partitions, int64_t callback_id, int i,
+                      const char* kind) {
+  auto* state = static_cast<ActionListenerState*>(self);
+  append_rebalance(state->log, partitions, kind);
+  // Owned; `__set_callback_result` takes it over and fails the callback.
+  kafka_common_Error_t* failure = run_listener_script(state, i, partitions, kind);
+  kafka_consumer_Consumer__set_callback_result(state->log->consumer, callback_id, nullptr, failure);
+}
+
+extern "C" void action_partitions_assigned(void* self, const kafka_List_t* partitions,
+                                           int64_t callback_id) {
+  action_rebalance(self, partitions, callback_id, 0, KIND_ASSIGNED);
+}
+
+extern "C" void action_partitions_revoked(void* self, const kafka_List_t* partitions,
+                                          int64_t callback_id) {
+  action_rebalance(self, partitions, callback_id, 1, KIND_REVOKED);
+}
+
+extern "C" void action_partitions_lost(void* self, const kafka_List_t* partitions,
+                                       int64_t callback_id) {
+  action_rebalance(self, partitions, callback_id, 2, KIND_LOST);
+}
 // A `kafka_Map_t` of owned `kafka_common_TopicPartition_t *` to `int64_t *`
 // (the timestamps to search) for `offsets_for_times`. `timestamps` is
 // reserved up front so the addresses handed to the map stay stable.
@@ -1635,14 +1963,24 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (req->with_listener()) {
       // A real ConsumerRebalanceListener whose invocations land in the callback
       // log. Its `self` is the consumer's LogState, which lives for the whole
-      // session and so outlives every release point of the registration (the
-      // next subscribe_*, unsubscribe, or the consumer's destruction). The
+      // session and so outlives every release point of the registration (a
+      // later successful subscribe_* that replaces it, a KafkaConsumer's close,
+      // or the consumer's destruction). The
       // registration is COPIED by subscribe, success or failure, so the handle
       // is destroyed right after.
+      //
+      // A pending SetListenerAction belongs to this registration: its
+      // listener's `self` is an ActionListenerState instead, holding the
+      // consumer's reentrancy handle (session-lifetime too, see the struct).
+      ActionListenerState* action_state = take_action_state(req->consumer_id(), c);
       kafka_consumer_ConsumerRebalanceListener_t* listener =
-          kafka_consumer_ConsumerRebalanceListener_new(
-              log_state_for(req->consumer_id()), log_partitions_revoked,
-              log_partitions_assigned, log_partitions_lost);
+          action_state == nullptr
+              ? kafka_consumer_ConsumerRebalanceListener_new(
+                    log_state_for(req->consumer_id()), log_partitions_revoked,
+                    log_partitions_assigned, log_partitions_lost)
+              : kafka_consumer_ConsumerRebalanceListener_new(
+                    action_state, action_partitions_revoked, action_partitions_assigned,
+                    action_partitions_lost);
       if (pattern != nullptr) {
         kafka_consumer_Consumer_subscribe_with_pattern_listener(c, pattern, listener, &err);
       } else {
@@ -1728,7 +2066,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
     // An absent timeout_ms selects the overload without a Duration.
-    if (req->offsets().empty()) {
+    // with_offsets selects the Map overload even for an empty map.
+    if (req->offsets().empty() && !req->with_offsets()) {
       if (req->has_timeout_ms()) {
         kafka_consumer_Consumer_commit_sync_with_timeout(c, req->timeout_ms(), &err);
       } else {
@@ -1755,7 +2094,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     kafka_common_Error_t* err = nullptr;
-    if (req->offsets().empty() && !req->with_callback()) {
+    if (req->offsets().empty() && !req->with_offsets() && !req->with_callback()) {
       kafka_consumer_Consumer_commit_async(c, &err);
     } else {
       // A real OffsetCommitCallback (or the reporting no-op, see
@@ -1766,7 +2105,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       kafka_consumer_OffsetCommitCallback_t* callback = kafka_consumer_OffsetCommitCallback_new(
           log_state_for(req->consumer_id()),
           req->with_callback() ? log_commit_complete : discard_commit_complete);
-      if (req->offsets().empty()) {
+      if (req->offsets().empty() && !req->with_offsets()) {
         kafka_consumer_Consumer_commit_async_with_callback(c, callback, &err);
       } else {
         OffsetMapHandles offsets(req->offsets());
@@ -2177,6 +2516,20 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // afterwards. The log entries stay in callback_log_ and the
     // LogState stays in log_states_, so GetCallbackLog still works post-close.
     entry.destroy();
+    // The action listeners' handles go last: the C API lets a handle outlive
+    // its consumer, so nothing the consumer ran up to its `_destroy` found
+    // one released. Their states stay, like LogState.
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      pending_actions_.erase(req->consumer_id());
+      auto it = action_states_.find(req->consumer_id());
+      if (it != action_states_.end()) {
+        for (auto& state : it->second) {
+          kafka_consumer_ConsumerHandle_destroy(state->handle);
+          state->handle = nullptr;
+        }
+      }
+    }
     return grpc::Status::OK;
   }
 
@@ -2215,7 +2568,45 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
+  grpc::Status SetListenerAction(grpc::ServerContext*, const ListenerActionRequest* req,
+                                 StatusResponse* resp) override {
+    if (consumer_for(req->consumer_id()) == nullptr) return unknown(resp, req->consumer_id());
+    for (const ListenerScript* script :
+         {req->has_on_assigned() ? &req->on_assigned() : nullptr,
+          req->has_on_revoked() ? &req->on_revoked() : nullptr,
+          req->has_on_lost() ? &req->on_lost() : nullptr}) {
+      if (script != nullptr && !listener_script_valid(*script)) {
+        *resp->mutable_error() = make_synthetic_error("unknown listener trigger or step",
+                                                      kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT);
+        return grpc::Status::OK;
+      }
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!req->has_on_assigned() && !req->has_on_revoked() && !req->has_on_lost()) {
+      pending_actions_.erase(req->consumer_id());
+    } else {
+      pending_actions_[req->consumer_id()] = *req;
+    }
+    return grpc::Status::OK;
+  }
+
  private:
+  // Takes the consumer's pending SetListenerAction, if any, into a new
+  // session-lifetime ActionListenerState with a fresh reentrancy handle of
+  // `consumer`; nullptr when there is none.
+  ActionListenerState* take_action_state(uint64_t id, kafka_consumer_Consumer_t* consumer) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto pending = pending_actions_.find(id);
+    if (pending == pending_actions_.end()) return nullptr;
+    auto log_state = log_states_.find(id);
+    if (log_state == log_states_.end()) return nullptr;
+    auto* state = new ActionListenerState{log_state->second.get(), std::move(pending->second),
+                                          kafka_consumer_Consumer_handle(consumer)};
+    pending_actions_.erase(pending);
+    action_states_[id].push_back(std::unique_ptr<ActionListenerState>(state));
+    return state;
+  }
+
   // The consumer's `Consumer` view, or nullptr for an unknown (or closed) id.
   kafka_consumer_Consumer_t* consumer_for(uint64_t id) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -2324,6 +2715,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // -1 for Java's Optional.empty(): the optional proto field stays unset.
     const int32_t epoch = kafka_consumer_ConsumerRecord_leader_epoch(rec);
     if (epoch >= 0) dst->set_leader_epoch(epoch);
+    // The binding's own sizes, -1 (Java's NULL_SIZE) for a null key or value.
+    dst->set_serialized_key_size(kafka_consumer_ConsumerRecord_serialized_key_size(rec));
+    dst->set_serialized_value_size(kafka_consumer_ConsumerRecord_serialized_value_size(rec));
     // headers(): BORROWED from the record. The RecordHeaders handle is only
     // enumerable through its `Headers` view, which `__as_Headers` hands out
     // for the read-only handle; nothing below writes through it, and the view
@@ -2361,6 +2755,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   // `self` for the rebalance-listener and commit callbacks; owned here, one
   // per consumer, for the whole session (never erased by Close — see LogState).
   std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
+  // SetListenerAction's pending actions, each taken by the consumer's next
+  // Subscribe with with_listener.
+  std::unordered_map<uint64_t, ListenerActionRequest> pending_actions_;
+  // `self` of the action listeners Subscribe registered; owned here for the
+  // session (see ActionListenerState). Their handles are released at Close.
+  std::unordered_map<uint64_t, std::vector<std::unique_ptr<ActionListenerState>>> action_states_;
   // Has its own mutex; see CallbackLog.
   CallbackLog callback_log_;
   std::atomic<uint64_t> next_id_{1};
@@ -2482,8 +2882,8 @@ void copy_proto_error(KafkaError* dst, const kafka_common_Error_t* err) {
     *dst = make_synthetic_error("null error handle");
     return;
   }
-  dst->set_code(kafka_common_Error__enum(err));
-  dst->set_message(cstr(kafka_common_Error_message(err)));
+  // Code, message, payload and the bare-KafkaException bit, as fill_proto_error.
+  fill_proto_error_borrowed(dst, err);
 }
 
 // Awaits a future; on success `*out` is the borrowed value (null for a Void
@@ -6305,8 +6705,9 @@ class ChaosWorkloadServiceImpl final : public ChaosWorkloadService::Service {
     retain(state);
 
     // The listener's `self` is the retained state, which outlives every release
-    // point of the registration (the next subscribe / unsubscribe, or the
-    // consumer's destruction). subscribe copies the registration, success or
+    // point of the registration (a later successful subscribe that replaces
+    // it, a KafkaConsumer's close, or the consumer's destruction). subscribe
+    // copies the registration, success or
     // failure, so the handle is destroyed right after.
     kafka_consumer_ConsumerRebalanceListener_t* listener =
         kafka_consumer_ConsumerRebalanceListener_new(state.get(), chaos_partitions_revoked,

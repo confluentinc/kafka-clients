@@ -58,6 +58,8 @@ use confluent_kafka::common::header::Header;
 use confluent_kafka::common::metrics::{KafkaMetric, Metrics, MetricsView, gauge};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
+use confluent_kafka::consumer::ConsumerNoOffsetForPartitionError;
+use confluent_kafka::consumer::ConsumerOffsetOutOfRangeError;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::Callback;
@@ -81,6 +83,12 @@ pub struct MultilanguageProducer {
     producer_id: u64,
     /// Cloned per RPC; tonic clients share their underlying connection.
     client: ProducerServiceClient<Channel>,
+    /// The same server over a channel without the 30 s per-request timeout,
+    /// for the blocking RPCs, each of which sets its own deadline: see
+    /// [`blocking_deadline`].
+    blocking_client: ProducerServiceClient<Channel>,
+    /// [`blocking_deadline`] of this producer's config.
+    blocking_deadline: Duration,
     /// Backend label (e.g. "python", "c") used in panic messages and logs.
     backend: &'static str,
 }
@@ -90,7 +98,15 @@ impl MultilanguageProducer {
     /// producer with the given `config`. The `config` map is forwarded
     /// verbatim to the server, which uses it to construct a `KafkaProducer`
     /// (or, if empty, a `MockProducer` for client-side smoke testing).
-    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
+    /// `untimed_channel` reaches the same server with no per-request timeout;
+    /// the blocking RPCs go over it.
+    pub async fn new(
+        channel: Channel,
+        untimed_channel: Channel,
+        config: HashMap<String, String>,
+        backend: &'static str,
+    ) -> Result<Self, Error> {
+        let blocking_deadline = blocking_deadline(&config);
         let mut client = ProducerServiceClient::new(channel);
         let response = client
             .create_producer(CreateProducerRequest { config })
@@ -100,7 +116,21 @@ impl MultilanguageProducer {
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
-        Ok(Self { producer_id: response.producer_id, client, backend })
+        Ok(Self {
+            producer_id: response.producer_id,
+            client,
+            blocking_client: ProducerServiceClient::new(untimed_channel),
+            blocking_deadline,
+            backend,
+        })
+    }
+
+    /// `message` as a request that may run for `deadline`, for the
+    /// blocking client.
+    fn blocking_request<T>(message: T, deadline: Duration) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        request.set_timeout(deadline);
+        request
     }
 
     /// Map a `StatusResponse` (the reply shared by the flush/close/transaction
@@ -132,9 +162,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// producer's `init_transactions` future and returns the resolved
     /// `StatusResponse` (empty on success, an `Error` on failure).
     async fn init_transactions(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .init_transactions(TransactionRequest { producer_id: self.producer_id })
+            .init_transactions(Self::blocking_request(
+                TransactionRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -146,12 +179,13 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// trip, so we drive the async call to completion with [`Self::block`] —
     /// mirroring `MultilanguageConsumer`'s sync state-read methods.
     fn begin_transaction(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let producer_id = self.producer_id;
         let backend = self.backend;
+        let deadline = self.blocking_deadline;
         self.block(async move {
             let response = client
-                .begin_transaction(TransactionRequest { producer_id })
+                .begin_transaction(Self::blocking_request(TransactionRequest { producer_id }, deadline))
                 .await
                 .map_err(|status| status_to_kafka_error(&status, backend))?
                 .into_inner();
@@ -176,7 +210,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         group_metadata: &dyn ConsumerGroupMetadata,
     ) -> Result<(), Error> {
         let group_metadata_id = remote_group_metadata_id(group_metadata, self.backend)?;
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         // The offsets reach the wire, so impose a deterministic order before
         // encoding (producer-transactions.md §10): a `HashMap` iterates
         // nondeterministically, so sort by topic then partition to keep the
@@ -197,7 +231,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         let request =
             SendOffsetsToTransactionRequest { producer_id: self.producer_id, offsets: entries, group_metadata_id };
         let response = client
-            .send_offsets_to_transaction(request)
+            .send_offsets_to_transaction(Self::blocking_request(request, self.blocking_deadline))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -207,9 +241,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// Java `commitTransaction()` tunneled over gRPC — see
     /// [`Self::init_transactions`] for the response convention.
     async fn commit_transaction(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .commit_transaction(TransactionRequest { producer_id: self.producer_id })
+            .commit_transaction(Self::blocking_request(
+                TransactionRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -219,9 +256,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// Java `abortTransaction()` tunneled over gRPC — see
     /// [`Self::init_transactions`] for the response convention.
     async fn abort_transaction(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .abort_transaction(TransactionRequest { producer_id: self.producer_id })
+            .abort_transaction(Self::blocking_request(
+                TransactionRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -237,18 +277,22 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
         callback: Option<Box<dyn Callback>>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let request = SendRequest {
             producer_id: self.producer_id,
             record: Some(producer_record_to_proto(&record)),
             with_callback: callback.is_some(),
         };
         let response = client
-            .send(request)
+            .send(Self::blocking_request(request, self.blocking_deadline))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
+        // The send call itself failed (Java's `send` throwing): the native
+        // producer returns `Err` without firing the callback, and so does this.
+        let raised_by_send = response.raised_by_send;
         let result = match response.result {
+            Some(proto::send_response::Result::Error(e)) if raised_by_send => return Err(kafka_error_from_proto(e)),
             Some(proto::send_response::Result::Metadata(m)) => Ok(record_metadata_from_proto(m)),
             Some(proto::send_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
             None => Err(Error::local_illegal_state(format!(
@@ -268,9 +312,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .flush(FlushRequest { producer_id: self.producer_id })
+            .flush(Self::blocking_request(
+                FlushRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -324,9 +371,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn close(&self) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .close(CloseRequest { producer_id: self.producer_id })
+            .close(Self::blocking_request(
+                CloseRequest { producer_id: self.producer_id },
+                self.blocking_deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -337,14 +387,22 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     }
 
     async fn close_with_timeout(&self, timeout: Duration) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+        // The call's own timeout plus the margin, but no longer than an
+        // untimed `close()` may take, and no shorter than the default.
+        let deadline = timeout
+            .saturating_add(BLOCKING_DEADLINE_MARGIN)
+            .clamp(DEFAULT_RPC_DEADLINE, self.blocking_deadline);
         // `close_timeout` here is the tonic-generated client method for
         // `rpc CloseTimeout`, NOT the `Producer` trait method above — the
         // proto RPC name is the wire contract and does not follow §2's
         // `_with_` rule, so the two spellings differ deliberately.
         let response = client
-            .close_timeout(CloseTimeoutRequest { producer_id: self.producer_id, timeout_ms })
+            .close_timeout(Self::blocking_request(
+                CloseTimeoutRequest { producer_id: self.producer_id, timeout_ms },
+                deadline,
+            ))
             .await
             .map_err(|status| status_to_kafka_error(&status, self.backend))?
             .into_inner();
@@ -431,15 +489,71 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
-/// Rebuilds an [`Error`] from its wire form.
-pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
+/// The per-request timeout of [`BackendHandle::channel`](crate::common::backend_pool::BackendHandle::channel),
+/// which every other RPC keeps.
+const DEFAULT_RPC_DEADLINE: Duration = Duration::from_secs(30);
+
+/// What a blocking RPC's deadline adds to the longest wait its call may
+/// legitimately make, for the server's own work and the round trip.
+const BLOCKING_DEADLINE_MARGIN: Duration = Duration::from_secs(30);
+
+/// The deadline of the producer's blocking RPCs (`send`, `flush`, the
+/// transaction calls, `close`): the longest wait the native call may
+/// legitimately make under `config`, plus [`BLOCKING_DEADLINE_MARGIN`], and
+/// never less than [`DEFAULT_RPC_DEADLINE`].
+///
+/// The longest wait is the largest of `max.block.ms` (the metadata wait of
+/// `send` and the transaction calls), `request.timeout.ms` (an in-flight
+/// request `close()` waits out, as for a fenced producer) and
+/// `delivery.timeout.ms` (a record `flush()` waits on), each at Java's
+/// default (60 s, 30 s, 120 s) when the config does not set it.
+fn blocking_deadline(config: &HashMap<String, String>) -> Duration {
+    let ms = |key: &str, default: u64| config.get(key).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default);
+    let longest = ms("max.block.ms", 60_000)
+        .max(ms("request.timeout.ms", 30_000))
+        .max(ms("delivery.timeout.ms", 120_000));
+    Duration::from_millis(longest)
+        .saturating_add(BLOCKING_DEADLINE_MARGIN)
+        .max(DEFAULT_RPC_DEADLINE)
+}
+
+/// Rebuilds an [`Error`] from its wire form, with its cause.
+///
+/// The cause (the proto's `cause`, one level deep) is rebuilt from its code and
+/// message and attached where the error's class takes one: a bare
+/// `KafkaException`, as Java's `KafkaException(String, Throwable)`, so
+/// [`Error::source`] answers as the native error's does. For any other class
+/// the cause is not attached, so a test asserting on `source()` there sees
+/// `None` and fails, rather than passing on a rebuilt guess.
+pub(crate) fn kafka_error_from_proto(mut p: proto::KafkaError) -> Error {
+    use crate::common::error_code::UNKNOWN_SERVER_ERROR;
+
+    let cause = p.cause.take().map(|cause| {
+        kafka_error_without_cause(proto::KafkaError {
+            code: cause.code,
+            message: cause.message,
+            bare_kafka_error: cause.bare_kafka_error,
+            ..Default::default()
+        })
+    });
+    match cause {
+        Some(cause) if p.code == UNKNOWN_SERVER_ERROR && p.bare_kafka_error => {
+            Error::kafka_message_source(p.message, cause)
+        },
+        _ => kafka_error_without_cause(p),
+    }
+}
+
+/// [`kafka_error_from_proto`] for the error itself, its cause left aside.
+fn kafka_error_without_cause(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 
-    // `code` is the sole discriminator. It is the FFI error code
+    // `code` is the discriminator. It is the FFI error code
     // (`kafka_common_Error_e`), which is injective over the client's error
-    // classes, so it identifies the class on its own — that is why the proto no
-    // longer carries a `variant` field and neither server hand-matches message
-    // text any more.
+    // classes except for -1, shared by the bare `KafkaException` and
+    // `UnknownServerException` and told apart by `bare_kafka_error` — that is
+    // why the proto no longer carries a `variant` field and neither server
+    // hand-matches message text any more.
     //
     // `is_retriable` / `is_fatal` are gone with it: both sides derive them from
     // the code (`Error::is_retriable_error`,
@@ -486,6 +600,37 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         INVALID_RECEIVE => Error::invalid_receive(p.message),
         PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
         BOOTSTRAP_RESOLUTION => Error::BootstrapResolution(BootstrapResolutionError::new(p.message)),
+        // Code -1 is shared by Java's bare `KafkaException` and its
+        // `ApiException` subclass `UnknownServerException`; the server says
+        // which it is.
+        UNKNOWN_SERVER_ERROR if p.bare_kafka_error => Error::kafka_message(p.message),
+        CONSUMER_OFFSET_OUT_OF_RANGE => Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::with_message(
+            p.message,
+            p.offset_out_of_range_partitions
+                .into_iter()
+                .map(|e| {
+                    let tp = e.partition.unwrap_or_default();
+                    (TopicPartition::new(tp.topic, tp.partition), e.offset)
+                })
+                .collect(),
+        )),
+        // Its public constructor builds the message from the partitions, so the
+        // class is rebuilt only when that reproduces the server's message
+        // exactly; otherwise it falls back to UNKNOWN_SERVER_ERROR with the
+        // server's text, as for the other payload classes below, so a
+        // difference shows instead of being papered over.
+        CONSUMER_NO_OFFSET_FOR_PARTITION if !p.partitions.is_empty() => {
+            let rebuilt = Error::ConsumerNoOffsetForPartition(ConsumerNoOffsetForPartitionError::with_partitions(
+                p.partitions
+                    .iter()
+                    .map(|tp| TopicPartition::new(tp.topic.clone(), tp.partition)),
+            ));
+            if rebuilt.message() == p.message {
+                rebuilt
+            } else {
+                error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class")
+            }
+        },
 
         // Everything else is a class that owns its protocol code, which is
         // exactly what the generated `error_with_message` table (a copy of
@@ -495,15 +640,15 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         // used to guess at from the message text.
         //
         // A code the table has no class for falls back to `UNKNOWN_SERVER_ERROR`,
-        // as `Errors.forCode` does in Java. Six negatives land there,
+        // as `Errors.forCode` does in Java. Four negatives land there,
         // deliberately, carrying the message. They are exactly the client-side
         // classes that hold structured payload the proto does not transport —
         // `CorrelationIdMismatch`'s two correlation ids, `QuotaViolation`'s
         // metric and bounds, `RecordDeserialization`'s partition and offset, and
-        // `ConsumerLogTruncation` / `ConsumerNoOffsetForPartition` /
-        // `ConsumerOffsetOutOfRange`'s partition maps — so an arm above could
-        // only reconstruct the class by fabricating that payload. Widening the
-        // proto is the fix if a test ever needs to assert on one of them.
+        // `ConsumerLogTruncation`'s partition map — so an arm above could only
+        // reconstruct the class by fabricating that payload. Widening the proto
+        // is the fix if a test ever needs to assert on one of them, as it was
+        // for `ConsumerNoOffsetForPartition` and `ConsumerOffsetOutOfRange`.
         code => match error_with_message(code, p.message.clone()) {
             Some(error) => error,
             None => error_with_message(UNKNOWN_SERVER_ERROR, p.message).expect("UNKNOWN_SERVER_ERROR owns a class"),
@@ -511,16 +656,92 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     }
 }
 
-/// Map a tonic transport-level failure to a `Error`. These are
-/// gRPC-layer problems (connection refused, server crashed mid-call, etc.)
-/// that aren't produced by a real Kafka client; surfacing them as
-/// `LocalIllegalState` makes failures visible without conflating with broker
-/// errors.
+/// A tonic transport-level failure: a gRPC-layer problem (connection refused,
+/// server crashed mid-call, a handler that raised instead of replying) that no
+/// real Kafka client produces. It panics, failing the test: returned as an
+/// `Error`, it would be one a test could match by class and so pass on a
+/// broken server. Every server returns a binding's error as its reply's
+/// `error`, so a transport failure is never the binding's answer.
 pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> Error {
-    Error::local_illegal_state(format!(
+    panic!(
         "{} gRPC backend transport error ({:?}): {}",
         backend,
         status.code(),
         status.message()
-    ))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::error_code::INVALID_PRODUCER_ID_MAPPING;
+    use crate::common::error_code::LOCAL_ILLEGAL_STATE;
+    use crate::common::error_code::UNKNOWN_SERVER_ERROR;
+
+    fn cause(code: i32, message: &str) -> Option<proto::KafkaErrorCause> {
+        Some(proto::KafkaErrorCause { code, message: message.to_string(), bare_kafka_error: false })
+    }
+
+    /// A bare `KafkaException` with a cause rebuilds with that cause, of its class.
+    #[test]
+    fn bare_kafka_error_keeps_its_cause() {
+        let error = kafka_error_from_proto(proto::KafkaError {
+            code: UNKNOWN_SERVER_ERROR,
+            message: "in an error state".to_string(),
+            bare_kafka_error: true,
+            cause: cause(INVALID_PRODUCER_ID_MAPPING, "bad mapping"),
+            ..Default::default()
+        });
+        assert!(matches!(error, Error::KafkaError(_)), "got {error:?}");
+        assert_eq!(error.message(), "in an error state");
+        let source = error.source().expect("a cause");
+        assert!(matches!(source, Error::InvalidPidMapping(_)), "got {source:?}");
+        assert_eq!(source.message(), "bad mapping");
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    /// Any other class is rebuilt without the cause, so `source()` is `None`.
+    #[test]
+    fn other_class_drops_the_cause() {
+        let error = kafka_error_from_proto(proto::KafkaError {
+            code: LOCAL_ILLEGAL_STATE,
+            message: "state".to_string(),
+            cause: cause(INVALID_PRODUCER_ID_MAPPING, "bad mapping"),
+            ..Default::default()
+        });
+        assert!(error.is_local_illegal_state_error(), "got {error:?}");
+        assert!(error.source().is_none());
+    }
+
+    /// The blocking deadline is the longest configured wait plus the margin,
+    /// at Java's defaults when unset.
+    #[test]
+    fn blocking_deadline_from_config() {
+        assert_eq!(blocking_deadline(&HashMap::new()), Duration::from_secs(150));
+        let config = HashMap::from([
+            ("max.block.ms".to_string(), "5000".to_string()),
+            ("request.timeout.ms".to_string(), "200000".to_string()),
+            ("delivery.timeout.ms".to_string(), "1000".to_string()),
+        ]);
+        assert_eq!(blocking_deadline(&config), Duration::from_secs(230));
+        let small = HashMap::from([
+            ("max.block.ms".to_string(), "0".to_string()),
+            ("request.timeout.ms".to_string(), "0".to_string()),
+            ("delivery.timeout.ms".to_string(), "0".to_string()),
+        ]);
+        assert_eq!(blocking_deadline(&small), Duration::from_secs(30));
+    }
+
+    /// No cause: a bare error stays bare, with no source.
+    #[test]
+    fn no_cause() {
+        let error = kafka_error_from_proto(proto::KafkaError {
+            code: UNKNOWN_SERVER_ERROR,
+            message: "plain".to_string(),
+            bare_kafka_error: true,
+            ..Default::default()
+        });
+        assert!(matches!(error, Error::KafkaError(_)), "got {error:?}");
+        assert!(error.source().is_none());
+    }
 }

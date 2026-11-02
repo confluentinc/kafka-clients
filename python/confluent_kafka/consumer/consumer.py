@@ -158,7 +158,13 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``KafkaConsumer`` inside ``poll()`` or ``unsubscribe()`` (and ``close()``
         revokes or loses the group assignment through it), as in Java; on
         ``MockConsumer`` inside ``rebalance()`` and ``lose_partitions()``, as in
-        Java's mock. Subscribing without one releases the previous listener.
+        Java's mock. The listener stays registered until a later
+        ``subscribe()`` replaces it (with or without a new one), or a
+        ``KafkaConsumer`` is closed (``MockConsumer.close()`` keeps it:
+        ``rebalance()`` and ``lose_partitions()`` still run it, as on Java's
+        mock); ``unsubscribe()`` and ``assign()`` keep it. On
+        ``KafkaConsumer`` an empty ``topics`` replaces nothing either: it keeps
+        the listener and ignores a new ``callback``.
 
         Raises ``IllegalArgumentError`` if ``callback`` is ``None``
         ("RebalanceListener cannot be None"), if ``topics`` or ``pattern`` is

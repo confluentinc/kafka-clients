@@ -4749,12 +4749,20 @@ static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records, int cop
 
 // The `void *self` registered with kafka_consumer_ConsumerRebalanceListener_new_err.
 // Owns one reference to the Python adapter (consumer.py's _ListenerAdapter).
-// Lives until the registration that copied it is replaced by a later
-// subscribe*, or until the consumer is destroyed (an unsubscribe leaves the
-// Java listener registered, so the context survives it too).
-typedef struct {
+// Lives until a later successful subscribe with a non-empty topic list or a
+// pattern replaces the registration (with a new listener or with none), or
+// until the consumer is destroyed. On a KafkaConsumer, unsubscribe(),
+// subscribe([]) (with or without a listener) and assign() leave the Java
+// listener registered, and close() may still call it, so the context
+// survives them. A MockConsumer's subscribe([]) replaces it, as Java's mock's
+// SubscriptionState.subscribe does. The context of a failed subscribe is parked
+// on the consumer's listener_orphans list until the consumer is destroyed:
+// SubscriptionState.subscribe registers the listener before its subscription
+// type check throws, so the core may hold it (see consumer_listener_commit).
+typedef struct ListenerCtx {
     PyObject* adapter;
     kafka_consumer_Consumer_t* consumer;  // reports through __set_callback_result
+    struct ListenerCtx* next;             // on listener_orphans only
 } ListenerCtx;
 
 // The `void *self` registered with kafka_consumer_OffsetCommitCallback_new_err.
@@ -4787,6 +4795,7 @@ typedef struct {
     kafka_consumer_Consumer_t* consumer;   // borrowed __as_Consumer view of mc or kc
     PyObject* notify_cb;                   // asyncio pump scheduler, or NULL
     ListenerCtx* listener;                 // the registered listener's `self`, or NULL
+    ListenerCtx* listener_orphans;         // failed subscribes' contexts, see ListenerCtx
     CommitCbCtx* orphans;                  // see CommitCbCtx
     PinnedBytes* pinned;                   // see PinnedBytes
     PyObject* client_id;                   // KafkaConsumer: its config's client.id (str), else NULL
@@ -4810,6 +4819,7 @@ static ListenerCtx* listener_ctx_new(PyObject* adapter, kafka_consumer_Consumer_
     Py_INCREF(adapter);
     ctx->adapter = adapter;
     ctx->consumer = consumer;
+    ctx->next = NULL;
     return ctx;
 }
 
@@ -4819,17 +4829,39 @@ static void listener_ctx_free(ListenerCtx* ctx) {
     PyMem_Free(ctx);
 }
 
-// Settles the listener registration after a subscribe* completed: on success
-// the new context (NULL for a listenerless subscribe, Java's NoOp listener)
-// replaces the old one, which Rust no longer references; on failure the old
-// registration stands and the new context is dropped. GIL held.
-static void consumer_listener_commit(Consumer* c, ListenerCtx* new_ctx, int failed) {
+// Settles the listener registration after a subscribe* completed. A
+// successful subscribe that `replaces` the listener (see
+// subscribe_replaces_listener) installs the new context (NULL for a
+// listenerless subscribe, Java's NoOp listener) and frees the old one, which
+// Rust no longer references. A KafkaConsumer's successful subscribe([]) --
+// Java's unsubscribe(), which keeps the old listener and ignores a new one --
+// keeps the old registration and frees the new context, which the core
+// dropped. A failed subscribe keeps the old one too, and parks the new one
+// until the consumer is destroyed: SubscriptionState.subscribe registers the
+// listener before its type check throws (subscribe after assign), so a
+// MockConsumer's rebalance still calls it, as Java's mock does. GIL held.
+static void consumer_listener_commit(Consumer* c, ListenerCtx* new_ctx, int failed, int replaces) {
     if (failed) {
+        if (new_ctx != NULL) {
+            new_ctx->next = c->listener_orphans;
+            c->listener_orphans = new_ctx;
+        }
+        return;
+    }
+    if (!replaces) {
         listener_ctx_free(new_ctx);
         return;
     }
     listener_ctx_free(c->listener);
     c->listener = new_ctx;
+}
+
+// Whether a successful topic subscribe replaces the registered listener: a
+// non-empty list always; an empty one only on a MockConsumer (Java's mock
+// registers the listener whatever the topics), since a KafkaConsumer runs
+// unsubscribe() for it (AsyncKafkaConsumer#subscribeInternal), keeping it.
+static int subscribe_replaces_listener(const Consumer* c, const str_list_t* topics) {
+    return c->is_mock || PySequence_Fast_GET_SIZE(topics->seq) > 0;
 }
 
 static CommitCbCtx* commit_ctx_new(Consumer* c, PyObject* adapter) {
@@ -5188,6 +5220,11 @@ static PyObject* py_Consumer_destroy(PyObject* self, PyObject* args) {
     // The handle is freed even after a panic: report it, release the C side.
     ffi_unraisable(err);
     listener_ctx_free(c->listener);
+    while (c->listener_orphans != NULL) {
+        ListenerCtx* next = c->listener_orphans->next;
+        listener_ctx_free(c->listener_orphans);
+        c->listener_orphans = next;
+    }
     while (c->orphans != NULL) {
         CommitCbCtx* next = c->orphans->next;
         commit_ctx_free(c->orphans);
@@ -6008,6 +6045,7 @@ typedef struct {
     PyObject* cb;
     Consumer* c;
     ListenerCtx* lctx;
+    int replaces;  // see consumer_listener_commit
 } SubscribeCbCtx;
 
 static void consumer_subscribe_cb(kafka_common_Error_t* error, void* opaque) {
@@ -6015,7 +6053,7 @@ static void consumer_subscribe_cb(kafka_common_Error_t* error, void* opaque) {
     SubscribeCbCtx* ctx = (SubscribeCbCtx*)opaque;
     PyGILState_STATE g;
     if (!gil_ensure_unless_finalizing(&g)) return;
-    consumer_listener_commit(ctx->c, ctx->lctx, error != NULL);
+    consumer_listener_commit(ctx->c, ctx->lctx, error != NULL, ctx->replaces);
     PyObject* py_err = error_handle_to_py(error);  // owned: the callable takes it
     if (py_err != NULL) {
         PyObject* r = PyObject_CallFunctionObjArgs(ctx->cb, py_err, NULL);
@@ -6030,13 +6068,14 @@ static void consumer_subscribe_cb(kafka_common_Error_t* error, void* opaque) {
     PyGILState_Release(g);
 }
 
-static SubscribeCbCtx* subscribe_cb_ctx_new(PyObject* cb, Consumer* c, ListenerCtx* lctx) {
+static SubscribeCbCtx* subscribe_cb_ctx_new(PyObject* cb, Consumer* c, ListenerCtx* lctx, int replaces) {
     SubscribeCbCtx* ctx = (SubscribeCbCtx*)PyMem_Malloc(sizeof(SubscribeCbCtx));
     if (ctx == NULL) { PyErr_NoMemory(); return NULL; }
     Py_INCREF(cb);
     ctx->cb = cb;
     ctx->c = c;
     ctx->lctx = lctx;
+    ctx->replaces = replaces;
     return ctx;
 }
 
@@ -6057,8 +6096,9 @@ static PyObject* py_Consumer_subscribe(PyObject* self, PyObject* args) {
                    : (kafka_consumer_Consumer_subscribe_with_topics(s, tl.list, &ffi_err), ffi_take(&ffi_err));
     Py_END_ALLOW_THREADS
     if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));  // registration copied
+    int replaces = subscribe_replaces_listener(c, &tl);
     str_list_free(&tl);
-    consumer_listener_commit(c, lctx, err != NULL);
+    consumer_listener_commit(c, lctx, err != NULL, replaces);
     return err_result(err);
 }
 
@@ -6071,7 +6111,7 @@ static PyObject* py_Consumer_subscribe_cb(PyObject* self, PyObject* args) {
     if (str_list_build(topics, &tl) < 0) return NULL;
     ListenerCtx* lctx; kafka_consumer_ConsumerRebalanceListener_t* listener;
     if (listener_build(c, adapter, &lctx, &listener) < 0) { str_list_free(&tl); return NULL; }
-    SubscribeCbCtx* ctx = subscribe_cb_ctx_new(cb, c, lctx);
+    SubscribeCbCtx* ctx = subscribe_cb_ctx_new(cb, c, lctx, subscribe_replaces_listener(c, &tl));
     if (ctx == NULL) {
         if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));
         listener_ctx_free(lctx); str_list_free(&tl);
@@ -6110,7 +6150,7 @@ static PyObject* py_Consumer_subscribe_pattern(PyObject* self, PyObject* args) {
     Py_END_ALLOW_THREADS
     ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
     if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));
-    consumer_listener_commit(c, lctx, err != NULL);
+    consumer_listener_commit(c, lctx, err != NULL, 1);
     return err_result(err);
 }
 
@@ -6123,7 +6163,7 @@ static PyObject* py_Consumer_subscribe_pattern_cb(PyObject* self, PyObject* args
     if (listener_build(c, adapter, &lctx, &listener) < 0) return NULL;
     kafka_consumer_SubscriptionPattern_t* sp = NULL;
     SubscribeCbCtx* ctx = ffi_raise((sp = kafka_consumer_SubscriptionPattern_new_err(pattern, &ffi_err), ffi_take(&ffi_err)))
-        ? NULL : subscribe_cb_ctx_new(cb, c, lctx);
+        ? NULL : subscribe_cb_ctx_new(cb, c, lctx, 1);
     if (ctx == NULL) {
         if (sp) ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
         if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));
