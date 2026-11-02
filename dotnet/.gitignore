@@ -17,3 +17,6 @@ obj/
 *.coverage
 *.coveragexml
 coverage/
+
+# Packages and their staged natives, from `make -C dotnet pack-dotnet` (.semaphore/pack-nupkg.sh)
+artifacts/
