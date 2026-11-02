@@ -70,7 +70,11 @@ These decide every question, in this order:
    `send()` may settle after its record's delivery callback ran.
 4. **Waiting calls use the `_cb` twin.** `send_with_callback_cb`, `flush_cb`,
    `close_cb`, `close_with_timeout_cb`. The blocking forms would block the
-   event loop and run callbacks on the caller's thread.
+   event loop and run callbacks on the caller's thread. One exception, the
+   finalizer's force-close (below): `producer_force_close` calls the blocking
+   `kafka_producer_Producer_close_with_timeout(view, 0, ...)` once, only while
+   the handle is finalized, where no JS runs and no event-loop turn will come
+   (`test/static/header_conformance.test.js` pins it there).
 5. **Never call `KafkaFuture_get`.** The `kafka_common_KafkaFuture_t*` a send's
    hand-over completion receives is destroyed unread; the delivery result comes
    from the record's `kafka_producer_Callback_t`.
@@ -124,7 +128,15 @@ These decide every question, in this order:
   keeps the process alive.
 - A producer collected or torn down without `close()` is destroyed by its
   finalizer, which first replaces the notify hook with a no-op and runs no JS:
-  the pending callbacks then only free their contexts.
+  the pending callbacks then only free their contexts. Before the destroy it
+  force-closes the producer, `close(Duration.ZERO)` (D11): destroy would
+  otherwise close an unclosed producer gracefully itself, blocking the JS
+  thread up to `max.block.ms` + `delivery.timeout.ms` (two minutes by
+  default) for records no broker may take, so a `worker.terminate()` would
+  stall. Unsent records fail at once instead; their delivery callbacks run,
+  inline, without JS, and still report through `__set_callback_result`
+  (`destroying` is set only after the close). `await producer.close()` is
+  unaffected: a completed close leaves nothing for the finalizer to do.
 
 ## Java shape, JS idiom
 
