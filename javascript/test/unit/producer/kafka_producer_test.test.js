@@ -249,14 +249,14 @@ test('argument errors throw synchronously', async () => {
   }
 });
 
-// Runs `script` in a fresh Node process, returning its exit status, output and
-// wall time.
-function runNode(script) {
+// Runs `script` in a fresh Node process (killed after `timeout` ms), returning
+// its exit status, output and wall time.
+function runNode(script, timeout = 30000) {
   const started = process.hrtime.bigint();
   const r = spawnSync(process.execPath, ['-e', script], {
     cwd: path.join(__dirname, '..', '..', '..'),
     encoding: 'utf8',
-    timeout: 30000,
+    timeout,
   });
   return { ...r, ms: Number((process.hrtime.bigint() - started) / 1000000n) };
 }
@@ -309,6 +309,38 @@ test('terminating a worker with records in flight tears its producer down cleanl
   `);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'done\n');
+});
+
+test('terminating a worker whose unclosed producer holds an unsent record is prompt', () => {
+  // D11: environment teardown finalizes a producer close() was never called
+  // on. Its destroy would close it gracefully first, waiting up to
+  // max.block.ms + delivery.timeout.ms (2 min by default) for a record no
+  // broker will take; the finalizer force-closes it (timeout 0) instead, so
+  // the record fails at once.
+  const r = runNode(
+    `
+    const { Worker } = require('node:worker_threads');
+    const body = \`
+      const { parentPort } = require('node:worker_threads');
+      const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+      const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1' });
+      p.send(new ProducerRecord({ topic: 'unclosed', value: 'v' }), () => {}).catch(() => {});
+      parentPort.postMessage('sent');
+    \`;
+    (async () => {
+      const w = new Worker(body, { eval: true });
+      await new Promise((res, rej) => { w.once('message', res); w.once('error', rej); });
+      const started = Date.now();
+      await w.terminate();
+      const ms = Date.now() - started;
+      console.log(ms < 2000 ? 'terminated promptly' : \`terminated after \${ms} ms\`);
+    })().catch((e) => { console.error(e); process.exit(1); });
+  `,
+    15000,
+  );
+  assert.equal(r.error, undefined, `the process did not exit: ${r.error}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'terminated promptly\n');
 });
 
 test('an un-awaited send whose hand-over fails surfaces as an unhandled rejection', () => {

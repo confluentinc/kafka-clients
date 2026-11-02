@@ -409,17 +409,39 @@ static void noop_notify(void* opaque) {
     (void)opaque;
 }
 
+// The finalizer's close of a producer close() never completed on (D11):
+// Producer.close(Duration.ZERO), blocking, on the JS thread. Destroy would
+// otherwise close it gracefully itself, waiting up to max.block.ms +
+// delivery.timeout.ms for records no broker may ever take (two minutes by
+// default), with the JS thread blocked in a finalizer and a terminating worker
+// stalled. A zero timeout fails the unsent and unacknowledged records at once,
+// as Java's close(Duration.ZERO) does.
+//
+// This is the binding's one blocking producer call (rule 4's exception): it
+// runs only here, while the handle is finalized, when no JS can run and no
+// event loop turn will come. It runs the queued callbacks on this thread
+// meanwhile, inline; with `finalizing` set they run no JS, and since
+// `destroying` is not set yet each delivery callback still reports through
+// __set_callback_result, which the close waits for. The close completion of a
+// close() in progress may fire inside it too.
+static void producer_force_close(Producer* p) {
+    kafka_common_Error_t* ffi_err = NULL;
+    // kafka_producer_Producer_close_with_timeout takes an out_err of its own.
+    FFI_DISCARD(kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err));
+}
+
 // Destroys the class handle on the JS thread, outside any drain: the core runs
 // the still-pending callbacks here, inline, once each. Then releases the tsfn.
 static void producer_destroy(napi_env env, Producer* p) {
     kafka_common_Error_t* ffi_err = NULL;
-    p->destroying = 1;
     p->queue.stopped = 1;
     if (p->queue.finalizing) {
         // The tsfn may already be finalized (environment teardown): the hook
         // must not reach it.
         FFI_DISCARD(kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err));
+        producer_force_close(p);
     }
+    p->destroying = 1;
     FFI_DISCARD(kafka_producer_KafkaProducer_destroy_err(p->kp, &ffi_err));
     p->kp = NULL;
     p->view = NULL;
