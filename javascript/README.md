@@ -140,9 +140,11 @@ settles; it may be reused after that. A string key or value is encoded into a
 
 **Close the producer before teardown.** A producer whose `close()` never
 completed is force-closed, as Java's `close(Duration.ZERO)`, when it is
-garbage collected or its worker or process ends (`worker.terminate()`,
-`process.exit()`): its unsent records fail, and no JS callback or future runs
-for them. The force-close can still block the thread briefly, while the
+garbage collected, when its worker ends (`worker.terminate()`, or
+`process.exit()` inside the worker), or when the main event loop runs out of
+work: its unsent records fail, and no JS callback or future runs for them. A
+`process.exit()` on the main thread runs no cleanup at all: the process ends
+at once and the unsent records are lost the same way. The force-close can still block the thread briefly, while the
 client's I/O task finishes a wait it is in (for a broker connection, up to
 `socket.connection.setup.timeout.max.ms`). So when records must be delivered,
 `await producer.close()` (or at least `flush()`) before ending a worker or the
