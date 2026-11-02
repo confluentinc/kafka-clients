@@ -21,6 +21,9 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+// Not part of `common`: see the module docs.
+#[path = "../common/integrity/mod.rs"]
+mod integrity;
 
 mod admin_acls_test;
 mod admin_bootstrap_controllers_test;
@@ -46,6 +49,7 @@ mod cluster_lifecycle_test;
 mod consumer_bounce_test;
 mod consumer_test;
 mod consumer_topic_creation_test;
+mod integrity_test;
 #[cfg(feature = "multilanguage-tests")]
 mod multilanguage_admin_test;
 #[cfg(feature = "multilanguage-tests")]
