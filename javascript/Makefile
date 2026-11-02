@@ -54,7 +54,17 @@ KAFKA_PORT ?= 39092
 # $(CONFLUENT_KAFKA_LIB_DIR) and its header under $(CONFLUENT_KAFKA_INCLUDE_DIR):
 # the repository root's Makefile orders that (`build-javascript` depends on the
 # Rust build); run standalone, build it first.
-.PHONY: build types test test-static test-unit test-typing test-integration clean
+# The gRPC server of the Rust multilanguage harness's `__grpc_js` producer arm
+# (grpc_server.js; see rust/tests/common/backend_pool.rs). Its two packages are
+# pinned once, in package.json's devDependencies; GRPC_NPM_PACKAGES lists them
+# as name@version for the native install (Dockerfile.grpc reads the same pins).
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/javascript-grpc-server:dev
+GRPC_NATIVE_DIR ?= $(RUST_PROJECT_ROOT)/target/grpc-native/javascript
+GRPC_NPM_PACKAGES = $(shell $(NODE) -p "Object.entries(require('./package.json').devDependencies) \
+	.filter(([n]) => n.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')")
+
+.PHONY: build types test test-static test-unit test-typing test-integration \
+	grpc-image grpc-native test-integration-grpc clean
 
 build:
 	$(NODE_GYP) rebuild $(NODEDIR_FLAG)
@@ -97,6 +107,55 @@ test-integration: build
 	    $(NODE) --test $(INTEGRATION_TESTS) || status=$$?; \
 	  docker rm -f $(KAFKA_CONTAINER) >/dev/null 2>&1 || true; \
 	  exit $$status; \
+	fi
+
+# The javascript gRPC server image. Context is the repo root; requires the
+# Linux libconfluent_kafka.so and confluent_kafka_bindings.h already built under
+# rust/target/ (the image builds the addon against them), so it builds only on a
+# Linux host.
+grpc-image:
+	docker build \
+		-t $(GRPC_IMAGE_TAG) \
+		-f $(REPO_ROOT)/javascript/Dockerfile.grpc \
+		$(REPO_ROOT)
+
+# The native (host-process) arm's gRPC packages, installed into
+# $(GRPC_NATIVE_DIR)/node_modules, which the harness puts on NODE_PATH (the
+# addon itself is `build`, which the root `build-grpc-native-javascript` runs
+# first). With MULTILANG_JS_NODE_PATH set to a node_modules that already holds
+# them, nothing is installed and the harness uses that one instead.
+grpc-native:
+	@if [ -n "$$MULTILANG_JS_NODE_PATH" ]; then \
+	  for pkg in @grpc/grpc-js @grpc/proto-loader; do \
+	    [ -d "$$MULTILANG_JS_NODE_PATH/$$pkg" ] || { \
+	      echo "MULTILANG_JS_NODE_PATH=$$MULTILANG_JS_NODE_PATH has no $$pkg" >&2; exit 1; }; \
+	  done; \
+	  echo "grpc-native: using MULTILANG_JS_NODE_PATH=$$MULTILANG_JS_NODE_PATH"; \
+	else \
+	  mkdir -p $(GRPC_NATIVE_DIR) && \
+	  echo '{"private": true}' > $(GRPC_NATIVE_DIR)/package.json && \
+	  $(NPM) install --prefix $(GRPC_NATIVE_DIR) --no-save --no-package-lock --ignore-scripts \
+	    --no-audit --no-fund $(GRPC_NPM_PACKAGES); \
+	fi
+
+# The container arm of the multilanguage suite for this binding: builds the
+# image, then runs the `__grpc_js` tests of the Rust harness. Linux only, like
+# python/'s and c/'s `test-integration`.
+test-integration-grpc:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\n========================================================================\n'; \
+		printf 'SKIP JavaScript test-integration-grpc: host is %s, not Linux.\n' "$$(uname -s)"; \
+		printf '\n'; \
+		printf 'The JavaScript gRPC-server image COPYs the host-built\n'; \
+		printf '  rust/target/release/libconfluent_kafka.so\n'; \
+		printf 'into a Linux container and links the addon against it. On this host\n'; \
+		printf 'that artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
+		printf 'Run it natively on this host with: %smake test-integration-javascript-native\n' \
+			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
+		printf '========================================================================\n\n'; \
+	else \
+		$(MAKE) grpc-image && \
+		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-js; \
 	fi
 
 clean:
