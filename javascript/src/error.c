@@ -43,16 +43,15 @@ static int set_named(napi_env env, napi_value obj, const char* name, napi_value 
 // The plain object for `e` (non-NULL), with its cause chain.
 static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int depth) {
     kafka_common_Error_t* ffi_err = NULL;
-    int code = (int)kafka_common_Error__enum_err(e, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    const char* message = kafka_common_Error_message_err(e, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int8_t retriable = kafka_common_Error_is_retriable_error_err(e, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int8_t api = kafka_common_Error_is_api_error_err(e, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    const kafka_common_Error_t* source = kafka_common_Error_source_err(e, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
+    int code = 0;
+    const char* message = NULL;
+    int8_t retriable = 0, api = 0;
+    const kafka_common_Error_t* source = NULL;
+    error_discard(FFI_SET(code, (int)kafka_common_Error__enum_err(e, &ffi_err)));
+    error_discard(FFI_SET(message, kafka_common_Error_message_err(e, &ffi_err)));
+    error_discard(FFI_SET(retriable, kafka_common_Error_is_retriable_error_err(e, &ffi_err)));
+    error_discard(FFI_SET(api, kafka_common_Error_is_api_error_err(e, &ffi_err)));
+    error_discard(FFI_SET(source, kafka_common_Error_source_err(e, &ffi_err)));
 
     napi_value obj, v;
     const char* name = error_name(code);

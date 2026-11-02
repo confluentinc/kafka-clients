@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // Broker-backed producer test: runs only when KAFKA_BOOTSTRAP_SERVERS is set
@@ -21,8 +20,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { KafkaFuture, KafkaProducer, ProducerRecord, RecordMetadata } = require('../..');
-const { fetchRecords } = require('./fetch_records');
+const { KafkaFuture } = require('confluent-kafka-javascript-rust/common');
+const { KafkaProducer, ProducerRecord, RecordMetadata } = require('confluent-kafka-javascript-rust/producer');
+const { fetchRecords } = require('./_fetch_records');
 
 const BOOTSTRAP = process.env.KAFKA_BOOTSTRAP_SERVERS;
 const SKIP = BOOTSTRAP ? false : 'KAFKA_BOOTSTRAP_SERVERS is not set: no broker to produce to';

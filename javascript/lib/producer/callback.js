@@ -12,33 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
-// Java's Callback interface, a single method, is a JS function
-// `(metadata, error) => void` (private helpers).
-//
-// A callback method the user can implement to provide asynchronous handling
-// of request completion. This method will be called when the record sent to
-// the server has been acknowledged. When error is not null in the callback,
-// metadata will contain the special -1 value for all fields. If topicPartition
-// cannot be chosen, a -1 value will be assigned.
+// Java's Callback interface, a single method: a JS function
+// `(metadata, error) => void`. This module holds only its type.
 
-/** The callback `send` was given, or null; throws a TypeError for a non-function. */
-function checkCallback(callback) {
-  if (callback === undefined || callback === null) return null;
-  if (typeof callback !== 'function') throw new TypeError('callback must be a function (metadata, error) => void');
-  return callback;
-}
+/**
+ * A callback interface that the user can implement to allow code to execute
+ * when the request is complete. This callback will generally execute in the
+ * background I/O thread so it should be fast; here it runs on the JS thread.
+ *
+ * This method will be called when the record sent to the server has been
+ * acknowledged. When `error` is not null in the callback, metadata will
+ * contain the special -1 value for all fields. If topicPartition cannot be
+ * chosen, a -1 value will be assigned. (The topic is the record's.)
+ *
+ * @callback Callback
+ * @param {import('./record_metadata').RecordMetadata} metadata The metadata for the record that was
+ *   sent (i.e. the partition and offset). An empty metadata with -1 value for all fields will be
+ *   returned if an error occurred.
+ * @param {import('../common/kafka_error').KafkaError | null} error The error thrown during
+ *   processing of this record. Null if no error occurred.
+ * @returns {void}
+ */
 
-/** The text the core logs for a callback that threw (Java logs a throwing onCompletion). */
-function thrownMessage(thrown) {
-  if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`;
-  try {
-    return String(thrown);
-  } catch {
-    return 'the callback threw a value that cannot be converted to a string';
-  }
-}
-
-module.exports = { checkCallback, thrownMessage };
+module.exports = {};

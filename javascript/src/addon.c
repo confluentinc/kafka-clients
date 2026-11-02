@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Module initialisation of the Node-API addon `confluent_kafka_js`: the
-// instance data, the probe and the producer's native functions. The public JS
-// surface lives in lib/; this module exports only what lib/ calls.
+// The entry point of the Node-API addon `confluent_kafka_js`: the instance
+// data, the helpers every client uses, and the registration of every native
+// function. The public JS surface lives in lib/; the addon exports only what
+// lib/ calls, all of it registered here.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,35 @@ void js_throw_last_napi_error(napi_env env, const char* what) {
     napi_throw_error(env, NULL, message);
 }
 
+void delete_ref(napi_env env, napi_ref* ref) {
+    if (*ref != NULL) {
+        napi_delete_reference(env, *ref);
+        *ref = NULL;
+    }
+}
+
+napi_value call_ref(napi_env env, napi_ref ref, size_t argc, napi_value* argv, char** thrown) {
+    napi_value fn, global, result = NULL;
+    if (napi_get_reference_value(env, ref, &fn) != napi_ok || fn == NULL || napi_get_global(env, &global) != napi_ok)
+        return NULL;
+    napi_status status = napi_call_function(env, global, fn, argc, argv, &result);
+    if (status == napi_ok) return result;
+    bool pending = false;
+    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
+        napi_value exc, text;
+        napi_get_and_clear_last_exception(env, &exc);
+        if (thrown != NULL && napi_coerce_to_string(env, exc, &text) == napi_ok) {
+            size_t len = 0;
+            if (napi_get_value_string_utf8(env, text, NULL, 0, &len) == napi_ok) {
+                char* s = (char*)malloc(len + 1);
+                if (s != NULL && napi_get_value_string_utf8(env, text, s, len + 1, &len) == napi_ok) *thrown = s;
+                else free(s);
+            }
+        }
+    }
+    return NULL;
+}
+
 static void addon_data_finalize(napi_env env, void* data, void* hint) {
     (void)hint;
     AddonData* d = (AddonData*)data;
@@ -53,12 +83,12 @@ static napi_value js_probe(napi_env env, napi_callback_info info) {
     (void)info;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_Map_t* map = NULL;
-    kafka_common_Error_t* err = (map = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err));
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
     }
-    err = (kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err));
+    err = FFI_ERR(kafka_Map_destroy_err(map, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
@@ -82,9 +112,15 @@ static napi_value addon_init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
         {"setFactories", NULL, js_set_factories, NULL, NULL, NULL, napi_default, NULL},
+        // producer.c
+        {"producerCreate", NULL, js_producer_create, NULL, NULL, NULL, napi_default, NULL},
+        {"producerSend", NULL, js_producer_send, NULL, NULL, NULL, napi_default, NULL},
+        {"producerFlush", NULL, js_producer_flush, NULL, NULL, NULL, napi_default, NULL},
+        {"producerClose", NULL, js_producer_close, NULL, NULL, NULL, napi_default, NULL},
+        {"producerPump", NULL, js_producer_pump, NULL, NULL, NULL, napi_default, NULL},
     };
     NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
-    return producer_init(env, exports);
+    return exports;
 }
 
 NAPI_MODULE_INIT() {

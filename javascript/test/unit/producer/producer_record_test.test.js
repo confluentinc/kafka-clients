@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { KafkaError, ProducerRecord } = require('../..');
+const { KafkaError } = require('confluent-kafka-javascript-rust/common');
+const { ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
 
 test('the fields Java leaves out default to null and no headers', () => {
   const r = new ProducerRecord({ topic: 't', value: 'v' });

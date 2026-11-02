@@ -14,10 +14,19 @@
 
 'use strict';
 
-// Loads the Node-API addon built by `npm run build` / `make -C javascript build`
-// (private).
+// Loads the Node-API addon (private) and does its one-time setup: the native
+// layer builds its errors and metadata through the JS classes registered
+// here, so every module that needs the addon requires this one, and no
+// index.js does any setup.
+//
+// The addon is `confluent_kafka_js.node`. Until prebuilt per-platform
+// packages exist, the only place it is looked for is the development build,
+// build/Release/ (`make -C javascript build`).
 
 const path = require('node:path');
+
+const { KafkaError } = require('./common/kafka_error');
+const { RecordMetadata } = require('./producer/record_metadata');
 
 const ADDON = path.join(__dirname, '..', 'build', 'Release', 'confluent_kafka_js.node');
 
@@ -31,5 +40,10 @@ try {
     { cause: e },
   );
 }
+
+native.setFactories(
+  (fields) => KafkaError._from(fields),
+  (fields) => new RecordMetadata(fields),
+);
 
 module.exports = native;

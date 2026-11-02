@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 /**
@@ -33,11 +32,19 @@ class RecordMetadata {
 
   /**
    * Partition value for record without partition assigned
-   * @type {number}
+   * @readonly
+   * @type {-1}
    */
   static UNKNOWN_PARTITION = -1;
 
-  /** @internal Built by the native layer through lib/index.js's factory. */
+  /**
+   * Built by the native layer, through the factory lib/_native.js registers
+   * (private).
+   *
+   * @private
+   * @param {{topic: string, partition: number, hasOffset: boolean, offset: number, hasTimestamp: boolean,
+   *          timestamp: number, serializedKeySize: number, serializedValueSize: number}} fields
+   */
   constructor(fields) {
     this.#topic = fields.topic;
     this.#partition = fields.partition;
@@ -95,6 +102,7 @@ class RecordMetadata {
     return this.#partition;
   }
 
+  /** @returns {string} */
   toString() {
     return `${this.#topic}-${this.#partition}@${this.#offset}`;
   }

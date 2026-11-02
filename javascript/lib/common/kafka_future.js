@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // Java's KafkaFuture: the future a send hands back once the record has reached
@@ -38,12 +37,19 @@ const CONSTRUCT = Symbol('KafkaFuture');
  */
 class KafkaFuture {
   #state = PENDING;
+  /** @type {T | undefined} */
   #value;
+  /** @type {unknown} */
   #error;
   // The settle functions of the Promises get() returned while pending.
   #waiters = null;
 
-  /** Futures are made by the client (private). */
+  /**
+   * Futures are made by the client (private).
+   *
+   * @private
+   * @param {symbol} token
+   */
   constructor(token) {
     if (token !== CONSTRUCT) throw new TypeError('KafkaFuture is not constructible');
   }
@@ -64,17 +70,29 @@ class KafkaFuture {
     });
   }
 
-  /** @returns {boolean} true if completed in any fashion: normally, exceptionally, or via cancellation */
+  /**
+   * Returns true if completed in any fashion: normally, exceptionally, or via cancellation.
+   *
+   * @returns {boolean}
+   */
   isDone() {
     return this.#state !== PENDING;
   }
 
-  /** @returns {boolean} true if completed exceptionally */
+  /**
+   * Returns true if completed exceptionally.
+   *
+   * @returns {boolean}
+   */
   isCompletedExceptionally() {
     return this.#state === FAILED;
   }
 
-  /** @returns {boolean} false: a record's future is never cancelled */
+  /**
+   * Returns false: a record's future is never cancelled.
+   *
+   * @returns {boolean}
+   */
   isCancelled() {
     return false;
   }
@@ -83,7 +101,7 @@ class KafkaFuture {
    * Java's `FutureRecordMetadata.cancel`: the record is not cancelled.
    *
    * @param {boolean} [mayInterruptIfRunning]
-   * @returns {boolean} false
+   * @returns {false}
    */
   cancel(mayInterruptIfRunning) {
     void mayInterruptIfRunning;
@@ -93,6 +111,10 @@ class KafkaFuture {
   /**
    * Completes the future (private): `error` null for success with `value`.
    * Only the first completion counts.
+   *
+   * @private
+   * @param {T} value
+   * @param {unknown} error
    */
   _complete(value, error) {
     if (this.#state !== PENDING) return;
@@ -112,7 +134,12 @@ class KafkaFuture {
     }
   }
 
-  /** A pending future (private). */
+  /**
+   * A pending future (private).
+   *
+   * @private
+   * @returns {KafkaFuture<any>}
+   */
   static _create() {
     return new KafkaFuture(CONSTRUCT);
   }

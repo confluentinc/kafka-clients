@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 'use strict';
 
 // Java's KafkaProducer over the C FFI's KafkaProducer with NULL serializers:
@@ -20,10 +19,26 @@
 
 const native = require('../_native');
 const { configEntries } = require('../_config');
-const { illegalArgument, illegalState } = require('../common/kafka_error');
+const { illegalArgument, illegalState } = require('../_errors');
 const { KafkaFuture } = require('../common/kafka_future');
-const { checkCallback, thrownMessage } = require('./callback');
 const { ProducerRecord } = require('./producer_record');
+
+/**
+ * A producer's configuration: Java's ProducerConfig keys, as a plain object
+ * or a `Map`. Values are stringified (`true` -> `"true"`, numbers and bigints
+ * by `String`, arrays joined with `,`); `null` / `undefined` drop the key.
+ *
+ * @typedef {Record<string, string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined>
+ *   | Map<string, unknown>} ProducerConfigs
+ */
+
+/**
+ * Options of {@link KafkaProducer#close}.
+ *
+ * @typedef {object} CloseOptions
+ * @property {number} [timeoutMs] The maximum time to wait for the producer to complete any
+ *   pending requests, in milliseconds. A timeout of zero means do not wait.
+ */
 
 // Java's KafkaProducer.throwIfProducerClosed message.
 const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed';
@@ -46,6 +61,23 @@ const FAST_PATH_YIELD_EVERY = 1000;
 // state is released in batches of at most this many records (Python's
 // AsyncProducer._PUMP_EVERY).
 const PUMP_EVERY = 64;
+
+/** The callback `send` was given, or null; throws a TypeError for a non-function. */
+function checkCallback(callback) {
+  if (callback === undefined || callback === null) return null;
+  if (typeof callback !== 'function') throw new TypeError('callback must be a function (metadata, error) => void');
+  return callback;
+}
+
+/** The text the core logs for a callback that threw (Java logs a throwing onCompletion). */
+function thrownMessage(thrown) {
+  if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`;
+  try {
+    return String(thrown);
+  } catch {
+    return 'the callback threw a value that cannot be converted to a string';
+  }
+}
 
 /**
  * A Kafka client that publishes records to the Kafka cluster.
@@ -77,8 +109,8 @@ class KafkaProducer {
    * configuration. Valid configuration strings are documented in Java's
    * ProducerConfig.
    *
-   * @param {Record<string, unknown> | Map<string, unknown>} configs The producer configs
-   * @throws {KafkaError} when the configuration is invalid or the producer cannot be built
+   * @param {ProducerConfigs} configs The producer configs
+   * @throws {import('../common/kafka_error').KafkaError} when the configuration is invalid or the producer cannot be built
    */
   constructor(configs) {
     this.#handle = native.producerCreate(configEntries(configs));
@@ -125,11 +157,13 @@ class KafkaProducer {
    * into a Buffer of the client's own and is unaffected.
    *
    * @param {ProducerRecord} record The record to send
-   * @param {((metadata: RecordMetadata, error: KafkaError | null) => void) | null} [callback] A
-   *   user-supplied callback to execute when the record has been acknowledged by the server
-   * @returns {Promise<KafkaFuture<RecordMetadata>>} resolving at hand-over to the future of the
-   *   record's metadata, rejecting with the KafkaError Java's send() would throw
-   * @throws {KafkaError} `LOCAL_ILLEGAL_STATE` when the producer is closed
+   * @param {import('./callback').Callback | null} [callback] A user-supplied callback to execute
+   *   when the record has been acknowledged by the server
+   * @returns {Promise<KafkaFuture<import('./record_metadata').RecordMetadata>>} resolving at
+   *   hand-over to the future of the record's metadata, rejecting with the KafkaError Java's
+   *   send() would throw
+   * @throws {import('../common/kafka_error').KafkaError} `LOCAL_ILLEGAL_STATE` when the producer
+   *   is closed
    * @throws {TypeError} when `record` is not a ProducerRecord or `callback` not a function
    */
   send(record, callback) {
@@ -246,8 +280,8 @@ class KafkaProducer {
    * producer's state and changes nothing, as Java's close(Duration) checks it
    * first.
    *
-   * @param {{timeoutMs?: number}} [options] `timeoutMs`: the maximum time to wait for the
-   *   producer to complete any pending requests. A timeout of zero means do not wait.
+   * @param {CloseOptions} [options] `timeoutMs`: the maximum time to wait for the producer to
+   *   complete any pending requests. A timeout of zero means do not wait.
    * @returns {Promise<void>} rejecting with `LOCAL_ILLEGAL_ARGUMENT` for a negative `timeoutMs`
    * @throws {TypeError} when `timeoutMs` is not an integer
    */

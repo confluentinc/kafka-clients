@@ -119,8 +119,8 @@ static kafka_common_Error_t* add_headers(napi_env env, kafka_common_header_Heade
             *thrown = 1;
             return NULL;
         }
-        kafka_common_Error_t* err =
-            (kafka_common_header_Headers_add_with_key_value(view, key, value.bytes, &ffi_err), ffi_take(&ffi_err));
+        // Headers_add_with_key_value takes an out_err of its own.
+        kafka_common_Error_t* err = FFI_ERR(kafka_common_header_Headers_add_with_key_value(view, key, value.bytes, &ffi_err));
         free(key);
         if (err != NULL) return err;
     }
@@ -141,44 +141,32 @@ static kafka_producer_ProducerRecord_t* record_with_headers(napi_env env, const 
     kafka_producer_ProducerRecord_t* record = NULL;
 
     kafka_common_Error_t* err =
-        (record_headers = kafka_common_header_internals_RecordHeaders_new_err(&ffi_err), ffi_take(&ffi_err));
-    if (err == NULL)
-        err = (view = kafka_common_header_internals_RecordHeaders__as_Headers_err(record_headers, &ffi_err),
-               ffi_take(&ffi_err));
+        FFI_SET(record_headers, kafka_common_header_internals_RecordHeaders_new_err(&ffi_err));
+    if (err == NULL) err = FFI_SET(view, kafka_common_header_internals_RecordHeaders__as_Headers_err(record_headers, &ffi_err));
     if (err == NULL) err = add_headers(env, view, headers, &thrown);
+    if (err == NULL && !thrown) err = FFI_SET(builder, kafka_producer_ProducerRecordOptionsBuilder_new_err(&ffi_err));
     if (err == NULL && !thrown)
-        err = (builder = kafka_producer_ProducerRecordOptionsBuilder_new_err(&ffi_err), ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_topic_err(builder, topic, &ffi_err));
     if (err == NULL && !thrown)
-        err = (kafka_producer_ProducerRecordOptionsBuilder_set_topic_err(builder, topic, &ffi_err),
-               ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_partition_err(builder, partition, &ffi_err));
     if (err == NULL && !thrown)
-        err = (kafka_producer_ProducerRecordOptionsBuilder_set_partition_err(builder, partition, &ffi_err),
-               ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_timestamp_err(builder, timestamp, &ffi_err));
     if (err == NULL && !thrown)
-        err = (kafka_producer_ProducerRecordOptionsBuilder_set_timestamp_err(builder, timestamp, &ffi_err),
-               ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_key_err(
+            builder, key->is_null ? NULL : (const void*)&key->bytes, &ffi_err));
     if (err == NULL && !thrown)
-        err = (kafka_producer_ProducerRecordOptionsBuilder_set_key_err(
-                   builder, key->is_null ? NULL : (const void*)&key->bytes, &ffi_err),
-               ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_value_err(
+            builder, value->is_null ? NULL : (const void*)&value->bytes, &ffi_err));
     if (err == NULL && !thrown)
-        err = (kafka_producer_ProducerRecordOptionsBuilder_set_value_err(
-                   builder, value->is_null ? NULL : (const void*)&value->bytes, &ffi_err),
-               ffi_take(&ffi_err));
-    if (err == NULL && !thrown)
-        err = (kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err),
-               ffi_take(&ffi_err));
-    if (err == NULL && !thrown)
-        err = (options = kafka_producer_ProducerRecordOptionsBuilder_build(builder, &ffi_err), ffi_take(&ffi_err));
-    if (err == NULL && !thrown)
-        err = (record = kafka_producer_ProducerRecord_with_options(options, &ffi_err), ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));
+    // _build and ProducerRecord_with_options take an out_err of their own.
+    if (err == NULL && !thrown) err = FFI_SET(options, kafka_producer_ProducerRecordOptionsBuilder_build(builder, &ffi_err));
+    if (err == NULL && !thrown) err = FFI_SET(record, kafka_producer_ProducerRecord_with_options(options, &ffi_err));
 
-    if (options != NULL) error_discard((kafka_producer_ProducerRecordOptions_destroy_err(options, &ffi_err), ffi_take(&ffi_err)));
-    if (builder != NULL)
-        error_discard((kafka_producer_ProducerRecordOptionsBuilder_destroy_err(builder, &ffi_err), ffi_take(&ffi_err)));
+    if (options != NULL) FFI_DISCARD(kafka_producer_ProducerRecordOptions_destroy_err(options, &ffi_err));
+    if (builder != NULL) FFI_DISCARD(kafka_producer_ProducerRecordOptionsBuilder_destroy_err(builder, &ffi_err));
     if (record_headers != NULL)
-        error_discard(
-            (kafka_common_header_internals_RecordHeaders_destroy_err(record_headers, &ffi_err), ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_common_header_internals_RecordHeaders_destroy_err(record_headers, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
@@ -196,10 +184,10 @@ kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, i
     }
     kafka_common_Error_t* ffi_err = NULL;
     kafka_producer_ProducerRecord_t* record = NULL;
-    kafka_common_Error_t* err = (record = kafka_producer_ProducerRecord_with_partition_timestamp_key(
-                                     topic, partition, timestamp, key->is_null ? NULL : (const void*)&key->bytes,
-                                     value->is_null ? NULL : (const void*)&value->bytes, &ffi_err),
-                                 ffi_take(&ffi_err));
+    kafka_common_Error_t* err = FFI_SET(record, kafka_producer_ProducerRecord_with_partition_timestamp_key(
+                                                    topic, partition, timestamp,
+                                                    key->is_null ? NULL : (const void*)&key->bytes,
+                                                    value->is_null ? NULL : (const void*)&value->bytes, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;

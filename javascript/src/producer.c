@@ -12,45 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The producer: a marshaling-only bridge to the Rust producer FFI
+// The KafkaProducer handle: a marshaling-only bridge to the Rust producer FFI
 // (javascript/CLAUDE.md). It runs no thread of its own and holds no Kafka
 // logic.
 //
 // Every operation uses the `_cb` twin of its Java method (send_with_callback_cb,
 // flush_cb, close_cb / close_with_timeout_cb), whose completion, like every
-// delivery callback, the core QUEUES on the producer's callback vector. The
-// hook installed with __set_callbacks_notify fires, from any thread, once each
-// time that vector goes from empty to non-empty, and only calls
-// napi_call_threadsafe_function; the threadsafe function's call_js then runs
-// on the JS main thread and drains the vector with __execute_callbacks while it
-// returns > 0. send() also runs that drain itself (pump) every so many sends
-// taken at once, which never let the event loop reach call_js; drains never
-// nest. So every completion runs on the JS thread and builds its JS values
-// there. A send's hand-over completion may also fire
-// inside send_with_callback_cb itself, on the JS thread (the record taken or
-// refused at once), so a send's whole state is in place before that call.
+// delivery callback, the core QUEUES on the producer's callback vector; the
+// producer's CallbackQueue (callback_queue.c) drains it on the JS thread, from
+// the event loop or from send()'s `pump`. So every completion runs on the JS
+// thread and builds its JS values there. A send's hand-over completion may
+// also fire inside send_with_callback_cb itself, on the JS thread (the record
+// taken or refused at once), so a send's whole state is in place before that
+// call.
 //
-// Liveness: the threadsafe function is ref'd, and the handle object kept from
-// garbage collection by a strong reference, while sends, flushes or a close are
-// outstanding (`pending`), and unref'd when idle.
+// Each request has its own context (SendCtx, FlushCtx), whose pointer is what
+// the core receives as the completion's opaque; the queue's pending counter
+// tracks the requests in flight. A send that fails at hand-over parks its
+// context on the orphan list, freed only after destroy.
 //
 // Teardown: close's completion only marks the producer; the drain that ran it
-// (producer_drain, from call_js or from send()'s pump) destroys it after its
-// loop (never inside a drain), on the JS thread, then releases
-// the threadsafe function, whose finalizer frees this struct together with the
-// handle object's finalizer (two owners). `KafkaProducer_destroy_err` runs the
-// callbacks still pending, inline, exactly once each.
-//
-// The notify hook and the threadsafe function's end: replacing the hook with
-// __set_callbacks_notify does not wait for a call of the old one in flight on
-// another thread, so swapping in a no-op before the tsfn goes away would not
-// keep such a call off a deleted tsfn (environment teardown deletes it while
-// the producer still runs). The hook therefore calls the tsfn only under
-// `notify_mtx` and only while `notify_open`, which the JS thread clears under
-// the same lock before the tsfn is released or once it is finalized: a hook
-// call in flight then either finished its tsfn call or sees it closed.
+// destroys it after its loop (never inside a drain), on the JS thread, then
+// releases the threadsafe function, whose finalizer frees this struct together
+// with the handle object's finalizer (two owners). `KafkaProducer_destroy_err`
+// runs the callbacks still pending, inline, exactly once each.
 
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,18 +48,10 @@ typedef struct {
     napi_env env;                              // the environment that created it (JS thread)
     kafka_producer_KafkaProducer_t* kp;        // owned class handle, NULL once destroyed
     const kafka_producer_Producer_t* view;     // borrowed __as_Producer view of kp
-    napi_threadsafe_function tsfn;
-    int tsfn_alive;                            // not released yet
-    pthread_mutex_t notify_mtx;                // guards notify_open and the hook's tsfn call
-    int notify_open;                           // the hook may call the tsfn
-    napi_ref self_ref;                         // the handle object; strong while busy
-    int64_t pending;                           // outstanding sends, flushes and close
-    int busy;                                  // tsfn and self_ref currently ref'd
+    CallbackQueue queue;                       // notify hook, tsfn, drain, liveness
     int closing;                               // a close is in progress
     int destroy_requested;                     // close completed: destroy after the drain
     int destroying;                            // KafkaProducer_destroy_err began
-    int finalizing;                            // the handle object is being finalized: no JS
-    int draining;                              // a drain loop is running (call_js or pump)
     napi_ref close_done;                       // close's JS completion
     kafka_common_Error_t* close_error;         // close's owned error, until reported
     SendCtx* orphans;                          // contexts of sends that failed at hand-over
@@ -90,7 +68,7 @@ struct SendCtx {
     napi_ref on_handover;                      // JS (error | null) => void
     napi_ref on_complete;                      // JS (metadata, error | null) => string | undefined
     int refs;                                  // owners left
-    int counted;                               // holds one unit of p->pending
+    int counted;                               // holds one unit of the queue's pending count
     int handed_over;
     int handover_failed;
     int delivered;
@@ -103,73 +81,10 @@ typedef struct {
     napi_ref done;                             // JS (error | null) => void
 } FlushCtx;
 
-static void producer_free(Producer* p) {
-    pthread_mutex_destroy(&p->notify_mtx);
-    free(p);
-}
-
 static void producer_release(Producer* p) {
-    if (--p->owners == 0) producer_free(p);
-}
-
-// Stops the notify hook from reaching the tsfn; once this returns, no hook
-// call is inside napi_call_threadsafe_function. JS thread.
-static void notify_close(Producer* p) {
-    pthread_mutex_lock(&p->notify_mtx);
-    p->notify_open = 0;
-    pthread_mutex_unlock(&p->notify_mtx);
-}
-
-// Refs the tsfn and the handle object while there is pending work, unrefs them
-// when idle or destroyed. JS thread only.
-static void update_liveness(napi_env env, Producer* p) {
-    int want = p->pending > 0 && p->tsfn_alive && !p->finalizing;
-    if (want == p->busy) return;
-    if (want) {
-        napi_ref_threadsafe_function(env, p->tsfn);
-        napi_reference_ref(env, p->self_ref, NULL);
-    } else {
-        if (p->tsfn_alive) napi_unref_threadsafe_function(env, p->tsfn);
-        if (!p->finalizing) napi_reference_unref(env, p->self_ref, NULL);
-    }
-    p->busy = want;
-}
-
-static void pending_add(napi_env env, Producer* p, int64_t delta) {
-    p->pending += delta;
-    update_liveness(env, p);
-}
-
-static void delete_ref(napi_env env, napi_ref* ref) {
-    if (*ref != NULL) {
-        napi_delete_reference(env, *ref);
-        *ref = NULL;
-    }
-}
-
-// Calls the function `ref` holds with `argc` arguments, on the JS thread.
-// Returns its result, or NULL when it threw: the exception is cleared and its
-// message stored in `*thrown` (malloc'ed) when `thrown` is not NULL.
-static napi_value call_ref(napi_env env, napi_ref ref, size_t argc, napi_value* argv, char** thrown) {
-    napi_value fn, global, result = NULL;
-    if (napi_get_reference_value(env, ref, &fn) != napi_ok || fn == NULL || napi_get_global(env, &global) != napi_ok)
-        return NULL;
-    napi_status status = napi_call_function(env, global, fn, argc, argv, &result);
-    if (status == napi_ok) return result;
-    bool pending = false;
-    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
-        napi_value exc, text;
-        napi_get_and_clear_last_exception(env, &exc);
-        if (thrown != NULL && napi_coerce_to_string(env, exc, &text) == napi_ok) {
-            size_t len = 0;
-            if (napi_get_value_string_utf8(env, text, NULL, 0, &len) == napi_ok) {
-                char* s = (char*)malloc(len + 1);
-                if (s != NULL && napi_get_value_string_utf8(env, text, s, len + 1, &len) == napi_ok) *thrown = s;
-                else free(s);
-            }
-        }
-    }
-    return NULL;
+    if (--p->owners != 0) return;
+    cbq_dispose(&p->queue);
+    free(p);
 }
 
 // ---- RecordMetadata ---------------------------------------------------------
@@ -182,28 +97,18 @@ static napi_value metadata_to_js(napi_env env, const kafka_producer_RecordMetada
         return result;
     }
     kafka_common_Error_t* ffi_err = NULL;
-    const char* topic = kafka_producer_RecordMetadata_topic_err(m, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int32_t partition = kafka_producer_RecordMetadata_partition_err(m, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int8_t has_offset = kafka_producer_RecordMetadata_has_offset_err(m, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int64_t offset = -1;
-    if (has_offset) {
-        offset = kafka_producer_RecordMetadata_offset_err(m, &ffi_err);
-        error_discard(ffi_take(&ffi_err));
-    }
-    int8_t has_timestamp = kafka_producer_RecordMetadata_has_timestamp_err(m, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int64_t timestamp = -1;
-    if (has_timestamp) {
-        timestamp = kafka_producer_RecordMetadata_timestamp_err(m, &ffi_err);
-        error_discard(ffi_take(&ffi_err));
-    }
-    int32_t key_size = kafka_producer_RecordMetadata_serialized_key_size_err(m, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
-    int32_t value_size = kafka_producer_RecordMetadata_serialized_value_size_err(m, &ffi_err);
-    error_discard(ffi_take(&ffi_err));
+    const char* topic = NULL;
+    int32_t partition = -1, key_size = -1, value_size = -1;
+    int8_t has_offset = 0, has_timestamp = 0;
+    int64_t offset = -1, timestamp = -1;
+    error_discard(FFI_SET(topic, kafka_producer_RecordMetadata_topic_err(m, &ffi_err)));
+    error_discard(FFI_SET(partition, kafka_producer_RecordMetadata_partition_err(m, &ffi_err)));
+    error_discard(FFI_SET(has_offset, kafka_producer_RecordMetadata_has_offset_err(m, &ffi_err)));
+    if (has_offset) error_discard(FFI_SET(offset, kafka_producer_RecordMetadata_offset_err(m, &ffi_err)));
+    error_discard(FFI_SET(has_timestamp, kafka_producer_RecordMetadata_has_timestamp_err(m, &ffi_err)));
+    if (has_timestamp) error_discard(FFI_SET(timestamp, kafka_producer_RecordMetadata_timestamp_err(m, &ffi_err)));
+    error_discard(FFI_SET(key_size, kafka_producer_RecordMetadata_serialized_key_size_err(m, &ffi_err)));
+    error_discard(FFI_SET(value_size, kafka_producer_RecordMetadata_serialized_value_size_err(m, &ffi_err)));
 
     napi_value obj, v;
     NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
@@ -246,7 +151,7 @@ static void send_maybe_idle(napi_env env, SendCtx* ctx) {
     if (!ctx->counted) return;
     if (ctx->handover_failed || (ctx->handed_over && ctx->delivered)) {
         ctx->counted = 0;
-        pending_add(env, ctx->p, -1);
+        cbq_pending_add(env, &ctx->p->queue, -1);
     }
 }
 
@@ -266,14 +171,14 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
     SendCtx* ctx = (SendCtx*)opaque;
     Producer* p = ctx->p;
     kafka_common_Error_t* ffi_err = NULL;
-    if (value != NULL) error_discard((kafka_common_KafkaFuture_destroy_err(value, &ffi_err), ffi_take(&ffi_err)));
+    if (value != NULL) FFI_DISCARD(kafka_common_KafkaFuture_destroy_err(value, &ffi_err));
     napi_env env = p->env;
     // The core no longer reads the key and value bytes.
     delete_ref(env, &ctx->key_ref);
     delete_ref(env, &ctx->value_ref);
     ctx->handed_over = 1;
     ctx->handover_failed = error != NULL;
-    if (!p->finalizing && ctx->on_handover != NULL) {
+    if (!p->queue.finalizing && ctx->on_handover != NULL) {
         napi_value arg = error_take_to_js(env, error);
         error = NULL;
         if (arg != NULL) call_ref(env, ctx->on_handover, 1, &arg, NULL);
@@ -312,7 +217,7 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     napi_env env = p->env;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_Error_t* report = NULL;
-    if (!p->finalizing && ctx->on_complete != NULL) {
+    if (!p->queue.finalizing && ctx->on_complete != NULL) {
         napi_value argv[2];
         argv[0] = metadata_to_js(env, metadata);
         argv[1] = argv[0] != NULL ? error_to_js(env, error) : NULL;
@@ -334,16 +239,14 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
             napi_get_and_clear_last_exception(env, &ignored);
         }
         if (thrown != NULL) {
-            report = kafka_common_Error_local_callback_err(thrown, NULL, NULL, &ffi_err);
-            kafka_common_Error_t* panic = ffi_take(&ffi_err);
+            kafka_common_Error_t* panic = FFI_SET(report, kafka_common_Error_local_callback_err(thrown, NULL, NULL, &ffi_err));
             if (report == NULL) report = panic;
             else error_discard(panic);
             free(thrown);
         }
     }
     if (!p->destroying) {
-        error_discard((kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err),
-                       ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err));
     } else {
         // Destroy completes the unreported callbacks itself.
         error_discard(report);
@@ -372,11 +275,12 @@ static int is_function(napi_env env, napi_value v) {
     return napi_typeof(env, v, &type) == napi_ok && type == napi_function;
 }
 
-// send(handle, topic, partition, timestamp, key, value, headers, onHandover,
-// onComplete): partition and timestamp -1 for Java's null; key and value a
-// Uint8Array or null; headers null or an array of [key, Uint8Array | null].
-// Throws a KafkaError when the record cannot be built (nothing is sent then).
-static napi_value js_send(napi_env env, napi_callback_info info) {
+// producerSend(handle, topic, partition, timestamp, key, value, headers,
+// onHandover, onComplete): partition and timestamp -1 for Java's null; key and
+// value a Uint8Array or null; headers null or an array of [key, Uint8Array |
+// null]. Throws a KafkaError when the record cannot be built (nothing is sent
+// then).
+napi_value js_producer_send(napi_env env, napi_callback_info info) {
     size_t argc = 9;
     napi_value argv[9];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
@@ -420,17 +324,16 @@ static napi_value js_send(napi_env env, napi_callback_info info) {
         || (!ctx->value.is_null && napi_create_reference(env, argv[5], 1, &ctx->value_ref) != napi_ok)
         || napi_create_reference(env, argv[7], 1, &ctx->on_handover) != napi_ok
         || napi_create_reference(env, argv[8], 1, &ctx->on_complete) != napi_ok) {
-        error_discard((kafka_producer_ProducerRecord_destroy_err(record, &ffi_err), ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err));
         send_ctx_free(env, ctx);
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
     kafka_producer_Callback_t* callback = NULL;
-    kafka_common_Error_t* err =
-        (callback = kafka_producer_Callback_new_err(ctx, send_on_completion, &ffi_err), ffi_take(&ffi_err));
+    kafka_common_Error_t* err = FFI_SET(callback, kafka_producer_Callback_new_err(ctx, send_on_completion, &ffi_err));
     if (err != NULL) {
         // Never registered: neither completion can fire.
-        error_discard((kafka_producer_ProducerRecord_destroy_err(record, &ffi_err), ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err));
         send_ctx_free(env, ctx);
         error_throw_owned(env, err);
         return NULL;
@@ -438,11 +341,11 @@ static napi_value js_send(napi_env env, napi_callback_info info) {
     // Everything the completions read is in place: the hand-over completion can
     // fire inside this call.
     ctx->counted = 1;
-    pending_add(env, p, 1);
+    cbq_pending_add(env, &p->queue, 1);
     kafka_producer_Producer_send_with_callback_cb(p->view, record, callback, send_on_handover, ctx);
     // The call consumed the callback and copied the record; the key and value
     // bytes stay borrowed until send_on_handover (ctx holds them).
-    error_discard((kafka_producer_ProducerRecord_destroy_err(record, &ffi_err), ffi_take(&ffi_err)));
+    FFI_DISCARD(kafka_producer_ProducerRecord_destroy_err(record, &ffi_err));
     return NULL;
 }
 
@@ -452,7 +355,7 @@ static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {
     FlushCtx* ctx = (FlushCtx*)opaque;
     Producer* p = ctx->p;
     napi_env env = p->env;
-    if (!p->finalizing) {
+    if (!p->queue.finalizing) {
         napi_value arg = error_take_to_js(env, error);
         error = NULL;
         if (arg != NULL) call_ref(env, ctx->done, 1, &arg, NULL);
@@ -460,12 +363,13 @@ static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_discard(error);
     delete_ref(env, &ctx->done);
     free(ctx);
-    pending_add(env, p, -1);
+    cbq_pending_add(env, &p->queue, -1);
 }
 
-// flush(handle, done): Producer.flush() through flush_cb; `done(error | null)`
-// runs once every record sent before it completed and its callback reported.
-static napi_value js_flush(napi_env env, napi_callback_info info) {
+// producerFlush(handle, done): Producer.flush() through flush_cb;
+// `done(error | null)` runs once every record sent before it completed and its
+// callback reported.
+napi_value js_producer_flush(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value argv[2];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
@@ -486,7 +390,7 @@ static napi_value js_flush(napi_env env, napi_callback_info info) {
         js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
-    pending_add(env, p, 1);
+    cbq_pending_add(env, &p->queue, 1);
     kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);
     return NULL;
 }
@@ -510,24 +414,18 @@ static void noop_notify(void* opaque) {
 static void producer_destroy(napi_env env, Producer* p) {
     kafka_common_Error_t* ffi_err = NULL;
     p->destroying = 1;
-    if (p->finalizing) {
+    p->queue.stopped = 1;
+    if (p->queue.finalizing) {
         // The tsfn may already be finalized (environment teardown): the hook
         // must not reach it.
-        error_discard((kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err),
-                       ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err));
     }
-    error_discard((kafka_producer_KafkaProducer_destroy_err(p->kp, &ffi_err), ffi_take(&ffi_err)));
+    FFI_DISCARD(kafka_producer_KafkaProducer_destroy_err(p->kp, &ffi_err));
     p->kp = NULL;
     p->view = NULL;
     // No callback can fire past this point.
     free_orphans(env, p);
-    notify_close(p);
-    if (p->tsfn_alive) {
-        if (p->busy) napi_unref_threadsafe_function(env, p->tsfn);
-        p->tsfn_alive = 0;
-        napi_release_threadsafe_function(p->tsfn, napi_tsfn_release);
-    }
-    update_liveness(env, p);
+    cbq_release(env, &p->queue);
 }
 
 // The close completion (close_cb / close_with_timeout_cb), on the JS thread.
@@ -540,13 +438,13 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     kafka_common_Error_t* ffi_err = NULL;
     int rejected = 0;
     if (error != NULL) {
-        int code = (int)kafka_common_Error__enum_err(error, &ffi_err);
-        error_discard(ffi_take(&ffi_err));
+        int code = 0;
+        error_discard(FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
         rejected = code == kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT;
     }
     if (rejected) {
         p->closing = 0;
-        if (!p->finalizing) {
+        if (!p->queue.finalizing) {
             napi_value argv[2];
             argv[0] = error_take_to_js(env, error);
             if (argv[0] != NULL && napi_get_boolean(env, false, &argv[1]) == napi_ok)
@@ -555,18 +453,21 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
             error_discard(error);
         }
         delete_ref(env, &p->close_done);
-        pending_add(env, p, -1);
+        cbq_pending_add(env, &p->queue, -1);
         return;
     }
     p->close_error = error;
     p->destroy_requested = 1;
-    // producer_drain (run by call_js or by send()'s pump) destroys it once its
-    // loop ended; this may also have fired outside a drain, so schedule one.
-    if (p->tsfn_alive) napi_call_threadsafe_function(p->tsfn, NULL, napi_tsfn_nonblocking);
+    // The drain destroys it once its loop ended (producer_after_drain); this
+    // may also have fired outside a drain, so schedule one.
+    cbq_schedule(&p->queue);
 }
 
-// Runs the destroy a close completion requested, then reports the close.
-static void producer_finish_close(napi_env env, Producer* p) {
+// The queue's after_drain: runs the destroy a close completion requested,
+// outside the drain loop, then reports the close.
+static void producer_after_drain(napi_env env, void* client) {
+    Producer* p = (Producer*)client;
+    if (!p->destroy_requested || p->destroying) return;
     producer_destroy(env, p);
     napi_value argv[2];
     argv[0] = error_take_to_js(env, p->close_error);
@@ -575,14 +476,15 @@ static void producer_finish_close(napi_env env, Producer* p) {
         call_ref(env, p->close_done, 2, argv, NULL);
     delete_ref(env, &p->close_done);
     p->closing = 0;
-    pending_add(env, p, -1);
+    cbq_pending_add(env, &p->queue, -1);
 }
 
-// close(handle, timeoutMs, done): Producer.close() for a null timeoutMs, else
-// close(Duration.ofMillis(timeoutMs)), through the `_cb` twins.
-// `done(error | null, destroyed)` runs once the close completed and, unless the
-// timeout was rejected (`destroyed` false), the native producer was destroyed.
-static napi_value js_close(napi_env env, napi_callback_info info) {
+// producerClose(handle, timeoutMs, done): Producer.close() for a null
+// timeoutMs, else close(Duration.ofMillis(timeoutMs)), through the `_cb`
+// twins. `done(error | null, destroyed)` runs once the close completed and,
+// unless the timeout was rejected (`destroyed` false), the native producer was
+// destroyed.
+napi_value js_producer_close(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value argv[3];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
@@ -602,7 +504,7 @@ static napi_value js_close(napi_env env, napi_callback_info info) {
     if (type != napi_null && type != napi_undefined) NAPI_CHECK(env, napi_get_value_int64(env, argv[1], &timeout), NULL);
     NAPI_CHECK(env, napi_create_reference(env, argv[2], 1, &p->close_done), NULL);
     p->closing = 1;
-    pending_add(env, p, 1);
+    cbq_pending_add(env, &p->queue, 1);
     if (type == napi_null || type == napi_undefined) kafka_producer_Producer_close_cb(p->view, close_on_complete, p);
     else kafka_producer_Producer_close_with_timeout_cb(p->view, timeout, close_on_complete, p);
     return NULL;
@@ -610,47 +512,17 @@ static napi_value js_close(napi_env env, napi_callback_info info) {
 
 // ---- the pump ---------------------------------------------------------------
 
-// Fired by the core once per empty -> non-empty transition of the callback
-// vector, from any thread. It only signals, under `notify_mtx` while the tsfn
-// is open (see the top of this file).
-static void producer_callbacks_notify(void* opaque) {
-    Producer* p = (Producer*)opaque;
-    pthread_mutex_lock(&p->notify_mtx);
-    if (p->notify_open) napi_call_threadsafe_function(p->tsfn, NULL, napi_tsfn_nonblocking);
-    pthread_mutex_unlock(&p->notify_mtx);
+// The queue's execute: the producer's __execute_callbacks.
+static int32_t producer_execute(void* client, kafka_common_Error_t** out_err) {
+    return kafka_producer_Producer__execute_callbacks_err(((Producer*)client)->view, out_err);
 }
 
-// The drain, on the JS thread: runs the queued callbacks while
-// __execute_callbacks returns > 0, then the destroy a close completion
-// requested (outside the loop). A drain never nests: a callback that calls
-// back into the producer (a send from a delivery callback pumps) finds
-// `draining` set and returns, and so does a drain once destroy began.
-static void producer_drain(napi_env env, Producer* p) {
-    if (p->kp == NULL || p->destroying || p->finalizing || p->draining) return;
-    kafka_common_Error_t* ffi_err = NULL;
-    p->draining = 1;
-    while (p->kp != NULL) {
-        int32_t ran = kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err);
-        error_discard(ffi_take(&ffi_err));
-        if (ran <= 0) break;
-    }
-    p->draining = 0;
-    if (p->destroy_requested && !p->destroying) producer_finish_close(env, p);
-}
-
-// The tsfn's call_js, on the JS thread: the drain the notify hook asked for.
-static void producer_call_js(napi_env env, napi_value js_cb, void* context, void* data) {
-    (void)js_cb;
-    (void)data;
-    if (env == NULL) return;
-    producer_drain(env, (Producer*)context);
-}
-
-// pump(handle): the same drain, run by send() on entry every so many sends the
-// producer took at once in a row (javascript/CLAUDE.md, rule 3): such sends
-// never return to the event loop, so call_js could not run between them. A
-// no-op inside a drain, during destroy, or on a destroyed handle.
-static napi_value js_pump(napi_env env, napi_callback_info info) {
+// producerPump(handle): the queue's drain, run by send() on entry every so
+// many sends the producer took at once in a row (javascript/CLAUDE.md, rule
+// 3): such sends never return to the event loop, so the tsfn's call_js could
+// not run between them. A no-op inside a drain, during destroy, or on a
+// destroyed handle.
+napi_value js_producer_pump(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
@@ -659,23 +531,22 @@ static napi_value js_pump(napi_env env, napi_callback_info info) {
         napi_throw_type_error(env, NULL, "pump(handle)");
         return NULL;
     }
-    producer_drain(env, (Producer*)data);
+    Producer* p = (Producer*)data;
+    if (p->kp != NULL) cbq_drain(env, &p->queue);
     return NULL;
 }
 
-static void producer_tsfn_finalize(napi_env env, void* data, void* hint) {
+// ---- finalization -----------------------------------------------------------
+
+// The queue's on_tsfn_finalize: the tsfn's ownership of the struct ends.
+static void producer_tsfn_finalized(napi_env env, void* client) {
     (void)env;
-    (void)hint;
-    Producer* p = (Producer*)data;
-    // A hook call in flight finishes its tsfn call before Node deletes the tsfn.
-    notify_close(p);
-    p->tsfn_alive = 0;
+    Producer* p = (Producer*)client;
     if (p->kp != NULL && !p->destroying) {
         // Environment teardown finalized the tsfn before the handle object: a
         // later hook call need not even take the lock.
         kafka_common_Error_t* ffi_err = NULL;
-        error_discard((kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err),
-                       ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_producer_Producer__set_callbacks_notify_err(p->view, noop_notify, NULL, &ffi_err));
     }
     producer_release(p);
 }
@@ -685,32 +556,23 @@ static void producer_tsfn_finalize(napi_env env, void* data, void* hint) {
 static void producer_finalize(napi_env env, void* data, void* hint) {
     (void)hint;
     Producer* p = (Producer*)data;
-    p->finalizing = 1;
+    p->queue.finalizing = 1;
     if (p->kp != NULL && !p->destroying) producer_destroy(env, p);
     error_discard(p->close_error);
     p->close_error = NULL;
     delete_ref(env, &p->close_done);
-    delete_ref(env, &p->self_ref);
+    cbq_detach(env, &p->queue);
     producer_release(p);
 }
 
 // ---- construction -----------------------------------------------------------
 
-// create(entries): a native producer handle over KafkaProducer(configs) with
-// NULL serializers (key and value cross as kafka_Bytes_t), `entries` an array
-// of [key, value] strings. Throws a KafkaError when the configuration is
-// rejected or the producer cannot be built.
-static napi_value js_create(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
-    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    bool is_array = false;
-    if (argc != 1 || napi_is_array(env, argv[0], &is_array) != napi_ok || !is_array) {
-        napi_throw_type_error(env, NULL, "create(entries)");
-        return NULL;
-    }
+// The class handle KafkaProducer(configs) with NULL serializers (key and value
+// cross as kafka_Bytes_t), from `entries`, an array of [key, value] strings.
+// Returns NULL with a JS exception pending on failure.
+static kafka_producer_KafkaProducer_t* new_kafka_producer(napi_env env, napi_value entries) {
     uint32_t count = 0;
-    NAPI_CHECK(env, napi_get_array_length(env, argv[0], &count), NULL);
+    NAPI_CHECK(env, napi_get_array_length(env, entries, &count), NULL);
     char** strings = (char**)calloc((size_t)count * 2 + 1, sizeof(char*));
     if (strings == NULL) {
         napi_throw_error(env, NULL, "out of memory");
@@ -720,14 +582,13 @@ static napi_value js_create(napi_env env, napi_callback_info info) {
     kafka_Map_t* props = NULL;
     kafka_producer_ProducerConfig_t* config = NULL;
     kafka_producer_KafkaProducer_t* kp = NULL;
-    napi_value result = NULL;
     int thrown = 0;
     // A C-built kafka_Map_t borrows its char * keys and values: they are freed
     // after the map.
-    kafka_common_Error_t* err = (props = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err));
+    kafka_common_Error_t* err = FFI_SET(props, kafka_Map_new_err(&ffi_err));
     for (uint32_t i = 0; err == NULL && !thrown && i < count; i++) {
         napi_value entry, k, v;
-        if (napi_get_element(env, argv[0], i, &entry) != napi_ok || napi_get_element(env, entry, 0, &k) != napi_ok
+        if (napi_get_element(env, entries, i, &entry) != napi_ok || napi_get_element(env, entry, 0, &k) != napi_ok
             || napi_get_element(env, entry, 1, &v) != napi_ok) {
             js_throw_last_napi_error(env, "reading a config entry");
             thrown = 1;
@@ -739,90 +600,82 @@ static napi_value js_create(napi_env env, napi_callback_info info) {
             thrown = 1;
             break;
         }
-        err = (kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err), ffi_take(&ffi_err));
+        err = FFI_ERR(kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err));
     }
-    if (err == NULL && !thrown) err = (config = kafka_producer_ProducerConfig_new(props, &ffi_err), ffi_take(&ffi_err));
-    if (props != NULL) error_discard((kafka_Map_destroy_err(props, &ffi_err), ffi_take(&ffi_err)));
+    // kafka_producer_ProducerConfig_new and _KafkaProducer_new take an out_err
+    // of their own (no `_err` twin).
+    if (err == NULL && !thrown) err = FFI_SET(config, kafka_producer_ProducerConfig_new(props, &ffi_err));
+    if (props != NULL) FFI_DISCARD(kafka_Map_destroy_err(props, &ffi_err));
     for (uint32_t i = 0; i < count * 2; i++) free(strings[i]);
     free(strings);
-    if (err == NULL && !thrown) {
-        err = (kp = kafka_producer_KafkaProducer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));
-    }
-    if (config != NULL) error_discard((kafka_producer_ProducerConfig_destroy_err(config, &ffi_err), ffi_take(&ffi_err)));
+    if (err == NULL && !thrown) err = FFI_SET(kp, kafka_producer_KafkaProducer_new(config, NULL, NULL, &ffi_err));
+    if (config != NULL) FFI_DISCARD(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
     }
-    if (thrown) return NULL;
+    return thrown ? NULL : kp;
+}
 
-    Producer* p = (Producer*)calloc(1, sizeof(Producer));
-    if (p == NULL) {
-        error_discard((kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err), ffi_take(&ffi_err)));
-        napi_throw_error(env, NULL, "out of memory");
+// producerCreate(entries): a native producer handle over
+// KafkaProducer(configs), `entries` an array of [key, value] strings. Throws a
+// KafkaError when the configuration is rejected or the producer cannot be
+// built.
+napi_value js_producer_create(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    bool is_array = false;
+    if (argc != 1 || napi_is_array(env, argv[0], &is_array) != napi_ok || !is_array) {
+        napi_throw_type_error(env, NULL, "create(entries)");
         return NULL;
     }
-    if (pthread_mutex_init(&p->notify_mtx, NULL) != 0) {
-        free(p);
-        error_discard((kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err), ffi_take(&ffi_err)));
-        napi_throw_error(env, NULL, "pthread_mutex_init failed");
+    kafka_producer_KafkaProducer_t* kp = new_kafka_producer(env, argv[0]);
+    if (kp == NULL) return NULL;
+
+    kafka_common_Error_t* ffi_err = NULL;
+    Producer* p = (Producer*)calloc(1, sizeof(Producer));
+    if (p == NULL) {
+        FFI_DISCARD(kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err));
+        napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
     p->env = env;
     p->kp = kp;
-    err = (p->view = kafka_producer_KafkaProducer__as_Producer_err(kp, &ffi_err), ffi_take(&ffi_err));
-    napi_value name;
+    kafka_common_Error_t* err = FFI_SET(p->view, kafka_producer_KafkaProducer__as_Producer_err(kp, &ffi_err));
     if (err == NULL
-        && (napi_create_string_utf8(env, "confluent-kafka producer callbacks", NAPI_AUTO_LENGTH, &name) != napi_ok
-            || napi_create_threadsafe_function(env, NULL, NULL, name, 0, 1, p, producer_tsfn_finalize, p,
-                                               producer_call_js, &p->tsfn) != napi_ok)) {
-        js_throw_last_napi_error(env, "napi_create_threadsafe_function");
+        && cbq_init(env, &p->queue, "confluent-kafka producer callbacks", p, producer_execute, producer_after_drain,
+                    producer_tsfn_finalized) != 0) {
+        FFI_DISCARD(kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err));
+        free(p);
+        return NULL;
+    }
+    if (err != NULL) {
+        FFI_DISCARD(kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err));
+        free(p);
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    p->owners = 1;  // the tsfn
+    napi_value result = NULL;
+    int thrown = 0;
+    if (napi_create_object(env, &result) != napi_ok || napi_wrap(env, result, p, producer_finalize, NULL, NULL) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_wrap");
         thrown = 1;
+    } else {
+        p->owners = 2;  // and the handle object
+        if (cbq_attach(env, &p->queue, result) != 0) thrown = 1;
     }
-    if (err == NULL && !thrown) {
-        p->tsfn_alive = 1;
-        p->notify_open = 1;
-        p->owners = 1;  // the tsfn
-        // Idle until something is pending.
-        napi_unref_threadsafe_function(env, p->tsfn);
-        if (napi_create_object(env, &result) != napi_ok || napi_wrap(env, result, p, producer_finalize, NULL, NULL) != napi_ok) {
-            js_throw_last_napi_error(env, "napi_wrap");
-            thrown = 1;
-        } else {
-            p->owners = 2;  // and the handle object
-            if (napi_create_reference(env, result, 0, &p->self_ref) != napi_ok) {
-                js_throw_last_napi_error(env, "napi_create_reference");
-                thrown = 1;
-            }
-        }
-    }
-    if (err == NULL && !thrown)
-        err = (kafka_producer_Producer__set_callbacks_notify_err(p->view, producer_callbacks_notify, p, &ffi_err),
-               ffi_take(&ffi_err));
+    if (!thrown)
+        err = FFI_ERR(kafka_producer_Producer__set_callbacks_notify_err(p->view, cbq_notify, &p->queue, &ffi_err));
     if (err != NULL || thrown) {
-        error_discard((kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err), ffi_take(&ffi_err)));
+        FFI_DISCARD(kafka_producer_KafkaProducer_destroy_err(kp, &ffi_err));
         p->kp = NULL;
         p->destroying = 1;
-        notify_close(p);
-        if (p->tsfn_alive) {
-            p->tsfn_alive = 0;
-            napi_release_threadsafe_function(p->tsfn, napi_tsfn_release);  // frees p when it was the only owner
-        } else {
-            producer_free(p);
-        }
+        // Releases the tsfn, whose finalizer frees p when it is the only owner.
+        cbq_release(env, &p->queue);
         if (err != NULL) error_throw_owned(env, err);
         return NULL;
     }
     return result;
-}
-
-napi_value producer_init(napi_env env, napi_value exports) {
-    napi_property_descriptor props[] = {
-        {"producerCreate", NULL, js_create, NULL, NULL, NULL, napi_default, NULL},
-        {"producerSend", NULL, js_send, NULL, NULL, NULL, napi_default, NULL},
-        {"producerFlush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
-        {"producerClose", NULL, js_close, NULL, NULL, NULL, napi_default, NULL},
-        {"producerPump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
-    };
-    NAPI_CHECK(env, napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props), NULL);
-    return exports;
 }
