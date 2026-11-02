@@ -592,16 +592,18 @@ blocks:
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # A new CI block must be added to this list.
+    # A new CI block must be added to this list. The order only sets where
+    # Semaphore's graph draws the Rust release row: beside the middle entry
+    # (the 4th of 8), here "Verify language bindings (Linux amd64)".
     dependencies:
-      - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
+      - "Verify Rust (Linux amd64)"
+      - "Verify language bindings (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
       - "Audit Rust dependencies (Linux amd64)"
+      - "Verify Rust (macOS arm64)"
+      - "Verify language bindings (macOS arm64)"
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -1302,17 +1304,18 @@ blocks:
     # its .crate and its API against the last rust/ release), which no wheel
     # contains. A new CI block that tests the library or the binding must be
     # added to this list. The checks this block makes are listed in
-    # publish-wheels.sh; it loads no token.
+    # publish-wheels.sh; it loads no token. The CI blocks are listed last only
+    # so that Semaphore's graph draws the Rust release row in one line.
     dependencies:
+      - "Release (Python): wheel verification (Linux amd64)"
+      - "Release (Python): wheel verification (Linux arm64)"
+      - "Release (Python): wheel verification (macOS amd64)"
+      - "Release (Python): wheel verification (macOS arm64)"
       - "Verify Rust (Linux amd64)"
       - "Verify language bindings (Linux amd64)"
       - "Verify Rust (macOS arm64)"
       - "Verify language bindings (macOS arm64)"
       - "Audit Rust dependencies (Linux amd64)"
-      - "Release (Python): wheel verification (Linux amd64)"
-      - "Release (Python): wheel verification (Linux arm64)"
-      - "Release (Python): wheel verification (macOS amd64)"
-      - "Release (Python): wheel verification (macOS arm64)"
     run:
       when: "tag =~ '^python/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\\.dev(0|[1-9][0-9]*))?$'"
     execution_time_limit:
