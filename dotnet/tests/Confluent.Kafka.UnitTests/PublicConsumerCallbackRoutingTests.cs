@@ -1276,7 +1276,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         if (e is ArgumentException argument && argument.ParamName is not null)
         {
             string message = argument.Message;
-            int parameter = message.IndexOf(" (Parameter", StringComparison.Ordinal);
+            int parameter = message.IndexOf(new ArgumentException(string.Empty, argument.ParamName).Message, StringComparison.Ordinal);
             return e.GetType().Name + "(" + argument.ParamName + "): " + (parameter < 0 ? message : message.Substring(0, parameter));
         }
 
