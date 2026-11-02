@@ -13,11 +13,13 @@
 // limitations under the License.
 
 //! A factory abstraction over the backends used by the multilanguage
-//! integration tests (native Rust, Python sync, Python asyncio, C).
+//! integration tests (native Rust, Python sync, Python asyncio, C, .NET sync,
+//! .NET async, JavaScript).
 //!
 //! Test bodies are written generically over `<F: ProducerBackendFactory>`,
 //! and the [`crate::common::multilanguage_test`] macro instantiates each
-//! body once per backend (rust / python / c). There is no dynamic
+//! body once per backend (rust / python / python_async / c / dotnet /
+//! dotnet_async / js). There is no dynamic
 //! dispatch — the trait carries an associated `Producer` type so each
 //! instantiation gets the concrete producer for its backend.
 //!
@@ -695,9 +697,81 @@ mod grpc_backends {
             crate::common::backend_pool::uses_containers()
         }
     }
+
+    /// Backend that drives the Node.js producer (`javascript/lib/producer`)
+    /// through `javascript/grpc_server.js`, natively or in the
+    /// `confluent-kafka-rust/javascript-grpc-server:dev` Docker image.
+    ///
+    /// Producer only. The JavaScript binding has no consumer or admin client
+    /// yet, so the server registers only `ProducerService` and there is no
+    /// [`AdminBackendFactory`] impl (the admin and consumer macros have no
+    /// `__grpc_js` arm).
+    pub struct JsGrpcFactory {
+        channel: Channel,
+    }
+
+    impl JsGrpcFactory {
+        pub fn new(channel: Channel) -> Self {
+            Self { channel }
+        }
+    }
+
+    impl ProducerBackendFactory for JsGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
+            MultilanguageProducer::new(self.channel.clone(), config, "js").await
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
+            producer_with_log(&self.channel, config, "js").await
+        }
+
+        fn name(&self) -> &'static str {
+            "js"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            crate::common::backend_pool::uses_containers()
+        }
+    }
+
+    /// Present only so producer test bodies bounded on
+    /// `ProducerBackendFactory + ConsumerBackendFactory`
+    /// (`consume_transform_produce_with_offsets_inner`) instantiate for the
+    /// `__grpc_js` arm. The JavaScript server does not register
+    /// `ConsumerService`, so every call fails with gRPC `UNIMPLEMENTED`; that
+    /// test is skipped through `JS_GRPC_SKIPS` in `rust/Makefile`.
+    impl ConsumerBackendFactory for JsGrpcFactory {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
+            Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "js").await?))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+            consumer_with_log(&self.channel, config, "js").await
+        }
+
+        fn name(&self) -> &'static str {
+            "js"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            crate::common::backend_pool::uses_containers()
+        }
+    }
 }
 
 #[cfg(feature = "multilanguage-tests")]
 pub use grpc_backends::{
-    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory,
+    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, JsGrpcFactory, PythonAsyncGrpcFactory,
+    PythonGrpcFactory,
 };

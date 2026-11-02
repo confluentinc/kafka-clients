@@ -36,6 +36,9 @@ VENV = . venv/bin/activate
 	transactional-producer-perf-test-python \
 	producer-perf-test-dotnet consumer-perf-test-dotnet \
 	build-javascript test-javascript verify-javascript \
+	build-grpc-images-javascript test-integration-javascript \
+	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
+	build-grpc-native-javascript test-integration-javascript-native \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
@@ -139,6 +142,13 @@ build-grpc-images-c: build-rust-all-features
 build-grpc-images-dotnet: build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) grpc-image grpc-image-async
 
+# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
+# against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
+# as the JavaScript client is not yet part of `build` either.
+build-grpc-images-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) grpc-image
+
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests) and the
 # Python development dependencies. Run this before `make build` on a new
@@ -195,7 +205,13 @@ test-integration-c: build-rust-all-features
 test-integration-dotnet: build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) test-integration
 
-# The gRPC Python/C/.NET arms above default to the PLAINTEXT CONTAINER listener.
+# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# arms (the image copies the host-built Linux libconfluent_kafka.so); use
+# `test-integration-javascript-native` there. Not part of `verify`.
+test-integration-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) test-integration-grpc
+
+# The gRPC Python/C/.NET/JavaScript arms above default to the PLAINTEXT CONTAINER listener.
 # These variants drive the same arm over the SSL / SASL_SSL CONTAINER
 # listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
 # of the client SSL/SASL_SSL listeners, advertised on the container hostname
@@ -216,11 +232,15 @@ test-integration-dotnet-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-dotnet
 test-integration-dotnet-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-dotnet
+test-integration-javascript-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+test-integration-javascript-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
 
 # ── Native (non-container) gRPC multilanguage arms ───────────────────────
 #
-# The same `__grpc_python` / `__grpc_c` / `__grpc_dotnet` arms, but with each
-# gRPC server run as a host process instead of a Docker container
+# The same `__grpc_python` / `__grpc_c` / `__grpc_dotnet` / `__grpc_js` arms,
+# but with each gRPC server run as a host process instead of a Docker container
 # (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs). Only
 # the broker runs in Docker. These targets are used on macOS, where containers
 # run Linux: the container arms can only test the Linux build of the bindings
@@ -233,6 +253,8 @@ test-integration-dotnet-sasl-ssl:
 #   c/       the kafka_grpc_server binary
 #   dotnet/  the .NET gRPC server's net10.0 build (Confluent.Kafka.GrpcServer.dll
 #            plus the native library), run with the `dotnet` host
+#   javascript/node_modules  @grpc/grpc-js + @grpc/proto-loader, put on
+#            NODE_PATH by the harness (MULTILANG_JS_NODE_PATH overrides it)
 build-grpc-native-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 
@@ -256,6 +278,12 @@ test-integration-c-native: build-grpc-native-c
 # (DOTNET_GRPC_SKIPS, see rust/Makefile).
 test-integration-dotnet-native: build-grpc-native-dotnet
 	$(MAKE) -C rust test-integration-grpc-dotnet-native
+
+build-grpc-native-javascript: build-javascript
+	$(MAKE) -C javascript $(ROOTS) grpc-native
+
+test-integration-javascript-native: build-grpc-native-javascript
+	$(MAKE) -C rust test-integration-grpc-js-native
 
 # ── Performance integration tests ────────────────────────────────────────
 #

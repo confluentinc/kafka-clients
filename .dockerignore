@@ -1,8 +1,8 @@
 # Build context filter for the multilanguage gRPC server images
-# (python/Dockerfile.grpc{,.async}, c/Dockerfile.grpc).
+# (python/Dockerfile.grpc{,.async}, c/Dockerfile.grpc, javascript/Dockerfile.grpc).
 #
 # Those builds use the repo root as their context so they can COPY from
-# rust/target/, python/, c/ and rust/multilanguage-test-server/. Without this file the
+# rust/target/, python/, c/, javascript/ and rust/multilanguage-test-server/. Without this file the
 # context is the whole working tree — including a multi-gigabyte rust/target/
 # directory and the kafka/ Java source submodule — which docker uploads to
 # the daemon on every build.
@@ -10,7 +10,8 @@
 # Only the handful of paths the Dockerfiles actually COPY are re-included.
 
 # Everything cargo produces, except the four artifacts the images need: the C
-# image takes confluent_kafka.h, the Python images confluent_kafka_bindings.h.
+# image takes confluent_kafka.h, the Python and JavaScript images
+# confluent_kafka_bindings.h.
 rust/target
 !rust/target/release/libconfluent_kafka.a
 !rust/target/release/libconfluent_kafka.so
@@ -28,5 +29,9 @@ c/build
 python/build
 python/*.egg-info
 python/**/__pycache__
+# The host's addon build (Mach-O on macOS) and any node_modules: the JavaScript
+# image builds the addon and installs its gRPC packages itself.
+javascript/build
+javascript/node_modules
 rust/consumer-perf/target
 rust/coverage
