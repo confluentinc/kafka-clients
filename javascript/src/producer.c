@@ -210,6 +210,16 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
 // run by the drain or by destroy on the JS thread. Both arguments are
 // BORROWED. Order (javascript/CLAUDE.md, rule 6): the JS side runs the user
 // callback and then completes the KafkaFuture; then the result is reported, once.
+//
+// What runs inside the drain here (D8): the user's Java-style Callback, the
+// one piece of user code called synchronously, and the settling of the
+// record's Promises (KafkaFuture.get()'s), whose reactions run as microtasks
+// once the drain has returned to JS, never inside it.
+//
+// `callback_id` (D13) stays in C: it is an int64_t the core may number past
+// 2^53, which a JS number cannot hold exactly, so it is never handed to JS. It
+// is used only here, synchronously, in the one __set_callback_result report;
+// the JS callback returns what it threw instead, and this function reports it.
 static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_t* metadata,
                                const kafka_common_Error_t* error, int64_t callback_id) {
     SendCtx* ctx = (SendCtx*)self_;

@@ -207,8 +207,12 @@ class KafkaProducer {
         settle(error);
       }
     };
-    // The record's delivery callback: the user callback first, then the
-    // future; a message returned is what the callback threw, for the core to log.
+    // The record's delivery callback, run synchronously inside the native
+    // drain: the user callback first (the only user code the drain runs),
+    // then the future, whose get() Promises it settles (their reactions run
+    // as microtasks after the drain). A message returned is what the callback
+    // threw, for the core to log; the callback id the core reports by stays
+    // in C (src/producer.c, send_on_completion).
     const onComplete = (metadata, error) => {
       let failure;
       if (userCallback !== null) {
