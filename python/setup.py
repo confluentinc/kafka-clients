@@ -22,7 +22,7 @@ import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust'))
 include_dir = os.path.join(project_root, 'target', 'include')
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
-                         os.path.join(project_root, 'target', 'release'))
+                         os.path.join(project_root, 'target', 'release-cdylib'))
 
 sources = ['_confluentkafka.c']
 include_dirs = [include_dir]

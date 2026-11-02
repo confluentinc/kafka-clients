@@ -24,6 +24,14 @@
 //! Key differences:
 //! - Only PEM format is supported. JKS and PKCS12 return an error.
 //! - `aws-lc-rs` is used as the crypto backend (FIPS compliant).
+//! - When no truststore is configured the broker certificate is verified
+//!   against Mozilla's root certificates (the default `webpki-roots` feature),
+//!   as the JDK bundles its own; with the crate's `platform-verifier` feature,
+//!   by the platform verifier (`rustls-platform-verifier`) instead: the OS
+//!   verifier on macOS and Windows, the OS root store on Linux (`SSL_CERT_FILE`
+//!   / `SSL_CERT_DIR` override it), as Java trusts the JDK's default trust
+//!   store. The C library and the Python wheel are built that way, without
+//!   the bundle.
 //! - Hostname verification is controlled by `endpoint_identification_algorithm`:
 //!   when empty, a custom `ServerCertVerifier` validates the cert chain but skips
 //!   hostname matching.
@@ -79,6 +87,9 @@ impl SslFactory {
     /// - The truststore or keystore format is not PEM (JKS/PKCS12 are unsupported)
     /// - PEM files cannot be read or parsed
     /// - No valid certificates are found in the truststore
+    /// - With the `platform-verifier` feature, no truststore is configured and
+    ///   the platform verifier cannot be built (on Linux, when the OS has no
+    ///   root certificate)
     /// - The private key cannot be loaded, is encrypted (see
     ///   [`is_encrypted_pem_key`]), or is missing when a client cert is provided
     /// - `ssl.protocol` names no client `SSLContext` of the JDK (`TLSv1.3`,
@@ -142,14 +153,20 @@ impl SslFactory {
         }
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
-        // Server certificate verification
-        let builder = if hostname_verification {
-            builder.with_root_certificates(root_store)
-        } else {
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoHostnameVerifier::new(root_store)))
+        // Server certificate verification: the configured truststore's roots,
+        // or the default verifier when there is none (Java: the trust manager
+        // over the JDK's default trust store). Without hostname verification
+        // the chain is always checked by the WebPKI verifier, over the default
+        // roots when there is no truststore, because `NoHostnameVerifier` can
+        // only tell a name mismatch from a chain error on its verdict.
+        let provider = builder.crypto_provider().clone();
+        let verifier = match (root_store, hostname_verification) {
+            (Some(roots), true) => webpki_verifier(roots, provider)?,
+            (None, true) => default_verifier(provider)?,
+            (Some(roots), false) => Arc::new(NoHostnameVerifier::new(webpki_verifier(roots, provider)?)),
+            (None, false) => Arc::new(NoHostnameVerifier::new(webpki_verifier(default_roots()?, provider)?)),
         };
+        let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
 
         // Client authentication
         let config = match load_client_identity(ssl_config)? {
@@ -247,14 +264,15 @@ fn validate_store_format(format: &str, store_name: &str) -> io::Result<()> {
     }
 }
 
-/// Builds a root certificate store from the SSL config.
+/// Builds the root certificate store of the configured truststore.
 ///
 /// Loads certificates from:
 /// 1. `truststore_location` — PEM file path
 /// 2. `truststore_certificates` — inline PEM string
-/// 3. Mozilla's root certificates, from the `webpki-roots` feature (fallback
-///    when neither 1 nor 2 is set)
-fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<RootCertStore> {
+///
+/// Returns `None` when neither is set: the broker certificate is then verified
+/// by the [`default_verifier`].
+fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<Option<RootCertStore>> {
     let mut root_store = RootCertStore::empty();
 
     if let Some(ref path) = ssl_config.truststore_location {
@@ -306,19 +324,144 @@ fn build_root_cert_store(ssl_config: &SslConfigs) -> io::Result<RootCertStore> {
             })?;
         }
     } else {
-        // Fallback to Mozilla's root certificates.
-        #[cfg(feature = "webpki-roots")]
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        return Ok(None);
     }
 
+    Ok(Some(root_store))
+}
+
+/// The WebPKI verifier over the configured truststore's `roots`, with the
+/// client configuration's crypto `provider`.
+fn webpki_verifier(
+    roots: RootCertStore,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> io::Result<Arc<dyn ServerCertVerifier>> {
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+        .build()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to build the certificate verifier: {e}"),
+            )
+        })?;
+    Ok(verifier)
+}
+
+/// The verifier used when no truststore is configured, standing for Java's
+/// `TrustManagerFactory.init(null)`, the JDK's default trust store: with the
+/// `platform-verifier` feature the platform's ([`platform_verifier`]), else
+/// with the default `webpki-roots` feature the WebPKI verifier over Mozilla's
+/// root certificates, which the JDK bundles too.
+///
+/// # Errors
+///
+/// Returns an error when the verifier cannot be built, see
+/// [`platform_verifier`] and [`webpki_verifier`].
+fn default_verifier(provider: Arc<rustls::crypto::CryptoProvider>) -> io::Result<Arc<dyn ServerCertVerifier>> {
+    #[cfg(feature = "platform-verifier")]
+    {
+        platform_verifier(provider)
+    }
+    #[cfg(all(not(feature = "platform-verifier"), feature = "webpki-roots"))]
+    {
+        let mut root_store = RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        webpki_verifier(root_store, provider)
+    }
+    // Never built: the `compile_error!` below stops the build first. The body
+    // only keeps that error the one the user sees.
+    #[cfg(not(any(feature = "platform-verifier", feature = "webpki-roots")))]
+    {
+        let _ = provider;
+        unreachable!()
+    }
+}
+
+// Without a truststore the client needs a default one: with neither feature,
+// every SSL client without a truststore key would trust no certificate at all,
+// so the build stops here instead.
+#[cfg(not(any(feature = "platform-verifier", feature = "webpki-roots")))]
+compile_error!(
+    "confluent-kafka needs a default trust store: enable the `webpki-roots` (default) or the `platform-verifier` feature"
+);
+
+/// The roots of the default trust store, for the WebPKI verifier that
+/// [`NoHostnameVerifier`] wraps when no truststore is configured: with the
+/// `platform-verifier` feature the operating system's root certificates
+/// ([`native_roots`]), else Mozilla's root certificates (`webpki-roots`).
+///
+/// # Errors
+///
+/// Returns an error when the operating system has no root certificate, see
+/// [`native_roots`].
+fn default_roots() -> io::Result<RootCertStore> {
+    #[cfg(feature = "platform-verifier")]
+    {
+        native_roots()
+    }
+    #[cfg(all(not(feature = "platform-verifier"), feature = "webpki-roots"))]
+    {
+        let mut root_store = RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Ok(root_store)
+    }
+    // Never built, as `default_verifier`'s third arm.
+    #[cfg(not(any(feature = "platform-verifier", feature = "webpki-roots")))]
+    {
+        unreachable!()
+    }
+}
+
+/// The operating system's root certificates, the ones the platform verifier
+/// trusts: the system keychains on macOS, the system certificate stores on
+/// Windows, the OS root store on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR`
+/// override it). Loaded as the platform verifier loads them on Linux: a
+/// certificate that cannot be read or parsed is logged and skipped.
+///
+/// # Errors
+///
+/// Returns an error when no root certificate could be loaded, as
+/// [`platform_verifier`] does on Linux.
+#[cfg(feature = "platform-verifier")]
+fn native_roots() -> io::Result<RootCertStore> {
+    let result = rustls_native_certs::load_native_certs();
+    for error in &result.errors {
+        log::warn!("Error loading CA root certificate: {error}");
+    }
+    let mut root_store = RootCertStore::empty();
+    let (_, ignored) = root_store.add_parsable_certificates(result.certs);
+    if ignored > 0 {
+        log::warn!("{ignored} platform CA root certificates were ignored due to errors");
+    }
+    if root_store.is_empty() {
+        return Err(io::Error::other(
+            "Failed to load the platform's root certificates, set ssl.truststore.location or \
+             ssl.truststore.certificates: no CA certificates were loaded from the system",
+        ));
+    }
     Ok(root_store)
 }
 
-// Without a truststore the client needs a default one, and `webpki-roots` is the
-// only one so far: with it off, every SSL client without a truststore key would
-// trust no certificate at all, so the build stops here instead.
-#[cfg(not(feature = "webpki-roots"))]
-compile_error!("confluent-kafka needs a default trust store: enable the `webpki-roots` feature (on by default)");
+/// The platform's certificate verifier, used when no truststore is configured
+/// and hostname verification is on, as Java's `TrustManagerFactory.init(null)`
+/// trusts the JDK's default trust store: the OS verifier on macOS and Windows,
+/// the OS root store on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override it).
+///
+/// # Errors
+///
+/// Returns an error when the verifier cannot be built: on Linux, when the OS
+/// has no root certificate. Java builds its trust manager over the empty
+/// default store and fails at the first handshake instead.
+#[cfg(feature = "platform-verifier")]
+fn platform_verifier(provider: Arc<rustls::crypto::CryptoProvider>) -> io::Result<Arc<dyn ServerCertVerifier>> {
+    let verifier = rustls_platform_verifier::Verifier::new(provider).map_err(|e| {
+        io::Error::other(format!(
+            "Failed to build the platform certificate verifier, set ssl.truststore.location or \
+             ssl.truststore.certificates: {e}"
+        ))
+    })?;
+    Ok(Arc::new(verifier))
+}
 
 /// Loads client certificate and private key for mTLS, if configured.
 ///
@@ -631,15 +774,17 @@ fn is_java_cipher_suite_name(rustls_name: &str, java_name: &str) -> bool {
 /// or when hostname verification is handled at a different layer.
 #[derive(Debug)]
 struct NoHostnameVerifier {
-    /// The underlying verifier that does standard WebPKI validation.
-    inner: Arc<rustls::client::WebPkiServerVerifier>,
+    /// The underlying verifier that validates the chain: the WebPKI verifier,
+    /// over the configured truststore or the default roots
+    /// ([`default_roots`]). Never the platform verifier: WebPKI checks the
+    /// name only once the chain is valid, so a `NotValidForName` verdict means
+    /// a trusted chain, which the OS verifiers on macOS and Windows do not
+    /// document.
+    inner: Arc<dyn ServerCertVerifier>,
 }
 
 impl NoHostnameVerifier {
-    fn new(roots: RootCertStore) -> Self {
-        let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
-            .build()
-            .expect("Failed to build WebPkiServerVerifier");
+    fn new(inner: Arc<dyn ServerCertVerifier>) -> Self {
         Self { inner }
     }
 }
@@ -790,6 +935,74 @@ B2V9lhUZNk+pRjtJw9unpXsM
         assert!(factory.hostname_verification());
     }
 
+    /// The crypto provider the tests build verifiers with.
+    fn test_provider() -> Arc<rustls::crypto::CryptoProvider> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        rustls::crypto::CryptoProvider::get_default().unwrap().clone()
+    }
+
+    #[test]
+    fn test_build_with_system_roots_and_no_hostname_verification() {
+        // The WebPKI verifier over the default roots, wrapped by
+        // `NoHostnameVerifier`.
+        let config = SslConfigs { endpoint_identification_algorithm: String::new(), ..SslConfigs::default() };
+        let factory = SslFactory::new(&config).unwrap();
+        assert!(!factory.hostname_verification());
+    }
+
+    #[test]
+    fn test_build_root_cert_store_without_truststore_is_none() {
+        // No truststore: the default verifier, not a configured root store.
+        assert!(build_root_cert_store(&SslConfigs::default()).unwrap().is_none());
+
+        let config = SslConfigs {
+            truststore_certificates: Some(Password::new(TEST_CA_CERT)),
+            ..SslConfigs::default()
+        };
+        let root_store = build_root_cert_store(&config).unwrap().expect("the configured truststore");
+        assert_eq!(root_store.len(), 1);
+    }
+
+    #[test]
+    fn test_default_verifier_rejects_untrusted_cert() {
+        // The test CA is neither in the OS store nor in Mozilla's bundle, with
+        // or without hostname verification; the default verifier is not an
+        // open door.
+        let verifier = default_verifier(test_provider()).unwrap();
+        let certs = parse_certs(TEST_SERVER_CERT);
+        let server_name = ServerName::try_from("server.example.com").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+
+        let result = verifier.verify_server_cert(&certs[0], &[], &server_name, &[], now);
+        assert!(result.is_err(), "the default verifier must reject a cert from an untrusted CA");
+
+        let verifier = NoHostnameVerifier::new(webpki_verifier(default_roots().unwrap(), test_provider()).unwrap());
+        let result = verifier.verify_server_cert(&certs[0], &[], &server_name, &[], now);
+        assert!(result.is_err(), "NoHostnameVerifier must not suppress an untrusted-CA error");
+    }
+
+    /// Without hostname verification and without a truststore, the default
+    /// roots are the ones the default verifier trusts: the OS store with the
+    /// `platform-verifier` feature, Mozilla's bundle without it.
+    #[test]
+    fn test_default_roots_match_the_default_trust_store() {
+        let roots = default_roots().unwrap();
+        assert!(!roots.is_empty());
+        #[cfg(all(not(feature = "platform-verifier"), feature = "webpki-roots"))]
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+    }
+
+    /// With the `platform-verifier` feature the platform verifier builds on
+    /// this host, OS store present.
+    #[cfg(feature = "platform-verifier")]
+    #[test]
+    fn test_platform_verifier_feature_builds() {
+        platform_verifier(test_provider()).unwrap();
+    }
+
+    /// Without it the default trust store is Mozilla's bundle, whatever the OS
+    /// holds, so a host without a CA bundle builds its client.
+    #[cfg(all(not(feature = "platform-verifier"), feature = "webpki-roots"))]
     #[test]
     fn test_default_trusts_the_mozilla_bundle() {
         assert!(
@@ -797,8 +1010,10 @@ B2V9lhUZNk+pRjtJw9unpXsM
             "{}",
             webpki_roots::TLS_SERVER_ROOTS.len()
         );
-        let root_store = build_root_cert_store(&SslConfigs::default()).unwrap();
+        let mut root_store = RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         assert_eq!(root_store.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        SslFactory::new(&SslConfigs::default()).unwrap();
     }
 
     #[test]
@@ -1579,7 +1794,7 @@ Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
         for cert in parse_certs(TEST_SERVER_CA_CERT) {
             root_store.add(cert).unwrap();
         }
-        let verifier = NoHostnameVerifier::new(root_store);
+        let verifier = NoHostnameVerifier::new(webpki_verifier(root_store, test_provider()).unwrap());
 
         // Parse the server certificate (SAN = server.example.com).
         let certs = parse_certs(TEST_SERVER_CERT);
@@ -1610,7 +1825,7 @@ Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
         for cert in parse_certs(TEST_SERVER_CA_CERT) {
             root_store.add(cert).unwrap();
         }
-        let verifier = NoHostnameVerifier::new(root_store);
+        let verifier = NoHostnameVerifier::new(webpki_verifier(root_store, test_provider()).unwrap());
 
         // Parse the server certificate (SAN = server.example.com).
         let certs = parse_certs(TEST_SERVER_CERT);
@@ -1641,7 +1856,7 @@ Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
         for cert in parse_certs(TEST_CA_CERT) {
             root_store.add(cert).unwrap();
         }
-        let verifier = NoHostnameVerifier::new(root_store);
+        let verifier = NoHostnameVerifier::new(webpki_verifier(root_store, test_provider()).unwrap());
 
         let certs = parse_certs(TEST_SERVER_CERT);
         let end_entity = &certs[0];

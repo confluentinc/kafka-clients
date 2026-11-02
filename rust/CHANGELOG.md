@@ -2,6 +2,32 @@
 
 All notable changes to the `confluent-kafka` crate are documented in this file.
 
+## [Unreleased]
+
+### Common
+
+- New cargo feature `platform-verifier` (`confluent-kafka = { features =
+  ["platform-verifier"] }`): without `ssl.truststore.location` or
+  `ssl.truststore.certificates`, the broker certificate is verified by the
+  platform's certificate verifier (`rustls-platform-verifier`): the operating
+  system's verifier on macOS and Windows, the operating system's root
+  certificates on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override them), as
+  the Java client uses the JDK's default trust store, so a CA installed in the
+  operating system is trusted without a truststore key, and which CAs are
+  trusted follows the operating system. With hostname verification off
+  (`ssl.endpoint.identification.algorithm` empty) the operating system's root
+  certificates are checked by the WebPKI verifier instead
+  (`rustls-native-certs`), which validates the chain before the name on every
+  platform. On Linux a host without a CA bundle (a
+  `scratch` or distroless image) must then set one of the truststore keys or
+  `SSL_CERT_FILE`: the client fails at construction with "Failed to build the
+  platform certificate verifier" otherwise. Off by default: the default
+  feature `webpki-roots` keeps trusting the Mozilla root bundle there, as
+  before; with both on, `platform-verifier` wins. Like `webpki-roots` it
+  enables `rustls`, so `default-features = false` with `platform-verifier`
+  builds TLS without the bundle. The C library and the Python wheel are built
+  that way.
+
 ## [1.0.0] - 2026-10-30
 
 ### General availability
