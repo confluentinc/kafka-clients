@@ -59,4 +59,12 @@ export class KafkaError extends Error {
      * @type {boolean}
      */
     readonly apiError: boolean;
+    /**
+     * The error's cause, Java's `getCause()`: set by `super()` (`Error`'s
+     * `options.cause`), declared here for the targets whose `lib` predates
+     * ES2022's `Error.cause`. Not a class field, which would overwrite it.
+     * @readonly
+     * @type {unknown}
+     */
+    readonly cause: unknown;
 }

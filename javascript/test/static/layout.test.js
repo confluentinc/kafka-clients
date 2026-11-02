@@ -62,29 +62,64 @@ test('every lib/ folder is a module: index.js and index.d.ts', () => {
   }
 });
 
-test('an index.js only requires its public modules and has one module.exports literal', () => {
-  for (const dir of libDirs) {
-    if (isPrivate(dir)) continue;
-    const code = stripComments(fs.readFileSync(path.join(LIB, dir, 'index.js'), 'utf8'));
-    const statements = code
-      .split(';')
-      .map((s) => s.trim())
-      .filter((s) => s !== '');
-    let exportsLiterals = 0;
-    for (const statement of statements) {
-      if (statement === "'use strict'") continue;
-      const required = /^const\s+(?:\{[\w\s,]+\}|\w+)\s*=\s*require\('(\.\/[\w/]+)'\)$/.exec(statement);
-      if (required !== null) {
-        assert.ok(!isPrivate(required[1]), `lib/${dir}index.js requires a private module: ${required[1]}`);
-        continue;
-      }
-      if (/^module\.exports\s*=\s*\{[\w\s,]*\}$/.test(statement)) {
-        exportsLiterals++;
-        continue;
-      }
-      assert.fail(`lib/${dir}index.js: not a require or the module.exports literal: ${statement}`);
+/** The public module folders, without their trailing `/` (`producer`, `common`). */
+const moduleDirs = libDirs.filter((d) => d !== '' && !isPrivate(d)).map((d) => d.replace(/\/$/, ''));
+
+/**
+ * The statements of `lib/<dir>index.js`: its requires, as
+ * `{bindings, path}` (bindings `null` for `const x = require(...)`, else the
+ * names destructured), and the names of its one `module.exports` literal.
+ */
+function parseIndex(dir) {
+  const code = stripComments(fs.readFileSync(path.join(LIB, dir, 'index.js'), 'utf8'));
+  const statements = code
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  const requires = [];
+  const exportsLiterals = [];
+  for (const statement of statements) {
+    if (statement === "'use strict'") continue;
+    const required = /^const\s+(?:\{([\w\s,]+)\}|(\w+))\s*=\s*require\('(\.\/[\w/]+)'\)$/.exec(statement);
+    if (required !== null) {
+      const names = required[1] === undefined ? [required[2]] : required[1].split(',').map((n) => n.trim()).filter(Boolean);
+      requires.push({ destructured: required[1] !== undefined, names, path: required[3] });
+      continue;
     }
-    assert.equal(exportsLiterals, 1, `lib/${dir}index.js has ${exportsLiterals} module.exports literals`);
+    const literal = /^module\.exports\s*=\s*\{([\w\s,]*)\}$/.exec(statement);
+    if (literal !== null) {
+      exportsLiterals.push(literal[1].split(',').map((n) => n.trim()).filter(Boolean));
+      continue;
+    }
+    assert.fail(`lib/${dir}index.js: not a require or the module.exports literal: ${statement}`);
+  }
+  assert.equal(exportsLiterals.length, 1, `lib/${dir}index.js has ${exportsLiterals.length} module.exports literals`);
+  return { requires, exports: exportsLiterals[0] };
+}
+
+test('the root index.js requires each module folder and exports exactly those namespaces', () => {
+  const { requires, exports } = parseIndex('');
+  for (const r of requires) {
+    assert.ok(!r.destructured, `lib/index.js destructures ${r.path}: the root exports namespaces only`);
+    assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `lib/index.js requires ${r.path}, not a module folder`);
+    assert.ok(moduleDirs.includes(r.path.slice(2)), `lib/index.js requires ${r.path}, not a public lib/ folder`);
+    assert.equal(r.names[0], r.path.slice(2), `lib/index.js binds ${r.path} as ${r.names[0]}`);
+  }
+  assert.deepEqual(requires.map((r) => r.path.slice(2)).sort(), [...moduleDirs].sort(), 'lib/index.js requires');
+  assert.deepEqual([...exports].sort(), [...moduleDirs].sort(), 'lib/index.js module.exports');
+});
+
+test('a module folder index.js requires only public files of its own folder, and exports what it requires', () => {
+  for (const dir of libDirs) {
+    if (dir === '' || isPrivate(dir)) continue;
+    const { requires, exports } = parseIndex(dir);
+    const bound = [];
+    for (const r of requires) {
+      assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `lib/${dir}index.js requires ${r.path}, not a file of its folder`);
+      assert.ok(libFiles.includes(`${dir}${r.path.slice(2)}.js`), `lib/${dir}index.js requires ${r.path}, not a public .js of lib/${dir}`);
+      bound.push(...r.names);
+    }
+    assert.deepEqual([...exports].sort(), bound.sort(), `lib/${dir}index.js module.exports`);
   }
 });
 
@@ -118,6 +153,28 @@ test('package.json exports every module folder, with its types, and nothing else
   assert.deepEqual(pkg.exports, expected);
   assert.equal(pkg.main, 'lib/index.js');
   assert.equal(pkg.types, 'lib/index.d.ts');
+});
+
+test('package.json typesVersions maps every module subpath to its index.d.ts', () => {
+  // `exports` is read only by TypeScript's node16, nodenext and bundler
+  // resolution; typesVersions gives the subpaths their types under node10, the
+  // default for `"module": "commonjs"`.
+  const expected = {};
+  for (const dir of moduleDirs) expected[dir] = [`lib/${dir}/index.d.ts`];
+  assert.deepEqual(pkg.typesVersions, { '*': expected });
+});
+
+test('a unit test file is named after the lib/ file it tests, in the same folder', () => {
+  // test/unit/<module>/<file>.test.js for lib/<module>/<file>.js: the Java test
+  // class without its Test suffix, snake_cased (KafkaProducerTest ->
+  // producer/kafka_producer.test.js).
+  const unit = path.join(ROOT, 'test', 'unit');
+  for (const rel of walk(unit).filter((p) => !p.endsWith('/'))) {
+    assert.match(rel, /\.test\.js$/, `test/unit/${rel} is not a .test.js`);
+    assert.doesNotMatch(rel, /_test\.test\.js$/, `test/unit/${rel}: drop the Test suffix`);
+    const tested = rel.replace(/\.test\.js$/, '.js');
+    assert.ok(libFiles.includes(tested), `test/unit/${rel} names no lib/${tested}`);
+  }
 });
 
 test('package.json: no install-time build or scripts, private, Node >= 18', () => {

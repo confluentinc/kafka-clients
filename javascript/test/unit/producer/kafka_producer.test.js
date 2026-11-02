@@ -314,9 +314,10 @@ test('terminating a worker with records in flight tears its producer down cleanl
 test('terminating a worker whose unclosed producer holds an unsent record is prompt', () => {
   // D11: environment teardown finalizes a producer close() was never called
   // on. Its destroy would close it gracefully first, waiting up to
-  // max.block.ms + delivery.timeout.ms (2 min by default) for a record no
+  // max.block.ms + delivery.timeout.ms (3 min by default) for a record no
   // broker will take; the finalizer force-closes it (timeout 0) instead, so
-  // the record fails at once.
+  // the record fails promptly (the connection to 127.0.0.1:1 is refused, so
+  // the I/O task is in no long wait).
   const r = runNode(
     `
     const { Worker } = require('node:worker_threads');

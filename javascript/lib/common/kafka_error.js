@@ -64,6 +64,14 @@ class KafkaError extends Error {
     this.code = code;
     this.retriable = retriable;
     this.apiError = apiError;
+    /**
+     * The error's cause, Java's `getCause()`: set by `super()` (`Error`'s
+     * `options.cause`), declared here for the targets whose `lib` predates
+     * ES2022's `Error.cause`. Not a class field, which would overwrite it.
+     * @readonly
+     * @type {unknown}
+     */
+    this.cause;
   }
 
   /**
