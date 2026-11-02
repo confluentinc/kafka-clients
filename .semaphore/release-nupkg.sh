@@ -23,11 +23,13 @@
 #   .semaphore/release-nupkg.sh
 #       Refuses unless all of the following hold, then records the package as the release in the
 #       workflow's artifacts: nuget/release/<package>, with `<sha256>  <package>` in
-#       nuget/release/SHA256SUMS. It loads no key and reads no gallery.
+#       nuget/release/SHA256SUMS. It loads no key, and reads nuget.org only to list the versions
+#       of the package.
 #         - the build is of a .NET release tag that still points at the commit the build
 #           checked out, and that commit is part of master;
 #         - the tag matches <Version> in dotnet/Directory.Build.props at that commit, which is
 #           4.0.0 or higher, and the library's <PackageId> is ${NUGET_PACKAGE};
+#         - nuget.org does not have that version yet, which it would refuse to take again;
 #         - the package the pack block recorded is the package every verification block of
 #           ${NUGET_PLATFORMS} tested;
 #         - check-nupkg.py accepts it, with the natives of every RID, for this commit;
@@ -122,6 +124,13 @@ if [ "${package_id}" != "${NUGET_PACKAGE}" ]; then
     refuse "dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj at this commit has the package id '${package_id}', not ${NUGET_PACKAGE}"
 fi
 
+# create-release-tag.yml makes the same check, but a tag can also be pushed by other means.
+/usr/bin/python3 .semaphore/check-published-nupkg.py versions https://api.nuget.org/v3/index.json "${NUGET_PACKAGE}" > "${work}/published" \
+    || refuse "could not read nuget.org to confirm that ${NUGET_PACKAGE} ${PACKAGE_VERSION} is new"
+if grep -qxF -- "${PACKAGE_VERSION}" "${work}/published"; then
+    refuse "${NUGET_PACKAGE} ${PACKAGE_VERSION} is already on nuget.org, which never takes a version twice; release a new version"
+fi
+
 # Proceeds only if the package the pack block recorded is exactly the package each verification
 # block tested.
 artifact pull workflow "nuget/built/${PACKAGE_FILE}" --destination "${work}/release/${PACKAGE_FILE}" --force >/dev/null \
@@ -143,9 +152,17 @@ echo "${checksum}  ${PACKAGE_FILE}" > "${work}/SHA256SUMS"
 
 # Once recorded, the release is final: it may already have been downloaded and uploaded to
 # nuget.org. A rerun of the pack block packs other bytes (a pack is not reproducible), so its
-# package is not recorded over it.
-if artifact pull workflow nuget/release/SHA256SUMS --destination "${work}/recorded.sha256" --force >/dev/null 2>&1 \
-    && ! cmp -s "${work}/SHA256SUMS" "${work}/recorded.sha256"; then
+# package is not recorded over it. A pull that fails reads as nothing recorded, so it is tried
+# three times before the record is made.
+recorded=false
+for attempt in 1 2 3; do
+    if artifact pull workflow nuget/release/SHA256SUMS --destination "${work}/recorded.sha256" --force >/dev/null 2>&1; then
+        recorded=true
+        break
+    fi
+    [ "${attempt}" -eq 3 ] || sleep 10
+done
+if [ "${recorded}" = true ] && ! cmp -s "${work}/SHA256SUMS" "${work}/recorded.sha256"; then
     refuse "this workflow already recorded $(cat "${work}/recorded.sha256") as the release, which may already be on nuget.org; it is not replaced by the repacked $(cat "${work}/SHA256SUMS"). Upload the recorded release, or release a new version"
 fi
 
@@ -157,4 +174,5 @@ artifact push workflow "${work}/SHA256SUMS" --destination nuget/release/SHA256SU
     || refuse "could not record the checksum of ${PACKAGE_FILE}; rerun this job"
 cat "${work}/SHA256SUMS"
 echo "Recorded ${PACKAGE_FILE}, identical to the package that was tested on: ${NUGET_PLATFORMS}."
-echo "Upload nuget/release/${PACKAGE_FILE} from this workflow's artifacts to nuget.org by hand."
+echo "Upload nuget/release/${PACKAGE_FILE} from this workflow's artifacts to nuget.org by hand,"
+echo "after checking that its SHA-256 is the one printed above."
