@@ -10,6 +10,10 @@ tools/java-perf-test/bin/
 *.svg
 *.json
 *.jsonl
+# The test selection of `make select-tests` is committed with the branch; the
+# pre-commit hook's own selection is local to a checkout.
+!/test-selection.json
+/.test-selection-commit.json
 !design/current/img/*.svg
 *.md.lock
 *.pyc

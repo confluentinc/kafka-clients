@@ -49,6 +49,12 @@ name: build-test-release
 #   9. The "Release (Rust):" and "Release (Python):" blocks, which run only on
 #      a release tag of their package (see the comments above them).
 #
+# On a pull request build the four verify blocks run only the tests that the
+# committed test-selection.json selects (`make select-tests`, run before
+# pushing), and only while the checkout is the working tree it was made for;
+# every other build, and a pull request without a matching selection, runs
+# every test.
+#
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
 # pipeline's default limit.
@@ -241,6 +247,11 @@ blocks:
     task:
       prologue:
         commands:
+          # On a pull request, only the tests that the committed
+          # test-selection.json selects, if it was made for exactly this
+          # working tree (`make select-tests`, see
+          # rust/xtask/src/test_selection.rs); otherwise every test runs.
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "Verify Rust (Linux amd64) — plaintext"
@@ -287,6 +298,8 @@ blocks:
         # Runs before EACH job in this block; every job is a separate VM with
         # its own checkout.
         commands:
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - ./.semaphore/dependencies.sh
       jobs:
         - name: "verify-c (Linux amd64) — plaintext"
@@ -321,6 +334,8 @@ blocks:
           value: full
       prologue:
         commands:
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
@@ -357,6 +372,8 @@ blocks:
           value: full
       prologue:
         commands:
+          # The test selection, as in "Verify Rust (Linux amd64)".
+          - if [ -n "${SEMAPHORE_GIT_PR_NUMBER:-}" ]; then export TEST_SELECTION=test-selection.json; fi
           - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
