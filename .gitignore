@@ -11,6 +11,8 @@ tools/java-perf-test/bin/
 *.json
 *.jsonl
 !design/current/img/*.svg
+# The Confluent.Kafka NuGet package's icon (dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj).
+!/dotnet/icon.png
 *.md.lock
 *.pyc
 bin
