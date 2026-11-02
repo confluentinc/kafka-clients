@@ -3724,7 +3724,20 @@ async fn test_timeout<F: ProducerBackendFactory + ConsumerBackendFactory>(
         _ => None,
     };
     if need_init_and_send_msg {
-        producer.init_transactions().await.expect("initTransactions");
+        // The setup shares the 3000 ms `max.block.ms` with the step under test,
+        // and on a freshly started cluster the transaction coordinator can take
+        // longer to load (a TLS client in a backend container on a busy CI host).
+        // `org.apache.kafka.clients.producer.KafkaProducer#initTransactions` is
+        // safe to retry after a `TimeoutException`, so the setup retries; the
+        // timed step below keeps Java's single attempt.
+        let mut attempt = 1;
+        loop {
+            match producer.init_transactions().await {
+                Ok(()) => break,
+                Err(e) if e.is_timeout_error() && attempt < 10 => attempt += 1,
+                Err(e) => panic!("initTransactions on the {backend} backend: {e:?}"),
+            }
+        }
         producer.begin_transaction().expect("beginTransaction");
         send_record(
             &producer,

@@ -510,7 +510,7 @@ enum ListenerStepKind {
   LISTENER_STEP_ASSIGNMENT = 1;
   // Java's `consumer.beginningOffsets(partitions)`; logged in `offsets`.
   LISTENER_STEP_BEGINNING_OFFSETS = 2;
-  // Java's `consumer.position(partition)`; logged as {"<partition>": position}.
+  // Java's `consumer.position(partition)`; logged as `{"<partition>": position}`.
   LISTENER_STEP_POSITION = 3;
   // Java's `consumer.seek(partition, value)`.
   LISTENER_STEP_SEEK = 4;
@@ -520,8 +520,8 @@ enum ListenerStepKind {
   LISTENER_STEP_SLEEP = 6;
   // Java's `consumer.commitSync(Map.of(partition, new
   // OffsetAndMetadata(position)))` with the position the latest POSITION step
-  // of this invocation read for `partition`; logged as {"<partition>":
-  // committed offset}. Fails with LOCAL_ILLEGAL_STATE when no such POSITION
+  // of this invocation read for `partition`; logged as
+  // `{"<partition>": committed offset}`. Fails with LOCAL_ILLEGAL_STATE when no such POSITION
   // step ran.
   LISTENER_STEP_COMMIT_SYNC_POSITION = 7;
   // The listener method fails with `message`: it raises / returns a
