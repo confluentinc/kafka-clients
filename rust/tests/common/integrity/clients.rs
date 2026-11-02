@@ -183,10 +183,4 @@ impl Clients {
             },
         }
     }
-
-    /// Whether a member's listener can commit from `on_partitions_revoked`:
-    /// only the Rust client's, since a binding's listener runs in its server.
-    pub fn commits_on_revoke(&self) -> bool {
-        matches!(self.backend, Backend::Rust)
-    }
 }

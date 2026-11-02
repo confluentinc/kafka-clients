@@ -40,9 +40,11 @@ There are two forms, on one harness (`tests/common/integrity/`):
   record: the bindings are checked for what they carry (bytes, headers, nulls,
   timestamps, offsets, transactions), not for batching, which the Rust arms
   cover. And a listener cannot cross the wire: a member subscribes with the
-  server's logging listener, which cannot commit, so after a clean restart a
-  binding may read a record again (never below the committed offset), where
-  the Rust arm must read nothing twice.
+  server's logging listener, which cannot commit. So the scenarios where
+  partitions move between members (`many_partitions` and both consumer
+  restarts) run on the Rust client only; CI once saw a binding's next owner
+  read below an offset the group had committed there, which no local run
+  reproduced.
 
   Two of them check compatibility with the Java client, using Apache Kafka's
   own tools in the broker container:

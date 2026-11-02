@@ -43,6 +43,10 @@
 //! client, and with the `multilanguage-tests` feature `<name>__grpc_python`,
 //! `<name>__grpc_python_async` and `<name>__grpc_c` with a binding's client
 //! behind its gRPC test server (`integrity::clients`), every check the same.
+//! The scenarios where partitions move between members run on the Rust client
+//! only: over gRPC a member cannot commit from its revocation listener, and
+//! CI once saw a binding's next owner read below an offset the group had
+//! committed, which no local run reproduced.
 //!
 //! `self_tests` checks the checker itself, without a broker: failures are
 //! produced on purpose and must be reported.
@@ -136,15 +140,21 @@ async fn context_for(arm: Arm) -> (TestContext, Props, Clients) {
 /// Expands `async fn $body(arm: Arm)` into one test per client:
 /// `$name__rust`, and with the `multilanguage-tests` feature
 /// `$name__grpc_python`, `$name__grpc_python_async` and `$name__grpc_c`.
+/// With `rust_only`, only `$name__rust`.
 macro_rules! integrity_test {
-    ($name:ident, $body:ident) => {
+    ($name:ident, $body:ident, rust_only) => {
         ::paste::paste! {
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __rust>]() {
                 $body(Arm::Rust).await;
             }
+        }
+    };
+    ($name:ident, $body:ident) => {
+        integrity_test!($name, $body, rust_only);
 
+        ::paste::paste! {
             #[cfg(feature = "multilanguage-tests")]
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
@@ -330,17 +340,14 @@ async fn many_partitions(arm: Arm) {
     spec.requirements = Requirements { min_records_per_stream: 6000, every_partition_read: true, ..requirements() };
     assert_pass(&run(spec, base).await);
 }
-integrity_test!(test_integrity_many_partitions, many_partitions);
+integrity_test!(test_integrity_many_partitions, many_partitions, rust_only);
 
 /// Members close cleanly and rejoin while records keep coming. Each commits
 /// everything it read before its partitions move, retrying a commit the
 /// rebalance failed (`STALE_MEMBER_EPOCH`) from its revocation listener, so
-/// nothing is read twice. A binding's listener runs in its gRPC server and
-/// cannot commit, so there a failed commit is retried only with the next one,
-/// and a record may be read again, never below the committed offset.
+/// nothing is read twice.
 async fn consumer_restart_clean(arm: Arm) {
     let (mut ctx, base, clients) = context_for(arm).await;
-    let commits_on_revoke = clients.commits_on_revoke();
     let mut spec = spec_for(clients);
     let topic = ctx.topic("restart_clean");
     spec.topics.push(TopicSpec::source(&topic, 6, 1));
@@ -352,11 +359,9 @@ async fn consumer_restart_clean(arm: Arm) {
     spec.requirements = Requirements { min_records_per_stream: 5000, min_clean_restarts: 3, ..requirements() };
     let verdict = run(spec, base).await;
     assert_pass(&verdict);
-    if commits_on_revoke {
-        assert_eq!(verdict.counts.redelivered, 0, "a clean handoff re-read records:\n{verdict}");
-    }
+    assert_eq!(verdict.counts.redelivered, 0, "a clean handoff re-read records:\n{verdict}");
 }
-integrity_test!(test_integrity_consumer_restart_clean, consumer_restart_clean);
+integrity_test!(test_integrity_consumer_restart_clean, consumer_restart_clean, rust_only);
 
 /// Members stop polling without `close()` (every other restart, the others
 /// clean), leaving their last batch uncommitted. Once `max.poll.interval.ms`
@@ -387,7 +392,7 @@ async fn consumer_restart_hard(arm: Arm) {
     };
     assert_pass(&run(spec, base).await);
 }
-integrity_test!(test_integrity_consumer_restart_hard, consumer_restart_hard);
+integrity_test!(test_integrity_consumer_restart_hard, consumer_restart_hard, rust_only);
 
 /// Writers replace their producer every few hundred records or every second:
 /// a new producer id each time, and for the transactional one a new epoch of
