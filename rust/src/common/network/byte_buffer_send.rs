@@ -83,6 +83,31 @@ impl ByteBufferSend {
     pub fn remaining(&self) -> usize {
         self.remaining
     }
+
+    /// Advances the buffers past `written` bytes, releasing each buffer once it is fully written.
+    ///
+    /// Java keeps the written buffers until the send is garbage collected. Here a buffer can be
+    /// a view of a pooled batch buffer, and the selector keeps a completed send in
+    /// `completed_sends` until its next poll, after `NetworkClient` has already completed an
+    /// `acks=0` produce and the batch has returned its buffer to the `BufferPool`: a view still
+    /// held then would stop `MemoryRecordsBuilder::take_buffer` from reclaiming the allocation.
+    fn advance(&mut self, written: usize) {
+        let mut to_consume = written;
+        for (data, offset) in &mut self.buffers {
+            if to_consume == 0 {
+                break;
+            }
+            let available = data.len() - *offset;
+            let consumed = to_consume.min(available);
+            *offset += consumed;
+            to_consume -= consumed;
+            if *offset == data.len() {
+                *data = Bytes::new();
+                *offset = 0;
+            }
+        }
+        self.remaining -= written;
+    }
 }
 
 impl network::Send for ByteBufferSend {
@@ -151,19 +176,7 @@ impl network::Send for ByteBufferSend {
                 return Ok(0);
             }
 
-            // Advance buffer offsets based on bytes written
-            let mut to_consume = written;
-            for (data, offset) in &mut self.buffers {
-                if to_consume == 0 {
-                    break;
-                }
-                let available = data.len() - *offset;
-                let consumed = to_consume.min(available);
-                *offset += consumed;
-                to_consume -= consumed;
-            }
-
-            self.remaining -= written;
+            self.advance(written);
             self.pending = channel.has_pending_writes();
             Ok(written)
         })
@@ -195,18 +208,7 @@ impl network::Send for ByteBufferSend {
             return Ok(0);
         }
 
-        let mut to_consume = written;
-        for (data, offset) in &mut self.buffers {
-            if to_consume == 0 {
-                break;
-            }
-            let available = data.len() - *offset;
-            let consumed = to_consume.min(available);
-            *offset += consumed;
-            to_consume -= consumed;
-        }
-
-        self.remaining -= written;
+        self.advance(written);
         self.pending = channel.has_pending_writes();
         Ok(written)
     }
