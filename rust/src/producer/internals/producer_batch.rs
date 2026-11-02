@@ -925,7 +925,9 @@ impl ProducerBatch {
             stream.deallocate_with_pool(Some(pool));
             return;
         }
-        pool.deallocate(BytesMut::zeroed(self.initial_capacity()));
+        // Java's `ByteBuffer.allocate` zero-fills only because the JVM zeroes every array; the
+        // pool hands buffers out cleared and the builder writes before it reads, so none is needed.
+        pool.deallocate(BytesMut::with_capacity(self.initial_capacity()));
     }
 
     /// Returns the initial capacity of the buffer.
