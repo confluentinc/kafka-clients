@@ -215,7 +215,7 @@ These decide every question, in this order:
   the tests and the gRPC harness.
 - Tests: `test/static` (no build),
   `test/unit/<module>/<java_test_class_snake>.test.js` for a Java test class
-  (`KafkaProducerTest` -> `kafka_producer_test.test.js`), other unit tests
+  (`KafkaProducerTest` -> `kafka_producer.test.js`), other unit tests
   named after what they test, `test/typing`,
   `test/integration` (broker-backed). Tests and examples import the package by
   its own name (`require('confluent-kafka-javascript-rust/producer')`, Node's
