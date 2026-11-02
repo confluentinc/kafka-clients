@@ -145,10 +145,9 @@ name: build-test-release
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
 # renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of "Release (Rust): pre-publish
-# package check" and, if it tests the Rust library or the Python binding, of
-# "Release (Python): packaging", and if it tests the Rust library or the .NET
-# binding, of "Release (.NET): packaging".
+# block must also be added to the dependencies of "Release: CI passed" if it
+# tests the Rust library, a binding or the crates the library links, and
+# otherwise to those of "Release (Rust): pre-publish package check".
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -569,6 +568,31 @@ blocks:
           commands:
             - make audit
 
+  - name: "Release: CI passed"
+    # Passes once the CI blocks that test the Rust library, the bindings over
+    # it and the crates it links have passed. The first release block of each
+    # client depends on it: "Release (Rust): pre-publish package check",
+    # "Release (Python): packaging" and "Release (.NET): packaging". A new CI
+    # block that tests the library, a binding or its dependencies must be
+    # added to this list. Semaphore treats a skipped block as passed, so this
+    # block runs on every tag build, which covers every block that depends on
+    # it. It is skipped on branch builds, so it records no CI result there.
+    dependencies:
+      - "Verify Rust (Linux amd64)"
+      - "Verify language bindings (Linux amd64)"
+      - "Verify Rust (macOS arm64)"
+      - "Verify language bindings (macOS arm64)"
+      - "Audit Rust dependencies (Linux amd64)"
+    run:
+      when: "tag =~ '.*'"
+    execution_time_limit:
+      minutes: 10
+    task:
+      jobs:
+        - name: "CI passed"
+          commands:
+            - echo "Every CI block that the release blocks depend on has passed."
+
   # Rust release blocks. They run only on the build of a Rust release tag,
   # rust/v<version> with an optional -alpha.N, -beta.N, -rc.N or -dev.N suffix,
   # and are skipped on every other build. A dev tag runs the two pre-publish
@@ -585,25 +609,22 @@ blocks:
   # (`--no-verify`), so no build script or procedural macro executes while the
   # token is loaded. It uploads a .crate only if it is byte-identical to the
   # tested ones, which is possible because `cargo package` output is
-  # reproducible for a given commit and toolchain. The "post-publish" blocks
-  # then verify the crate as users receive it from crates.io.
+  # reproducible for a given commit and toolchain. "Release (Rust):
+  # post-publish checks" then verifies the crate as users receive it from
+  # crates.io.
   #
   # Semaphore runs the pipelines of one git ref one at a time, so two runs for
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # A new CI block must be added to this list. The order only sets where
-    # Semaphore's graph draws the Rust release row: beside the middle entry
-    # (the 4th of 8), here "Verify language bindings (Linux amd64)".
+    # Waits for every CI block: the ones that test the library through
+    # "Release: CI passed", and the ones that check the crate directly. A new
+    # CI block that only checks the crate must be added to this list.
     dependencies:
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
-      - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
-      - "Audit Rust dependencies (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
+      - "Release: CI passed"
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -970,25 +991,32 @@ blocks:
                 exit 1
               fi
             # Records the checksum of the uploaded bytes, which "Release (Rust):
-            # post-publish checksum" compares with what crates.io serves.
+            # post-publish checks" compares with what crates.io serves.
             - echo "${uploaded_sha}  ${CRATE}-${CRATE_VERSION}.crate" > /tmp/crate.sha256
             - artifact push workflow /tmp/crate.sha256 --destination "crates-io/${CRATE}-${CRATE_VERSION}.sha256" --force
 
-  - name: "Release (Rust): post-publish checksum"
-    # Checks that crates.io lists the version as live, with the checksum of the
-    # uploaded bytes, and serves exactly those bytes for download. This block
-    # and the smoke test below it load no token and repeat none of the release
-    # checks: the release has already happened. A failure means the published
-    # version is defective for users. Release a fixed version, and yank this
-    # one if it is unusable.
+  - name: "Release (Rust): post-publish checks"
+    # Checks the crate as users receive it from crates.io. The first job checks
+    # that crates.io lists the version as live, with the checksum of the
+    # uploaded bytes, and serves exactly those bytes for download. The two
+    # smoke test jobs each create a new project that depends on the released
+    # version from crates.io (pinned with `=`), start a temporary apache/kafka
+    # broker, and run the smoke test's offline checks and broker round trip,
+    # with the crate's minimum supported Rust version and the latest stable
+    # toolchain. The jobs load no token and repeat none of the release checks:
+    # the release has already happened. A failure means the published version
+    # is defective for users. Release a fixed version, and yank this one if it
+    # is unusable.
     dependencies: ["Release (Rust): publish to crates.io"]
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
     execution_time_limit:
-      minutes: 20
+      minutes: 40
     task:
       jobs:
         - name: "crates.io index and download match the upload"
+          execution_time_limit:
+            minutes: 20
           commands:
             # The checked-out commit is the tagged one that was published, so
             # the manifest holds the published version.
@@ -1037,28 +1065,15 @@ blocks:
                 exit 1
               fi
               echo "crates.io lists and serves exactly the uploaded ${CRATE} ${version}"
-
-  - name: "Release (Rust): post-publish smoke test (Linux amd64)"
-    # Each job creates a new project that depends on the released version from
-    # crates.io (pinned with `=`), starts a temporary apache/kafka broker, and
-    # runs the smoke test's offline checks and broker round trip, with the
-    # crate's minimum supported Rust version and the latest stable toolchain.
-    dependencies: ["Release (Rust): publish to crates.io"]
-    run:
-      when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc)\\.[0-9]+)?$'"
-    execution_time_limit:
-      minutes: 40
-    task:
-      prologue:
-        commands:
-          - sudo apt install -y cmake rustup
-          - cd rust
-      jobs:
         - name: "Rust MSRV, broker round trip"
           commands:
+            - sudo apt install -y cmake rustup
+            - cd rust
             - cargo --locked xtask package-smoke-test --registry --msrv --with-broker
         - name: "Rust stable, release build, broker round trip"
           commands:
+            - sudo apt install -y cmake rustup
+            - cd rust
             - rustup toolchain install stable --profile minimal
             - cargo --locked xtask package-smoke-test --registry --with-broker --toolchain stable --release
 
@@ -1298,19 +1313,15 @@ blocks:
 
   - name: "Release (Python): packaging"
     # Starts only when every wheel was built and tested, and the CI blocks that
-    # test what the wheels hold have passed: "Verify Rust", for the Rust
-    # library each wheel bundles, and "Verify language bindings", for the
-    # Python binding over it. The other CI blocks check the crate (its docs,
-    # its .crate and its API against the last rust/ release), which no wheel
-    # contains. A new CI block that tests the library or the binding must be
-    # added to this list. The checks this block makes are listed in
-    # publish-wheels.sh; it loads no token.
+    # test what the wheels hold have passed ("Release: CI passed"): "Verify
+    # Rust", for the Rust library each wheel bundles, "Verify language
+    # bindings", for the Python binding over it, and "Audit Rust
+    # dependencies", for the Rust crates the library links. The other CI
+    # blocks check the crate (its docs, its .crate and its API against the
+    # last rust/ release), which no wheel contains. The checks this block
+    # makes are listed in publish-wheels.sh; it loads no token.
     dependencies:
-      - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
-      - "Audit Rust dependencies (Linux amd64)"
+      - "Release: CI passed"
       - "Release (Python): wheel verification (Linux amd64)"
       - "Release (Python): wheel verification (Linux arm64)"
       - "Release (Python): wheel verification (macOS amd64)"
@@ -1620,19 +1631,14 @@ blocks:
 
   - name: "Release (.NET): packaging"
     # Starts only when the package was tested on every platform, and the CI
-    # blocks that test what the package holds have passed: "Verify Rust", for
-    # the Rust library, "Verify language bindings", for the .NET binding over
-    # it, and "Audit Rust dependencies", for the Rust crates the library links.
-    # The other CI blocks check the crate, which the package does not contain.
-    # A new CI block that tests the library or the binding must be added to
-    # this list. The checks this block makes are listed in publish-nupkg.sh; it
-    # loads no key.
+    # blocks that test what the package holds have passed ("Release: CI
+    # passed"): "Verify Rust", for the Rust library, "Verify language
+    # bindings", for the .NET binding over it, and "Audit Rust dependencies",
+    # for the Rust crates the library links. The other CI blocks check the
+    # crate, which the package does not contain. The checks this block makes
+    # are listed in publish-nupkg.sh; it loads no key.
     dependencies:
-      - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
-      - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
-      - "Audit Rust dependencies (Linux amd64)"
+      - "Release: CI passed"
       - "Release (.NET): package verification (Linux amd64)"
       - "Release (.NET): package verification (Linux arm64)"
       - "Release (.NET): package verification (macOS amd64)"
