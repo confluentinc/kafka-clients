@@ -1,0 +1,119 @@
+version: v1.0
+name: publish-nuget-test
+
+# The manual "Publish to NuGet test gallery" promotion of semaphore.yml. It
+# publishes a .NET version to the NuGet test gallery, int.nugettest.org, from
+# the build of its dotnet/v<version> tag, with exactly the package that build's
+# "Release (.NET): packaging" block recorded (see the .NET release blocks of
+# semaphore.yml), and checks it there. Its blocks run on the tag of any .NET
+# version, a pre-release or a dev version included; the tag pattern must stay
+# the pattern of semaphore.yml. The "Publish to NuGet" promotion of this
+# pipeline (publish-nuget.yml) then publishes the same package to nuget.org
+# once the checks here have passed.
+#
+# A promotion can be started even from a failed pipeline, so the publish job
+# does not rely on the result of the build it was promoted from:
+# publish-nupkg.sh refuses, before the key is loaded, unless the packaging
+# block recorded this package in this workflow and the tag still points at the
+# commit it built.
+#
+# To resume an interrupted publish, rerun the failed blocks of this pipeline.
+# The pipeline limit covers its three blocks in sequence, each at its own limit.
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+execution_time_limit:
+  hours: 3
+
+global_job_config:
+  env_vars:
+    # As in semaphore.yml: <PackageId> in
+    # dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj.
+    - name: NUGET_PACKAGE
+      value: Confluent.Kafka
+  prologue:
+    commands:
+      - checkout
+
+blocks:
+  - name: "Release (.NET): publish to the NuGet test gallery"
+    # Pushes the package recorded by the packaging block of the tag build.
+    # publish-nupkg.sh repeats the tag check and checks that the version is
+    # new on the gallery before the key is loaded.
+    # Its limit covers the install, a push that times out (15 minutes) and the
+    # 20-minute wait that follows a failed push.
+    dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 45
+    task:
+      env_vars:
+        - name: NUGET_GALLERY
+          value: https://int.nugettest.org
+      jobs:
+        - name: "dotnet nuget push (NuGet test gallery)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - bash .semaphore/publish-nupkg.sh prepare
+            - bash .semaphore/publish-nupkg.sh upload
+
+  - name: "Release (.NET): post-publish check (NuGet test gallery)"
+    # Waits until the gallery serves the version, then checks that the package
+    # it serves is the uploaded package, entry by entry, plus the gallery's
+    # repository signature (.semaphore/check-published-nupkg.py). This block
+    # and the smoke test below it load no key and repeat none of the release
+    # checks. The test gallery is slower than nuget.org: it has taken from 4 to
+    # 18 minutes to serve a new version, and it has also stalled for days, so
+    # it waits up to 50 minutes. If the gallery does not serve the version in
+    # time, the check says so: the version is not defective, so rerun this
+    # block later. Any other failure stops the release before nuget.org;
+    # release a fixed version.
+    dependencies: ["Release (.NET): publish to the NuGet test gallery"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 60
+    task:
+      jobs:
+        - name: "NuGet test gallery serves the upload"
+          commands:
+            # Written by the publish job after a successful upload. If it is
+            # absent, nothing was published from this workflow and the job
+            # fails.
+            - artifact pull workflow nuget/int.nugettest.org/uploaded.sha256 --destination /tmp/uploaded.sha256
+            - export PACKAGE_FILE="${NUGET_PACKAGE}.${SEMAPHORE_GIT_TAG_NAME#dotnet/v}.nupkg"
+            - artifact pull workflow "nuget/release/${PACKAGE_FILE}" --destination "/tmp/${PACKAGE_FILE}"
+            - test "$(cat /tmp/uploaded.sha256)" = "$(cd /tmp && sha256sum "${PACKAGE_FILE}")"
+            - /usr/bin/python3 .semaphore/check-published-nupkg.py check https://apiint.nugettest.org/v3/index.json "${NUGET_PACKAGE}" "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" "/tmp/${PACKAGE_FILE}" --attempts 100
+
+  - name: "Release (.NET): post-publish smoke test (NuGet test gallery, Linux amd64)"
+    # Installs the released version from the gallery into a fresh project, on
+    # net8.0 and net10.0, on this VM and in each Linux distribution the package
+    # was tested in, and runs the smoke program; then a self-contained publish
+    # (.semaphore/test-nupkg.sh --source). Once they pass, it records the
+    # package as verified on the test gallery, which "Publish to NuGet"
+    # requires.
+    dependencies: ["Release (.NET): post-publish check (NuGet test gallery)"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 40
+    task:
+      jobs:
+        - name: "Install from the NuGet test gallery (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - sh .semaphore/test-nupkg.sh --source https://apiint.nugettest.org/v3/index.json "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}"
+            - artifact pull workflow nuget/int.nugettest.org/uploaded.sha256 --destination /tmp/verified.sha256
+            - artifact push workflow /tmp/verified.sha256 --destination nuget/int.nugettest.org/verified --force
+
+promotions:
+  # Manual. Publishes the .NET version to nuget.org (publish-nuget.yml). Run it
+  # once the blocks of this pipeline have passed. Its blocks are skipped on any
+  # other build, and its publish job refuses unless the package passed the test
+  # gallery's checks in this workflow, so starting it from a failed or
+  # unrelated pipeline publishes nothing.
+  - name: Publish to NuGet
+    pipeline_file: publish-nuget.yml
