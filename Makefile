@@ -32,6 +32,9 @@ VENV = . venv/bin/activate
 	consumer-perf-test-python producer-perf-test-python \
 	transactional-producer-perf-test-python \
 	build-javascript test-javascript verify-javascript \
+	build-grpc-images-javascript test-integration-javascript \
+	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
+	build-grpc-native-javascript test-integration-javascript-native \
 	verify verify-c verify-python verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-sandbox format-check lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
@@ -120,6 +123,13 @@ build-grpc-images-python: build-rust-all-features build-python
 build-grpc-images-c: build-rust-all-features
 	$(MAKE) -C c $(ROOTS) grpc-image
 
+# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
+# against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
+# as the JavaScript client is not yet part of `build` either.
+build-grpc-images-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) grpc-image
+
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests) and the
 # Python development dependencies. Run this before `make build` on a new
@@ -168,6 +178,12 @@ test-integration-python: build-rust-all-features build-python
 test-integration-c: build-rust-all-features
 	$(MAKE) -C c $(ROOTS) test-integration
 
+# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# arms (the image copies the host-built Linux libconfluent_kafka.so); use
+# `test-integration-javascript-native` there. Not part of `verify`.
+test-integration-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) test-integration-grpc
+
 # The gRPC Python/C arms above default to the PLAINTEXT CONTAINER listener.
 # These variants drive the same arm over the SSL / SASL_SSL CONTAINER
 # listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
@@ -185,12 +201,16 @@ test-integration-c-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-c
 test-integration-c-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-c
+test-integration-javascript-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+test-integration-javascript-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
 
 # ── Native (non-container) gRPC multilanguage arms ───────────────────────
 #
-# The same `__grpc_python` / `__grpc_c` arms, but with each gRPC server run as a
-# host process instead of a Docker container (MULTILANG_BACKEND_MODE=native; see
-# rust/tests/common/backend_pool.rs). Only the broker runs in Docker. These
+# The same `__grpc_python` / `__grpc_c` / `__grpc_js` arms, but with each gRPC
+# server run as a host process instead of a Docker container
+# (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs). Only the broker runs in Docker. These
 # targets are used on macOS, where containers run Linux: the container arms can
 # only test the Linux build of the bindings and cannot load the host's Mach-O
 # artifacts. Native mode is also supported on Linux.
@@ -199,6 +219,8 @@ test-integration-c-sasl-ssl:
 # tree clean:
 #   python/  generated gRPC stubs, put on PYTHONPATH by the harness
 #   c/       the kafka_grpc_server binary
+#   javascript/node_modules  @grpc/grpc-js + @grpc/proto-loader, put on
+#            NODE_PATH by the harness (MULTILANG_JS_NODE_PATH overrides it)
 build-grpc-native-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 
@@ -210,6 +232,12 @@ test-integration-python-native: build-grpc-native-python
 
 test-integration-c-native: build-grpc-native-c
 	$(MAKE) -C rust test-integration-grpc-c-native
+
+build-grpc-native-javascript: build-javascript
+	$(MAKE) -C javascript $(ROOTS) grpc-native
+
+test-integration-javascript-native: build-grpc-native-javascript
+	$(MAKE) -C rust test-integration-grpc-js-native
 
 # ── Performance integration tests ────────────────────────────────────────
 #
