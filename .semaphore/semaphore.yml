@@ -145,9 +145,7 @@ name: build-test-release
 # below). "Create release tag" refuses unless every job in its REQUIRED_CI_JOBS
 # list passed on the commit and no other job reported a result, so adding,
 # renaming or removing a CI job here also means updating that list. A new CI
-# block must also be added to the dependencies of "Release: CI passed" if it
-# tests the Rust library, a binding or the crates the library links, and
-# otherwise to those of "Release (Rust): pre-publish package check".
+# block must also be added to the dependencies of "Release: CI passed".
 agent:
   machine:
     type: s1-prod-ubuntu24-04-amd64-2
@@ -569,19 +567,22 @@ blocks:
             - make audit
 
   - name: "Release: CI passed"
-    # Passes once the CI blocks that test the Rust library, the bindings over
-    # it and the crates it links have passed. The first release block of each
-    # client depends on it: "Release (Rust): pre-publish package check",
-    # "Release (Python): packaging" and "Release (.NET): packaging". A new CI
-    # block that tests the library, a binding or its dependencies must be
-    # added to this list. Semaphore treats a skipped block as passed, so this
-    # block runs on every tag build, which covers every block that depends on
-    # it. It is skipped on branch builds, so it records no CI result there.
+    # Passes once every CI block has passed, as "Create release tag" requires
+    # of every CI job before it tags a commit. The release blocks that need CI
+    # depend on it: "Release (Rust): pre-publish package check", "Release
+    # (Python): packaging" and "Release (.NET): packaging". A new CI block must
+    # be added to this list. Semaphore treats a skipped block as passed, so
+    # this block runs on every tag build, which covers every block that
+    # depends on it. It is skipped on branch builds, so it records no CI
+    # result there.
     dependencies:
       - "Verify Rust (Linux amd64)"
       - "Verify language bindings (Linux amd64)"
       - "Verify Rust (macOS arm64)"
       - "Verify language bindings (macOS arm64)"
+      - "Check Rust docs (Linux amd64)"
+      - "Check crate package (Linux amd64)"
+      - "Check API compatibility (Linux amd64)"
       - "Audit Rust dependencies (Linux amd64)"
     run:
       when: "tag =~ '.*'"
@@ -617,14 +618,8 @@ blocks:
   # the same tag cannot upload concurrently. To resume an interrupted publish,
   # rerun the failed blocks of the tag build.
   - name: "Release (Rust): pre-publish package check"
-    # Waits for every CI block: the ones that test the library through
-    # "Release: CI passed", and the ones that check the crate directly. A new
-    # CI block that only checks the crate must be added to this list.
-    dependencies:
-      - "Check Rust docs (Linux amd64)"
-      - "Check crate package (Linux amd64)"
-      - "Check API compatibility (Linux amd64)"
-      - "Release: CI passed"
+    # Waits for every CI block, through "Release: CI passed".
+    dependencies: ["Release: CI passed"]
     run:
       when: "tag =~ '^rust/v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta|rc|dev)\\.[0-9]+)?$'"
     execution_time_limit:
@@ -1312,14 +1307,9 @@ blocks:
             - artifact push workflow /tmp/tested.sha256 --destination "pypi/tested/${WHEEL_PLATFORM}" --force
 
   - name: "Release (Python): packaging"
-    # Starts only when every wheel was built and tested, and the CI blocks that
-    # test what the wheels hold have passed ("Release: CI passed"): "Verify
-    # Rust", for the Rust library each wheel bundles, "Verify language
-    # bindings", for the Python binding over it, and "Audit Rust
-    # dependencies", for the Rust crates the library links. The other CI
-    # blocks check the crate (its docs, its .crate and its API against the
-    # last rust/ release), which no wheel contains. The checks this block
-    # makes are listed in publish-wheels.sh; it loads no token.
+    # Starts only when every wheel was built and tested, and every CI block has
+    # passed ("Release: CI passed"). The checks this block makes are listed in
+    # publish-wheels.sh; it loads no token.
     dependencies:
       - "Release: CI passed"
       - "Release (Python): wheel verification (Linux amd64)"
@@ -1630,13 +1620,9 @@ blocks:
             - artifact push workflow /tmp/tested.sha256 --destination "nuget/tested/${NUGET_PLATFORM}" --force
 
   - name: "Release (.NET): packaging"
-    # Starts only when the package was tested on every platform, and the CI
-    # blocks that test what the package holds have passed ("Release: CI
-    # passed"): "Verify Rust", for the Rust library, "Verify language
-    # bindings", for the .NET binding over it, and "Audit Rust dependencies",
-    # for the Rust crates the library links. The other CI blocks check the
-    # crate, which the package does not contain. The checks this block makes
-    # are listed in publish-nupkg.sh; it loads no key.
+    # Starts only when the package was tested on every platform, and every CI
+    # block has passed ("Release: CI passed"). The checks this block makes are
+    # listed in publish-nupkg.sh; it loads no key.
     dependencies:
       - "Release: CI passed"
       - "Release (.NET): package verification (Linux amd64)"
