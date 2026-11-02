@@ -54,6 +54,7 @@ from confluent_kafka.consumer import (  # noqa: E402
     SubscriptionPattern,
 )
 from confluent_kafka.producer import ProducerRecord  # noqa: E402
+from confluent_kafka.common.header import Header  # noqa: E402
 # The admin client is the new ``confluent_kafka.admin`` package: keyword-only
 # value types with method accessors, typed errors, results that hold futures.
 from confluent_kafka import ExecutionError  # noqa: E402
@@ -240,22 +241,22 @@ def _proto_to_producer_record(proto_record):
     ``timestamp`` are ``None`` when unset (Java's null), not the old ``-1``
     sentinel.
 
-    The producer send path DOES carry ProducerRecord headers end-to-end now (the
-    native record + FFI struct + Rust send preserve them — B1), but the gRPC
-    *producer* proto ``ProducerRecord`` has no ``headers`` field, so this
-    translation cannot forward them; they default to empty on this arm. Adding a
-    headers field to the producer proto is a separate gRPC-contract change. (The
-    consumer arm's proto DOES carry headers — see ``_consumer_record_to_proto``.)"""
+    The headers are forwarded in order, a header whose ``value`` is unset as
+    Java's null value. Java's constructor taking headers also takes the
+    partition and the timestamp, so all three are always given."""
     value = proto_record.value if proto_record.HasField("value") else None
     key = proto_record.key if proto_record.HasField("key") else None
     partition = proto_record.partition if proto_record.HasField("partition") else None
     timestamp = proto_record.timestamp if proto_record.HasField("timestamp") else None
+    headers = [Header(key=h.key, value=h.value if h.HasField("value") else None)
+               for h in proto_record.headers]
     return ProducerRecord(
         topic=proto_record.topic,
-        value=value,
-        key=key,
         partition=partition,
         timestamp=timestamp,
+        key=key,
+        value=value,
+        headers=headers,
     )
 
 
@@ -493,7 +494,8 @@ def _record_to_proto(r):
     ``TimestampType`` int-enum whose value is the proto's ``int32``."""
     key = bytes(r.key()) if r.key() is not None else None
     value = bytes(r.value()) if r.value() is not None else None
-    headers = [pb.Header(key=h.key(), value=bytes(v) if (v := h.value()) is not None else b"")
+    # A null header value leaves ``value`` unset (``optional`` in the proto).
+    headers = [pb.Header(key=h.key(), value=bytes(v) if (v := h.value()) is not None else None)
                for h in r.headers()]
     leader_epoch = r.leader_epoch()
     return cpb.ConsumerRecord(
