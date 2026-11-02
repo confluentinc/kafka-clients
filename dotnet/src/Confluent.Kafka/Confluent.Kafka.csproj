@@ -110,10 +110,15 @@
     <CargoProfileDir>debug</CargoProfileDir>
     <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release</CargoProfileDir>
 
+    <!-- A cargo build for an explicit target triple, as the Windows CI jobs make, puts the
+         library under target/<triple>/; -p:CargoTargetTriple=<triple> reads it from there. -->
+    <CargoTargetSubdir>target</CargoTargetSubdir>
+    <CargoTargetSubdir Condition="'$(CargoTargetTriple)' != ''">target/$(CargoTargetTriple)</CargoTargetSubdir>
+
     <!-- Repo root is 3 dir levels up from this project
          (src/Confluent.Kafka -> src -> dotnet -> repo); the Rust workspace, and so
          Cargo's target dir, is rust/ under it. -->
-    <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/target/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
+    <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/$(CargoTargetSubdir)/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
   </PropertyGroup>
 
   <!-- Pack="false": the package carries the natives from NativeAssetsDir instead, and a <Content>
