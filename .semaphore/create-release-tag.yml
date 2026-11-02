@@ -14,14 +14,14 @@ name: create-release-tag
 #     them to Test PyPI, and its "Publish to PyPI" promotion (publish-pypi.yml)
 #     then publishes them to PyPI.
 #   - DOTNET_VERSION: the tag is dotnet/v<DOTNET_VERSION>, and "Release
-#     (.NET):" builds and tests the ${NUGET_PACKAGE} package. The "Publish to
-#     NuGet test gallery" promotion of the tag build (publish-nuget-test.yml)
-#     publishes it to the NuGet test gallery, and its "Publish to NuGet"
-#     promotion (publish-nuget.yml) then publishes it to nuget.org.
+#     (.NET):" builds and tests the ${NUGET_PACKAGE} package and records it in
+#     the tag build's artifacts, from which it is uploaded to nuget.org by
+#     hand.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python,
 #     4.4.0-dev.1 for dotnet) is tagged like any other. A rust dev version is
-#     tested and packaged, never published; a python or dotnet dev version is
-#     released like any other, through the two manual promotions.
+#     tested and packaged, never published; a python dev version is released
+#     like any other, through the two manual promotions, and a dotnet dev
+#     version like any other dotnet version.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
@@ -40,8 +40,7 @@ name: create-release-tag
 #     <major>.<minor>, the only one its publish block accepts from the branch;
 #   - the tag does not yet exist, and the version is new: for rust, unless it
 #     is a dev version, higher than every version on crates.io; for python, not
-#     yet on Test PyPI or PyPI; for dotnet, on neither the NuGet test gallery
-#     nor nuget.org;
+#     yet on Test PyPI or PyPI; for dotnet, not yet on nuget.org;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
 # nothing. The publish blocks repeat the tag, version and registry checks on
@@ -65,9 +64,10 @@ global_job_config:
     # semaphore.yml: a job that reports a result but is not listed, or is
     # listed but reports no result, blocks the release until the list is
     # updated. The release blocks never run on a branch build, so they are not
-    # listed.
+    # listed, except the .NET native library, pack and package verification
+    # blocks, which run on every build.
     - name: REQUIRED_CI_JOBS
-      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);verify-dotnet (Windows amd64);verify-dotnet (Windows x86);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64)"
+      value: "Verify Rust (Linux amd64) — plaintext;Verify Rust (Linux amd64) — ssl;Verify Rust (Linux amd64) — sasl_ssl (plain);verify-c (Linux amd64) — plaintext;verify-c (Linux amd64) — ssl;verify-c (Linux amd64) — sasl_ssl (plain);verify-python (Linux amd64) — plaintext;verify-python (Linux amd64) — ssl;verify-python (Linux amd64) — sasl_ssl (plain);verify-dotnet (Linux amd64) — plaintext;verify-dotnet (Linux amd64) — ssl;verify-dotnet (Linux amd64) — sasl_ssl (plain);verify-rust (macOS arm64);verify-c (macOS arm64);verify-python (macOS arm64);verify-dotnet (macOS arm64);verify-dotnet (Windows amd64);verify-dotnet (Windows x86);doc-check (Linux amd64);package-check (Linux amd64);api-compat (Linux amd64);audit (Linux amd64);Build the native library (Linux amd64);Build the native library (Linux arm64);Build the native library (macOS arm64);Pack the package;Test the package (Linux amd64);Test the package (Linux arm64);Test the package (macOS arm64)"
 
 blocks:
   - name: "Create release tag"
@@ -196,11 +196,11 @@ blocks:
             # precedence (0.2.0-alpha.1 < 0.2.0 < 0.10.0). A Python version
             # need only be new on Test PyPI and PyPI: as with Apache Kafka, a patch of an
             # older minor version can follow a newer minor version (4.4.101
-            # after 4.5.0). A .NET version, the same, on the NuGet test gallery
-            # and nuget.org, where a version can never be reused, even after
-            # it is deleted; check-published-nupkg.py lists the versions of
-            # each, unlisted ones included, in the lowercase normalized form
-            # that a version matching the pattern above already has. A rust
+            # after 4.5.0). A .NET version, the same, on nuget.org, where it is
+            # uploaded by hand and where a version can never be reused, even
+            # after it is deleted; check-published-nupkg.py lists its versions,
+            # unlisted ones included, in the lowercase normalized form that a
+            # version matching the pattern above already has. A rust
             # dev version is never published, so it is not compared with
             # crates.io; a python dev version only with Test PyPI. `fetch` writes the body of a URL to a file, or
             # empties the file if the URL does not exist; it fails on any other
@@ -264,13 +264,11 @@ blocks:
                     done
                     ;;
                   dotnet)
-                    for index in https://apiint.nugettest.org/v3/index.json https://api.nuget.org/v3/index.json; do
-                      /usr/bin/python3 .semaphore/check-published-nupkg.py versions "${index}" "${NUGET_PACKAGE}" > "${published_file}" \
-                        || refuse "could not read ${index} to confirm that ${NUGET_PACKAGE} ${version} is new"
-                      if grep -qxF -- "${version}" "${published_file}"; then
-                        refuse "${NUGET_PACKAGE} ${version} is already on ${index}; bump <Version> in dotnet/Directory.Build.props for a new release"
-                      fi
-                    done
+                    /usr/bin/python3 .semaphore/check-published-nupkg.py versions https://api.nuget.org/v3/index.json "${NUGET_PACKAGE}" > "${published_file}" \
+                      || refuse "could not read nuget.org to confirm that ${NUGET_PACKAGE} ${version} is new"
+                    if grep -qxF -- "${version}" "${published_file}"; then
+                      refuse "${NUGET_PACKAGE} ${version} is already on nuget.org; bump <Version> in dotnet/Directory.Build.props for a new release"
+                    fi
                     ;;
                 esac
               done
@@ -349,6 +347,6 @@ blocks:
                 case "${client}" in
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
                   python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI, then that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
-                  dotnet) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the package. Then run its \"Publish to NuGet test gallery\" promotion to publish ${NUGET_PACKAGE} ${version} to the NuGet test gallery, then that pipeline's \"Publish to NuGet\" promotion to publish to nuget.org." ;;
+                  dotnet) echo "Pushed ${tag} at ${head_sha}. Its build runs CI, builds and tests the package, and records ${NUGET_PACKAGE} ${version} in its artifacts as nuget/release/${NUGET_PACKAGE}.${version}.nupkg. Then upload that file to nuget.org by hand." ;;
                 esac
               done

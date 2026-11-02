@@ -34,8 +34,6 @@
 #       nothing else. <abi-header> is the confluent_kafka_bindings.h of the native library this
 #       machine loads, for the unit tests' ABI conformance test. With <checksum-file>, writes
 #       `<sha256>  <package>` to it once every test has passed.
-#   .semaphore/test-nupkg.sh --source <nuget-v3-index-url> <version>
-#       Restores <version> from that gallery instead, and runs the smoke tests only.
 #   .semaphore/test-nupkg.sh --smoke <package-dir>
 #       Runs the smoke tests on this machine only (make package-check-dotnet).
 # Override the distribution list (Linux) with DISTRO_IMAGES="img1 img2 ...".
@@ -51,7 +49,6 @@ die() {
 
 usage() {
     echo "Usage: $0 <package-dir> <abi-header> [<checksum-file>]" >&2
-    echo "       $0 --source <nuget-v3-index-url> <version>" >&2
     echo "       $0 --smoke <package-dir>" >&2
     exit 2
 }
@@ -85,7 +82,6 @@ host_rid() {
     case "$(uname -s)-$(uname -m)" in
         Linux-x86_64) echo linux-x64 ;;
         Linux-aarch64|Linux-arm64) echo linux-arm64 ;;
-        Darwin-x86_64) echo osx-x64 ;;
         Darwin-arm64) echo osx-arm64 ;;
         *) die "no RID for $(uname -s) $(uname -m)" ;;
     esac
@@ -132,20 +128,10 @@ EOF
 
 mode=full
 case "${1:-}" in
-    --source)
-        [ $# -eq 3 ] || usage
-        mode=source
-        FEED="$2"
-        VERSION="$3"
-        PACKAGE=""
-        HEADER=""
-        CHECKSUM_FILE=""
-        ;;
     --smoke)
         [ $# -eq 2 ] || usage
         mode=smoke
         find_package "$2"
-        FEED=""
         HEADER=""
         CHECKSUM_FILE=""
         ;;
@@ -155,7 +141,6 @@ case "${1:-}" in
     *)
         [ $# -ge 2 ] && [ $# -le 3 ] || usage
         find_package "$1"
-        FEED=""
         HEADER="$2"
         CHECKSUM_FILE="${3:-}"
         [ -f "$HEADER" ] || die "$HEADER does not exist"
@@ -184,11 +169,8 @@ for runtime in 8.0. 10.0.; do
 done
 
 # Recorded before the tests, and written only if they all pass.
-checksum=""
-if [ -n "$PACKAGE" ]; then
-    sum=$(sha256_of "$PACKAGE") || die "could not hash $PACKAGE"
-    checksum="$sum  $(basename "$PACKAGE")"
-fi
+sum=$(sha256_of "$PACKAGE") || die "could not hash $PACKAGE"
+checksum="$sum  $(basename "$PACKAGE")"
 
 # A physical path: the smoke test compares the path of the loaded native library with it.
 work=$(mktemp -d /tmp/test-nupkg.XXXXXX)
@@ -199,15 +181,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 # An empty NuGet cache, so that a package of the same version cached earlier cannot be used.
 export NUGET_PACKAGES="$work/packages" NUGET_HTTP_CACHE_PATH="$work/http-cache"
-# A gallery is read without NuGet's HTTP cache, so that a retry sees a version it has just started
-# to serve.
-no_http_cache=""
-[ "$mode" = source ] && no_http_cache="--no-http-cache"
-if [ -n "$PACKAGE" ]; then
-    mkdir "$work/feed"
-    cp "$PACKAGE" "$work/feed/"
-    FEED="$work/feed"
-fi
+mkdir "$work/feed"
+cp "$PACKAGE" "$work/feed/"
+FEED="$work/feed"
 echo "Testing Confluent.Kafka $VERSION from $FEED"
 
 # The smoke project, outside the repository.
@@ -217,16 +193,14 @@ cp dotnet/tools/PackageSmoke/PackageSmoke.csproj dotnet/tools/PackageSmoke/Progr
 write_nuget_config "$work/smoke" "$FEED"
 (
     cd "$work/smoke"
-    retry dotnet restore --configfile nuget.config $no_http_cache -p:ConfluentKafkaVersion="$VERSION"
+    retry dotnet restore --configfile nuget.config -p:ConfluentKafkaVersion="$VERSION"
     dotnet build --no-restore -c Release -p:ConfluentKafkaVersion="$VERSION"
 )
 
 # The package restored is the one under test, byte for byte.
 restored="$NUGET_PACKAGES/confluent.kafka/$VERSION/confluent.kafka.$VERSION.nupkg"
 [ -f "$restored" ] || die "Confluent.Kafka $VERSION was not restored into $NUGET_PACKAGES"
-if [ -n "$PACKAGE" ]; then
-    cmp -s "$restored" "$PACKAGE" || die "the restored Confluent.Kafka $VERSION is not the package under test"
-fi
+cmp -s "$restored" "$PACKAGE" || die "the restored Confluent.Kafka $VERSION is not the package under test"
 sum=$(sha256_of "$restored") || die "could not hash $restored"
 echo "Restored Confluent.Kafka $VERSION: $sum"
 
@@ -261,7 +235,7 @@ if [ "$mode" != smoke ]; then
     esac
     (
         cd "$work/smoke"
-        retry dotnet restore --configfile nuget.config $no_http_cache -r "$rid" -p:ConfluentKafkaVersion="$VERSION"
+        retry dotnet restore --configfile nuget.config -r "$rid" -p:ConfluentKafkaVersion="$VERSION"
         dotnet publish --no-restore -c Release -f net10.0 -r "$rid" --self-contained \
             -p:ConfluentKafkaVersion="$VERSION" -o "$work/publish"
     )
