@@ -19,7 +19,10 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
-using Confluent.Kafka;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Producer;
 
 /// <summary>
 /// Checks that the Confluent.Kafka package works where it is installed: its native library loads

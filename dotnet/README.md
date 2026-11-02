@@ -4,7 +4,9 @@ Confluent's .NET client for Apache Kafka. All the Kafka logic, from batching and
 retries and the group protocol, runs in the Confluent Kafka Rust client, which this package ships
 as a native library. Its API follows the Apache Kafka Java client: `KafkaProducer`, `KafkaConsumer`,
 `ProducerRecord`, `ConsumerRecord`, futures for sends, and so on. Each client has a blocking form
-and an async form.
+and an async form. Each type is in the namespace of its Java package, without `org.apache.kafka`
+and `clients`: `KafkaProducer` is in `Confluent.Kafka.Producer`, `Serdes` in
+`Confluent.Kafka.Common.Serialization`.
 
 > This is a pre-release of a new major version. Its API is not the API of Confluent.Kafka 2.x
 > (the librdkafka-based client). The two share the package id, so a project gets one of them for
@@ -28,7 +30,8 @@ package installs and a project builds, but creating a client, a mock one include
 
 ```csharp
 using System.Collections.Generic;
-using Confluent.Kafka;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
 
 var config = new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" };
 using var producer = new KafkaProducer<string, string>(config, Serdes.String, Serdes.String);
@@ -44,7 +47,8 @@ The value comes before the key in the `ProducerRecord` constructor, unlike Java'
 ```csharp
 using System;
 using System.Collections.Generic;
-using Confluent.Kafka;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 
 var config = new Dictionary<string, string>
 {
