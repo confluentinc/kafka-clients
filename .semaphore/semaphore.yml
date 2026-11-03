@@ -482,6 +482,55 @@ blocks:
           commands:
             - .\.semaphore\verify-dotnet-windows.ps1 -Platform x86
 
+  # TEMPORARY, to be removed: whether the Windows agents can run Linux containers through WSL 2,
+  # and whether WSL can be enabled without a reboot (.semaphore/probe-wsl.ps1). The probe never
+  # fails, and no other block depends on these.
+  - name: "Probe WSL 2 (Windows Server 2019)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "probe-wsl (Windows Server 2019)"
+          commands:
+            - .\.semaphore\probe-wsl.ps1
+
+  - name: "Probe WSL 2 (Windows Server 2025)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-windows-2025-amd64-4
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "probe-wsl (Windows Server 2025)"
+          commands:
+            - .\.semaphore\probe-wsl.ps1
+
   - name: "Check Rust docs (Linux amd64)"
     # Its own block so a documentation failure is attributable at a glance and
     # does not wait behind the test suite. `make doc-check` runs `cargo doc`
