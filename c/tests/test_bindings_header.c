@@ -23,9 +23,15 @@
 // test_support.h (which includes confluent_kafka.h) is not used here.
 #include <confluent_kafka_bindings.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "unity.h"
+
+/* The Consumer interface's assign(NULL) reports the IllegalArgumentException
+ * of Java's AsyncKafkaConsumer.assign, whichever class is behind the view. */
+#define ASSIGN_NULL_KIND kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT
+#define ASSIGN_NULL_MESSAGE "Topic partitions collection to assign to cannot be null"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -141,6 +147,93 @@ static void test_iterator_past_the_end_reports_an_illegal_state(void) {
     assert_ok(err);
 }
 
+/* Asserts `err` is the LocalNullPointerError a NULL mandatory argument
+ * reports, with `message`, then frees it. */
+static void assert_null_pointer(kafka_common_Error_t *err, const char *message) {
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_Error_t *read_err = NULL;
+    TEST_ASSERT_EQUAL_INT(kafka_common_Error_LOCAL_NULL_POINTER, kafka_common_Error__enum_err(err, &read_err));
+    assert_ok(read_err);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_Error_is_local_null_pointer_error_err(err, &read_err));
+    assert_ok(read_err);
+    TEST_ASSERT_EQUAL_STRING(message, kafka_common_Error_message_err(err, &read_err));
+    assert_ok(read_err);
+    kafka_common_Error_destroy_err(err, &read_err);
+    assert_ok(read_err);
+}
+
+/* A NULL mandatory string given to a fallible function is reported through
+ * its out_err, as Java's NullPointerException: no crash, NULL returned. */
+static void test_null_string_is_a_null_pointer_error(void) {
+    kafka_common_Error_t *err = NULL;
+    TEST_ASSERT_NULL(kafka_common_Uuid_from_string(NULL, &err));
+    assert_null_pointer(err, "s must not be null");
+}
+
+/* A NULL handle given to a twin is reported through its out_err, the twin
+ * returning its failure value. */
+static void test_null_handle_is_a_null_pointer_error(void) {
+    kafka_common_Error_t *err = NULL;
+    TEST_ASSERT_NULL(kafka_common_TopicPartition_topic_err(NULL, &err));
+    assert_null_pointer(err, "self_ must not be null");
+}
+
+static void on_assigned(kafka_common_Error_t *error, void *opaque) {
+    kafka_common_Error_t **slot = (kafka_common_Error_t **)opaque;
+    TEST_ASSERT_NULL(*slot);
+    *slot = error;
+}
+
+/* Where Java checks the argument itself, its error and text come back: the
+ * blocking form stores it in out_err and the _cb twin delivers it, once, to
+ * its completion. */
+static void test_null_list_reports_java_s_error(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_MockConsumer_t *mock = kafka_consumer_MockConsumer_new("earliest", &err);
+    assert_ok(err);
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer__as_Consumer_err(mock, &err);
+    assert_ok(err);
+
+    kafka_consumer_Consumer_assign(consumer, NULL, &err);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_Error_t *read_err = NULL;
+    int32_t kind = kafka_common_Error__enum_err(err, &read_err);
+    assert_ok(read_err);
+    char *blocking_message = strdup(kafka_common_Error_message_err(err, &read_err));
+    assert_ok(read_err);
+    kafka_common_Error_destroy_err(err, &read_err);
+    assert_ok(read_err);
+    err = NULL;
+    TEST_ASSERT_EQUAL_INT(ASSIGN_NULL_KIND, kind);
+    TEST_ASSERT_EQUAL_STRING(ASSIGN_NULL_MESSAGE, blocking_message);
+    free(blocking_message);
+
+    kafka_common_Error_t *delivered = NULL;
+    kafka_consumer_Consumer_assign_cb(consumer, NULL, on_assigned, &delivered);
+    for (int i = 0; i < 1000 && delivered == NULL; i++) {
+        int32_t ran = kafka_consumer_Consumer__execute_callbacks_err(consumer, &err);
+        assert_ok(err);
+        TEST_ASSERT_TRUE(ran >= 0);
+        if (delivered == NULL) {
+            struct timespec pause = {0, 10 * 1000 * 1000};
+            nanosleep(&pause, NULL);
+        }
+    }
+    TEST_ASSERT_NOT_NULL(delivered);
+    TEST_ASSERT_EQUAL_INT(ASSIGN_NULL_KIND, kafka_common_Error__enum_err(delivered, &read_err));
+    assert_ok(read_err);
+    TEST_ASSERT_EQUAL_STRING(ASSIGN_NULL_MESSAGE, kafka_common_Error_message_err(delivered, &read_err));
+    assert_ok(read_err);
+    kafka_common_Error_destroy_err(delivered, &read_err);
+    assert_ok(read_err);
+    /* Delivered once: nothing is left to run. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_Consumer__execute_callbacks_err(consumer, &err));
+    assert_ok(err);
+
+    kafka_consumer_MockConsumer_destroy_err(mock, &err);
+    assert_ok(err);
+}
+
 static void on_closed(void *opaque) {
     atomic_fetch_add((atomic_int *)opaque, 1);
 }
@@ -192,5 +285,8 @@ int main(void) {
     RUN_TEST(test_fallible_function_keeps_its_name_and_its_errors);
     RUN_TEST(test_cb_function_completes_through_the_callback_queue);
     RUN_TEST(test_iterator_past_the_end_reports_an_illegal_state);
+    RUN_TEST(test_null_string_is_a_null_pointer_error);
+    RUN_TEST(test_null_handle_is_a_null_pointer_error);
+    RUN_TEST(test_null_list_reports_java_s_error);
     return UNITY_END();
 }

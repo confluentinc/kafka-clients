@@ -3620,6 +3620,42 @@ mod tests {
         );
     }
 
+    /// A real plain export given a NULL `self_` aborts with Java's message: it has no
+    /// error channel, as a `confluent_kafka.h` caller sees it.
+    #[test]
+    fn a_plain_export_aborts_on_a_null_self() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: the NULL `self_` is the case under test; the export's
+            // precondition check aborts before anything reads through it.
+            unsafe { crate::ffi::common::uuid::kafka_common_Uuid_to_string(std::ptr::null()) };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::a_plain_export_aborts_on_a_null_self",
+            "kafka_common_Uuid_to_string",
+            "self_ must not be null",
+        );
+    }
+
+    /// A real fallible export given a NULL argument and a NULL `out_err` aborts: the
+    /// error it would store has nowhere to go.
+    #[test]
+    fn a_fallible_export_aborts_on_a_null_out_err() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: deliberately breaks the `out_err` contract, the case under
+            // test; the guard aborts before anything writes through it.
+            unsafe { crate::ffi::common::uuid::kafka_common_Uuid_from_string(std::ptr::null(), std::ptr::null_mut()) };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::a_fallible_export_aborts_on_a_null_out_err",
+            "out_err",
+            "s must not be null",
+        );
+    }
+
     /// A NULL `out_err` is never read on success.
     #[test]
     fn ffi_guard_null_out_err_is_unread_on_success() {
