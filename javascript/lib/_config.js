@@ -29,6 +29,8 @@
 //   that validator's message, as `ConfigDef.parseValue` runs the validator on
 //   `null`; any other `null`, and every `undefined`, is dropped (the key is not
 //   set, so the core's default applies).
+// - A key that is not a string (a `Map`'s) throws `ConfigError` "Key must be a
+//   string." (`Utils.castToStringObjectMap`).
 // - Every other key reaches the core as given (stringified), and the core
 //   checks the values themselves (ranges, enums, boolean and number text) and
 //   reports the keys it does not know.
@@ -164,7 +166,9 @@ function configEntries(configs) {
   const source = configs instanceof Map ? configs.entries() : Object.entries(configs);
   const out = [];
   for (const [key, value] of source) {
-    if (typeof key !== 'string') throw new TypeError(`config keys must be strings, not ${typeName(key)}`);
+    // Java's Utils.castToStringObjectMap (Python's prepare): String(key), as a
+    // template literal throws on a Symbol.
+    if (typeof key !== 'string') throw invalidValue(String(key), value, 'Key must be a string.', undefined);
     if (value === undefined) continue;
     if (value === null) {
       checkNull(key);

@@ -209,7 +209,8 @@ These decide every question, in this order:
   but for `STRING` / `PASSWORD`, which must be strings), else `ConfigError`
   with Java's `parseType` message, a `PASSWORD` value shown as `[hidden]`; a
   `null` for a key whose validator rejects `null` throws that validator's
-  `ConfigError`; other `null`s and every `undefined` are dropped. Values are
+  `ConfigError`; other `null`s and every `undefined` are dropped; a key that
+  is not a string (a `Map`'s) throws `ConfigError` "Key must be a string.". Values are
   then stringified (`true` → `"true"`, numbers and bigints by `String`, arrays
   joined with `,`). The core validates them.
 

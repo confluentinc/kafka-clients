@@ -62,11 +62,21 @@ test('undefined values, and null ones the validator accepts, are dropped', () =>
   assert.deepEqual(configEntries({ 'client.id': null, acks: undefined, 'linger.ms': 0 }), [['linger.ms', '0']]);
 });
 
-test('a Map is accepted, and its non-string keys rejected', () => {
+test("a Map is accepted, and its non-string keys rejected with Java's ConfigError", () => {
   assert.deepEqual(configEntries(new Map([['acks', 'all']])), [['acks', 'all']]);
-  assert.throws(() => configEntries(new Map([[1, 'x']])), {
-    name: 'TypeError',
-    message: 'config keys must be strings, not number',
+  // Java's Utils.castToStringObjectMap, Python's prepare.
+  assert.throws(() => configEntries(new Map([[1, 'x']])), (e) => {
+    assert.ok(e instanceof ConfigError);
+    assert.equal(e.message, 'Invalid value x for configuration 1: Key must be a string.');
+    return true;
+  });
+  assert.throws(() => configEntries(new Map([[Symbol('k'), 'x']])), {
+    name: 'ConfigError',
+    message: 'Invalid value x for configuration Symbol(k): Key must be a string.',
+  });
+  assert.throws(() => new KafkaProducer(new Map([['bootstrap.servers', 'localhost:9092'], [1, 'x']])), {
+    name: 'ConfigError',
+    message: 'Invalid value x for configuration 1: Key must be a string.',
   });
 });
 
