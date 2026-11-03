@@ -14,12 +14,12 @@
 
 //! The `multilanguage_test!` declarative macro.
 //!
-//! Each invocation expands to four `#[tokio::test(flavor = "multi_thread")]`
+//! Each invocation expands to five `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers — one per backend — that call the same generic test body. The
 //! body must be `async fn body<F: ProducerBackendFactory>(factory: &F)`.
 //!
 //! Naming convention: `name__rust`, `name__grpc_python`,
-//! `name__grpc_python_async`, `name__grpc_c`. The double underscore is
+//! `name__grpc_python_async`, `name__grpc_c`, `name__grpc_js`. The double underscore is
 //! intentional so the backend label is easy to grep for in `cargo test` output.
 //!
 //! Every backend that runs in a container behind gRPC shares the `__grpc_`
@@ -39,8 +39,8 @@
 //! multilanguage_test!(test_produce_single_record, produce_single_record_inner);
 //! ```
 
-/// Expand a generic test body into four `#[tokio::test]` wrappers — one
-/// per backend (rust / grpc_python / grpc_python_async / grpc_c). See module docs for the
+/// Expand a generic test body into five `#[tokio::test]` wrappers — one
+/// per backend (rust / grpc_python / grpc_python_async / grpc_c / grpc_js). See module docs for the
 /// expected signature of `$body`.
 ///
 /// Two forms are supported:
@@ -110,6 +110,20 @@ macro_rules! multilanguage_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
+                $body(&mut ctx, &factory).await;
+            }
+
+            #[expect(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __ grpc_js>]() {
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
+                let handle = $crate::common::backend_pool::get_or_start(
+                    $crate::common::backend_pool::BackendKind::Javascript,
+                    ctx.broker_network_name(),
+                )
+                .await;
+                let factory =
+                    $crate::common::backend_factory::JsGrpcFactory::new(handle.channel().await);
                 $body(&mut ctx, &factory).await;
             }
         }

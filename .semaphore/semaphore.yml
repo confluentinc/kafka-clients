@@ -27,13 +27,15 @@ name: build-test-release
 # pipeline's SHA):
 #   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   2. "Verify language bindings (Linux amd64)" -- verify-c and verify-python,
-#      including the gRPC multilanguage arm (__grpc_c / __grpc_python).
+#   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python and
+#      verify-javascript, each over PLAINTEXT, SSL and SASL_SSL, including the
+#      gRPC multilanguage arm (__grpc_c / __grpc_python / __grpc_js).
 #   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
-#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest) and
-#      verify-python (pytest test/unit), followed by the gRPC multilanguage arm
+#   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest),
+#      verify-python (pytest test/unit) and verify-javascript (node --test
+#      test/unit), each followed by the gRPC multilanguage arm
 #      with the gRPC servers running as native host processes
 #      (MULTILANG_BACKEND_MODE=native), which tests the macOS build of each
 #      binding. The broker runs in Docker via Colima.
@@ -266,18 +268,27 @@ blocks:
     #
     # Each binding runs across the three protocols, following the same pattern
     # as the "Verify Rust" block. The gRPC multilanguage container arm
-    # (__grpc_c / __grpc_python) connects to the broker over the CONTAINER
-    # listener for the active protocol:
-    #   - PLAINTEXT: `make verify-c` / `make verify-python` — the full binding
-    #     gate (ctest / pytest unit tests, the PLAINTEXT gRPC arm, check-bindings,
-    #     and the Python perf suite).
+    # (__grpc_c / __grpc_python / __grpc_js) connects to the broker over the
+    # CONTAINER listener for the active protocol:
+    #   - PLAINTEXT: `make verify-c` / `make verify-python` /
+    #     `make verify-javascript` — the full binding gate (ctest / pytest /
+    #     node --test unit tests, the PLAINTEXT gRPC arm, check-bindings, the
+    #     Python perf suite, and the Node.js client's static, typing and
+    #     broker-backed tests).
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
-    #     ctest / pytest unit tests, check-bindings and perf are
-    #     protocol-independent, so running them once in the PLAINTEXT job is
-    #     enough.
+    #     unit tests, check-bindings and perf are protocol-independent, so
+    #     running them once in the PLAINTEXT job is enough. The JavaScript
+    #     protocol jobs install no host Node.js: javascript/Dockerfile.grpc builds
+    #     the addon inside the node:22 image, and the harness is Rust.
     #
-    # Each job is a separate VM with its own broker, so the six jobs do not
+    # Node.js comes from `sem-version node 22`, as confluent-kafka-javascript's
+    # CI installs it. npm packages come from the public npm registry, as pip's
+    # come from public PyPI: NPM_CONFIG_REGISTRY overrides any registry the
+    # agent's npm config names, and package-lock.json resolves every package
+    # there.
+    #
+    # Each job is a separate VM with its own broker, so the nine jobs do not
     # contend for Docker resources.
     dependencies: []
     execution_time_limit:
@@ -307,6 +318,23 @@ blocks:
         - name: "verify-python (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-python-sasl-ssl
+        - name: "verify-javascript (Linux amd64) — plaintext"
+          env_vars:
+            - name: NPM_CONFIG_REGISTRY
+              value: https://registry.npmjs.org/
+          commands:
+            - sem-version node 22
+            - node --version && npm --version
+            # The devDependencies, from package-lock.json: typescript and
+            # @types/node for the typing tests, which skip without them.
+            - (cd javascript && npm ci --no-audit --no-fund)
+            - make verify-javascript
+        - name: "verify-javascript (Linux amd64) — ssl"
+          commands:
+            - make test-integration-javascript-ssl
+        - name: "verify-javascript (Linux amd64) — sasl_ssl (plain)"
+          commands:
+            - make test-integration-javascript-sasl-ssl
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
@@ -335,9 +363,10 @@ blocks:
             - make verify-rust-macos-docker
 
   - name: "Verify language bindings (macOS arm64)"
-    # verify-c runs the C ctest suite; verify-python runs pytest test/unit. Each
-    # job then runs its binding's gRPC multilanguage arm (__grpc_c /
-    # __grpc_python) with the gRPC server as a native host process rather than
+    # verify-c runs the C ctest suite; verify-python runs pytest test/unit;
+    # verify-javascript runs node --test test/unit. Each job then runs its
+    # binding's gRPC multilanguage arm (__grpc_c / __grpc_python / __grpc_js)
+    # with the gRPC server as a native host process rather than
     # a container. Containers on macOS run Linux, so a container would only test
     # the Linux build of the binding. The broker runs in Docker via Colima.
     #
@@ -373,6 +402,16 @@ blocks:
         - name: "verify-python (macOS arm64)"
           commands:
             - make verify-python-macos-docker
+        - name: "verify-javascript (macOS arm64)"
+          env_vars:
+            # The native arm installs @grpc/grpc-js and @grpc/proto-loader with
+            # npm (make -C javascript grpc-native); see the Linux block.
+            - name: NPM_CONFIG_REGISTRY
+              value: https://registry.npmjs.org/
+          commands:
+            - sem-version node 22
+            - node --version && npm --version
+            - make verify-javascript-macos-docker
 
   - name: "Check Rust docs (Linux amd64)"
     # Its own block so a documentation failure is attributable at a glance and
