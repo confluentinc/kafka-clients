@@ -586,15 +586,17 @@ blocks:
     # tag build, which covers every block that depends on it. It is skipped on
     # branch builds, so it records no CI result there.
     dependencies:
+      # In this order, Semaphore draws the gate, and the Rust release row after it, near the
+      # top of the CI column: it places the gate level with the middle block of the list.
       - "Verify Rust (Linux amd64)"
-      - "Verify language bindings (Linux amd64)"
       - "Verify Rust (macOS arm64)"
-      - "Verify language bindings (macOS arm64)"
-      - "Verify language bindings (Windows amd64)"
       - "Check Rust docs (Linux amd64)"
       - "Check crate package (Linux amd64)"
       - "Check API compatibility (Linux amd64)"
       - "Audit Rust dependencies (Linux amd64)"
+      - "Verify language bindings (Linux amd64)"
+      - "Verify language bindings (macOS arm64)"
+      - "Verify language bindings (Windows amd64)"
     run:
       when: "tag =~ '.*'"
     execution_time_limit:
