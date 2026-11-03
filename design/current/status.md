@@ -88,6 +88,13 @@
 >   `kafka_Map_t` / `kafka_Bytes_t`, enum singletons, `__as_<Interface>`
 >   views. `cargo xtask lint-custom check-ffi-translation` enforces it; the
 >   baseline `xtask/ffi-baseline.txt` holds 5 by-design closure gaps.
+> - **A NULL mandatory C argument is Java's error, never a segfault** (2026-11-03): every
+>   export checks its mandatory pointers through `ffi::precondition` and panics with
+>   Java's error (`LocalNullPointerError` for an NPE, Java's text where Java checks);
+>   fallible functions, `_err` twins and `_cb` completions deliver it, a
+>   `confluent_kafka.h` export with no error channel aborts. `check-ffi-null-checks`
+>   enforces the checks; Python maps `LOCAL_NULL_POINTER` to `TypeError` and lets a
+>   `None` reach the core (consumer and producer; the admin binding keeps its checks).
 > - **The admin client supports security.** `AdminClientConfig` carries
 >   `security.protocol` and the SSL / SASL settings, and
 >   `KafkaAdminClient::new` builds its channel builder from them

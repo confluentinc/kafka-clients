@@ -4,6 +4,20 @@ All notable changes to the `confluent-kafka` Python package are documented in th
 
 Before GA the public API is not stable, and an interface may change even in a minor release.
 
+## [Unreleased]
+
+### Changed
+
+- A `None` for an argument Java requires reaches the Rust core, which answers
+  with Java's error and message: a `NullPointerException` is Python's
+  `TypeError`, with the core's message and its "null" spelled "None"
+  (`pause(partitions=None)` -> `TypeError("The partitions to pause must be
+  nonnull")`), and an `IllegalArgumentError` keeps Java's text
+  (`subscribe(topics=None)` -> "Topic collection to subscribe to cannot be
+  null"). The consumer and producer no longer check these arguments in Python
+  first, so some messages differ from the previous release. The admin client
+  keeps its checks.
+
 ## [4.4.0b1] - 2026-10-30
 
 First preview release of the 4.4.0 Python client built on a new Rust core. Its
