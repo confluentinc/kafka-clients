@@ -77,12 +77,11 @@ internal static class Program
             mock.Close();
         }
 
-        // Binds every P/Invoke now, so an entry point the native library lacks fails here. The
-        // library is read after a call into it: .NET Framework's PrelinkAll does not load it.
-        Type nativeMethods = assembly.GetType("Confluent.Kafka.Internal.Interop.NativeMethods", throwOnError: true)!;
-        Marshal.PrelinkAll(nativeMethods);
+        // Binds every P/Invoke now, so an entry point the native library lacks fails here. They are
+        // internal, and Marshal.PrelinkAll binds only public methods, so each is prelinked itself.
+        int imports = PrelinkEveryImport(assembly);
         string native = LoadedNativeLibrary(assembly);
-        Console.WriteLine($"OK: every P/Invoke binds to {native}");
+        Console.WriteLine($"OK: all {imports} P/Invokes bind to {native}");
         if (!native.StartsWith(AppContext.BaseDirectory, IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
         {
             throw new InvalidOperationException($"the native library was loaded from {native}, not from the application in {AppContext.BaseDirectory}");
@@ -114,6 +113,42 @@ internal static class Program
     {
         using var producer = new KafkaProducer<string, string>(config, Serdes.String, Serdes.String);
         producer.Close(TimeSpan.FromSeconds(10));
+    }
+
+    /// <summary>Prelinks every <c>[DllImport]</c> of the assembly and returns how many there are.</summary>
+    private static int PrelinkEveryImport(Assembly assembly)
+    {
+        Type nativeMethods = assembly.GetType("Confluent.Kafka.Internal.Interop.NativeMethods", throwOnError: true)!;
+        var failures = new List<string>();
+        int imports = 0;
+        foreach (MethodInfo method in nativeMethods.GetMethods(
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly))
+        {
+            if (method.GetCustomAttribute<DllImportAttribute>() is not { } import)
+            {
+                continue;
+            }
+            imports++;
+            try
+            {
+                Marshal.Prelink(method);
+            }
+            catch (Exception e)
+            {
+                failures.Add($"{import.EntryPoint ?? method.Name}: {e.GetType().Name}: {e.Message}");
+            }
+        }
+        if (imports == 0)
+        {
+            throw new InvalidOperationException("found no [DllImport] on NativeMethods");
+        }
+        if (failures.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"{failures.Count} of {imports} P/Invokes do not bind:{Environment.NewLine}"
+                + string.Join(Environment.NewLine, failures));
+        }
+        return imports;
     }
 
     private static bool IsWindows()

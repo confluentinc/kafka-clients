@@ -152,26 +152,22 @@ echo "${checksum}  ${PACKAGE_FILE}" > "${work}/SHA256SUMS"
 
 # Once recorded, the release is final: it may already have been downloaded and uploaded to
 # nuget.org. A rerun of the pack block packs other bytes (a pack is not reproducible), so its
-# package is not recorded over it. A pull that fails reads as nothing recorded, so it is tried
-# three times before the record is made.
-recorded=false
-for attempt in 1 2 3; do
-    if artifact pull workflow nuget/release/SHA256SUMS --destination "${work}/recorded.sha256" --force >/dev/null 2>&1; then
-        recorded=true
-        break
+# package is not recorded over it. SHA256SUMS claims the release: it is pushed first, without
+# --force, which fails when the file exists, so a pull that fails for another reason cannot lead to
+# a recorded release being replaced. The package is then written under it, so that the package
+# recorded is always the one SHA256SUMS names, and a rerun completes a job interrupted between
+# the two pushes.
+if artifact pull workflow nuget/release/SHA256SUMS --destination "${work}/recorded.sha256" --force >/dev/null 2>&1; then
+    if ! cmp -s "${work}/SHA256SUMS" "${work}/recorded.sha256"; then
+        refuse "this workflow already recorded $(cat "${work}/recorded.sha256") as the release, which may already be on nuget.org; it is not replaced by the repacked $(cat "${work}/SHA256SUMS"). Upload the recorded release, or release a new version"
     fi
-    [ "${attempt}" -eq 3 ] || sleep 10
-done
-if [ "${recorded}" = true ] && ! cmp -s "${work}/SHA256SUMS" "${work}/recorded.sha256"; then
-    refuse "this workflow already recorded $(cat "${work}/recorded.sha256") as the release, which may already be on nuget.org; it is not replaced by the repacked $(cat "${work}/SHA256SUMS"). Upload the recorded release, or release a new version"
+    echo "This workflow already recorded ${PACKAGE_FILE} with this checksum; recording the package again"
+else
+    artifact push workflow "${work}/SHA256SUMS" --destination nuget/release/SHA256SUMS \
+        || refuse "could not record the checksum of ${PACKAGE_FILE}, either because this workflow already recorded a release that could not be read, or because the artifact store failed; rerun this job"
 fi
-
-# SHA256SUMS is recorded last, so that a job interrupted while recording the package leaves no
-# checksum that names it.
 artifact push workflow "${work}/release/${PACKAGE_FILE}" --destination "nuget/release/${PACKAGE_FILE}" --force \
     || refuse "could not record ${PACKAGE_FILE}; rerun this job"
-artifact push workflow "${work}/SHA256SUMS" --destination nuget/release/SHA256SUMS --force \
-    || refuse "could not record the checksum of ${PACKAGE_FILE}; rerun this job"
 cat "${work}/SHA256SUMS"
 echo "Recorded ${PACKAGE_FILE}, identical to the package that was tested on: ${NUGET_PLATFORMS}."
 echo "Upload nuget/release/${PACKAGE_FILE} from this workflow's artifacts to nuget.org by hand,"

@@ -99,8 +99,9 @@ Invoke-Retry { Invoke-Native rustup @('toolchain', 'install', $channel, '--profi
 Write-Output "== Native library ($triple)"
 # A RUSTFLAGS variable would replace the static C runtime flags of rust/.cargo/config.toml.
 Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
+# The header is left in place: Cargo reruns build.rs, which writes it, whenever src\ or
+# cbindgen.toml changes, and skips it on a cached build, which would then find no header.
 $header = Join-Path $repo 'rust\target\include\confluent_kafka_bindings.h'
-Remove-Item $header -ErrorAction SilentlyContinue
 Push-Location (Join-Path $repo 'rust')
 try {
     Invoke-Native cargo @('build', '--locked', '--features', 'ffi', '--release', '--target', $triple)
