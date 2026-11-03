@@ -2457,7 +2457,7 @@ static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Err
 // 0 when it was, else the error the producer's send() returned (Java's doSend
 // rethrow). It runs here, before the call returns, for a record the producer
 // takes or refuses at once, and from the callback pump for one that was queued
-// (its topic's metadata missing, the buffer full). After an error
+// (its topic's metadata missing, the buffer full) or refused as NULL. After an error
 // `on_completion` still runs, once, if the record had reached the accumulator
 // before the error (Java's maybeAddPartition throws after the append), and
 // never if it had not. A record the C API rejects before either returns its
@@ -2475,8 +2475,8 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     kafka_common_Error_t* err = NULL;
     if (rec_obj == Py_None) {
         // Java's send(null): the C API reports the NULL record to `resolve`
-        // as its LocalNullPointerError, inside this call, with no delivery
-        // callback registered.
+        // through the client's callback queue, as its LocalNullPointerError,
+        // with no delivery callback registered.
         SendCtx* none_ctx = (SendCtx*)PyMem_Malloc(sizeof(SendCtx));
         if (none_ctx == NULL) return PyErr_NoMemory();
         Py_INCREF(resolve);
