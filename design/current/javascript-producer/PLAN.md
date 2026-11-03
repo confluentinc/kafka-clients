@@ -1,6 +1,6 @@
 # JavaScript (Node.js) client — Phase 1: the producer
 
-Status: **approved 2026-10-29** (D1 Java shape, D2 plain C on `node_api.h` + node-gyp, D3 plain JavaScript + `index.d.ts`, D4 standalone `verify-javascript`, D5 `javascript/CLAUDE.md`, D6 working name only, D7 Python `verifiable_consumer.py`). Milestone: produce one record from Node; more work follows on the same PR. Branch `dev/javascript-producer-bindings`, cut from `origin/master` at e47f8c25b.
+Status: **approved 2026-10-29** (D1 Java shape, D2 plain C on `node_api.h` + node-gyp, D3 plain JavaScript + `index.d.ts`, D4 standalone `verify-javascript`, D5 `javascript/CLAUDE.md`, D6 the earlier client's names `@confluentinc/kafka-javascript` 4.4.0-beta.1, decided 2026-11-03, D7 Python `verifiable_consumer.py`). Milestone: produce one record from Node; more work follows on the same PR. Branch `dev/javascript-producer-bindings`, cut from `origin/master` at e47f8c25b.
 
 ## 1. Goal and scope
 
@@ -173,8 +173,8 @@ await producer.close();          // or close({ timeoutMs })
 - Calling `flush()` inside a callback rejects with the core's own error text.
 
 **Errors:**
-- `KafkaError extends Error` with `code` (numeric), `name` (the `kafka_common_Error_e` name, e.g. `TOPIC_AUTHORIZATION_FAILED`), `retriable`, `apiError` and `cause`, which follows the `Error_source` chain.
-- The full per-class error hierarchy, as Python has, is a later phase.
+- *(Updated 2026-11-03, D10.)* The full per-class error hierarchy, as Python has, generated from the Java sources by `cargo xtask generate-error-codes`: Java's names (`Exception` read as `Error`) and `extends` chain (`SaslAuthenticationError extends AuthenticationError extends ApiError extends KafkaError extends Error`), the Java built-ins (`IllegalStateError`, `IllegalArgumentError`, ...) at the package root, not `KafkaError`s. An error the client reports is an instance of the class of its FFI id, with Python's fallback rules.
+- Every class has `name` (the class name), `code` (numeric), `errorName` (the `kafka_common_Error_e` name, e.g. `TOPIC_AUTHORIZATION_FAILED`), `retriable`, `apiError` and `cause`, which follows the `Error_source` chain.
 
 ### 4.4 Build
 
@@ -208,7 +208,7 @@ The phase is done when the consumer prints `k1` / `hello-from-node` at the parti
 ### 4.6 Tests
 
 **Unit tests** (no broker; `node --test`, so there are no test-framework dependencies):
-- **Config conversion:** stringifying values, dropping `null`, and rejecting non-string keys.
+- **Config conversion:** stringifying values; *(updated 2026-11-03, D10)* checking a value's type against its key's `ConfigDef` type and a `null` against its key's validator, as Python's `check_type` / `check_null` (a `null` the validator accepts, and every `undefined`, dropped); rejecting non-string keys with Java's `ConfigError`.
 - **`ProducerRecord` validation and key/value conversion.**
 - **Error conversion:** an invalid config gives a `KafkaError` with a config error code and the core's message, asserted exactly.
 - **Unreachable broker:**
@@ -274,3 +274,4 @@ The phase is done when the consumer prints `k1` / `hello-from-node` at the parti
 | D7 | Consumer for the end-to-end check | **Python `verifiable_consumer.py`**, falling back to the Rust verifiable consumer. | Rust only, which avoids the Python build and its pip index issue. |
 | D8 | Ordering after Critic 100 items 1–2 (added 2026-10-29) | **Approved: two-step send.** `send()` resolves at hand-over with a `KafkaFuture`; `future.get()` resolves at delivery. No binding-side buffering. | A binding FIFO (rejected: no binding-side buffering); a blocking send on the JS thread (rejected: freezes the event loop up to `max.block.ms`); an ordered mode in the Rust core (possible later; changes the C API). |
 | D9 | Caller's Buffer (Critic 100 item 4) | **Approved with D8:** borrowed until `send()` resolves, documented; no copy. | Copy every caller Buffer at `send()`. |
+| D10 | Errors and config checks (added 2026-11-03, security parity with Python) | **Python's generated hierarchy and config checks:** the error classes, config constants and producer key-type table generated from the Java sources; `name` is the class name and `errorName` the enumerator name; a value checked against its key's `ConfigDef` type, a `null` against its validator; a password value never shown. | One `KafkaError` with `name` the enumerator name (Phase 1 as approved). |
