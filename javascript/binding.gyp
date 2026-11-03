@@ -38,7 +38,7 @@
       ],
       "actions": [
         {
-          # KafkaError.name: each kafka_common_Error_e value's enumerator name,
+          # An error's errorName: each kafka_common_Error_e value's enumerator name,
           # read from the header this addon is built against.
           "action_name": "error_names",
           "inputs": [

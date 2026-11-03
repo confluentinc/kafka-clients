@@ -190,9 +190,11 @@ These decide every question, in this order:
   message. A value of the wrong JS type throws `TypeError`. Java's abstract
   bases (`RetriableError`, ...) are catch-only: constructing one throws
   `TypeError`. *(Deviation from the Python classes:)* every class takes
-  JavaScript's `(message?, {cause}?)`, not Java's constructor forms, and the
-  payload fields (`TopicAuthorizationError`'s topics, ...) are not read across
-  the FFI.
+  JavaScript's `(message?, {cause}?)`, not Java's constructor forms; the
+  payload getters (`TopicAuthorizationError`'s topics, ...), the `INSTANCE`
+  singletons (`DisconnectError`, `CoordinatorNotAvailableError`) and
+  `RecordDeserializationError.DeserializationExceptionOrigin` are not
+  generated, and no payload is read across the FFI.
 - After a completed `close()`, `send` throws `LOCAL_ILLEGAL_STATE` with Java's
   `throwIfProducerClosed` message, and `flush()` resolves at once: Java's
   `flush()` has no closed check and returns immediately on the empty

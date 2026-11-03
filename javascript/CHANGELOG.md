@@ -46,6 +46,12 @@ name needs the agreement of the team that owns it.
 
 - Of the SASL mechanisms, only `PLAIN` is supported. Keys and certificates must
   be PEM (no JKS or PKCS12).
+- The error classes take `(message?, {cause}?)`, not Java's constructors, and
+  have none of Java's payload getters (`TopicAuthorizationError`'s
+  `unauthorizedTopics()`, `RecordTooLargeError`'s
+  `recordTooLargePartitions()`, ...), the `INSTANCE` singletons
+  (`DisconnectError`, `CoordinatorNotAvailableError`) or
+  `RecordDeserializationError.DeserializationExceptionOrigin`.
 
 ### Package
 
