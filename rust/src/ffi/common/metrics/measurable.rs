@@ -33,6 +33,7 @@ use crate::ffi::common::metrics::metric_config::{
 };
 use crate::ffi::common::metrics::{Interface, c_type_name, type_name_c_str};
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{Required, require_fn};
 
 /// Opaque handle to a [`Measurable`] implementation.
 #[repr(C)]
@@ -42,8 +43,9 @@ pub struct kafka_common_metrics_Measurable_t {
 
 /// `measure(MetricConfig config, long now)` of a C implementation: `config`
 /// is borrowed for the call.
-pub type kafka_common_metrics_Measurable_measure_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, config: *const kafka_common_metrics_MetricConfig_t, now: i64) -> f64;
+pub type kafka_common_metrics_Measurable_measure_fn_t = Option<
+    unsafe extern "C" fn(self_: *mut c_void, config: *const kafka_common_metrics_MetricConfig_t, now: i64) -> f64,
+>;
 
 /// The Rust-only `type_name` of a C implementation, the provider's name in
 /// `KafkaMetric_to_string`: a NUL-terminated string that stays valid and
@@ -57,7 +59,7 @@ pub type kafka_common_metrics_Measurable_type_name_fn_t =
 /// `kafka_common_metrics_Measurable_new`.
 struct CMeasurable {
     self_: *mut c_void,
-    measure: kafka_common_metrics_Measurable_measure_fn_t,
+    measure: Required<kafka_common_metrics_Measurable_measure_fn_t>,
     type_name: kafka_common_metrics_Measurable_type_name_fn_t,
 }
 
@@ -174,6 +176,7 @@ pub extern "C" fn kafka_common_metrics_Measurable_new(
     measure: kafka_common_metrics_Measurable_measure_fn_t,
     type_name: kafka_common_metrics_Measurable_type_name_fn_t,
 ) -> *mut kafka_common_metrics_Measurable_t {
+    let measure = require_fn(measure, "measure");
     box_measurable(Arc::new(CMeasurable { self_, measure, type_name }))
 }
 
@@ -264,7 +267,7 @@ mod tests {
     #[test]
     fn c_implementation_is_driven_through_the_trait_and_the_invoker() {
         let mut offset = 0.5_f64;
-        let handle = kafka_common_metrics_Measurable_new(&mut offset as *mut f64 as *mut c_void, c_measure, None);
+        let handle = kafka_common_metrics_Measurable_new(&mut offset as *mut f64 as *mut c_void, Some(c_measure), None);
         let config = MetricConfig::new().set_samples(3);
         // SAFETY: Test code: `handle` comes from `kafka_common_metrics_Measurable_new` over the
         // `offset` local, which outlives it, and `take_measurable` consumes it, after which it is
@@ -292,8 +295,8 @@ mod tests {
 
     #[test]
     fn type_name_is_the_c_slot_or_none_when_the_slot_is_null() {
-        let named = kafka_common_metrics_Measurable_new(ptr::null_mut(), c_measure, Some(c_type_name_slot));
-        let unnamed = kafka_common_metrics_Measurable_new(ptr::null_mut(), c_measure, None);
+        let named = kafka_common_metrics_Measurable_new(ptr::null_mut(), Some(c_measure), Some(c_type_name_slot));
+        let unnamed = kafka_common_metrics_Measurable_new(ptr::null_mut(), Some(c_measure), None);
         // SAFETY: Test code: both handles come from `kafka_common_metrics_Measurable_new` over a null
         // `self_` the C functions never read; the strings the invoker returns stay valid for the
         // rest of the program; `measurable_ref` borrows each handle within the block, and each handle is

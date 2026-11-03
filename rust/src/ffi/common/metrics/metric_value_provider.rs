@@ -35,6 +35,7 @@ use crate::ffi::common::metrics::metric_config::{
 };
 use crate::ffi::common::metrics::{Interface, c_type_name, type_name_c_str};
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{Required, require_fn};
 
 /// Opaque handle to a [`MetricValueProvider`] implementation.
 #[repr(C)]
@@ -45,11 +46,13 @@ pub struct kafka_common_metrics_MetricValueProvider_t {
 /// `value(MetricConfig config, long now)` of a C implementation: `config` is
 /// borrowed for the call; the returned reading (never null) is owned and
 /// taken over by Rust.
-pub type kafka_common_metrics_MetricValueProvider_value_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    config: *const kafka_common_metrics_MetricConfig_t,
-    now: i64,
-) -> *mut kafka_common_MetricValue_t;
+pub type kafka_common_metrics_MetricValueProvider_value_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        config: *const kafka_common_metrics_MetricConfig_t,
+        now: i64,
+    ) -> *mut kafka_common_MetricValue_t,
+>;
 
 /// The Rust-only `type_name` of a C implementation, the provider's name in
 /// `KafkaMetric_to_string`: a NUL-terminated string that stays valid and
@@ -63,7 +66,7 @@ pub type kafka_common_metrics_MetricValueProvider_type_name_fn_t =
 /// `kafka_common_metrics_MetricValueProvider_new`.
 struct CMetricValueProvider {
     self_: *mut c_void,
-    value: kafka_common_metrics_MetricValueProvider_value_fn_t,
+    value: Required<kafka_common_metrics_MetricValueProvider_value_fn_t>,
     type_name: kafka_common_metrics_MetricValueProvider_type_name_fn_t,
 }
 
@@ -183,6 +186,7 @@ pub extern "C" fn kafka_common_metrics_MetricValueProvider_new(
     value: kafka_common_metrics_MetricValueProvider_value_fn_t,
     type_name: kafka_common_metrics_MetricValueProvider_type_name_fn_t,
 ) -> *mut kafka_common_metrics_MetricValueProvider_t {
+    let value = require_fn(value, "value");
     let provider: Arc<dyn MetricValueProvider> = Arc::new(CMetricValueProvider { self_, value, type_name });
     Interface::owned(provider) as *mut kafka_common_metrics_MetricValueProvider_t
 }
@@ -278,7 +282,8 @@ mod tests {
 
     #[test]
     fn c_implementation_is_driven_through_the_trait_and_taken() {
-        let provider = kafka_common_metrics_MetricValueProvider_new(ptr::null_mut(), c_value, Some(c_type_name_slot));
+        let provider =
+            kafka_common_metrics_MetricValueProvider_new(ptr::null_mut(), Some(c_value), Some(c_type_name_slot));
         let config = kafka_common_metrics_MetricConfig_new();
         // SAFETY: Test code: `provider` comes from `kafka_common_metrics_MetricValueProvider_new`
         // (its functions ignore the null `self_`) and `config` from

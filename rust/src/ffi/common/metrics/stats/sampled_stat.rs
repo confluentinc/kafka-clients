@@ -30,7 +30,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::ffi::precondition::{Required, require_fn, require_mut, require_ref};
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
@@ -237,24 +237,28 @@ pub struct kafka_common_metrics_stats_SampledStatKind_t {
 /// `update(Sample sample, MetricConfig config, double value, long timeMs)`:
 /// folds `value` into the current sample. `sample` is borrowed for the call
 /// and mutated in place.
-pub type kafka_common_metrics_stats_SampledStatKind_update_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    sample: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
-    config: *const kafka_common_metrics_MetricConfig_t,
-    value: f64,
-    time_ms: i64,
-);
+pub type kafka_common_metrics_stats_SampledStatKind_update_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        sample: *mut kafka_common_metrics_stats_SampledStat_Sample_t,
+        config: *const kafka_common_metrics_MetricConfig_t,
+        value: f64,
+        time_ms: i64,
+    ),
+>;
 
 /// `combine(List<Sample> samples, MetricConfig config, long now)`: the
 /// measurement over every sample. `samples` holds
 /// `const kafka_common_metrics_stats_SampledStat_Sample_t *` elements
 /// borrowed for the call.
-pub type kafka_common_metrics_stats_SampledStatKind_combine_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    samples: *const kafka_List_t,
-    config: *const kafka_common_metrics_MetricConfig_t,
-    now: i64,
-) -> f64;
+pub type kafka_common_metrics_stats_SampledStatKind_combine_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        samples: *const kafka_List_t,
+        config: *const kafka_common_metrics_MetricConfig_t,
+        now: i64,
+    ) -> f64,
+>;
 
 /// `isWindowedCount()`: whether this kind counts events like
 /// `WindowedCount`, which `Meter` consults; a Java default (`false`) when
@@ -272,8 +276,8 @@ pub type kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t =
 /// A kind implemented in C.
 struct CSampledStatKind {
     self_: *mut c_void,
-    update: kafka_common_metrics_stats_SampledStatKind_update_fn_t,
-    combine: kafka_common_metrics_stats_SampledStatKind_combine_fn_t,
+    update: Required<kafka_common_metrics_stats_SampledStatKind_update_fn_t>,
+    combine: Required<kafka_common_metrics_stats_SampledStatKind_combine_fn_t>,
     is_windowed_count: kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t,
     is_windowed_sum: kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t,
 }
@@ -436,6 +440,8 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
     is_windowed_count: kafka_common_metrics_stats_SampledStatKind_is_windowed_count_fn_t,
     is_windowed_sum: kafka_common_metrics_stats_SampledStatKind_is_windowed_sum_fn_t,
 ) -> *mut kafka_common_metrics_stats_SampledStatKind_t {
+    let update = require_fn(update, "update");
+    let combine = require_fn(combine, "combine");
     Interface::owned(
         Arc::new(CSampledStatKind { self_, update, combine, is_windowed_count, is_windowed_sum })
             as Arc<dyn SampledStatKind>,
@@ -997,8 +1003,8 @@ mod tests {
         unsafe {
             let kind = kafka_common_metrics_stats_SampledStatKind_new(
                 &mut combines as *mut i32 as *mut c_void,
-                max_update,
-                max_combine,
+                Some(max_update),
+                Some(max_combine),
                 None,
                 Some(yes),
             );

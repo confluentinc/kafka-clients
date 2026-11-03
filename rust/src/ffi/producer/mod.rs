@@ -218,7 +218,7 @@ pub(crate) mod producer_record;
 pub(crate) mod record_metadata;
 pub(crate) mod round_robin_partitioner;
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::future::Future;
@@ -284,7 +284,7 @@ enum SubmitRequest {
         callback: Option<Box<dyn Callback>>,
         /// The future `callback`'s report completes (see [`delivery_callback`]).
         completion: Option<KafkaFutureImpl<RecordMetadata>>,
-        cb: kafka_producer_Producer_send_cb_t,
+        cb: Required<kafka_producer_Producer_send_cb_t>,
         opaque: SendPtr,
     },
     /// A marker placed behind a set of queued sends.
@@ -492,7 +492,12 @@ impl Client {
     }
 
     /// Queues the completion of a `void` operation.
-    fn deliver(&self, cb: kafka_producer_Producer_init_transactions_cb_t, opaque: SendPtr, result: Result<(), Error>) {
+    fn deliver(
+        &self,
+        cb: Required<kafka_producer_Producer_init_transactions_cb_t>,
+        opaque: SendPtr,
+        result: Result<(), Error>,
+    ) {
         let error = result.err().map_or(std::ptr::null_mut(), box_error);
         let error = SendPtr(error as *mut c_void);
         // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: each
@@ -604,7 +609,7 @@ async fn send_waiter(
     record: GenericRecord,
     callback: Option<Box<dyn Callback>>,
     completion: Option<KafkaFutureImpl<RecordMetadata>>,
-    cb: kafka_producer_Producer_send_cb_t,
+    cb: Required<kafka_producer_Producer_send_cb_t>,
     opaque: SendPtr,
 ) {
     let result = catch_task_panic("kafka_producer_Producer_send_with_callback_cb", async {
@@ -623,7 +628,7 @@ type RecordFuture = crate::common::KafkaFuture<RecordMetadata>;
 /// so nothing is fired here.
 fn deliver_send(
     client: &Arc<Client>,
-    cb: kafka_producer_Producer_send_cb_t,
+    cb: Required<kafka_producer_Producer_send_cb_t>,
     opaque: SendPtr,
     result: Result<(RecordFuture, Option<KafkaFutureImpl<RecordMetadata>>), Error>,
 ) {
@@ -1012,7 +1017,7 @@ fn with_txn_control_cb<F, Fut>(
     fn_name: &'static str,
     client: &Arc<Client>,
     wait: ReportWait,
-    cb: kafka_producer_Producer_init_transactions_cb_t,
+    cb: Required<kafka_producer_Producer_init_transactions_cb_t>,
     opaque: *mut c_void,
     op: F,
 ) where
@@ -1106,7 +1111,7 @@ fn with_drain_cb<F, Fut>(
     bound: DrainBound,
     wait: ReportWait,
     in_callback: bool,
-    cb: kafka_producer_Producer_init_transactions_cb_t,
+    cb: Required<kafka_producer_Producer_init_transactions_cb_t>,
     opaque: *mut c_void,
     op: F,
 ) where
@@ -1162,57 +1167,59 @@ unsafe fn offsets_map(offsets: *const kafka_Map_t) -> HashMap<TopicPartition, Of
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_init_transactions_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_begin_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_send_offsets_to_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_commit_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_abort_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_flush_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_close_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` operation: `error` is `NULL` on success and owned
 /// by the callee otherwise.
 pub type kafka_producer_Producer_close_with_timeout_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `send`: `value` is the owned
 /// `kafka_common_KafkaFuture_t *` resolving to a
 /// `kafka_producer_RecordMetadata_t *` borrowed from the future (`NULL` on
 /// failure), `error` the owned failure (`NULL` on success).
-pub type kafka_producer_Producer_send_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+pub type kafka_producer_Producer_send_cb_t = Option<
+    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+>;
 /// Completion of a `send`: `value` is the owned
 /// `kafka_common_KafkaFuture_t *` resolving to a
 /// `kafka_producer_RecordMetadata_t *` borrowed from the future (`NULL` on
 /// failure), `error` the owned failure (`NULL` on success).
-pub type kafka_producer_Producer_send_with_callback_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+pub type kafka_producer_Producer_send_with_callback_cb_t = Option<
+    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+>;
 
 /// Completion of `partitions_for`: `value` is the owned `kafka_List_t *` of
 /// owned `kafka_common_PartitionInfo_t *` (`NULL` on failure).
 pub type kafka_producer_Producer_partitions_for_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The hook fired once each time the callback vector goes from empty to
 /// non-empty, from a Rust task: it may only schedule a later
 /// [`kafka_producer_Producer__execute_callbacks`], never run callbacks.
-pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_producer_Producer_callbacks_notify_fn_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 // ---------------------------------------------------------------------------
 // Transactions
@@ -1291,6 +1298,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
     cb: kafka_producer_Producer_init_transactions_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     with_txn_control_cb(
         "kafka_producer_Producer_init_transactions_cb",
         // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -1381,6 +1389,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_cb(
     cb: kafka_producer_Producer_begin_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     with_txn_control_cb(
         "kafka_producer_Producer_begin_transaction_cb",
         // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -1528,6 +1537,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
     cb: kafka_producer_Producer_send_offsets_to_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `offsets` is a live map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as `offsets_map`
     // requires.
@@ -1641,6 +1651,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
     cb: kafka_producer_Producer_commit_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     with_txn_control_cb(
         "kafka_producer_Producer_commit_transaction_cb",
         // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -1747,6 +1758,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
     cb: kafka_producer_Producer_abort_transaction_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     with_txn_control_cb(
         "kafka_producer_Producer_abort_transaction_cb",
         // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -2023,6 +2035,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback_cb(
     cb: kafka_producer_Producer_send_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_, "self_") };
@@ -2076,7 +2089,7 @@ fn queue_send(
     record: GenericRecord,
     callback: Option<Box<dyn Callback>>,
     completion: Option<KafkaFutureImpl<RecordMetadata>>,
-    cb: kafka_producer_Producer_send_cb_t,
+    cb: Required<kafka_producer_Producer_send_cb_t>,
     opaque: *mut c_void,
 ) {
     let opaque = SendPtr(opaque);
@@ -2110,7 +2123,7 @@ fn queue_send(
 /// [`kafka_producer_Producer_send_with_callback_cb`], not yet fired and not
 /// handed over to the submission task.
 unsafe fn complete_send_now(
-    cb: kafka_producer_Producer_send_cb_t,
+    cb: Required<kafka_producer_Producer_send_cb_t>,
     opaque: *mut c_void,
     result: Result<*mut kafka_common_KafkaFuture_t, Error>,
 ) {
@@ -2238,6 +2251,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
     cb: kafka_producer_Producer_flush_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task it
     // spawns.
@@ -2357,6 +2371,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     cb: kafka_producer_Producer_partitions_for_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call, the task getting its own `Arc`.
     let client = unsafe { client_ref(self_, "self_") };
@@ -2525,6 +2540,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
     cb: kafka_producer_Producer_close_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `with_drain_cb` uses the reference only before it returns, cloning the `Arc` for the task it
     // spawns.
@@ -2658,6 +2674,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
     cb: kafka_producer_Producer_close_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_, "self_") };
@@ -2761,6 +2778,7 @@ pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
     notify: kafka_producer_Producer_callbacks_notify_fn_t,
     opaque: *mut c_void,
 ) {
+    let notify = require_fn(notify, "notify");
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires, and
     // `opaque` stays valid while the hook is installed and until a call in flight returns, which is
     // what the hook call in `CallbackQueue::notify_if`, made after the registration's lock is
@@ -2898,7 +2916,7 @@ mod tests {
             kafka_producer_Producer_close_with_timeout_cb(
                 view,
                 -1,
-                record_outcome,
+                Some(record_outcome),
                 &outcome as *const Mutex<Vec<Option<String>>> as *mut c_void,
             );
             while outcome.lock().unwrap().is_empty() {
@@ -2993,16 +3011,16 @@ mod tests {
 
             let flush = Probe::default();
             fail_point::arm();
-            kafka_producer_Producer_flush_cb(view, on_error, flush.as_opaque());
+            kafka_producer_Producer_flush_cb(view, Some(on_error), flush.as_opaque());
             let commit = Probe::default();
             fail_point::arm();
-            kafka_producer_Producer_commit_transaction_cb(view, on_error, commit.as_opaque());
+            kafka_producer_Producer_commit_transaction_cb(view, Some(on_error), commit.as_opaque());
             let partitions = Probe::default();
             fail_point::arm();
-            kafka_producer_Producer_partitions_for_cb(view, topic.as_ptr(), on_value, partitions.as_opaque());
+            kafka_producer_Producer_partitions_for_cb(view, topic.as_ptr(), Some(on_value), partitions.as_opaque());
             let send = Probe::default();
             fail_point::arm();
-            kafka_producer_Producer_send_cb(view, record, on_value, send.as_opaque());
+            kafka_producer_Producer_send_cb(view, record, Some(on_value), send.as_opaque());
 
             for probe in [&flush, &commit, &partitions, &send] {
                 assert!(probe.fired().is_empty(), "queued, not fired");
@@ -3088,7 +3106,7 @@ mod tests {
             let future = kafka_producer_Producer_send(view, record, &mut err);
             assert!(err.is_null());
             let opaque = &seen as *const Mutex<Vec<Option<String>>> as *mut c_void;
-            kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
+            kafka_common_KafkaFuture_get_cb(future, Some(record_future), opaque);
             std::thread::sleep(Duration::from_millis(20));
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0, "still waiting");
             assert!(seen.lock().unwrap().is_empty());
@@ -3096,7 +3114,7 @@ mod tests {
             kafka_producer_MockProducer_destroy(mock);
             let destroyed = Some("The client was destroyed before the future completed".to_string());
             assert_eq!(*seen.lock().unwrap(), std::slice::from_ref(&destroyed));
-            kafka_common_KafkaFuture_get_cb(future, record_future, opaque);
+            kafka_common_KafkaFuture_get_cb(future, Some(record_future), opaque);
             assert_eq!(*seen.lock().unwrap(), [destroyed.clone(), destroyed]);
             kafka_common_KafkaFuture_destroy(future);
             kafka_producer_ProducerRecord_destroy(record);
@@ -3144,7 +3162,7 @@ mod tests {
             let mut err = std::ptr::null_mut();
             let future = Future(match with_callback {
                 true => {
-                    let callback = kafka_producer_Callback_new(std::ptr::null_mut(), unreported);
+                    let callback = kafka_producer_Callback_new(std::ptr::null_mut(), Some(unreported));
                     kafka_producer_Producer_send_with_callback(view, record, callback, &mut err)
                 },
                 false => kafka_producer_Producer_send(view, record, &mut err),
@@ -3235,7 +3253,7 @@ mod tests {
             let other = kafka_producer_Producer_send(view, record, &mut err);
             assert!(err.is_null());
             let nested = Nested { other, seen: Mutex::new(Vec::new()) };
-            kafka_common_KafkaFuture_get_cb(first, nested_get, &nested as *const Nested as *mut c_void);
+            kafka_common_KafkaFuture_get_cb(first, Some(nested_get), &nested as *const Nested as *mut c_void);
             std::thread::sleep(Duration::from_millis(20));
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 0, "still waiting");
 
@@ -3294,7 +3312,7 @@ mod tests {
             kafka_producer_Producer_send_cb(
                 view,
                 record,
-                record_send_offset,
+                Some(record_send_offset),
                 &seen as *const Mutex<Vec<i64>> as *mut c_void,
             );
             assert_eq!(
@@ -3333,7 +3351,7 @@ mod tests {
             kafka_producer_Producer_send_cb(
                 view,
                 record,
-                record_refused_send,
+                Some(record_refused_send),
                 &fired as *const Mutex<Vec<(String, std::thread::ThreadId)>> as *mut c_void,
             );
             assert_eq!(
@@ -3410,7 +3428,7 @@ mod tests {
             );
 
             // The mock takes the second record at once, although one is queued before it.
-            kafka_producer_Producer_send_cb(view, records[1], record_send_offset, seen_ptr);
+            kafka_producer_Producer_send_cb(view, records[1], Some(record_send_offset), seen_ptr);
             assert_eq!(
                 *seen.lock().unwrap(),
                 [0],

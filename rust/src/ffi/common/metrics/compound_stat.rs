@@ -25,7 +25,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -53,25 +53,28 @@ pub struct kafka_common_metrics_CompoundStat_NamedMeasurable_t {
 
 /// `record(MetricConfig config, double value, long timeMs)` of a C
 /// implementation: `config` is borrowed for the call.
-pub type kafka_common_metrics_CompoundStat_record_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    config: *const kafka_common_metrics_MetricConfig_t,
-    value: f64,
-    time_ms: i64,
-);
+pub type kafka_common_metrics_CompoundStat_record_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        config: *const kafka_common_metrics_MetricConfig_t,
+        value: f64,
+        time_ms: i64,
+    ),
+>;
 
 /// `stats()` of a C implementation: returns a list (`kafka_List_new`) of
 /// owned `kafka_common_metrics_CompoundStat_NamedMeasurable_t *` elements
 /// (`CompoundStat_NamedMeasurable_new`). Rust takes over the list and its
 /// elements, so the implementation never frees them.
-pub type kafka_common_metrics_CompoundStat_stats_fn_t = unsafe extern "C" fn(self_: *mut c_void) -> *mut kafka_List_t;
+pub type kafka_common_metrics_CompoundStat_stats_fn_t =
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> *mut kafka_List_t>;
 
 /// A C implementation of [`CompoundStat`] registered through
 /// `kafka_common_metrics_CompoundStat_new`.
 struct CCompoundStat {
     self_: *mut c_void,
-    record: kafka_common_metrics_CompoundStat_record_fn_t,
-    stats: kafka_common_metrics_CompoundStat_stats_fn_t,
+    record: Required<kafka_common_metrics_CompoundStat_record_fn_t>,
+    stats: Required<kafka_common_metrics_CompoundStat_stats_fn_t>,
 }
 
 // SAFETY: `self_` and the function pointers are what the C caller registered through
@@ -211,6 +214,8 @@ pub extern "C" fn kafka_common_metrics_CompoundStat_new(
     record: kafka_common_metrics_CompoundStat_record_fn_t,
     stats: kafka_common_metrics_CompoundStat_stats_fn_t,
 ) -> *mut kafka_common_metrics_CompoundStat_t {
+    let record = require_fn(record, "record");
+    let stats = require_fn(stats, "stats");
     let stat: Arc<dyn CompoundStat> = Arc::new(CCompoundStat { self_, record, stats });
     Interface::owned(stat) as *mut kafka_common_metrics_CompoundStat_t
 }
@@ -457,7 +462,7 @@ mod tests {
     }
     unsafe extern "C" fn c_stats(self_: *mut c_void) -> *mut kafka_List_t {
         let name = box_metric_name(MetricName::new("sum", "g", "d", BTreeMap::new()));
-        let stat = kafka_common_metrics_Measurable_new(self_, c_measure_sum, None);
+        let stat = kafka_common_metrics_Measurable_new(self_, Some(c_measure_sum), None);
         let list = kafka_List_new();
         // SAFETY: Test code: `list` comes from `kafka_List_new` and takes the owned pair, which
         // takes over `stat` and copies `name`; `name` comes from `box_metric_name` and is destroyed
@@ -485,7 +490,7 @@ mod tests {
     fn named_measurable_copies_the_name_and_shares_the_stat() {
         let name = box_metric_name(MetricName::new("n", "g", "d", BTreeMap::new()));
         let mut reading = 2.5_f64;
-        let stat = kafka_common_metrics_Measurable_new(&mut reading as *mut f64 as *mut c_void, c_measure, None);
+        let stat = kafka_common_metrics_Measurable_new(&mut reading as *mut f64 as *mut c_void, Some(c_measure), None);
         let config = kafka_common_metrics_MetricConfig_new();
         // SAFETY: Test code: `name` comes from `box_metric_name` and is destroyed once, after the
         // constructor copies it; `stat` comes from `kafka_common_metrics_Measurable_new` over the
@@ -509,7 +514,11 @@ mod tests {
     #[test]
     fn c_implementation_is_driven_through_the_trait_and_the_invokers() {
         let sum = Mutex::new(0.0_f64);
-        let handle = kafka_common_metrics_CompoundStat_new(&sum as *const Mutex<f64> as *mut c_void, c_record, c_stats);
+        let handle = kafka_common_metrics_CompoundStat_new(
+            &sum as *const Mutex<f64> as *mut c_void,
+            Some(c_record),
+            Some(c_stats),
+        );
         let config = MetricConfig::new();
         // SAFETY: Test code: `handle` comes from `kafka_common_metrics_CompoundStat_new` over the
         // `sum` local, which outlives it, and `take_compound_stat` consumes it, after which it is

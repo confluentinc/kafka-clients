@@ -52,7 +52,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_fn, require_ref};
 use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::{Arc, Weak};
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_with_offset_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -327,6 +327,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
     cb: kafka_consumer_ConsumerHandle_seek_with_offset_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -401,7 +402,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -441,6 +442,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
     cb: kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -514,7 +516,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -552,6 +554,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -622,7 +625,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_to_end_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -660,6 +663,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_end_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -728,7 +732,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_pause_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -766,6 +770,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     cb: kafka_consumer_ConsumerHandle_pause_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -837,7 +842,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_resume_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -875,6 +880,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     cb: kafka_consumer_ConsumerHandle_resume_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -947,7 +953,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
 /// The completion of the `_cb` twin: `value` on success, `-1` beside
 /// an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_position_cb_t =
-    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -985,6 +991,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
     cb: kafka_consumer_ConsumerHandle_position_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1058,7 +1065,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout(
 /// The completion of the `_cb` twin: `value` on success, `-1` beside
 /// an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_position_with_timeout_cb_t =
-    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1098,6 +1105,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     cb: kafka_consumer_ConsumerHandle_position_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1173,7 +1181,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_committed_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1214,6 +1222,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     cb: kafka_consumer_ConsumerHandle_committed_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1297,7 +1306,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_committed_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1340,6 +1349,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout_cb
     cb: kafka_consumer_ConsumerHandle_committed_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1419,7 +1429,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_partitions_for_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1460,6 +1470,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_cb(
     cb: kafka_consumer_ConsumerHandle_partitions_for_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1537,7 +1548,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1580,6 +1591,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
     cb: kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1647,7 +1659,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_list_topics_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1686,6 +1698,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_cb(
     cb: kafka_consumer_ConsumerHandle_list_topics_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1755,7 +1768,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1796,6 +1809,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout_
     cb: kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1868,7 +1882,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_beginning_offsets_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1909,6 +1923,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1988,7 +2003,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2031,6 +2046,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2107,7 +2123,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_end_offsets_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2148,6 +2164,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_end_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2227,7 +2244,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2270,6 +2287,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
     cb: kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2349,7 +2367,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
@@ -2391,6 +2409,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2472,7 +2491,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
@@ -2516,6 +2535,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2580,7 +2600,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2615,6 +2635,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
     cb: kafka_consumer_ConsumerHandle_commit_sync_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2677,7 +2698,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2714,6 +2735,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2783,7 +2805,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2820,6 +2842,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2895,7 +2918,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2934,6 +2957,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2995,7 +3019,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_async_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -3030,6 +3054,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
     cb: kafka_consumer_ConsumerHandle_commit_async_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -3113,7 +3138,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` and the `onComplete` calls the operation
 /// triggers are queued for `kafka_consumer_Consumer__execute_callbacks`.
@@ -3150,6 +3175,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
     cb: kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -3251,7 +3277,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` and the `onComplete` calls the operation
 /// triggers (on a `MockConsumer` handle, this commit's own `onComplete`
@@ -3291,6 +3317,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
     cb: kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -3456,7 +3483,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag(
 /// and a `lag` of 0 for `OptionalLong.empty()`, beside a null `error` on
 /// success; `present` 0 and a `lag` of 0 beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_current_lag_cb_t =
-    unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -3493,6 +3520,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag_cb(
     cb: kafka_consumer_ConsumerHandle_current_lag_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };

@@ -1309,7 +1309,7 @@ mod tests {
             let mock = kafka_producer_MockProducer_with_auto_complete(0);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), &value as *const i32 as *const c_void);
-            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
+            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, Some(on_completion));
 
             let mut err = std::ptr::null_mut();
             let future = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
@@ -1382,7 +1382,7 @@ mod tests {
             kafka_producer_Producer_begin_transaction(view, &raw mut err);
             assert!(err.is_null());
             for _ in 0..3 {
-                kafka_producer_Producer_send_cb(view, record, on_sent, &seen as *const Seen as *mut c_void);
+                kafka_producer_Producer_send_cb(view, record, Some(on_sent), &seen as *const Seen as *mut c_void);
             }
             // The commit drains the queued sends first, so they are committed.
             kafka_producer_Producer_commit_transaction(view, &raw mut err);
@@ -1438,9 +1438,9 @@ mod tests {
             kafka_producer_Producer_init_transactions(view, &raw mut err);
             assert!(err.is_null());
             for _ in 0..3 {
-                kafka_producer_Producer_send_cb(view, record, on_sent, &seen as *const Seen as *mut c_void);
+                kafka_producer_Producer_send_cb(view, record, Some(on_sent), &seen as *const Seen as *mut c_void);
             }
-            kafka_producer_Producer_begin_transaction_cb(view, on_operation, &seen as *const Seen as *mut c_void);
+            kafka_producer_Producer_begin_transaction_cb(view, Some(on_operation), &seen as *const Seen as *mut c_void);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while seen.completions.load(Ordering::SeqCst) == 0 {
                 assert!(std::time::Instant::now() < deadline, "begin_transaction_cb never completed");
@@ -1488,7 +1488,7 @@ mod tests {
             let mock = kafka_producer_MockProducer_with_auto_complete(0);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
-            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
+            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, Some(on_completion));
             let mut err = std::ptr::null_mut();
             let first = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
             assert!(err.is_null());
@@ -1516,7 +1516,7 @@ mod tests {
 
                 // A record completing after the flush began registers after its mark: the flush
                 // runs its callback too, but does not wait for its report.
-                let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
+                let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, Some(on_completion));
                 let second = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
                 assert!(err.is_null());
                 assert_eq!(kafka_producer_MockProducer_complete_next(mock), 1);
@@ -1567,7 +1567,7 @@ mod tests {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
-            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, on_completion);
+            let callback = kafka_producer_Callback_new(&seen as *const Seen as *mut c_void, Some(on_completion));
             let mut err = std::ptr::null_mut();
             let future = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
             assert!(err.is_null());
@@ -1618,7 +1618,7 @@ mod tests {
             let mock = kafka_producer_MockProducer_with_auto_complete(1);
             let view = kafka_producer_MockProducer__as_Producer(mock);
             let record = kafka_producer_ProducerRecord_new(topic.as_ptr(), std::ptr::null());
-            let callback = kafka_producer_Callback_new(view as *mut c_void, flush_and_close_from_the_callback);
+            let callback = kafka_producer_Callback_new(view as *mut c_void, Some(flush_and_close_from_the_callback));
             let mut err = std::ptr::null_mut();
             let future = kafka_producer_Producer_send_with_callback(view, record, callback, &raw mut err);
             assert!(err.is_null());
@@ -1685,7 +1685,7 @@ mod tests {
         unsafe {
             kafka_producer_Producer_close_cb(
                 kafka_producer_MockProducer__as_Producer(mock),
-                on_fired,
+                Some(on_fired),
                 fired.as_opaque(),
             );
             let mock = mock as usize;
@@ -1741,7 +1741,7 @@ mod tests {
         let (mock, serializer) = unsafe {
             let serializer = kafka_common_serialization_Serializer_new_async(
                 &pending as *const _ as *mut c_void,
-                serialize_later,
+                Some(serialize_later),
                 None,
                 None,
                 None,
@@ -1772,7 +1772,7 @@ mod tests {
                     let view = kafka_producer_MockProducer__as_Producer(mock.0 as *mut _);
                     let record =
                         kafka_producer_ProducerRecord_new(topic.as_ptr(), &value as *const i32 as *const c_void);
-                    kafka_producer_Producer_send_cb(view, record, on_sent, seen.0);
+                    kafka_producer_Producer_send_cb(view, record, Some(on_sent), seen.0);
                     returned_tx.send(()).unwrap();
                     // The submission task calls the serializer on the runtime.
                     let deadline = std::time::Instant::now() + Duration::from_secs(10);

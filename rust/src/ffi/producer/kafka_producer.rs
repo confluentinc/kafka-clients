@@ -74,27 +74,28 @@ type Handle = ProducerHandle<KafkaProducer<GenericValue, GenericValue>>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_init_transactions_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_begin_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_send_offsets_to_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_commit_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_abort_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of [`kafka_producer_KafkaProducer_send_cb`]: the same shape as
 /// `kafka_producer_Producer_send_cb_t`.
-pub type kafka_producer_KafkaProducer_send_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+pub type kafka_producer_KafkaProducer_send_cb_t = Option<
+    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+>;
 
 /// The serializer behind a `NULL` handle: the `void *` is a `kafka_Bytes_t *`
 /// and its bytes are the serialized form (`data == NULL` is Java's `null`),
@@ -933,7 +934,7 @@ mod tests {
         let asynchronous = unsafe {
             ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
                 std::ptr::null_mut(),
-                async_fn,
+                Some(async_fn),
                 None,
                 None,
                 None,
@@ -1030,14 +1031,26 @@ mod tests {
                 ("built-in", built_in, built_in, true),
                 (
                     "C key",
-                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
+                    kafka_common_serialization_Serializer_new_async(
+                        std::ptr::null_mut(),
+                        Some(async_fn),
+                        None,
+                        None,
+                        None,
+                    ),
                     std::ptr::null_mut(),
                     false,
                 ),
                 (
                     "C value",
                     built_in,
-                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
+                    kafka_common_serialization_Serializer_new_async(
+                        std::ptr::null_mut(),
+                        Some(async_fn),
+                        None,
+                        None,
+                        None,
+                    ),
                     false,
                 ),
             ];
@@ -1202,7 +1215,7 @@ mod tests {
                     kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
                 let gate = client.submission_gate.try_lock().expect("the gate is free");
                 for _ in 0..3 {
-                    kafka_producer_Producer_send_cb(view, record, record_send, sends_opaque);
+                    kafka_producer_Producer_send_cb(view, record, Some(record_send), sends_opaque);
                 }
                 let start = std::time::Instant::now();
                 if queued {
@@ -1210,7 +1223,7 @@ mod tests {
                     kafka_producer_Producer_close_with_timeout_cb(
                         view,
                         500,
-                        record_void,
+                        Some(record_void),
                         &closed as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
                     );
                     while closed.lock().unwrap().is_empty() {
@@ -1299,7 +1312,7 @@ mod tests {
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let started = Instant::now();
             for _ in 0..2 {
-                kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+                kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
             }
             while sends.lock().unwrap().len() < 2 {
                 assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
@@ -1344,7 +1357,7 @@ mod tests {
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
             wait_until("the record waits on a task of its own", || live_tasks(view) == 1);
             // Inside its `send`, waiting for the topic's metadata.
             std::thread::sleep(Duration::from_millis(100));
@@ -1398,7 +1411,7 @@ mod tests {
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let gate = client.submission_gate.try_lock().expect("the gate is free");
-            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
             let handle = producer as usize;
             std::thread::scope(|scope| {
                 let destroy = scope.spawn(move || kafka_producer_KafkaProducer_destroy(handle as *mut _));
@@ -1440,12 +1453,17 @@ mod tests {
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
-            kafka_producer_Producer_close_cb(view, record_void, &closes as *const _ as *mut c_void);
+            kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_close_cb(view, Some(record_void), &closes as *const _ as *mut c_void);
             // The send waits for the topic's metadata, on a task of its own.
             std::thread::sleep(std::time::Duration::from_millis(100));
             let start = std::time::Instant::now();
-            kafka_producer_Producer_close_with_timeout_cb(view, 0, record_void, &closes as *const _ as *mut c_void);
+            kafka_producer_Producer_close_with_timeout_cb(
+                view,
+                0,
+                Some(record_void),
+                &closes as *const _ as *mut c_void,
+            );
             kafka_producer_KafkaProducer_destroy(producer);
             let elapsed = start.elapsed();
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
@@ -1525,7 +1543,7 @@ mod tests {
             for _ in 0..SENDS {
                 let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
                     &delivered as *const std::sync::Mutex<Vec<Result<i64, String>>> as *mut c_void,
-                    record_delivery,
+                    Some(record_delivery),
                 );
                 futures.push(kafka_producer_KafkaProducer_send(producer, record, callback, &raw mut err));
                 assert!(err.is_null());
@@ -1578,7 +1596,7 @@ mod tests {
             let mut err = std::ptr::null_mut();
             crate::ffi::producer::kafka_producer_Producer_flush(ctx.view, &raw mut err);
             record_void(err, opaque);
-            crate::ffi::producer::kafka_producer_Producer_flush_cb(ctx.view, record_void, opaque);
+            crate::ffi::producer::kafka_producer_Producer_flush_cb(ctx.view, Some(record_void), opaque);
             let start = std::time::Instant::now();
             let mut err = std::ptr::null_mut();
             kafka_producer_Producer_close_with_timeout(ctx.view, 60_000, &raw mut err);
@@ -1623,7 +1641,7 @@ mod tests {
             let ctx = InCallback { view, outcomes: std::sync::Mutex::new(Vec::new()) };
             let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
                 &ctx as *const InCallback as *mut c_void,
-                flush_and_close_from_the_callback,
+                Some(flush_and_close_from_the_callback),
             );
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
@@ -1750,7 +1768,7 @@ mod tests {
             kafka_producer_Producer_close_with_timeout_cb(
                 view,
                 -1,
-                record_rejection,
+                Some(record_rejection),
                 &rejected as *const std::sync::Mutex<Option<String>> as *mut c_void,
             );
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
@@ -1793,7 +1811,7 @@ mod tests {
             kafka_producer_Producer_send_cb(
                 view,
                 record,
-                record_send,
+                Some(record_send),
                 &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
             );
             let elapsed = started.elapsed();
@@ -1845,7 +1863,7 @@ mod tests {
             kafka_producer_Producer_send_cb(
                 view,
                 record,
-                record_send,
+                Some(record_send),
                 &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
             );
             assert_eq!(

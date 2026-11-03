@@ -160,6 +160,20 @@ pub(crate) fn require_fn<F: Copy>(f: Option<F>, param: &'static str) -> F {
     }
 }
 
+/// A nullable C function-pointer typedef, `Option<unsafe extern "C" fn(..)>`.
+pub(crate) trait NullableFn {
+    /// The function pointer inside the `Option`.
+    type Bare: Copy;
+}
+
+impl<F: Copy> NullableFn for Option<F> {
+    type Bare = F;
+}
+
+/// The function pointer a nullable typedef `T` holds once [`require_fn`] has
+/// checked it, as a registration stores a mandatory method.
+pub(crate) type Required<T> = <T as NullableFn>::Bare;
+
 #[cfg(test)]
 mod tests {
     use super::*;

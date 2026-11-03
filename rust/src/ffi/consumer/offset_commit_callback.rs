@@ -47,6 +47,7 @@ use crate::ffi::common::{
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
 use crate::ffi::consumer::{Delivery, error_slot};
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{Required, require_fn};
 use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
 
 /// Opaque handle to an `OffsetCommitCallback` implementation registered
@@ -66,18 +67,20 @@ pub struct kafka_consumer_OffsetCommitCallback_t {
 /// Java's exception thrown from `onComplete`, which propagates out of the
 /// consumer call that ran the callback (`poll`, `commit_*`, `close`); the
 /// callbacks queued behind it run at the next such call.
-pub type kafka_consumer_OffsetCommitCallback_on_complete_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    offsets: *const kafka_Map_t,
-    error: *const kafka_common_Error_t,
-    callback_id: i64,
-);
+pub type kafka_consumer_OffsetCommitCallback_on_complete_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        offsets: *const kafka_Map_t,
+        error: *const kafka_common_Error_t,
+        callback_id: i64,
+    ),
+>;
 
 /// What a callback handle points at (see `ListenerRegistration`).
 #[derive(Clone, Copy)]
 pub(crate) struct CommitCallbackRegistration {
     self_: SendPtr,
-    on_complete: kafka_consumer_OffsetCommitCallback_on_complete_fn_t,
+    on_complete: Required<kafka_consumer_OffsetCommitCallback_on_complete_fn_t>,
 }
 
 impl CommitCallbackRegistration {
@@ -204,6 +207,7 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
     self_: *mut c_void,
     on_complete: kafka_consumer_OffsetCommitCallback_on_complete_fn_t,
 ) -> *mut kafka_consumer_OffsetCommitCallback_t {
+    let on_complete = require_fn(on_complete, "on_complete");
     Box::into_raw(Box::new(CommitCallbackRegistration { self_: SendPtr(self_), on_complete }))
         as *mut kafka_consumer_OffsetCommitCallback_t
 }
@@ -286,7 +290,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
 /// `error` is `NULL` on success, owned otherwise (the error `onComplete`
 /// reported).
 pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// Non-blocking `on_complete`: the method runs on the calling thread, `cb`
 /// fires with the reported error when its completion is reported (a
@@ -338,6 +342,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     cb: kafka_consumer_OffsetCommitCallback_on_complete_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live callback handle, as
     // `commit_callback_registration` requires.
     let registration = unsafe { commit_callback_registration(self_) };
@@ -440,7 +445,7 @@ mod tests {
     #[test]
     fn invoker_copies_its_arguments_and_waits_for_the_report() {
         let log = Log::default();
-        let handle = kafka_consumer_OffsetCommitCallback_new(&log as *const Log as *mut c_void, on_complete);
+        let handle = kafka_consumer_OffsetCommitCallback_new(&log as *const Log as *mut c_void, Some(on_complete));
         let offsets = HashMap::from([(TopicPartition::new("t", 0), OffsetAndMetadata::new(7).unwrap())]);
         let c_offsets = offset_and_metadata_map(&offsets);
         let error = box_error(Error::timeout("late"));
@@ -488,14 +493,14 @@ mod tests {
                 handle,
                 c_offsets,
                 std::ptr::null(),
-                cb,
+                Some(cb),
                 &fired as *const _ as *mut c_void,
             );
             kafka_consumer_OffsetCommitCallback_on_complete_cb(
                 handle,
                 c_offsets,
                 late,
-                cb,
+                Some(cb),
                 &fired as *const _ as *mut c_void,
             );
             kafka_common_Error_destroy(late);
@@ -512,7 +517,7 @@ mod tests {
     #[test]
     fn a_panicking_on_complete_cb_fires_cb_once_inline() {
         let log = Log::default();
-        let handle = kafka_consumer_OffsetCommitCallback_new(&log as *const Log as *mut c_void, on_complete);
+        let handle = kafka_consumer_OffsetCommitCallback_new(&log as *const Log as *mut c_void, Some(on_complete));
         let c_offsets = offset_and_metadata_map(&HashMap::new());
         let probe = Probe::default();
         fail_point::arm();
@@ -523,7 +528,7 @@ mod tests {
                 handle,
                 c_offsets,
                 std::ptr::null(),
-                on_error,
+                Some(on_error),
                 probe.as_opaque(),
             );
             kafka_Map_destroy(c_offsets);

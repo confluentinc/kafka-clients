@@ -34,7 +34,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -51,19 +51,21 @@ pub struct kafka_consumer_ConsumerGroupMetadata_t {
 }
 
 /// `String groupId()` of a C implementation: a borrowed string.
-pub type kafka_consumer_ConsumerGroupMetadata_group_id_fn_t = unsafe extern "C" fn(self_: *mut c_void) -> *const c_char;
+pub type kafka_consumer_ConsumerGroupMetadata_group_id_fn_t =
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
 
 /// `int generationId()` of a C implementation.
-pub type kafka_consumer_ConsumerGroupMetadata_generation_id_fn_t = unsafe extern "C" fn(self_: *mut c_void) -> i32;
+pub type kafka_consumer_ConsumerGroupMetadata_generation_id_fn_t =
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> i32>;
 
 /// `String memberId()` of a C implementation: a borrowed string.
 pub type kafka_consumer_ConsumerGroupMetadata_member_id_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void) -> *const c_char;
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
 
 /// `Optional<String> groupInstanceId()` of a C implementation: a borrowed
 /// string, or `NULL` for `Optional.empty()`.
 pub type kafka_consumer_ConsumerGroupMetadata_group_instance_id_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void) -> *const c_char;
+    Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
 
 /// What the handle points at: the metadata and lazily built NUL-terminated
 /// copies of its strings for the borrowed getters.
@@ -126,10 +128,10 @@ unsafe fn inner_ref<'a>(
 /// [`kafka_consumer_ConsumerGroupMetadata_new`].
 struct CGroupMetadata {
     self_: SendPtr,
-    group_id: kafka_consumer_ConsumerGroupMetadata_group_id_fn_t,
-    generation_id: kafka_consumer_ConsumerGroupMetadata_generation_id_fn_t,
-    member_id: kafka_consumer_ConsumerGroupMetadata_member_id_fn_t,
-    group_instance_id: kafka_consumer_ConsumerGroupMetadata_group_instance_id_fn_t,
+    group_id: Required<kafka_consumer_ConsumerGroupMetadata_group_id_fn_t>,
+    generation_id: Required<kafka_consumer_ConsumerGroupMetadata_generation_id_fn_t>,
+    member_id: Required<kafka_consumer_ConsumerGroupMetadata_member_id_fn_t>,
+    group_instance_id: Required<kafka_consumer_ConsumerGroupMetadata_group_instance_id_fn_t>,
 }
 
 impl CGroupMetadata {
@@ -237,6 +239,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     member_id: kafka_consumer_ConsumerGroupMetadata_member_id_fn_t,
     group_instance_id: kafka_consumer_ConsumerGroupMetadata_group_instance_id_fn_t,
 ) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
+    let group_id = require_fn(group_id, "group_id");
+    let generation_id = require_fn(generation_id, "generation_id");
+    let member_id = require_fn(member_id, "member_id");
+    let group_instance_id = require_fn(group_instance_id, "group_instance_id");
     box_group_metadata(Arc::new(CGroupMetadata {
         self_: SendPtr(self_),
         group_id,
@@ -404,10 +410,10 @@ mod tests {
         let handle = unsafe {
             kafka_consumer_ConsumerGroupMetadata_new(
                 &mut fixture as *mut Fixture as *mut c_void,
-                group_id,
-                generation_id,
-                member_id,
-                group_instance_id,
+                Some(group_id),
+                Some(generation_id),
+                Some(member_id),
+                Some(group_instance_id),
             )
         };
         // SAFETY: Test code: `handle` is an owned handle from `_new`, used here and destroyed once,
@@ -436,10 +442,10 @@ mod tests {
         let handle = unsafe {
             kafka_consumer_ConsumerGroupMetadata_new(
                 &mut fixture as *mut Fixture as *mut c_void,
-                group_id,
-                generation_id,
-                member_id,
-                group_instance_id,
+                Some(group_id),
+                Some(generation_id),
+                Some(member_id),
+                Some(group_instance_id),
             )
         };
         // SAFETY: Test code: `handle` is an owned handle from `_new`, used here and destroyed once,

@@ -291,7 +291,7 @@ mod tests {
         let asynchronous = unsafe {
             ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new_async(
                 std::ptr::null_mut(),
-                async_fn,
+                Some(async_fn),
                 None,
                 None,
                 None,
@@ -373,7 +373,7 @@ mod tests {
         let slot = AtomicPtr::new(std::ptr::null_mut());
         let handle = kafka_common_serialization_Deserializer_new_async(
             &slot as *const AtomicPtr<_> as *mut c_void,
-            unused,
+            Some(unused),
             None,
             Some(report_inline),
             None,
@@ -664,7 +664,7 @@ mod tests {
             kafka_consumer_Consumer_poll_cb(
                 consumer,
                 60_000,
-                record_poll,
+                Some(record_poll),
                 &fired as *const Fired as *mut std::ffi::c_void,
             );
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -760,7 +760,7 @@ mod tests {
             kafka_consumer_Consumer_current_lag_cb(
                 consumer,
                 tp,
-                record_lag,
+                Some(record_lag),
                 &fired as *const LagFired as *mut std::ffi::c_void,
             );
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

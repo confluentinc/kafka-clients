@@ -82,7 +82,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::future::Future;
@@ -268,7 +268,7 @@ impl Client {
     fn run_cb<F, Fut>(
         self: &Arc<Self>,
         fn_name: &'static str,
-        cb: kafka_admin_Admin_close_cb_t,
+        cb: Required<kafka_admin_Admin_close_cb_t>,
         opaque: *mut c_void,
         op: F,
     ) where
@@ -743,15 +743,15 @@ pub(crate) unsafe fn destroy_result<R, P>(handle: *mut P) {
 
 /// Completion of `close`: Java's `close()` is `void` and throws nothing, so
 /// the callback carries only the opaque pointer.
-pub type kafka_admin_Admin_close_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_admin_Admin_close_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 /// Completion of `close(Duration)`: Java's `close(Duration)` is `void` and
 /// throws nothing, so the callback carries only the opaque pointer.
-pub type kafka_admin_Admin_close_with_timeout_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_admin_Admin_close_with_timeout_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 /// The hook fired once each time the callback vector goes from empty to
 /// non-empty, from a Rust task: it may only schedule a later
 /// [`kafka_admin_Admin__execute_callbacks`], never run callbacks.
-pub type kafka_admin_Admin_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_admin_Admin_callbacks_notify_fn_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 // ---------------------------------------------------------------------------
 // Close
@@ -801,6 +801,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
     cb: kafka_admin_Admin_close_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call, the task getting its own `Arc`s.
     unsafe { client_ref(self_, "self_") }.run_cb("kafka_admin_Admin_close_cb", cb, opaque, |admin| async move {
@@ -868,6 +869,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout_cb(
     cb: kafka_admin_Admin_close_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     let timeout = close_timeout(timeout);
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call, the task getting its own `Arc`s.
@@ -924,6 +926,7 @@ pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
     notify: kafka_admin_Admin_callbacks_notify_fn_t,
     opaque: *mut c_void,
 ) {
+    let notify = require_fn(notify, "notify");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call. `opaque` stays valid while the hook is
     // installed and until a call in flight returns, as the doc requires.
@@ -1056,10 +1059,10 @@ mod tests {
 
             let close = Probe::default();
             fail_point::arm();
-            kafka_admin_Admin_close_cb(admin, on_opaque, close.as_opaque());
+            kafka_admin_Admin_close_cb(admin, Some(on_opaque), close.as_opaque());
             let close_with_timeout = Probe::default();
             fail_point::arm();
-            kafka_admin_Admin_close_with_timeout_cb(admin, 0, on_opaque, close_with_timeout.as_opaque());
+            kafka_admin_Admin_close_with_timeout_cb(admin, 0, Some(on_opaque), close_with_timeout.as_opaque());
 
             assert!(close.fired().is_empty(), "queued, not fired");
             assert!(close_with_timeout.fired().is_empty(), "queued, not fired");
@@ -1171,7 +1174,7 @@ mod tests {
             let result = kafka_admin_Admin_list_topics(admin);
             let names = kafka_admin_ListTopicsResult_names(result);
             let fired = Fired::default();
-            kafka_common_KafkaFuture_get_cb(names, record_completion, &fired as *const Fired as *mut c_void);
+            kafka_common_KafkaFuture_get_cb(names, Some(record_completion), &fired as *const Fired as *mut c_void);
             let blocking = names as usize;
             let getter = std::thread::spawn(move || {
                 let mut err = std::ptr::null_mut();
@@ -1290,7 +1293,7 @@ mod tests {
             let result = kafka_admin_Admin_list_topics(admin);
             let names = kafka_admin_ListTopicsResult_names(result);
             let fired = Fired::default();
-            kafka_common_KafkaFuture_get_cb(names, record_completion, &fired as *const Fired as *mut c_void);
+            kafka_common_KafkaFuture_get_cb(names, Some(record_completion), &fired as *const Fired as *mut c_void);
             let blocking = names as usize;
             let (got_tx, got_rx) = std::sync::mpsc::channel();
             // A `get` and a `get_with_timeout`.
@@ -1385,7 +1388,7 @@ mod tests {
             let result = kafka_admin_Admin_list_topics(admin);
             let close = Probe::default();
             let started = std::time::Instant::now();
-            kafka_admin_Admin_close_with_timeout_cb(admin, 1500, on_opaque, close.as_opaque());
+            kafka_admin_Admin_close_with_timeout_cb(admin, 1500, Some(on_opaque), close.as_opaque());
             kafka_admin_Admin_destroy(admin);
             let elapsed = started.elapsed();
             assert!(
@@ -1410,7 +1413,11 @@ mod tests {
             let mut err = std::ptr::null_mut();
             let mock = built_mock(&mut err);
             assert!(err.is_null());
-            kafka_admin_Admin_close_cb(kafka_admin_MockAdminClient__as_Admin(mock), complete_close, fired.as_opaque());
+            kafka_admin_Admin_close_cb(
+                kafka_admin_MockAdminClient__as_Admin(mock),
+                Some(complete_close),
+                fired.as_opaque(),
+            );
             let mock = mock as usize;
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             runtime.block_on(async move { kafka_admin_MockAdminClient_destroy(mock as *mut _) });

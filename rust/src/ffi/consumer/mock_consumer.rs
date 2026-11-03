@@ -46,6 +46,7 @@ use crate::ffi::consumer::{
     kafka_consumer_Consumer_t,
 };
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_fn;
 use crate::ffi::util::{GenericValue, c_str_to_string, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`MockConsumer`] over `void *` key and value.
@@ -454,7 +455,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 
 /// The completion of [`kafka_consumer_MockConsumer_rebalance_cb`].
 pub type kafka_consumer_MockConsumer_rebalance_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// Simulate a rebalance event.
 ///
@@ -490,6 +491,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     cb: kafka_consumer_MockConsumer_rebalance_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
@@ -569,7 +571,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
 
 /// The completion of [`kafka_consumer_MockConsumer_lose_partitions_cb`].
 pub type kafka_consumer_MockConsumer_lose_partitions_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// Non-blocking `lose_partitions`: the listener's callbacks and `cb` are queued
 /// for `kafka_consumer_Consumer__execute_callbacks`.
@@ -603,6 +605,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions_cb(
     cb: kafka_consumer_MockConsumer_lose_partitions_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
@@ -914,8 +917,12 @@ mod tests {
     /// been copied.
     unsafe fn subscribe(consumer: *mut kafka_consumer_Consumer_t, probe: &ListenerProbe) {
         probe.consumer.store(consumer, SeqCst);
-        let listener =
-            kafka_consumer_ConsumerRebalanceListener_new(probe.as_self(), probe_revoked, probe_assigned, None);
+        let listener = kafka_consumer_ConsumerRebalanceListener_new(
+            probe.as_self(),
+            Some(probe_revoked),
+            Some(probe_assigned),
+            None,
+        );
         let topics = kafka_List_new();
         // SAFETY: Test code: `topics` is a live list and the element a static NUL-terminated
         // literal.
@@ -986,7 +993,7 @@ mod tests {
         unsafe {
             kafka_consumer_Consumer__set_callbacks_notify(
                 consumer,
-                count_notify,
+                Some(count_notify),
                 &notifies as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1002,7 +1009,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1107,7 +1114,7 @@ mod tests {
         unsafe {
             kafka_consumer_Consumer__set_callbacks_notify(
                 consumer,
-                count_notify,
+                Some(count_notify),
                 &notifies as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1126,7 +1133,7 @@ mod tests {
             kafka_consumer_MockConsumer_lose_partitions_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1149,7 +1156,7 @@ mod tests {
             kafka_consumer_MockConsumer_lose_partitions_cb(
                 mock,
                 assignment,
-                store_completion,
+                Some(store_completion),
                 &failed as *const Mutex<Option<Option<Error>>> as *mut c_void,
             )
         };
@@ -1187,7 +1194,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1292,7 +1299,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1406,7 +1413,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1506,7 +1513,7 @@ mod tests {
         unsafe {
             let void = Probe::default();
             fail_point::arm();
-            kafka_consumer_Consumer_commit_sync_cb(consumer, on_error, void.as_opaque());
+            kafka_consumer_Consumer_commit_sync_cb(consumer, Some(on_error), void.as_opaque());
             assert!(void.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             void.assert_one_panic("kafka_consumer_Consumer_commit_sync_cb", fail_point::MESSAGE);
@@ -1514,21 +1521,21 @@ mod tests {
 
             let int = Probe::default();
             fail_point::arm();
-            kafka_consumer_Consumer_position_cb(consumer, tp, on_i64, int.as_opaque());
+            kafka_consumer_Consumer_position_cb(consumer, tp, Some(on_i64), int.as_opaque());
             assert!(int.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             int.assert_one_panic("kafka_consumer_Consumer_position_cb", fail_point::MESSAGE);
 
             let value = Probe::default();
             fail_point::arm();
-            kafka_consumer_Consumer_poll_cb(consumer, 0, on_value, value.as_opaque());
+            kafka_consumer_Consumer_poll_cb(consumer, 0, Some(on_value), value.as_opaque());
             assert!(value.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             value.assert_one_panic("kafka_consumer_Consumer_poll_cb", fail_point::MESSAGE);
 
             let mock_void = Probe::default();
             fail_point::arm();
-            kafka_consumer_MockConsumer_rebalance_cb(mock, partitions, on_error, mock_void.as_opaque());
+            kafka_consumer_MockConsumer_rebalance_cb(mock, partitions, Some(on_error), mock_void.as_opaque());
             assert!(mock_void.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             mock_void.assert_one_panic("kafka_consumer_MockConsumer_rebalance_cb", fail_point::MESSAGE);
@@ -1557,7 +1564,7 @@ mod tests {
             with_mock(mock, |m| m.schedule_poll_task(Box::new(|_| panic!("poll task panicked"))))
                 .expect("no other call in flight");
             let probe = Probe::default();
-            kafka_consumer_Consumer_poll_cb(consumer, 0, on_value, probe.as_opaque());
+            kafka_consumer_Consumer_poll_cb(consumer, 0, Some(on_value), probe.as_opaque());
             drain_one(consumer, &probe);
             probe.assert_one_panic("kafka_consumer_Consumer_poll_cb", "poll task panicked");
 
@@ -1580,10 +1587,10 @@ mod tests {
             let handle = kafka_consumer_Consumer_handle(consumer);
             let queued = Probe::default();
             fail_point::arm();
-            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, on_error, queued.as_opaque());
+            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, Some(on_error), queued.as_opaque());
             let int = Probe::default();
             fail_point::arm();
-            kafka_consumer_ConsumerHandle_position_cb(handle, tp, on_i64, int.as_opaque());
+            kafka_consumer_ConsumerHandle_position_cb(handle, tp, Some(on_i64), int.as_opaque());
             assert!(queued.fired().is_empty() && int.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 2);
             queued.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
@@ -1592,7 +1599,7 @@ mod tests {
 
             let inline = Probe::default();
             fail_point::arm();
-            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, on_error, inline.as_opaque());
+            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, Some(on_error), inline.as_opaque());
             inline.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
             assert_eq!(queued.fired().len() + int.fired().len(), 2, "no second completion");
 
@@ -1723,7 +1730,7 @@ mod tests {
             kafka_consumer_Consumer_current_lag_cb(
                 consumer,
                 tp,
-                record_lag,
+                Some(record_lag),
                 &fired as *const Mutex<Vec<(i8, i64, bool)>> as *mut c_void,
             );
         }
@@ -1754,7 +1761,7 @@ mod tests {
         unsafe {
             kafka_consumer_Consumer_close_cb(
                 kafka_consumer_MockConsumer__as_Consumer(mock),
-                on_fired,
+                Some(on_fired),
                 fired.as_opaque(),
             );
             let mock = mock as usize;
