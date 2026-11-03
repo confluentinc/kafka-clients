@@ -2421,6 +2421,21 @@ public sealed class AdminP14SyncCompositionTests
         Assert.Equal(new ArgumentNullException(parameterName).Message, failure.Message);
     }
 
+    private static string KeyNotFoundMessage<TKey>(TKey key)
+        where TKey : notnull
+    {
+        try
+        {
+            _ = new Dictionary<TKey, int>()[key];
+        }
+        catch (KeyNotFoundException failure)
+        {
+            return failure.Message;
+        }
+
+        throw new InvalidOperationException("An empty dictionary found a key.");
+    }
+
     private static async Task RunKeyedRow<TKey>(string row, KeyedHarness<TKey> harness, TKey unknown)
         where TKey : notnull
     {
@@ -2503,7 +2518,7 @@ public sealed class AdminP14SyncCompositionTests
                 {
                     // The per-key dictionary is the only key-taking member: it fails as a dictionary does, at the call.
                     KeyNotFoundException failure = Assert.IsType<KeyNotFoundException>(harness.CallIndexer(unknown));
-                    Assert.Equal($"The given key '{unknown}' was not present in the dictionary.", failure.Message);
+                    Assert.Equal(KeyNotFoundMessage(unknown), failure.Message);
                     Assert.False(harness.TryGetValue(unknown));
                     Assert.False(harness.ContainsKey(unknown));
                     break;

@@ -165,7 +165,11 @@ public sealed class PublicConsumerOwnerCheckTests
                         await consumer.Seek(s_tp0, call).ConfigureAwait(false);
                         callers.Add(Environment.CurrentManagedThreadId);
                         Assert.Equal(new[] { s_tp0 }, consumer.Assignment());
-                        await Task.Run(() => { }).ConfigureAwait(false);
+                        await Task.Factory.StartNew(
+                            () => Thread.Sleep(10),
+                            CancellationToken.None,
+                            TaskCreationOptions.LongRunning,
+                            TaskScheduler.Default).ConfigureAwait(false);
                     }
                 },
                 s_deadline);
