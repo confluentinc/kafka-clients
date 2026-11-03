@@ -16,7 +16,7 @@
 //! (CLAUDE.md §4). Java's `Optional<GroupType>` and `Optional<GroupState>`
 //! cross as a nullable singleton pointer: null is `Optional.empty()`.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -25,7 +25,7 @@ use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupListing`].
 #[repr(C)]
@@ -138,11 +138,11 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
     box_group_listing(GroupListing::new(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(group_id) },
+        unsafe { require_str(group_id, "group_id") },
         group_type,
         // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(protocol) },
+        // `require_str` requires.
+        unsafe { require_str(protocol, "protocol") },
         group_state,
     ))
 }

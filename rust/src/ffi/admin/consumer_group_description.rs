@@ -20,7 +20,7 @@
 //! the broker did not report them; `Optional<Integer> groupEpoch()` and
 //! `targetAssignmentEpoch()` cross as `-1` when empty.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ConsumerGroupDescription, MemberDescription};
@@ -32,7 +32,7 @@ use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ConsumerGroupDescription`].
 #[repr(C)]
@@ -190,16 +190,16 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_new(
 ) -> *mut kafka_admin_ConsumerGroupDescription_t {
     box_consumer_group_description(ConsumerGroupDescription::new(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(group_id) },
+        // `require_str` requires.
+        unsafe { require_str(group_id, "group_id") },
         is_simple_consumer_group != 0,
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
         unsafe { list_member_descriptions(members, "members") },
         // SAFETY: Per this function's `# Safety`, `partition_assignor` is a valid NUL-terminated
-        // string, as `c_str_to_string` requires.
-        unsafe { c_str_to_string(partition_assignor) },
+        // string, as `require_str` requires.
+        unsafe { require_str(partition_assignor, "partition_assignor") },
         // SAFETY: Per this function's `# Safety`, `group_type` is a `kafka_common_GroupType_t`
         // singleton, as `group_type::value_of` requires.
         unsafe { group_type::value_of(group_type, "group_type") },

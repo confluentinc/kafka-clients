@@ -21,7 +21,7 @@
 //! handle. The replica lists are `java.util.List<Node>`s and cross as owned
 //! `kafka_List_t`s of node copies.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::PartitionInfo;
@@ -29,9 +29,7 @@ use crate::ffi::common::node::{
     NodeInner, kafka_common_Node_t, list_nodes, node_list, optional_node, optional_node_ptr,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
-};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`PartitionInfo`].
 #[repr(C)]
@@ -164,9 +162,9 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
 ) -> *mut kafka_common_PartitionInfo_t {
     box_partition_info(PartitionInfo::new(
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(topic) },
+        unsafe { require_str(topic, "topic") },
         partition,
         // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
         // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
@@ -209,9 +207,9 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_with_offline_replicas(
 ) -> *mut kafka_common_PartitionInfo_t {
     box_partition_info(PartitionInfo::with_offline_replicas(
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(topic) },
+        unsafe { require_str(topic, "topic") },
         partition,
         // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
         // `optional_node` requires; the node is cloned, so nothing borrows it after this call.

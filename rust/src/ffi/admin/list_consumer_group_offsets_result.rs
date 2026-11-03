@@ -33,7 +33,8 @@ use crate::ffi::consumer::offset_and_metadata::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_string};
+use crate::ffi::precondition::require_str;
+use crate::ffi::util::{box_map, box_string_keyed_map};
 
 /// Opaque handle to a [`ListConsumerGroupOffsetsResult`], owned and freed
 /// with [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`].
@@ -198,8 +199,8 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into a `String` during the call.
-    let group_id = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied into a `String` during the call.
+    let group_id = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `out_err`
     // is a valid slot, as `deliver_value` requires. For `handle_future`, `destroy_map_element` frees
     // exactly the map `group_offsets_map` makes through `box_map`, and the handle holds only owned

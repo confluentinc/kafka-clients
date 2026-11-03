@@ -15,7 +15,7 @@
 //! C bindings for `org.apache.kafka.clients.admin.CreateTopicsResult` and
 //! its nested `CreateTopicsResult.TopicMetadataAndConfig`.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::{CreateTopicsResult, TopicMetadataAndConfig};
@@ -27,7 +27,7 @@ use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_destroy, kafka_common
 use crate::ffi::common::{kafka_common_Error_t, take_error};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{c_str_to_string, kafka_Map_t};
+use crate::ffi::util::kafka_Map_t;
 
 // ---------------------------------------------------------------------------
 // CreateTopicsResult.TopicMetadataAndConfig
@@ -305,8 +305,8 @@ where
     T: Clone + Send + Sync + 'static,
 {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into a `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into a `String`.
+    let topic = unsafe { require_str(topic, "topic") };
     if h.result.values().contains_key(&topic) {
         get(&h.result, &topic)
     } else {

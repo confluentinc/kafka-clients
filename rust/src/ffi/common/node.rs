@@ -20,7 +20,7 @@
 //! `Cluster`, the admin descriptions) stores [`NodeInner`]s so the pointers
 //! it hands out stay valid for its own lifetime.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 use std::sync::LazyLock;
@@ -28,8 +28,7 @@ use std::sync::LazyLock;
 use crate::common::Node;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
-    box_list, c_str_to_option, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements,
-    owned_c_string,
+    box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
 };
 
 /// Opaque handle to a [`Node`] (broker).
@@ -151,9 +150,9 @@ pub(crate) unsafe fn list_nodes(list: *const kafka_List_t, param: &'static str) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, port: i32) -> *mut kafka_common_Node_t {
     // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    box_node(Node::new(id, unsafe { c_str_to_string(host) }, port))
+    box_node(Node::new(id, unsafe { require_str(host, "host") }, port))
 }
 
 /// Creates a node that is not fenced.
@@ -178,9 +177,9 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
     rack: *const c_char,
 ) -> *mut kafka_common_Node_t {
     // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `rack` null or one, as `c_str_to_option` requires; both are
+    // `require_str` requires, and `rack` null or one, as `c_str_to_option` requires; both are
     // copied into owned values, so nothing borrows them after this call.
-    box_node(Node::with_rack(id, unsafe { c_str_to_string(host) }, port, unsafe {
+    box_node(Node::with_rack(id, unsafe { require_str(host, "host") }, port, unsafe {
         c_str_to_option(rack)
     }))
 }
@@ -211,9 +210,9 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack_is_fenced(
     box_node(Node::with_rack_is_fenced(
         id,
         // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(host) },
+        unsafe { require_str(host, "host") },
         port,
         // SAFETY: Per this function's `# Safety`, `rack` is null or a valid NUL-terminated string,
         // as `c_str_to_option` requires; it is copied into an owned value, so nothing borrows it

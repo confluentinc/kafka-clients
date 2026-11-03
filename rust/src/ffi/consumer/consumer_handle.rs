@@ -52,7 +52,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_fn, require_ref};
+use crate::ffi::precondition::{require_fn, require_ref, require_str};
 use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::{Arc, Weak};
@@ -82,7 +82,7 @@ use crate::ffi::consumer::{
     topic_partition_info_map,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`ConsumerHandle`].
 // Rust-only: a listener reenters the consumer through it (consumer-threading.md §31, §41), as a Java listener captures the consumer
@@ -1415,8 +1415,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for(
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_partitions_for", async move {
         h.partitions_for(&topic).await
@@ -1475,8 +1475,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_cb(
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1534,8 +1534,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_partitions_for_with_timeout", async move {
         h.partitions_for_with_timeout(&topic, ms(timeout)?).await
@@ -1596,8 +1596,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(

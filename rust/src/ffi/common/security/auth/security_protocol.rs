@@ -23,8 +23,8 @@ use std::ptr;
 
 use crate::common::security::auth::SecurityProtocol;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_ref;
-use crate::ffi::util::{box_string_list, c_str_to_string, into_c_string, kafka_List_t};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{box_string_list, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`SecurityProtocol`] value; only the four singletons
 /// exist, never freed, comparable with `==`.
@@ -246,9 +246,9 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_for_name(
     name: *const c_char,
 ) -> *const kafka_common_security_auth_SecurityProtocol_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    optional_singleton(SecurityProtocol::for_name(&unsafe { c_str_to_string(name) }))
+    optional_singleton(SecurityProtocol::for_name(&unsafe { require_str(name, "name") }))
 }
 
 /// Returns the names of all security protocols, in id order.

@@ -205,7 +205,7 @@ use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition
 use crate::ffi::common::topic_partition_replica::topic_partition_replica_ref;
 use crate::ffi::consumer::offset_and_metadata::map_offset_and_metadata;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use crate::ffi::util::{
     c_str_to_string, kafka_Bytes_t, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries,
 };
@@ -1572,8 +1572,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction(
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is null or a NUL-terminated
-    // string, as `c_str_to_string` requires; it is copied.
-    let transactional_id_ = unsafe { c_str_to_string(transactional_id) };
+    // string, as `require_str` requires; it is copied.
+    let transactional_id_ = unsafe { require_str(transactional_id, "transactional_id") };
     let result = client.call(|admin| admin.force_terminate_transaction(&transactional_id_));
     box_terminate_transaction_result(result, &client.future_ctx())
 }
@@ -1609,8 +1609,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction_with_opti
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is null or a NUL-terminated
-    // string, as `c_str_to_string` requires; it is copied.
-    let transactional_id_ = unsafe { c_str_to_string(transactional_id) };
+    // string, as `require_str` requires; it is copied.
+    let transactional_id_ = unsafe { require_str(transactional_id, "transactional_id") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_TerminateTransactionOptions_t` handle that no other call mutates during this
     // one, so no setter runs on it while it is cloned, as `terminate_transaction_options_ref`
@@ -3142,8 +3142,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     let result = client.call(|admin| admin.list_consumer_group_offsets_with_group_id(&group_id_));
     box_list_consumer_group_offsets_result(result, &client.future_ctx())
 }
@@ -3177,8 +3177,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_ListConsumerGroupOffsetsOptions_t` handle that no other call mutates during this
     // one, so no setter runs on it while it is cloned, as `list_consumer_group_offsets_options_ref`
@@ -3333,8 +3333,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
     // `const kafka_common_TopicPartition_t *` keys to `const kafka_consumer_OffsetAndMetadata_t *`
     // values, all live, that no other call mutates during this one, as `map_offset_and_metadata`
@@ -3383,8 +3383,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_opt
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
     // `const kafka_common_TopicPartition_t *` keys to `const kafka_consumer_OffsetAndMetadata_t *`
     // values, all live, that no other call mutates during this one, as `map_offset_and_metadata`
@@ -3435,8 +3435,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
@@ -3484,8 +3484,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_op
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
@@ -3618,8 +3618,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_remove_members_from_consumer_group_wi
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let group_id_ = unsafe { c_str_to_string(group_id) };
+    // `require_str` requires; it is copied.
+    let group_id_ = unsafe { require_str(group_id, "group_id") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_RemoveMembersFromConsumerGroupOptions_t` handle that no other call mutates
     // during this one, so no setter runs on it while it is cloned, as

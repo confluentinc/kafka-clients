@@ -24,8 +24,8 @@ use std::sync::LazyLock;
 
 use crate::common::ClassicGroupState;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_ref;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupState`] singleton.
 #[repr(C)]
@@ -198,9 +198,9 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_parse(
     name: *const c_char,
 ) -> *const kafka_common_ClassicGroupState_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    singleton(ClassicGroupState::parse(&unsafe { c_str_to_string(name) }))
+    singleton(ClassicGroupState::parse(&unsafe { require_str(name, "name") }))
 }
 
 /// Returns the state's name, the text the broker sends and `kafka_common_ClassicGroupState_parse` reads (`PreparingRebalance`).

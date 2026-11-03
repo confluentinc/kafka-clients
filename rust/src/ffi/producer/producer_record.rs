@@ -30,7 +30,7 @@
 //! `RecordHeaders`), so the handle passed to a constructor stays the
 //! caller's.
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::ffi::precondition::{require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::Error;
@@ -42,7 +42,7 @@ use crate::ffi::common::header::internals::record_headers::{
 };
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{GenericValue, c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{GenericValue, into_c_string, owned_c_string};
 use crate::producer::{ProducerRecord, ProducerRecordOptions, ProducerRecordOptionsBuilder};
 
 /// The record type every producer handle works with.
@@ -157,8 +157,11 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
     value: *const c_void,
 ) -> *mut kafka_producer_ProducerRecord_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    box_producer_record(ProducerRecord::new(unsafe { c_str_to_string(topic) }, generic(value)))
+    // `require_str` requires; it is copied into an owned `String`.
+    box_producer_record(ProducerRecord::new(
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
+        generic(value),
+    ))
 }
 
 /// `new ProducerRecord(String topic, K key, V value)`.
@@ -184,8 +187,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
 ) -> *mut kafka_producer_ProducerRecord_t {
     box_producer_record(ProducerRecord::with_key(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         generic(key),
         generic(value),
     ))
@@ -228,8 +231,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
 ) -> *mut kafka_producer_ProducerRecord_t {
     let result = ProducerRecord::with_partition_key(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         optional_partition(partition),
         generic(key),
         generic(value),
@@ -279,8 +282,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_header
 ) -> *mut kafka_producer_ProducerRecord_t {
     let result = ProducerRecord::with_partition_key_headers(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         optional_partition(partition),
         generic(key),
         generic(value),
@@ -335,8 +338,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_timestamp_
 ) -> *mut kafka_producer_ProducerRecord_t {
     let result = ProducerRecord::with_partition_timestamp_key(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         optional_partition(partition),
         optional_timestamp(timestamp),
         generic(key),
@@ -629,8 +632,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_topic(
     topic: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_topic(topic)) };
@@ -835,7 +838,7 @@ mod tests {
         kafka_common_header_internals_RecordHeaders_destroy, kafka_common_header_internals_RecordHeaders_new,
     };
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::util::kafka_string_destroy;
+    use crate::ffi::util::{c_str_to_string, kafka_string_destroy};
 
     #[test]
     fn constructors_keep_the_pointers_and_map_null_to_minus_one() {

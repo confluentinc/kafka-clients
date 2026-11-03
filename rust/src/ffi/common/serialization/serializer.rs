@@ -45,7 +45,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_fn, require_ref};
+use crate::ffi::precondition::{Required, require_fn, require_ref, require_str};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
@@ -72,7 +72,7 @@ use crate::ffi::common::{
     take_error,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{GenericValue, c_str_to_string, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, owned_c_string};
+use crate::ffi::util::{GenericValue, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, owned_c_string};
 
 /// Opaque handle to a [`Serializer`] implementation over the `void *`
 /// representation.
@@ -836,8 +836,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and `out_err` as
     // `invoke` requires; `data` is null or the representation the implementation reads, alive and
     // unchanged for this call, which returns only once the implementation returned or reported.
@@ -895,7 +895,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_cb(
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, `data` valid
     // until `cb` fires and `cb` a valid completion.
     unsafe { invoke_cb(self_, &topic, None, data, cb, opaque) }
@@ -941,7 +941,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     out_err: *mut *mut kafka_common_Error_t,
 ) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
     // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
     let headers = unsafe { record_headers_mut(headers, "headers") };
@@ -1003,7 +1003,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
     // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
     let headers = ptr::from_mut(unsafe { record_headers_mut(headers, "headers") });

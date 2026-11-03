@@ -20,7 +20,7 @@
 //! (`upgraded`). The two assignment getters return borrowed handles valid as
 //! long as the description.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -29,7 +29,7 @@ use crate::ffi::admin::member_assignment::{
     kafka_admin_MemberAssignment_t, member_assignment_ptr, member_assignment_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_option, c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`MemberDescription`].
 #[repr(C)]
@@ -160,8 +160,8 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
     };
     box_member_description(MemberDescription::new(
         // SAFETY: Per this function's `# Safety`, `member_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(member_id) },
+        // `require_str` requires.
+        unsafe { require_str(member_id, "member_id") },
         // SAFETY: Per this function's `# Safety`, `group_instance_id` is null or a valid
         // NUL-terminated string, as `c_str_to_option` requires.
         unsafe { c_str_to_option(group_instance_id) },
@@ -170,10 +170,10 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
         unsafe { c_str_to_option(rack_id) },
         // SAFETY: Per this function's `# Safety`, `client_id` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(client_id) },
+        unsafe { require_str(client_id, "client_id") },
         // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(host) },
+        // `require_str` requires.
+        unsafe { require_str(host, "host") },
         // SAFETY: Per this function's `# Safety`, `assignment` is a valid member-assignment handle,
         // kept alive for this call, as `member_assignment_ref` requires; the borrow ends with the
         // clone.

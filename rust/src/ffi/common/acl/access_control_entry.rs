@@ -15,7 +15,7 @@
 //! `kafka_common_acl_AccessControlEntry_t`:
 //! `org.apache.kafka.common.acl.AccessControlEntry` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::acl::AccessControlEntry;
@@ -31,7 +31,7 @@ use crate::ffi::common::acl::acl_permission_type::{
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to an [`AccessControlEntry`].
 #[repr(C)]
@@ -131,11 +131,11 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
         // SAFETY: Per this function's `# Safety`, `principal` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(principal) },
+        unsafe { require_str(principal, "principal") },
         // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(host) },
+        unsafe { require_str(host, "host") },
         // SAFETY: Per this function's `# Safety`, `operation` is a singleton of its enum, i.e. one
         // returned by the `acl_operation` module, as `operation_of` (`acl_operation::value_of`)
         // requires; the value is copied out.

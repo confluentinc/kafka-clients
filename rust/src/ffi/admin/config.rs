@@ -16,7 +16,7 @@
 //! (CLAUDE.md §4). `get` returns a borrowed entry handle valid as long as
 //! the config; `entries` returns owned copies.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 
@@ -25,7 +25,7 @@ use crate::ffi::admin::config_entry::{
     ConfigEntryInner, box_config_entry, config_entry_ref, destroy_config_entry_element, kafka_admin_ConfigEntry_t,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`Config`].
 #[repr(C)]
@@ -172,8 +172,8 @@ pub unsafe extern "C" fn kafka_admin_Config_get(
     name: *const c_char,
 ) -> *const kafka_admin_ConfigEntry_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires.
-    let name = unsafe { c_str_to_string(name) };
+    // `require_str` requires.
+    let name = unsafe { require_str(name, "name") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config handle, kept alive for this
     // call, as `inner_ref` requires; the returned view points at a `ConfigEntryInner` stored in the
     // `entries` map of the boxed `ConfigInner`, which nothing mutates, so it stays in place until

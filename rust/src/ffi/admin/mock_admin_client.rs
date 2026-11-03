@@ -51,9 +51,7 @@ use crate::ffi::common::topic_partition::map_topic_partition_i64;
 use crate::ffi::common::topic_partition_info::topic_partition_info_ref;
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    c_str_to_string, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries, map_strings,
-};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries, map_strings};
 
 /// Opaque handle to a [`MockAdminClient`].
 #[repr(C)]
@@ -300,9 +298,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     configs: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `c_str_to_string` requires;
+    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `require_str` requires;
     // it is copied.
-    let name = unsafe { c_str_to_string(name) };
+    let name = unsafe { require_str(name, "name") };
     let partitions = if partitions.is_null() {
         Vec::new()
     } else {
@@ -357,9 +355,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
     name: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `c_str_to_string` requires;
+    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `require_str` requires;
     // it is copied.
-    let name = unsafe { c_str_to_string(name) };
+    let name = unsafe { require_str(name, "name") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
     // constructor, kept alive for this call, as `mock_ref` requires.
     let result = unsafe { mock_ref(self_, "self_") }.mark_topic_for_deletion(&name);
@@ -447,9 +445,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_fetches_remaining_until
     fetches_remaining_until_visible: i32,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `topic_name` is a C string, as `c_str_to_string`
+    // SAFETY: Per this function's `# Safety`, `topic_name` is a C string, as `require_str`
     // requires; it is copied.
-    let topic_name = unsafe { c_str_to_string(topic_name) };
+    let topic_name = unsafe { require_str(topic_name, "topic_name") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock constructor,
     // kept alive for this call, as `mock_ref` requires.
     let result = unsafe { mock_ref(self_, "self_") }
@@ -576,9 +574,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_cluster_id(
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     cluster_id: *const c_char,
 ) {
-    // SAFETY: Per this function's `# Safety`, `cluster_id` is a C string, as `c_str_to_string`
+    // SAFETY: Per this function's `# Safety`, `cluster_id` is a C string, as `require_str`
     // requires; it is copied.
-    let cluster_id = unsafe { c_str_to_string(cluster_id) };
+    let cluster_id = unsafe { require_str(cluster_id, "cluster_id") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live builder handle no other call uses
     // at the same time, as `update` requires.
     unsafe { update(self_, |b| b.set_cluster_id(&cluster_id)) }

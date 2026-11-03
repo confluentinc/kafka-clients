@@ -39,7 +39,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_fn, require_ref};
+use crate::ffi::precondition::{Required, require_fn, require_ref, require_str};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -66,7 +66,7 @@ use crate::ffi::common::{
     run_inline, take_error,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{GenericValue, c_str_to_string, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, owned_c_string};
+use crate::ffi::util::{GenericValue, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, owned_c_string};
 
 /// Opaque handle to a [`Deserializer`] implementation over the `void *`
 /// representation.
@@ -850,8 +850,8 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
     // or a valid array, read only during this call: an implementation that outlives the call gets a
     // copy.
@@ -904,7 +904,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_cb(
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
     // or a valid array, read only during this call.
     unsafe { invoke_cb(self_, Method::Deserialize, &topic, None, slice(data), value_sink(cb, opaque)) }
@@ -949,7 +949,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
     // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
     let headers = unsafe { record_headers_mut(headers, "headers") };
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
     // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
     let headers = ptr::from_mut(unsafe { record_headers_mut(headers, "headers") });
@@ -1067,7 +1067,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
     // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
     let headers = unsafe { record_headers_mut(headers, "headers") };
@@ -1126,7 +1126,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
     // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
     let headers = ptr::from_mut(unsafe { record_headers_mut(headers, "headers") });

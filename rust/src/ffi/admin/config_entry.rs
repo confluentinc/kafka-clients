@@ -25,7 +25,8 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_element, require_mut, require_ref};
+use crate::common::Error;
+use crate::ffi::precondition::{require_element, require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -33,9 +34,7 @@ use crate::admin::{ConfigEntry, ConfigEntryOptions, ConfigEntryOptionsBuilder};
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, c_str_to_option, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string,
-};
+use crate::ffi::util::{box_list, c_str_to_option, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // ConfigEntry.ConfigSource
@@ -779,8 +778,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, kept alive for this call, as `builder_mut` requires, and `name` a
-    // valid NUL-terminated string, as `c_str_to_string` requires.
-    unsafe { builder_mut(self_, "self_") }.name = Some(unsafe { c_str_to_string(name) });
+    // valid NUL-terminated string, as `require_str` requires.
+    unsafe { builder_mut(self_, "self_") }.name =
+        Some(unsafe { require_str_or(name, "name", || Error::local_null_pointer("name should not be null")) });
 }
 
 /// Sets Java's `value`, a mandatory parameter.
@@ -1104,11 +1104,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
     value: *const c_char,
 ) -> *mut kafka_admin_ConfigEntry_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `value` null or a valid NUL-terminated string, as
+    // `require_str` requires, and `value` null or a valid NUL-terminated string, as
     // `c_str_to_option` requires.
-    box_config_entry(ConfigEntry::new(unsafe { c_str_to_string(name) }, unsafe {
-        c_str_to_option(value)
-    }))
+    box_config_entry(ConfigEntry::new(
+        unsafe { require_str_or(name, "name", || Error::local_null_pointer("name should not be null")) },
+        unsafe { c_str_to_option(value) },
+    ))
 }
 
 /// `new ConfigEntry(String name, String value, ConfigSource source, boolean isSensitive, boolean

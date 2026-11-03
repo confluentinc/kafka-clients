@@ -21,7 +21,7 @@
 //! NUL-terminated topic name of each topic id and the cluster resource. The
 //! getters returning Java collections build owned `kafka_List_t`s of copies.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -642,9 +642,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_topic(
         unsafe { inner_ref(self_, "self_") }
             .cluster
             // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            .partitions_for_topic(&unsafe { c_str_to_string(topic) }),
+            .partitions_for_topic(&unsafe { require_str(topic, "topic") }),
     )
 }
 
@@ -675,9 +675,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
     unsafe { inner_ref(self_, "self_") }
         .cluster
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        .partition_count_for_topic(&unsafe { c_str_to_string(topic) })
+        .partition_count_for_topic(&unsafe { require_str(topic, "topic") })
         .map_or(-1, |count| count as i32)
 }
 
@@ -709,9 +709,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_available_partitions_for_topic(
         unsafe { inner_ref(self_, "self_") }
             .cluster
             // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            .available_partitions_for_topic(&unsafe { c_str_to_string(topic) }),
+            .available_partitions_for_topic(&unsafe { require_str(topic, "topic") }),
     )
 }
 
@@ -912,12 +912,12 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
     // requires; the reference is used only within this call, and `topic` is a valid NUL-terminated
-    // string, as `c_str_to_string` requires; both are read only within this call, and the id is
+    // string, as `require_str` requires; both are read only within this call, and the id is
     // copied into the owned handle returned.
     box_uuid(
         unsafe { inner_ref(self_, "self_") }
             .cluster
-            .topic_id(&unsafe { c_str_to_string(topic) }),
+            .topic_id(&unsafe { require_str(topic, "topic") }),
     )
 }
 

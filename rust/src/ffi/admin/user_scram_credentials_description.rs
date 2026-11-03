@@ -16,7 +16,7 @@
 //! `org.apache.kafka.clients.admin.UserScramCredentialsDescription`
 //! (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ScramCredentialInfo, UserScramCredentialsDescription};
@@ -25,7 +25,7 @@ use crate::ffi::admin::scram_credential_info::{
     scram_credential_info_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`UserScramCredentialsDescription`].
 #[repr(C)]
@@ -148,8 +148,8 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
         .collect();
     box_user_scram_credentials_description(UserScramCredentialsDescription::new(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(name) },
+        // `require_str` requires.
+        unsafe { require_str(name, "name") },
         infos,
     ))
 }

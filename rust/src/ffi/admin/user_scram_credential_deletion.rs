@@ -15,7 +15,7 @@
 //! `kafka_admin_UserScramCredentialDeletion_t`:
 //! `org.apache.kafka.clients.admin.UserScramCredentialDeletion` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::admin::UserScramCredentialDeletion;
@@ -23,7 +23,7 @@ use crate::ffi::admin::scram_mechanism::{
     kafka_admin_ScramMechanism_t, scram_mechanism_singleton, scram_mechanism_value_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, owned_c_string};
+use crate::ffi::util::owned_c_string;
 
 /// Opaque handle to a [`UserScramCredentialDeletion`].
 #[repr(C)]
@@ -104,9 +104,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_new(
     mechanism: *const kafka_admin_ScramMechanism_t,
 ) -> *mut kafka_admin_UserScramCredentialDeletion_t {
     // SAFETY: Per this function's `# Safety`, `user` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `mechanism` a SCRAM-mechanism singleton, which only the
+    // `require_str` requires, and `mechanism` a SCRAM-mechanism singleton, which only the
     // `scram_mechanism` module hands out, as `scram_mechanism_value_of` requires.
-    box_user_scram_credential_deletion(UserScramCredentialDeletion::new(unsafe { c_str_to_string(user) }, unsafe {
+    box_user_scram_credential_deletion(UserScramCredentialDeletion::new(unsafe { require_str(user, "user") }, unsafe {
         scram_mechanism_value_of(mechanism, "mechanism")
     }))
 }

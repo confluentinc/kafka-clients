@@ -28,7 +28,8 @@ use crate::ffi::admin::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_string_keyed_map, box_string_list, c_str_to_string};
+use crate::ffi::precondition::require_str;
+use crate::ffi::util::{box_string_keyed_map, box_string_list};
 
 /// Opaque handle to a [`DescribeUserScramCredentialsResult`], owned and
 /// freed with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`].
@@ -173,8 +174,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `user_name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into a `String` during the call.
-    let user_name = unsafe { c_str_to_string(user_name) };
+    // `require_str` requires; it is copied into a `String` during the call.
+    let user_name = unsafe { require_str(user_name, "user_name") };
     // SAFETY: `destroy_user_scram_credentials_description_element` frees exactly the handle
     // `box_user_scram_credentials_description` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as

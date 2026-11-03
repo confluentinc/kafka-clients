@@ -24,8 +24,8 @@ use crate::common::Uuid;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{require_element, require_ref};
-use crate::ffi::util::{box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`Uuid`].
 #[repr(C)]
@@ -134,9 +134,9 @@ pub unsafe extern "C" fn kafka_common_Uuid_from_string(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `s` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    match Uuid::from_string(&unsafe { c_str_to_string(s) }) {
+    match Uuid::from_string(&unsafe { require_str(s, "s") }) {
         Ok(uuid) => box_uuid(uuid),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(e) => unsafe { fail_with(out_err, e) },

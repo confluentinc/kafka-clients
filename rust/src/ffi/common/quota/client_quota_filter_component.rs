@@ -15,13 +15,13 @@
 //! `kafka_common_quota_ClientQuotaFilterComponent_t`:
 //! `org.apache.kafka.common.quota.ClientQuotaFilterComponent` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::quota::ClientQuotaFilterComponent;
 use crate::ffi::common::quota::client_quota_match::{client_quota_match_ptr, kafka_common_quota_ClientQuotaMatch_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ClientQuotaFilterComponent`].
 #[repr(C)]
@@ -140,11 +140,11 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_entity
         // SAFETY: Per this function's `# Safety`, `entity_type` is a valid NUL-terminated string,
         // as `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(entity_type) },
+        unsafe { require_str(entity_type, "entity_type") },
         // SAFETY: Per this function's `# Safety`, `entity_name` is a valid NUL-terminated string,
-        // as `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // as `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(entity_name) },
+        unsafe { require_str(entity_name, "entity_name") },
     ))
 }
 
@@ -170,10 +170,10 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_defaul
     entity_type: *const c_char,
 ) -> *mut kafka_common_quota_ClientQuotaFilterComponent_t {
     // SAFETY: Per this function's `# Safety`, `entity_type` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
     box_client_quota_filter_component(ClientQuotaFilterComponent::of_default_entity(unsafe {
-        c_str_to_string(entity_type)
+        require_str(entity_type, "entity_type")
     }))
 }
 
@@ -199,10 +199,10 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_entity
     entity_type: *const c_char,
 ) -> *mut kafka_common_quota_ClientQuotaFilterComponent_t {
     // SAFETY: Per this function's `# Safety`, `entity_type` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
     box_client_quota_filter_component(ClientQuotaFilterComponent::of_entity_type(unsafe {
-        c_str_to_string(entity_type)
+        require_str(entity_type, "entity_type")
     }))
 }
 

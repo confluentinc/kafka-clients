@@ -16,7 +16,7 @@
 //! `org.apache.kafka.common.security.token.delegation.TokenInformation`
 //! (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::ffi::precondition::{require_mut, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::security::token::delegation::TokenInformation;
@@ -25,9 +25,7 @@ use crate::ffi::common::security::auth::kafka_principal::{
     list_kafka_principals,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, box_string_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, owned_c_string,
-};
+use crate::ffi::util::{box_list, box_string_list, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`TokenInformation`].
 #[repr(C)]
@@ -134,9 +132,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 ) -> *mut kafka_common_security_token_delegation_TokenInformation_t {
     box_token_information(TokenInformation::new(
         // SAFETY: Per this function's `# Safety`, `token_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(token_id) },
+        unsafe { require_str(token_id, "token_id") },
         // SAFETY: Per this function's `# Safety`, `owner` is a valid principal handle, as
         // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(owner, "owner") }.clone(),
@@ -184,9 +182,9 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 ) -> *mut kafka_common_security_token_delegation_TokenInformation_t {
     box_token_information(TokenInformation::with_token_requester(
         // SAFETY: Per this function's `# Safety`, `token_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(token_id) },
+        unsafe { require_str(token_id, "token_id") },
         // SAFETY: Per this function's `# Safety`, `owner` is a valid principal handle, as
         // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(owner, "owner") }.clone(),

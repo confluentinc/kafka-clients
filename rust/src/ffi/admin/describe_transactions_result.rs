@@ -27,7 +27,8 @@ use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_string_keyed_map, c_str_to_string};
+use crate::ffi::precondition::require_str;
+use crate::ffi::util::box_string_keyed_map;
 
 /// Opaque handle to a [`DescribeTransactionsResult`], owned and freed with
 /// [`kafka_admin_DescribeTransactionsResult_destroy`].
@@ -106,8 +107,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
-    // as `c_str_to_string` requires; it is copied into a `String` during the call.
-    let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    // as `require_str` requires; it is copied into a `String` during the call.
+    let transactional_id = unsafe { require_str(transactional_id, "transactional_id") };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. For `handle_future`, `destroy_transaction_description_element` frees exactly the
     // handle `box_transaction_description` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as

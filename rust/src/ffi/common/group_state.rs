@@ -24,8 +24,8 @@ use std::sync::LazyLock;
 use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_type::{kafka_common_GroupType_t, value_of as group_type_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_ref;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, owned_c_string};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`GroupState`] singleton.
 #[repr(C)]
@@ -216,9 +216,9 @@ pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *const kafka_common_GroupState_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    singleton(GroupState::parse(&unsafe { c_str_to_string(name) }))
+    singleton(GroupState::parse(&unsafe { require_str(name, "name") }))
 }
 
 /// Returns the states a group of `group_type` can be in, in declaration order, or `NULL` for

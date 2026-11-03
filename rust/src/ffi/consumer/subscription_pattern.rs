@@ -16,12 +16,12 @@
 //! `org.apache.kafka.clients.consumer.SubscriptionPattern`, the server-side
 //! (RE2/J) regular expression of `subscribe(SubscriptionPattern)`.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::consumer::SubscriptionPattern;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`SubscriptionPattern`].
 #[repr(C)]
@@ -72,8 +72,8 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
     pattern: *const c_char,
 ) -> *mut kafka_consumer_SubscriptionPattern_t {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let pattern = unsafe { c_str_to_string(pattern) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let pattern = unsafe { require_str(pattern, "pattern") };
     let pattern_c = owned_c_string(&pattern);
     Box::into_raw(Box::new(SubscriptionPatternInner {
         pattern: SubscriptionPattern::new(pattern),

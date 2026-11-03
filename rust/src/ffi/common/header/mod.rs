@@ -38,7 +38,7 @@
 
 pub(crate) mod internals;
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::ffi::precondition::{require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 use std::sync::OnceLock;
@@ -51,7 +51,7 @@ use crate::ffi::common::header::internals::record_header::{
 };
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, kafka_Bytes_t, kafka_List_t, owned_c_string};
+use crate::ffi::util::{box_list, kafka_Bytes_t, kafka_List_t, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // Header
@@ -356,9 +356,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let key = unsafe { c_str_to_string(key) };
+    let key = unsafe { require_str_or(key, "key", || Error::local_null_pointer("Null header keys are not permitted")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle whose headers may
     // be mutated and that no other call uses at the same time, as `headers_mut` requires, and
     // `value` is null or a valid buffer, so `value.data` is null or valid for `value.len` bytes, as
@@ -396,9 +396,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_remove(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let key = unsafe { c_str_to_string(key) };
+    let key = unsafe { require_str_or(key, "key", || Error::local_illegal_argument("key cannot be null.")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle whose headers may
     // be mutated and that no other call uses at the same time, as `headers_mut` requires; the
     // reference is used only within this call.
@@ -430,9 +430,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
     key: *const c_char,
 ) -> *const kafka_common_header_internals_RecordHeader_t {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let key = unsafe { c_str_to_string(key) };
+    let key = unsafe { require_str_or(key, "key", || Error::local_illegal_argument("key cannot be null.")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle, as `headers_ref`
     // requires; it is not mutated during this call, because the mutating `Headers_*` functions
     // require that no other call use the handle at the same time. The handle returned is an element
@@ -471,9 +471,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_headers(
     key: *const c_char,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let key = unsafe { c_str_to_string(key) };
+    let key = unsafe { require_str_or(key, "key", || Error::local_illegal_argument("key cannot be null.")) };
     view_list(
         // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle, as
         // `headers_ref` requires; it is not mutated during this call, because the mutating

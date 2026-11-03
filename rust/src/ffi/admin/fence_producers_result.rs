@@ -23,7 +23,8 @@ use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{c_str_to_string, kafka_Map_t};
+use crate::ffi::precondition::require_str;
+use crate::ffi::util::kafka_Map_t;
 
 /// Opaque handle to a [`FenceProducersResult`], owned and freed with
 /// [`kafka_admin_FenceProducersResult_destroy`].
@@ -113,8 +114,8 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
-    // as `c_str_to_string` requires; it is copied into a `String` during the call.
-    let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    // as `require_str` requires; it is copied into a `String` during the call.
+    let transactional_id = unsafe { require_str(transactional_id, "transactional_id") };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
     unsafe { deliver_value(h.result.producer_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
@@ -150,8 +151,8 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
-    // as `c_str_to_string` requires; it is copied into a `String` during the call.
-    let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    // as `require_str` requires; it is copied into a `String` during the call.
+    let transactional_id = unsafe { require_str(transactional_id, "transactional_id") };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
     unsafe { deliver_value(h.result.epoch_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }

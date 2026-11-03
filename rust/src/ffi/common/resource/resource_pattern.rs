@@ -15,7 +15,7 @@
 //! `kafka_common_resource_ResourcePattern_t`:
 //! `org.apache.kafka.common.resource.ResourcePattern` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::resource::ResourcePattern;
@@ -31,7 +31,7 @@ use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ResourcePattern`].
 #[repr(C)]
@@ -129,9 +129,9 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
         // (`resource_type::value_of`) requires; the value is copied out.
         unsafe { resource_type_of(resource_type, "resource_type") },
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `pattern_type` is a singleton of its enum, i.e.
         // one returned by the `pattern_type` module, as `pattern_type_of`
         // (`pattern_type::value_of`) requires; the value is copied out.

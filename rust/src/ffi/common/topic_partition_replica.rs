@@ -15,12 +15,12 @@
 //! `kafka_common_TopicPartitionReplica_t`:
 //! `org.apache.kafka.common.TopicPartitionReplica` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::TopicPartitionReplica;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TopicPartitionReplica`].
 #[repr(C)]
@@ -86,9 +86,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_new(
     broker_id: i32,
 ) -> *mut kafka_common_TopicPartitionReplica_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let replica = TopicPartitionReplica::new(unsafe { c_str_to_string(topic) }, partition, broker_id);
+    let replica = TopicPartitionReplica::new(unsafe { require_str(topic, "topic") }, partition, broker_id);
     let topic_c = owned_c_string(replica.topic());
     Box::into_raw(Box::new(TopicPartitionReplicaInner { replica, topic_c }))
         as *mut kafka_common_TopicPartitionReplica_t

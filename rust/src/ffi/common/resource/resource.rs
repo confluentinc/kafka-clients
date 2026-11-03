@@ -15,7 +15,7 @@
 //! `kafka_common_resource_Resource_t`: `org.apache.kafka.common.resource.Resource`
 //! (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::resource::Resource;
@@ -23,7 +23,7 @@ use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`Resource`].
 #[repr(C)]
@@ -98,11 +98,11 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_new(
 ) -> *mut kafka_common_resource_Resource_t {
     // SAFETY: Per this function's `# Safety`, `resource_type` is a resource-type singleton, as
     // `resource_type_of` requires, and its value is copied out; `name` is a valid NUL-terminated
-    // string, as `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows
+    // string, as `require_str` requires, and is copied into an owned `String`. Nothing borrows
     // either argument after this call.
     box_resource(Resource::new(
         unsafe { resource_type_of(resource_type, "resource_type") },
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
     ))
 }
 

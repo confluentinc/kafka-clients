@@ -25,7 +25,8 @@
 //! alive, the fetch buffer or, for a compressed batch, each record's own:
 //! destroying the records handle releases them.
 
-use crate::ffi::precondition::require_ref;
+use crate::common::Error;
+use crate::ffi::precondition::{require_ref, require_str_or};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -39,7 +40,7 @@ use crate::ffi::consumer::consumer_record::{
 };
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, kafka_Map_t, list_elements, map_entries};
+use crate::ffi::util::{box_list, kafka_List_t, kafka_Map_t, list_elements, map_entries};
 
 /// Opaque handle to a [`ConsumerRecords`].
 #[repr(C)]
@@ -309,8 +310,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
     // never resized, so they stay valid until the handle is destroyed, as the rustdoc states.
     let inner = unsafe { inner_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic must be non-null.")) };
     ConsumerRecordsInner::borrowed_list(
         inner
             .partitions

@@ -15,13 +15,13 @@
 //! `kafka_admin_TopicListing_t`: `org.apache.kafka.clients.admin.TopicListing`
 //! (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::TopicListing;
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TopicListing`].
 #[repr(C)]
@@ -113,8 +113,8 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_new(
 ) -> *mut kafka_admin_TopicListing_t {
     box_topic_listing(TopicListing::new(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(name) },
+        // `require_str` requires.
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires.
         unsafe { uuid_of(topic_id, "topic_id") },

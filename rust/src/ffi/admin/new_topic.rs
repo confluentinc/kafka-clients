@@ -20,7 +20,7 @@
 //! `kafka_Map_t` of `int32_t *` keys to `kafka_List_t *` values holding
 //! `int32_t *` elements.
 
-use crate::ffi::precondition::{require_element_ref, require_mut, require_ref};
+use crate::ffi::precondition::{require_element_ref, require_mut, require_ref, require_str};
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -181,8 +181,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 ) -> *mut kafka_admin_NewTopic_t {
     box_new_topic(NewTopic::with_num_partitions_replication_factor(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(name) },
+        // `require_str` requires.
+        unsafe { require_str(name, "name") },
         (num_partitions >= 0).then_some(num_partitions),
         (replication_factor >= 0).then_some(replication_factor),
     ))
@@ -214,11 +214,12 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
     replicas_assignments: *const kafka_Map_t,
 ) -> *mut kafka_admin_NewTopic_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `replicas_assignments` null or a valid map of the shape
+    // `require_str` requires, and `replicas_assignments` null or a valid map of the shape
     // `map_replicas_assignments` requires, kept alive and not mutated for this call.
-    box_new_topic(NewTopic::with_replicas_assignments(unsafe { c_str_to_string(name) }, unsafe {
-        map_replicas_assignments(replicas_assignments, "replicas_assignments")
-    }))
+    box_new_topic(NewTopic::with_replicas_assignments(
+        unsafe { require_str(name, "name") },
+        unsafe { map_replicas_assignments(replicas_assignments, "replicas_assignments") },
+    ))
 }
 
 /// Returns the name of the topic to be created.

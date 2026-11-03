@@ -20,13 +20,14 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::common::Error;
+use crate::ffi::precondition::{require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::config::ConfigResource;
 use crate::common::config::config_resource::Type;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // ConfigResource.Type
@@ -323,11 +324,11 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
 ) -> *mut kafka_common_config_ConfigResource_t {
     // SAFETY: Per this function's `# Safety`, `resource_type` is a type singleton, as `type_of`
     // requires, and its value is copied out; `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows either
+    // `require_str` requires, and is copied into an owned `String`. Nothing borrows either
     // argument after this call.
     box_config_resource(ConfigResource::new(
         unsafe { type_of(resource_type, "resource_type") },
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str_or(name, "name", || Error::local_null_pointer("name should not be null")) },
     ))
 }
 

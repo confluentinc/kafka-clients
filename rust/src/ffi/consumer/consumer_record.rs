@@ -29,7 +29,8 @@
 //! [`kafka_consumer_ConsumerRecord_new`] or `_with_options` never owns its
 //! key or value.
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::common::Error;
+use crate::ffi::precondition::{require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 use std::sync::OnceLock;
 
@@ -42,9 +43,7 @@ use crate::ffi::common::header::internals::record_headers::{
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::record::timestamp_type::{self, kafka_common_record_TimestampType_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    GenericValue, c_str_to_string, into_c_string, kafka_Bytes_destroy, kafka_Bytes_t, owned_c_string,
-};
+use crate::ffi::util::{GenericValue, into_c_string, kafka_Bytes_destroy, kafka_Bytes_t, owned_c_string};
 
 /// A record whose key and value are the C caller's `void *`s.
 pub(crate) type GenericRecord = ConsumerRecord<GenericValue, GenericValue>;
@@ -205,8 +204,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
     value: *const c_void,
 ) -> *mut kafka_consumer_ConsumerRecord_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null")) };
     box_consumer_record(
         GenericRecord::new(topic, partition, offset, generic(key), generic(value)),
         false,
@@ -619,8 +618,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(
     topic: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_topic(topic)) }

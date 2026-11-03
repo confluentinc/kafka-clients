@@ -15,7 +15,7 @@
 //! `kafka_admin_TransactionListing_t`:
 //! `org.apache.kafka.clients.admin.TransactionListing` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::TransactionListing;
@@ -23,7 +23,7 @@ use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TransactionListing`].
 #[repr(C)]
@@ -118,8 +118,8 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
 ) -> *mut kafka_admin_TransactionListing_t {
     box_transaction_listing(TransactionListing::new(
         // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated
-        // string, as `c_str_to_string` requires.
-        unsafe { c_str_to_string(transactional_id) },
+        // string, as `require_str` requires.
+        unsafe { require_str(transactional_id, "transactional_id") },
         producer_id,
         // SAFETY: Per this function's `# Safety`, `transaction_state` is a transaction-state
         // singleton; only the `transaction_state` module hands those out, as

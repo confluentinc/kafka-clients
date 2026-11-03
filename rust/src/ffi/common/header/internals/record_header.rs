@@ -20,14 +20,15 @@
 //! handle, so every owner keeps a [`RecordHeaderInner`] boxed and never moves
 //! it after the view exists.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::common::Error;
+use crate::ffi::precondition::{require_element, require_ref, require_str_or};
 use std::ffi::c_char;
 use std::sync::OnceLock;
 
 use crate::common::header::{Header, RecordHeader};
 use crate::ffi::common::header::{HeaderInner, kafka_common_header_Header_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, kafka_Bytes_t, kafka_List_t, list_elements};
+use crate::ffi::util::{into_c_string, kafka_Bytes_t, kafka_List_t, list_elements};
 
 /// Opaque handle to a [`RecordHeader`]. Public although Java keeps the
 /// class in `internals`: it is the type the `Headers` getters return, and the
@@ -188,9 +189,9 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
 ) -> *mut kafka_common_header_internals_RecordHeader_t {
     box_record_header(RecordHeader::new(
         // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(key) },
+        unsafe { require_str_or(key, "key", || Error::local_null_pointer("Null header keys are not permitted")) },
         // SAFETY: Per this function's `# Safety`, `value` is null or a valid buffer, so
         // `value.data` is null or valid for `value.len` bytes, as `kafka_Bytes_t::as_slice`
         // requires; the bytes are copied into an owned `Vec`, so nothing borrows them after this

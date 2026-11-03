@@ -218,7 +218,7 @@ pub(crate) mod producer_record;
 pub(crate) mod record_metadata;
 pub(crate) mod round_robin_partitioner;
 
-use crate::ffi::precondition::{Required, fail, require_fn, require_map, require_ref};
+use crate::ffi::precondition::{Required, fail, require_fn, require_map, require_ref, require_str_or};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::future::Future;
@@ -255,7 +255,7 @@ use crate::ffi::kafka_future::{
 use crate::ffi::producer::callback::{kafka_producer_Callback_t, take_callback};
 use crate::ffi::producer::producer_record::{GenericRecord, kafka_producer_ProducerRecord_t, producer_record_ref};
 use crate::ffi::producer::record_metadata::{box_record_metadata, kafka_producer_RecordMetadata_destroy};
-use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t};
+use crate::ffi::util::{GenericValue, box_list, kafka_List_t, kafka_Map_t};
 use crate::producer::{Callback, DynTrySend, RecordMetadata, TrySendOutcome};
 
 /// The `Producer` every C handle drives: `void *` key and value, with the
@@ -2323,8 +2323,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_null_pointer("topic cannot be null")) };
     let infos = client
         .producer()
         .and_then(|producer| block_on(&client.runtime, async move { producer.partitions_for(&topic).await }));
@@ -2384,8 +2384,8 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_cb(
     // `client` is used only during the call, the task getting its own `Arc`.
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_null_pointer("topic cannot be null")) };
     let opaque = SendPtr(opaque);
     let task_client = Arc::clone(client);
     #[cfg(test)]

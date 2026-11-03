@@ -46,8 +46,8 @@ use crate::ffi::consumer::{
     kafka_consumer_Consumer_t,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{require_fn, require_ref};
-use crate::ffi::util::{GenericValue, c_str_to_string, kafka_List_t, kafka_Map_t};
+use crate::ffi::precondition::{require_fn, require_ref, require_str, require_str_or};
+use crate::ffi::util::{GenericValue, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`MockConsumer`] over `void *` key and value.
 #[repr(C)]
@@ -124,8 +124,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_MockConsumer_t {
     // SAFETY: Per this function's `# Safety`, `offset_reset_strategy` is a valid NUL-terminated
-    // string, as `c_str_to_string` requires; it is copied, so the borrow lasts for this call only.
-    let strategy = unsafe { c_str_to_string(offset_reset_strategy) };
+    // string, as `require_str` requires; it is copied, so the borrow lasts for this call only.
+    let strategy = unsafe {
+        require_str_or(offset_reset_strategy, "offset_reset_strategy", || {
+            Error::local_illegal_argument("Auto offset reset strategy is null")
+        })
+    };
     // No deserializers: the `void *`s are whatever `add_record` was given.
     let result = ConsumerClassHandle::new(Owns { key: false, value: false }, || {
         Mock::new(&strategy).map(|mock| ConsumerKind::Mock(Box::new(mock)))
@@ -322,8 +326,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_PartitionInfo_t *`, as `list_partition_infos` requires; the values are copied,
     // so the borrow lasts for this call only.

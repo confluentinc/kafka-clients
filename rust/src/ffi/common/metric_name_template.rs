@@ -18,14 +18,14 @@
 //! The handle owns a [`MetricNameTemplate`] plus the NUL-terminated copies of
 //! its three strings the borrowed getters hand out.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use indexmap::IndexSet;
 
 use crate::common::MetricNameTemplate;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_string_list, c_str_to_string, into_c_string, kafka_List_t, list_strings, owned_c_string};
+use crate::ffi::util::{box_string_list, into_c_string, kafka_List_t, list_strings, owned_c_string};
 
 /// Opaque handle to a [`MetricNameTemplate`].
 #[repr(C)]
@@ -113,15 +113,15 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `description` is a valid NUL-terminated string,
-        // as `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // as `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(description) },
+        unsafe { require_str(description, "description") },
         tag_names,
     )))) as *mut kafka_common_MetricNameTemplate_t
 }

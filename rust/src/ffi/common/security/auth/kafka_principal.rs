@@ -15,12 +15,13 @@
 //! `kafka_common_security_auth_KafkaPrincipal_t`:
 //! `org.apache.kafka.common.security.auth.KafkaPrincipal` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_mut, require_ref};
+use crate::common::Error;
+use crate::ffi::precondition::{require_element, require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char};
 
 use crate::common::security::auth::KafkaPrincipal;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`KafkaPrincipal`].
 #[repr(C)]
@@ -133,11 +134,16 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
     name: *const c_char,
 ) -> *mut kafka_common_security_auth_KafkaPrincipal_t {
     // SAFETY: Per this function's `# Safety`, `principal_type` and `name` are each a valid
-    // NUL-terminated string, as `c_str_to_string` requires; both are copied into owned `String`s,
+    // NUL-terminated string, as `require_str` requires; both are copied into owned `String`s,
     // so nothing borrows them after this call.
-    box_kafka_principal(KafkaPrincipal::new(unsafe { c_str_to_string(principal_type) }, unsafe {
-        c_str_to_string(name)
-    }))
+    box_kafka_principal(KafkaPrincipal::new(
+        unsafe {
+            require_str_or(principal_type, "principal_type", || {
+                Error::local_null_pointer("Principal type cannot be null")
+            })
+        },
+        unsafe { require_str_or(name, "name", || Error::local_null_pointer("Principal name cannot be null")) },
+    ))
 }
 
 /// Creates a principal.
@@ -161,13 +167,17 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_with_token_au
 ) -> *mut kafka_common_security_auth_KafkaPrincipal_t {
     box_kafka_principal(KafkaPrincipal::with_token_authenticated(
         // SAFETY: Per this function's `# Safety`, `principal_type` is a valid NUL-terminated
-        // string, as `c_str_to_string` requires; it is copied into an owned `String`, so nothing
+        // string, as `require_str` requires; it is copied into an owned `String`, so nothing
         // borrows it after this call.
-        unsafe { c_str_to_string(principal_type) },
+        unsafe {
+            require_str_or(principal_type, "principal_type", || {
+                Error::local_null_pointer("Principal type cannot be null")
+            })
+        },
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str_or(name, "name", || Error::local_null_pointer("Principal name cannot be null")) },
         token_authenticated != 0,
     ))
 }

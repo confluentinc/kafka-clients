@@ -19,7 +19,7 @@
 //! description (null for Java's null); `authorizedOperations()` is null when
 //! the broker did not report them.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ClassicGroupDescription, MemberDescription};
@@ -30,7 +30,7 @@ use crate::ffi::admin::topic_description::{acl_operation_list, list_acl_operatio
 use crate::ffi::common::classic_group_state::{self, kafka_common_ClassicGroupState_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupDescription`].
 #[repr(C)]
@@ -173,13 +173,13 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
     box_classic_group_description(ClassicGroupDescription::new(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(group_id) },
+        unsafe { require_str(group_id, "group_id") },
         // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(protocol) },
+        unsafe { require_str(protocol, "protocol") },
         // SAFETY: Per this function's `# Safety`, `protocol_data` is a valid NUL-terminated string,
-        // as `c_str_to_string` requires.
-        unsafe { c_str_to_string(protocol_data) },
+        // as `require_str` requires.
+        unsafe { require_str(protocol_data, "protocol_data") },
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
@@ -227,13 +227,13 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_with_authorized_ope
     box_classic_group_description(ClassicGroupDescription::with_authorized_operations(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(group_id) },
+        unsafe { require_str(group_id, "group_id") },
         // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(protocol) },
+        unsafe { require_str(protocol, "protocol") },
         // SAFETY: Per this function's `# Safety`, `protocol_data` is a valid NUL-terminated string,
-        // as `c_str_to_string` requires.
-        unsafe { c_str_to_string(protocol_data) },
+        // as `require_str` requires.
+        unsafe { require_str(protocol_data, "protocol_data") },
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.

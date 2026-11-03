@@ -15,14 +15,14 @@
 //! `kafka_common_TopicIdPartition_t`:
 //! `org.apache.kafka.common.TopicIdPartition` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::c_char;
 
 use crate::common::TopicIdPartition;
 use crate::ffi::common::topic_partition::{TopicPartitionInner, kafka_common_TopicPartition_t, topic_partition_ref};
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string};
+use crate::ffi::util::into_c_string;
 
 /// Opaque handle to a [`TopicIdPartition`].
 #[repr(C)]
@@ -117,9 +117,9 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
         unsafe { uuid_of(topic_id, "topic_id") },
         partition,
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(topic) },
+        unsafe { require_str(topic, "topic") },
     ))
 }
 

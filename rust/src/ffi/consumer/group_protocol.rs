@@ -26,8 +26,8 @@ use crate::consumer::GroupProtocol;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_ref;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupProtocol`] singleton.
 #[repr(C)]
@@ -158,8 +158,8 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const kafka_consumer_GroupProtocol_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    match GroupProtocol::of(&unsafe { c_str_to_string(name) }) {
+    // `require_str` requires; it is copied into an owned `String`.
+    match GroupProtocol::of(&unsafe { require_str(name, "name") }) {
         Ok(protocol) => singleton(protocol),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },

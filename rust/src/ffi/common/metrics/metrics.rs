@@ -56,7 +56,7 @@ use crate::ffi::common::metrics::sensor::{
 };
 use crate::ffi::common::{FailValue, deliver_value};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t, list_strings, map_strings};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t, list_strings, map_strings};
 
 // ---------------------------------------------------------------------------
 // Metrics
@@ -195,15 +195,15 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `description` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(description) },
+        unsafe { require_str(description, "description") },
     ))
 }
 
@@ -241,11 +241,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
         // strings, as `map_strings` requires; the entries are copied into owned `String`s, so
         // nothing borrows the map after this call.
@@ -287,15 +287,15 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `description` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(description) },
+        unsafe { require_str(description, "description") },
         // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
         // strings, as `map_strings` requires; the entries are copied into owned `String`s, so
         // nothing borrows the map after this call.
@@ -352,15 +352,15 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            unsafe { c_str_to_string(name) },
+            unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            unsafe { c_str_to_string(group) },
+            unsafe { require_str(group, "group") },
             // SAFETY: Per this function's `# Safety`, `description` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            unsafe { c_str_to_string(description) },
+            unsafe { require_str(description, "description") },
             &key_value,
         )
         .map(box_metric_name);
@@ -409,9 +409,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_get_sensor(
     name: *const c_char,
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
-    // requires, and `name` a NUL-terminated string, as `c_str_to_string` requires; the reference is
+    // requires, and `name` a NUL-terminated string, as `require_str` requires; the reference is
     // used only within this call and the name is copied into an owned `String`.
-    match unsafe { metrics_ref(self_, "self_") }.get_sensor(&unsafe { c_str_to_string(name) }) {
+    match unsafe { metrics_ref(self_, "self_") }.get_sensor(&unsafe { require_str(name, "name") }) {
         Some(sensor) => box_sensor(sensor),
         None => std::ptr::null_mut(),
     }
@@ -448,9 +448,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor(
     // requires; the reference is used only within this call.
     let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        .sensor(&unsafe { c_str_to_string(name) })
+        .sensor(&unsafe { require_str(name, "name") })
         .map(box_sensor);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as `deliver` requires; on
     // success the owned handle written there passes to the C caller.
@@ -491,10 +491,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_leve
     // requires; the reference is used only within this call.
     let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-        // `c_str_to_string` requires, and `recording_level` a recording-level singleton, as
+        // `require_str` requires, and `recording_level` a recording-level singleton, as
         // `recording_level_of` requires; the name is copied into an owned `String` and the level
         // copied out.
-        .sensor_with_recording_level(&unsafe { c_str_to_string(name) }, unsafe {
+        .sensor_with_recording_level(&unsafe { require_str(name, "name") }, unsafe {
             recording_level_of(recording_level, "recording_level")
         })
         .map(box_sensor);
@@ -539,10 +539,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_parents(
     // requires; the reference is used only within this call.
     let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-        // `c_str_to_string` requires, and `parents` null or a valid list of sensor handles, as
+        // `require_str` requires, and `parents` null or a valid list of sensor handles, as
         // `list_sensors` requires; the name is copied into an owned `String` and the sensors cloned
         // into owned `Arc`s, so nothing borrows either after this call.
-        .sensor_with_parents(&unsafe { c_str_to_string(name) }, &unsafe { list_sensors(parents) })
+        .sensor_with_parents(&unsafe { require_str(name, "name") }, &unsafe { list_sensors(parents) })
         .map(box_sensor);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as `deliver`
     // requires; on success the owned handle written there passes to the C caller.
@@ -586,9 +586,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_leve
     let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_recording_level_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `recording_level` is a recording-level
             // singleton, as `recording_level_of` requires; the value is copied out.
             unsafe { recording_level_of(recording_level, "recording_level") },
@@ -643,9 +643,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_parents
     let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_config_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config
             // handle, as `metric_config_option` requires; it returns an owned `Arc`, so nothing
             // borrows the handle after this call.
@@ -701,9 +701,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_recordi
     let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_config_recording_level_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config
             // handle, as `metric_config_option` requires; it returns an owned `Arc`, so nothing
             // borrows the handle after this call.
@@ -763,9 +763,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_inactiv
     let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_config_inactive_sensor_expiration_time_seconds_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config
             // handle, as `metric_config_option` requires; it returns an owned `Arc`, so nothing
             // borrows the handle after this call.
@@ -842,9 +842,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_sensor(
     name: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
-    // requires, and `name` a NUL-terminated string, as `c_str_to_string` requires; the reference is
+    // requires, and `name` a NUL-terminated string, as `require_str` requires; the reference is
     // used only within this call and the name is copied into an owned `String`.
-    unsafe { metrics_ref(self_, "self_") }.remove_sensor(&unsafe { c_str_to_string(name) })
+    unsafe { metrics_ref(self_, "self_") }.remove_sensor(&unsafe { require_str(name, "name") })
 }
 
 /// `addMetric(MetricName metricName, Measurable measurable)`: the name is
@@ -1388,9 +1388,9 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_name(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `builder_mut` requires, and `name` a NUL-terminated string, as
-    // `c_str_to_string` requires; the exclusive reference is used only within this call. The name
+    // `require_str` requires; the exclusive reference is used only within this call. The name
     // is copied into an owned `String`.
-    unsafe { builder_mut(self_, "self_") }.name = Some(unsafe { c_str_to_string(name) });
+    unsafe { builder_mut(self_, "self_") }.name = Some(unsafe { require_str(name, "name") });
 }
 
 /// Sets the sensor's config.

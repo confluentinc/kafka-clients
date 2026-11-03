@@ -24,7 +24,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use crate::ffi::util::into_c_string;
 use std::ffi::{CString, c_char};
 use std::sync::Arc;
@@ -38,7 +38,7 @@ use crate::ffi::common::metrics::compound_stat::{kafka_common_metrics_CompoundSt
 use crate::ffi::common::metrics::measurable_stat::{kafka_common_metrics_MeasurableStat_t, take_measurable_stat};
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_option};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{kafka_List_t, list_elements, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // Sensor.RecordingLevel
@@ -251,9 +251,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_for_name(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const kafka_common_metrics_Sensor_RecordingLevel_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    match RecordingLevel::for_name(&unsafe { c_str_to_string(name) }) {
+    match RecordingLevel::for_name(&unsafe { require_str(name, "name") }) {
         Ok(level) => recording_level_singleton(level),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },

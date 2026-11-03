@@ -38,10 +38,9 @@ use crate::common::Cluster;
 use crate::ffi::common::cluster::{box_cluster, kafka_common_Cluster_destroy, kafka_common_Cluster_t};
 use crate::ffi::common::metrics::Interface;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{Required, require_fn};
+use crate::ffi::precondition::{Required, require_fn, require_str};
 use crate::ffi::util::{
-    GenericValue, box_string_map, c_str_to_string, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, map_strings,
-    owned_c_string,
+    GenericValue, box_string_map, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, map_strings, owned_c_string,
 };
 use crate::producer::Partitioner;
 
@@ -341,9 +340,9 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
     cluster: *const kafka_common_Cluster_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     let key = (!key.is_null()).then(|| GenericValue::new(key as *mut c_void));
     let value = (!value.is_null()).then(|| GenericValue::new(value as *mut c_void));
     // SAFETY: Per this function's `# Safety`, `cluster` is a live handle, as `cluster_ref`
@@ -409,7 +408,7 @@ mod tests {
     use super::*;
     use crate::common::{Node, PartitionInfo};
     use crate::ffi::common::cluster::kafka_common_Cluster_node_by_id;
-    use crate::ffi::util::{kafka_Map_get, kafka_Map_size};
+    use crate::ffi::util::{c_str_to_string, kafka_Map_get, kafka_Map_size};
 
     struct Recorder {
         configured: AtomicI32,

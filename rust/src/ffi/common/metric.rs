@@ -28,14 +28,13 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 use std::sync::OnceLock;
 
 use crate::common::{Metric, MetricValue};
 use crate::ffi::common::metric_name::{MetricNameInner, kafka_common_MetricName_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`Metric`] implementation.
 #[repr(C)]
@@ -257,9 +256,9 @@ pub extern "C" fn kafka_common_MetricValue_double(value: f64) -> *mut kafka_comm
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_string(value: *const c_char) -> *mut kafka_common_MetricValue_t {
     // SAFETY: Per this function's `# Safety`, `value` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    box_metric_value(MetricValue::String(unsafe { c_str_to_string(value) }))
+    box_metric_value(MetricValue::String(unsafe { require_str(value, "value") }))
 }
 
 /// Returns a long reading.

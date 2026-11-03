@@ -110,6 +110,21 @@ pub(crate) unsafe fn require_str(s: *const c_char, param: &'static str) -> Strin
     unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned()
 }
 
+/// The mandatory string `s`, copied; panics with [`fail`]`(error())` when it
+/// is `NULL`, for a parameter Java checks with its own error and message.
+///
+/// # Safety
+///
+/// `s` must be `NULL` or a valid NUL-terminated string.
+pub(crate) unsafe fn require_str_or(s: *const c_char, param: &'static str, error: impl FnOnce() -> Error) -> String {
+    if s.is_null() {
+        fail(error())
+    }
+    // SAFETY: `s` is non-null (checked above) and, per this function's `# Safety`, a valid
+    // NUL-terminated string, as `require_str` requires.
+    unsafe { require_str(s, param) }
+}
+
 /// The elements of the mandatory list `list`; panics with [`null`] when it is
 /// `NULL`.
 ///
@@ -236,6 +251,14 @@ mod tests {
             });
             assert_eq!(error.message(), "topic must not be null");
             assert_eq!(require_str(c"t".as_ptr(), "topic"), "t");
+            let error = caught(|| {
+                require_str_or(std::ptr::null(), "topic", || {
+                    Error::local_illegal_argument("Topic cannot be null.")
+                });
+            });
+            assert!(error.is_local_illegal_argument_error());
+            assert_eq!(error.message(), "Topic cannot be null.");
+            assert_eq!(require_str_or(c"t".as_ptr(), "topic", || unreachable!()), "t");
             let error = caught(|| {
                 require_list(std::ptr::null(), "partitions");
             });

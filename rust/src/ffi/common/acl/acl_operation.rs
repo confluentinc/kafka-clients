@@ -22,8 +22,8 @@ use std::ffi::{c_char, c_void};
 
 use crate::common::acl::AclOperation;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_ref;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`AclOperation`] singleton.
 #[repr(C)]
@@ -400,9 +400,9 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
     str: *const c_char,
 ) -> *const kafka_common_acl_AclOperation_t {
     // SAFETY: Per this function's `# Safety`, `str` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    singleton(AclOperation::from_string(&unsafe { c_str_to_string(str) }))
+    singleton(AclOperation::from_string(&unsafe { require_str(str, "str") }))
 }
 
 /// Returns 1 if this operation is UNKNOWN, else 0.

@@ -21,15 +21,15 @@
 //! across the boundary: single handles, `kafka_List_t`s of them and the
 //! `kafka_Map_t` shape of Java's `Map<TopicPartition, Long>`.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::TopicPartition;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
-    box_list, box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, kafka_Map_t, list_elements,
-    map_entries, owned_c_string,
+    box_list, box_map, destroy_boxed, into_c_string, kafka_List_t, kafka_Map_t, list_elements, map_entries,
+    owned_c_string,
 };
 
 /// Opaque handle to a [`TopicPartition`].
@@ -224,9 +224,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_new(
     partition: i32,
 ) -> *mut kafka_common_TopicPartition_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    box_topic_partition(TopicPartition::new(unsafe { c_str_to_string(topic) }, partition))
+    box_topic_partition(TopicPartition::new(unsafe { require_str(topic, "topic") }, partition))
 }
 
 /// Returns the topic name.

@@ -21,7 +21,7 @@
 //! singletons. This file also hosts the two helpers that convert such a set
 //! for the group descriptions.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_ref, require_str};
 use std::collections::BTreeSet;
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
@@ -36,7 +36,7 @@ use crate::ffi::common::topic_partition_info::{
 };
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`TopicDescription`].
 #[repr(C)]
@@ -226,12 +226,14 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_admin_TopicDescription_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `partitions` null or a valid list whose elements are valid
+    // `require_str` requires, and `partitions` null or a valid list whose elements are valid
     // topic-partition-info handles, all kept alive and not mutated for this call, as
     // `list_topic_partition_infos` requires.
-    box_topic_description(TopicDescription::new(unsafe { c_str_to_string(name) }, internal != 0, unsafe {
-        list_topic_partition_infos(partitions, "partitions")
-    }))
+    box_topic_description(TopicDescription::new(
+        unsafe { require_str(name, "name") },
+        internal != 0,
+        unsafe { list_topic_partition_infos(partitions, "partitions") },
+    ))
 }
 
 /// `new TopicDescription(String name, boolean internal,
@@ -263,8 +265,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
 ) -> *mut kafka_admin_TopicDescription_t {
     box_topic_description(TopicDescription::with_authorized_operations(
         // SAFETY: Per this function's `# Safety` (that of `kafka_admin_TopicDescription_new`),
-        // `name` is a valid NUL-terminated string, as `c_str_to_string` requires.
-        unsafe { c_str_to_string(name) },
+        // `name` is a valid NUL-terminated string, as `require_str` requires.
+        unsafe { require_str(name, "name") },
         internal != 0,
         // SAFETY: Per this function's `# Safety` (that of `kafka_admin_TopicDescription_new`),
         // `partitions` is null or a valid list whose elements are valid topic-partition-info
@@ -310,8 +312,8 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
         // SAFETY: Per this function's `# Safety` (through that of
         // `kafka_admin_TopicDescription_with_authorized_operations`, that of
         // `kafka_admin_TopicDescription_new`), `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(name) },
+        // `require_str` requires.
+        unsafe { require_str(name, "name") },
         internal != 0,
         // SAFETY: Per this function's `# Safety` (through that of
         // `kafka_admin_TopicDescription_with_authorized_operations`, that of

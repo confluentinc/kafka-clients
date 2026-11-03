@@ -26,12 +26,11 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::c_char;
 
 use crate::common::quota::ClientQuotaMatch;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::c_str_to_string;
 
 /// Opaque handle to a [`ClientQuotaMatch`].
 // Rust-only: Java expresses the three states with an `Optional` that may be null.
@@ -148,9 +147,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_exact(
     value: *const c_char,
 ) -> *mut kafka_common_quota_ClientQuotaMatch_t {
     // SAFETY: Per this function's `# Safety`, `value` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    Box::into_raw(Box::new(ClientQuotaMatch::Exact(unsafe { c_str_to_string(value) })))
+    Box::into_raw(Box::new(ClientQuotaMatch::Exact(unsafe { require_str(value, "value") })))
         as *mut kafka_common_quota_ClientQuotaMatch_t
 }
 

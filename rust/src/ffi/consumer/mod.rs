@@ -85,7 +85,7 @@ pub(crate) mod offset_and_timestamp;
 pub(crate) mod offset_commit_callback;
 pub(crate) mod subscription_pattern;
 
-use crate::ffi::precondition::{require_fn, require_ref};
+use crate::ffi::precondition::{require_fn, require_ref, require_str};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
@@ -3622,8 +3622,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.partitions_for(&topic).await })) };
@@ -3687,8 +3687,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let opaque = SendPtr(opaque);
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
     // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
@@ -3750,8 +3750,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     let result = unsafe {
@@ -3819,8 +3819,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
 ) {
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let opaque = SendPtr(opaque);
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
     // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.

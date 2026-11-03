@@ -15,12 +15,12 @@
 //! `kafka_admin_MemberToRemove_t`:
 //! `org.apache.kafka.clients.admin.MemberToRemove` (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::MemberToRemove;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, owned_c_string};
+use crate::ffi::util::owned_c_string;
 
 /// Opaque handle to a [`MemberToRemove`].
 #[repr(C)]
@@ -104,8 +104,10 @@ pub unsafe extern "C" fn kafka_admin_MemberToRemove_new(
     group_instance_id: *const c_char,
 ) -> *mut kafka_admin_MemberToRemove_t {
     // SAFETY: Per this function's `# Safety`, `group_instance_id` is a valid NUL-terminated string,
-    // as `c_str_to_string` requires.
-    box_member_to_remove(MemberToRemove::new(unsafe { c_str_to_string(group_instance_id) }))
+    // as `require_str` requires.
+    box_member_to_remove(MemberToRemove::new(unsafe {
+        require_str(group_instance_id, "group_instance_id")
+    }))
 }
 
 /// Returns the group instance id of the member.
