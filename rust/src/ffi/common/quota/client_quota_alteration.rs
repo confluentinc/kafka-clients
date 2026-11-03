@@ -17,7 +17,7 @@
 //! `org.apache.kafka.common.quota.ClientQuotaAlteration` and
 //! `ClientQuotaAlteration.Op` (CLAUDE.md §4 rule 7).
 
-use crate::ffi::precondition::{require_list, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::quota::{ClientQuotaAlteration, Op};
@@ -252,7 +252,15 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `ops` is a valid op handle, as
         // `op_ref` requires; the op is cloned, so the borrow lasts for this call only.
-        .map(|&op| unsafe { op_ref(op as *const kafka_common_quota_ClientQuotaAlteration_Op_t, "op") }.clone())
+        .map(|&op| {
+            unsafe {
+                op_ref(
+                    require_element(op, "ops") as *const kafka_common_quota_ClientQuotaAlteration_Op_t,
+                    "ops",
+                )
+            }
+            .clone()
+        })
         .collect();
     box_client_quota_alteration(ClientQuotaAlteration::new(
         // SAFETY: Per this function's `# Safety`, `entity` is a valid entity handle, as

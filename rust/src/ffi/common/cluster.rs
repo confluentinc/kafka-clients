@@ -21,7 +21,7 @@
 //! NUL-terminated topic name of each topic id and the cluster resource. The
 //! getters returning Java collections build owned `kafka_List_t`s of copies.
 
-use crate::ffi::precondition::{require_map, require_ref};
+use crate::ffi::precondition::{require_element, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -451,11 +451,23 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_partitions(
                 // SAFETY: Per this function's `# Safety`, every key of `partitions` is a valid
                 // topic-partition handle, as `topic_partition_ref` requires; it is cloned, so
                 // nothing borrows it after this call.
-                unsafe { topic_partition_ref(tp as *const kafka_common_TopicPartition_t, "tp") }.clone(),
+                unsafe {
+                    topic_partition_ref(
+                        require_element(tp, "partitions") as *const kafka_common_TopicPartition_t,
+                        "partitions",
+                    )
+                }
+                .clone(),
                 // SAFETY: Per this function's `# Safety`, every value of `partitions` is a valid
                 // partition-info handle, as `partition_info_ref` requires; it is cloned, so nothing
                 // borrows it after this call.
-                unsafe { partition_info_ref(info as *const kafka_common_PartitionInfo_t, "info") }.clone(),
+                unsafe {
+                    partition_info_ref(
+                        require_element(info, "partitions") as *const kafka_common_PartitionInfo_t,
+                        "partitions",
+                    )
+                }
+                .clone(),
             )
         })
         .collect();

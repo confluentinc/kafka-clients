@@ -26,7 +26,7 @@
 //! destroying the records handle releases them.
 
 use crate::common::Error;
-use crate::ffi::precondition::{require_list, require_map, require_ref, require_str_or};
+use crate::ffi::precondition::{require_element, require_list, require_map, require_ref, require_str_or};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -175,16 +175,28 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
     for &(tp, list) in unsafe { require_map(records, "records") } {
         // SAFETY: Per this function's `# Safety`, every key of `records` is a valid topic-partition
         // handle, as `topic_partition_ref` requires; it is cloned, so the borrow ends here.
-        let tp = unsafe { topic_partition_ref(tp as *const kafka_common_TopicPartition_t, "tp") }.clone();
+        let tp = unsafe {
+            topic_partition_ref(
+                require_element(tp, "records") as *const kafka_common_TopicPartition_t,
+                "records",
+            )
+        }
+        .clone();
         // SAFETY: Per this function's `# Safety`, every value of `records` is a valid list of
         // record handles that no other call mutates during this one, as `require_list` requires;
         // the elements are read only within this statement.
-        let records = unsafe { require_list(list as *const kafka_List_t, "list") }
+        let records = unsafe { require_list(require_element(list, "records") as *const kafka_List_t, "records") }
             .iter()
             .map(|&record| {
                 // SAFETY: Per this function's `# Safety`, every element of that list is a valid record
                 // handle, as `consumer_record_ref` requires; it is cloned, so the borrow ends here.
-                unsafe { consumer_record_ref(record as *const kafka_consumer_ConsumerRecord_t, "record") }.clone()
+                unsafe {
+                    consumer_record_ref(
+                        require_element(record, "records") as *const kafka_consumer_ConsumerRecord_t,
+                        "records",
+                    )
+                }
+                .clone()
             })
             .collect();
         by_partition.insert(tp, records);
