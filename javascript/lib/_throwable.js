@@ -116,11 +116,28 @@ function init(self, cls) {
   const id = ffiIdOf(cls);
   self.code = id === undefined ? -1 : id;
   self.errorName = id === undefined ? null : FFI_NAMES.get(id) ?? null;
-  // Required here, not at load: they extend the class this module serves.
-  const { RetriableError } = require('./common/errors/retriable_error');
-  const { ApiError } = require('./common/errors/api_error');
+  const [RetriableError, ApiError] = bases();
   self.retriable = self instanceof RetriableError;
   self.apiError = self instanceof ApiError;
+}
+
+/** @type {[Function, Function] | null} */
+let cachedBases = null;
+
+/**
+ * `[RetriableError, ApiError]`: required on first use, not at load (they
+ * extend the classes this module serves), and kept once both are loaded, so a
+ * conversion costs no `require()`.
+ *
+ * @returns {[Function, Function]}
+ */
+function bases() {
+  if (cachedBases !== null) return cachedBases;
+  const { RetriableError } = require('./common/errors/retriable_error');
+  const { ApiError } = require('./common/errors/api_error');
+  const found = /** @type {[Function, Function]} */ ([RetriableError, ApiError]);
+  if (typeof RetriableError === 'function' && typeof ApiError === 'function') cachedBases = found;
+  return found;
 }
 
 module.exports = { causeOf, ffiIdOf, init, messageOf, optionsOf, ownFfiId, setFfiId };
