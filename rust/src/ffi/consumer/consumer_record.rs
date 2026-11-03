@@ -188,6 +188,10 @@ fn generic_ptr(value: Option<&GenericValue>) -> *mut c_void {
 /// - `key` - The key of the record, if one exists (`NULL` is allowed)
 /// - `value` - The record contents
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string.
@@ -606,6 +610,10 @@ pub extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_new() -> *mut kafk
 /// # Parameters
 ///
 /// - `topic` - the topic
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null") if `topic` is `NULL`.
 ///
 /// # Safety
 ///

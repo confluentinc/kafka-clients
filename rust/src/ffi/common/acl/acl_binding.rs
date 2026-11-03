@@ -312,4 +312,17 @@ mod tests {
             kafka_common_acl_AclBinding_destroy(ptr::null_mut());
         }
     }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: both arguments are `NULL`, and `err` is a valid slot pointing at
+        // null; `stored` frees the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_acl_AclBinding_new_err(std::ptr::null(), std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "pattern");
+        }
+    }
 }

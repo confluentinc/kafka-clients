@@ -21,7 +21,7 @@
 #![expect(non_camel_case_types)]
 
 use crate::common::Error;
-use crate::ffi::precondition::{require_ref, require_str_or};
+use crate::ffi::precondition::{fail, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::config::ConfigResource;
@@ -312,6 +312,11 @@ pub(crate) fn box_config_resource(resource: ConfigResource) -> *mut kafka_common
 /// - `resource_type` - a non-`NULL` resource type
 /// - `name` - a non-`NULL` resource name
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("name should not be null") if `name` is `NULL`.
+/// - `LocalNullPointerError` ("type should not be null") if `resource_type` is `NULL`.
+///
 /// # Safety
 ///
 /// `resource_type` must be a type singleton and `name` a valid NUL-terminated string, copied. The
@@ -322,6 +327,9 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
     resource_type: *const kafka_common_config_ConfigResource_Type_t,
     name: *const c_char,
 ) -> *mut kafka_common_config_ConfigResource_t {
+    if resource_type.is_null() {
+        fail(Error::local_null_pointer("type should not be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `resource_type` is a type singleton, as `type_of`
     // requires, and its value is copied out; `name` is a valid NUL-terminated string, as
     // `require_str` requires, and is copied into an owned `String`. Nothing borrows either
@@ -509,6 +517,27 @@ mod tests {
             assert_eq!(kafka_common_config_ConfigResource_is_default(default_broker), 1);
             kafka_common_config_ConfigResource_destroy(default_broker);
             kafka_common_config_ConfigResource_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: each call gets one `NULL` argument, the other valid (a type
+        // singleton or a string literal), and a valid `err` slot pointing at null; `stored` frees
+        // the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_config_ConfigResource_new_err(std::ptr::null(), c"t".as_ptr(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "type should not be null");
+
+            let mut err = std::ptr::null_mut();
+            let topic = kafka_common_config_ConfigResource_Type_topic();
+            assert!(kafka_common_config_ConfigResource_new_err(topic, std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "name should not be null");
         }
     }
 }

@@ -1444,6 +1444,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_cb(
 /// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
 ///   fails within `bootstrap.resolve.timeout.ms`
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Consumer group metadata could not be null") if `group_metadata` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live view, `offsets` a live map of
@@ -2306,6 +2310,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
 ///   fails within `bootstrap.resolve.timeout.ms`
 /// - `kafka_common_Error_is_kafka_error` for all Kafka-related errors, including the case where
 ///   this method is called after producer close
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("topic cannot be null") if `topic` is `NULL`.
 ///
 /// # Safety
 ///

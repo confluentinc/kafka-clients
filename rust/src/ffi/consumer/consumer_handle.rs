@@ -483,6 +483,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Partitions collection cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -597,6 +601,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
 ///   the consumer is running;
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Partitions collection cannot be null") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -713,6 +721,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("The partitions to pause must be nonnull") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -825,6 +837,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
 ///   the consumer is running;
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("The partitions to resume must be nonnull") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -1873,6 +1889,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout_
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -1998,6 +2018,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
 ///   the consumer is running;
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -2126,6 +2150,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -2251,6 +2279,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
 ///   the consumer is running;
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -2382,6 +2414,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Timestamps to search cannot be null") if `timestamps_to_search` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -2510,6 +2546,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
 ///   the consumer is running;
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Timestamps to search cannot be null") if `timestamps_to_search` is `NULL`.
 ///
 /// # Safety
 ///

@@ -197,6 +197,23 @@ impl<F: Copy> NullableFn for Option<F> {
 /// checked it, as a registration stores a mandatory method.
 pub(crate) type Required<T> = <T as NullableFn>::Bare;
 
+/// The error an `_err` twin stored in a test's `out_err` slot, which it frees.
+///
+/// # Safety
+///
+/// `err` must be `NULL` or an owned error handle, used by nothing else.
+#[cfg(test)]
+pub(crate) unsafe fn stored(err: *mut crate::ffi::common::kafka_common_Error_t) -> Error {
+    assert!(!err.is_null(), "no error was stored");
+    // SAFETY: Per this function's `# Safety`, `err` is a live owned handle; the error is cloned
+    // before the handle is freed, once.
+    unsafe {
+        let error = crate::ffi::common::error_ref(err, "err").error.clone();
+        crate::ffi::common::kafka_common_Error_destroy(err);
+        error
+    }
+}
+
 /// The error a closure's precondition panic carries, for the tests of `ffi`.
 #[cfg(test)]
 pub(crate) fn caught(body: impl FnOnce() + std::panic::UnwindSafe) -> Error {

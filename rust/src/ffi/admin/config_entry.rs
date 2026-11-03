@@ -766,6 +766,10 @@ pub extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_new() -> *mut kafka_admi
 ///
 /// - `name` - the config name, copied
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("name should not be null") if `name` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the same time, and `name` a
@@ -1091,6 +1095,10 @@ pub(crate) unsafe fn destroy_config_entry_element(element: *mut c_void) {
 ///
 /// - `name` - the non-`NULL` config name
 /// - `value` - the config value or `NULL`
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("name should not be null") if `name` is `NULL`.
 ///
 /// # Safety
 ///
@@ -1554,6 +1562,27 @@ mod tests {
             );
             kafka_string_destroy(s);
             kafka_admin_ConfigEntry_destroy(entry);
+        }
+    }
+
+    #[test]
+    fn a_null_name_is_javas_null_pointer_error() {
+        // SAFETY: Test code: every call gets a `NULL` name and a valid `err` slot pointing at
+        // null; `stored` frees the error stored there; the builder is owned and destroyed once.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_admin_ConfigEntry_new_err(std::ptr::null(), std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "name should not be null");
+
+            let builder = kafka_admin_ConfigEntryOptionsBuilder_new();
+            let mut err = std::ptr::null_mut();
+            kafka_admin_ConfigEntryOptionsBuilder_set_name_err(builder, std::ptr::null(), &mut err);
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "name should not be null");
+            kafka_admin_ConfigEntryOptionsBuilder_destroy(builder);
         }
     }
 }

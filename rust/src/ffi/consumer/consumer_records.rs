@@ -292,6 +292,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_partition(
 ///
 /// A list of `const kafka_consumer_ConsumerRecord_t *` across the topic's partitions.
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic must be non-null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle and `topic` a valid NUL-terminated string.
@@ -463,6 +467,23 @@ mod tests {
             let empty = kafka_consumer_ConsumerRecords_empty();
             assert_eq!(kafka_consumer_ConsumerRecords_is_empty(empty), 1);
             kafka_consumer_ConsumerRecords_destroy(empty);
+            kafka_consumer_ConsumerRecords_destroy(records);
+        }
+    }
+
+    #[test]
+    fn a_null_topic_is_javas_illegal_argument_error() {
+        // SAFETY: Test code: `records` is the owned empty handle, destroyed once; the topic is
+        // `NULL`, and `err` is a valid slot pointing at null, whose error `stored` frees.
+        unsafe {
+            let records = kafka_consumer_ConsumerRecords_empty();
+            let mut err = std::ptr::null_mut();
+            assert!(
+                kafka_consumer_ConsumerRecords_records_with_topic_err(records, std::ptr::null(), &mut err).is_null()
+            );
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_illegal_argument_error(), "{error:?}");
+            assert_eq!(error.message(), "Topic must be non-null.");
             kafka_consumer_ConsumerRecords_destroy(records);
         }
     }

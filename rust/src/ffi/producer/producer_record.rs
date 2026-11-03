@@ -144,6 +144,10 @@ unsafe fn deliver(
 /// - `topic` - The topic the record will be appended to
 /// - `value` - The record contents
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string.
@@ -171,6 +175,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
 /// - `topic` - The topic the record will be appended to
 /// - `key` - The key that will be included in the record
 /// - `value` - The record contents
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
 ///
 /// # Safety
 ///
@@ -212,6 +220,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
 ///   passes none it rejects
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
 ///   FFI boundary
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
 ///
 /// # Safety
 ///
@@ -262,6 +274,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
 ///   passes none it rejects
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
 ///   FFI boundary
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
 ///
 /// # Safety
 ///
@@ -318,6 +334,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_header
 ///   passes none it rejects
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
 ///   FFI boundary
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
 ///
 /// # Safety
 ///
@@ -620,6 +640,10 @@ pub extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_new() -> *mut kafk
 /// # Parameters
 ///
 /// - `topic` - The topic the record will be appended to
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
 ///
 /// # Safety
 ///

@@ -15,14 +15,15 @@
 //! `kafka_common_TopicIdPartition_t`:
 //! `org.apache.kafka.common.TopicIdPartition` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_ref, require_str};
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref};
 use std::ffi::c_char;
 
 use crate::common::TopicIdPartition;
 use crate::ffi::common::topic_partition::{TopicPartitionInner, kafka_common_TopicPartition_t, topic_partition_ref};
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::into_c_string;
+use crate::ffi::util::{c_str_to_string, into_c_string};
 
 /// Opaque handle to a [`TopicIdPartition`].
 #[repr(C)]
@@ -69,6 +70,11 @@ fn boxed(tip: TopicIdPartition) -> *mut kafka_common_TopicIdPartition_t {
 /// - `topic_id` - the topic id
 /// - `topic_partition` - the topic partition
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("topicId can not be null") if `topic_id` is `NULL`.
+/// - `LocalNullPointerError` ("topicPartition can not be null") if `topic_partition` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic_id` must be a valid uuid handle and `topic_partition` a valid
@@ -80,6 +86,12 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
     topic_id: *const kafka_common_Uuid_t,
     topic_partition: *const kafka_common_TopicPartition_t,
 ) -> *mut kafka_common_TopicIdPartition_t {
+    if topic_id.is_null() {
+        fail(Error::local_null_pointer("topicId can not be null"));
+    }
+    if topic_partition.is_null() {
+        fail(Error::local_null_pointer("topicPartition can not be null"));
+    }
     boxed(TopicIdPartition::new(
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires; the `Uuid` is copied out.
@@ -99,6 +111,10 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
 /// - `partition` - the partition id
 /// - `topic` - the topic name, empty or `NULL` if unknown
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("topicId can not be null") if `topic_id` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic_id` must be a valid uuid handle and `topic` `NULL` or a valid NUL-terminated
@@ -111,15 +127,18 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
     partition: i32,
     topic: *const c_char,
 ) -> *mut kafka_common_TopicIdPartition_t {
+    if topic_id.is_null() {
+        fail(Error::local_null_pointer("topicId can not be null"));
+    }
     boxed(TopicIdPartition::with_partition_topic(
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires; the `Uuid` is copied out.
         unsafe { uuid_of(topic_id, "topic_id") },
         partition,
-        // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
-        // after this call.
-        unsafe { require_str(topic, "topic") },
+        // SAFETY: Per this function's `# Safety`, `topic` is `NULL` or a valid NUL-terminated
+        // string, as `c_str_to_string` requires; it is copied into an owned `String`, so nothing
+        // borrows it after this call. `NULL` reads as the empty, unknown, topic name.
+        unsafe { c_str_to_string(topic) },
     ))
 }
 
@@ -276,6 +295,39 @@ mod tests {
                 kafka_common_TopicIdPartition_destroy(tip);
             }
             kafka_common_TopicIdPartition_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn null_arguments_follow_java() {
+        // SAFETY: Test code: `id` and `tp` are owned handles destroyed once, at the end; each
+        // failing call gets one `NULL` argument and a valid `err` slot pointing at null, whose
+        // error `stored` frees; `tip` is owned, read while alive and destroyed once.
+        unsafe {
+            let id = crate::ffi::common::uuid::kafka_common_Uuid_new(1, 2);
+            let tp = crate::ffi::common::topic_partition::kafka_common_TopicPartition_new(c"t".as_ptr(), 0);
+            for (topic_id, topic_partition, text) in [
+                (std::ptr::null(), tp as *const _, "topicId can not be null"),
+                (id as *const _, std::ptr::null(), "topicPartition can not be null"),
+            ] {
+                let mut err = std::ptr::null_mut();
+                assert!(kafka_common_TopicIdPartition_new_err(topic_id, topic_partition, &mut err).is_null());
+                let error = crate::ffi::precondition::stored(err);
+                assert!(error.is_local_null_pointer_error(), "{error:?}");
+                assert_eq!(error.message(), text);
+            }
+            let mut err = std::ptr::null_mut();
+            let none =
+                kafka_common_TopicIdPartition_with_partition_topic_err(std::ptr::null(), 0, c"t".as_ptr(), &mut err);
+            assert!(none.is_null());
+            assert_eq!(crate::ffi::precondition::stored(err).message(), "topicId can not be null");
+
+            // Java's "the topic name or null": `NULL` is the unknown, empty, name.
+            let tip = kafka_common_TopicIdPartition_with_partition_topic(id, 3, std::ptr::null());
+            assert_eq!(CStr::from_ptr(kafka_common_TopicIdPartition_topic(tip)).to_str().unwrap(), "");
+            kafka_common_TopicIdPartition_destroy(tip);
+            crate::ffi::common::uuid::kafka_common_Uuid_destroy(id);
+            crate::ffi::common::topic_partition::kafka_common_TopicPartition_destroy(tp);
         }
     }
 }

@@ -16,7 +16,8 @@
 //! `org.apache.kafka.common.resource.ResourcePatternFilter` (CLAUDE.md §4). A
 //! null name is Java's null: "matches any name".
 
-use crate::ffi::precondition::require_ref;
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref};
 use std::ffi::{CString, c_char};
 use std::ptr;
 
@@ -111,6 +112,11 @@ pub(crate) fn box_resource_pattern_filter(
 ///   supplied `name`, including a matching prefixed and wildcards patterns. If any other resource
 ///   pattern type, the filter will match only patterns with the same type.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("resourceType") if `resource_type` is `NULL`.
+/// - `LocalNullPointerError` ("patternType") if `pattern_type` is `NULL`.
+///
 /// # Safety
 ///
 /// `resource_type` and `pattern_type` must be singletons of their enums and
@@ -123,6 +129,12 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_new(
     name: *const c_char,
     pattern_type: *const kafka_common_resource_PatternType_t,
 ) -> *mut kafka_common_resource_ResourcePatternFilter_t {
+    if resource_type.is_null() {
+        fail(Error::local_null_pointer("resourceType"));
+    }
+    if pattern_type.is_null() {
+        fail(Error::local_null_pointer("patternType"));
+    }
     box_resource_pattern_filter(ResourcePatternFilter::new(
         // SAFETY: Per this function's `# Safety`, `resource_type` is a singleton of its enum, i.e.
         // one returned by the `resource_type` module, as `resource_type_of`
@@ -458,6 +470,32 @@ mod tests {
             kafka_common_resource_ResourcePatternFilter_destroy(ptr::null_mut());
             kafka_common_resource_ResourcePattern_destroy(literal);
             kafka_common_resource_ResourcePattern_destroy(prefixed);
+        }
+    }
+
+    #[test]
+    fn null_types_are_javas_null_pointer_errors() {
+        let topic = kafka_common_resource_ResourceType_topic();
+        let literal = kafka_common_resource_PatternType_literal();
+        // SAFETY: Test code: each call gets one `NULL` type, the other a singleton, and a valid
+        // `err` slot pointing at null; `stored` frees the error stored there.
+        unsafe {
+            for (resource_type, pattern_type, text) in [
+                (std::ptr::null(), literal, "resourceType"),
+                (topic, std::ptr::null(), "patternType"),
+            ] {
+                let mut err = std::ptr::null_mut();
+                let filter = kafka_common_resource_ResourcePatternFilter_new_err(
+                    resource_type,
+                    std::ptr::null(),
+                    pattern_type,
+                    &mut err,
+                );
+                assert!(filter.is_null());
+                let error = crate::ffi::precondition::stored(err);
+                assert!(error.is_local_null_pointer_error(), "{error:?}");
+                assert_eq!(error.message(), text);
+            }
         }
     }
 }

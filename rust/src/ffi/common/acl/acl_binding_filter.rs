@@ -106,6 +106,11 @@ pub(crate) fn box_acl_binding_filter(filter: AclBindingFilter) -> *mut kafka_com
 /// - `pattern_filter` - non-`NULL` pattern filter
 /// - `entry_filter` - non-`NULL` access control entry filter
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("patternFilter") if `pattern_filter` is `NULL`.
+/// - `LocalNullPointerError` ("entryFilter") if `entry_filter` is `NULL`.
+///
 /// # Safety
 ///
 /// `pattern_filter` must be a valid resource-pattern-filter handle and
@@ -385,6 +390,19 @@ mod tests {
             kafka_common_acl_AclBindingFilter_destroy(any);
             kafka_common_acl_AclBindingFilter_destroy(ptr::null_mut());
             kafka_common_acl_AclBinding_destroy(binding);
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: both arguments are `NULL`, and `err` is a valid slot pointing at
+        // null; `stored` frees the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_acl_AclBindingFilter_new_err(std::ptr::null(), std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "patternFilter");
         }
     }
 }

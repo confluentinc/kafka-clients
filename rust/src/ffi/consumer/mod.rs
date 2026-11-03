@@ -842,6 +842,10 @@ fn deliver_ptr<T, P>(
 /// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
 ///   topics or pattern (without a subsequent call to `kafka_consumer_Consumer_unsubscribe`)
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic partitions collection to assign to cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -960,6 +964,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
 ///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
 ///   strategy
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic collection to subscribe to cannot be null") if `topics` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -1075,6 +1083,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
 ///   pattern, or assign is called previously (without a subsequent call to
 ///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
 ///   strategy
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("RebalanceListener cannot be null") if `listener` is `NULL`.
+/// - `LocalIllegalArgumentError` ("Topic collection to subscribe to cannot be null") if `topics` is `NULL`.
 ///
 /// # Safety
 ///
@@ -1215,6 +1228,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
 ///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
 ///   strategy
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic pattern to subscribe to cannot be null") if `pattern` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -1327,6 +1344,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
 ///   topics, or assign is called previously (without a subsequent call to
 ///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
 ///   strategy
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("RebalanceListener cannot be null") if `listener` is `NULL`.
+/// - `LocalIllegalArgumentError` ("Topic pattern to subscribe to cannot be null") if `pattern` is `NULL`.
 ///
 /// # Safety
 ///
@@ -2871,6 +2893,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_c
 /// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
 ///   currently assigned to this consumer
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Partitions collection cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -2978,6 +3004,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
 /// - `kafka_common_Error_is_local_illegal_argument_error` if `partitions` is `NULL`
 /// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
 ///   currently assigned to this consumer
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Partitions collection cannot be null") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -4136,6 +4166,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 /// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
 ///   fails within `bootstrap.resolve.timeout.ms`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Timestamps to search cannot be null") if `timestamps_to_search` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -4274,6 +4308,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 /// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
 ///   the offsets by timestamp
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Timestamps to search cannot be null") if `timestamps_to_search` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -4409,6 +4447,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
 /// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
 ///   expiration of the configured `default.api.timeout.ms`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -4531,6 +4573,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
 ///   for more details
 /// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
 ///   expiration of the passed timeout
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -4661,6 +4707,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
 /// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
 ///   amount of time allocated by `default.api.timeout.ms` expires
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -4783,6 +4833,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
 ///   for more details
 /// - `kafka_common_Error_is_timeout_error` if the offsets could not be fetched before expiration of
 ///   the passed timeout
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///
@@ -4911,6 +4965,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
 ///   currently assigned to this consumer
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("The partitions to pause must be nonnull") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -5016,6 +5074,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
 ///
 /// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
 ///   currently assigned to this consumer
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("The partitions to resume must be nonnull") if `partitions` is `NULL`.
 ///
 /// # Safety
 ///

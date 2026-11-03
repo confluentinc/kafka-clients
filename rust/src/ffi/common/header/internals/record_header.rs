@@ -182,6 +182,10 @@ pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t, param: &'sta
 /// - `key` - the header's key, copied
 /// - `value` - the header's value, copied; `value.data == NULL` is a `NULL` value
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Null header keys are not permitted") if `key` is `NULL`.
+///
 /// # Safety
 ///
 /// `key` must be a valid NUL-terminated string and `value` null or a valid
@@ -339,6 +343,21 @@ mod tests {
             kafka_List_destroy(list);
             kafka_common_header_internals_RecordHeader_destroy(first);
             kafka_common_header_internals_RecordHeader_destroy(second);
+        }
+    }
+
+    #[test]
+    fn a_null_key_is_javas_null_pointer_error() {
+        // SAFETY: Test code: the key is `NULL`, and `err` is a valid slot pointing at null;
+        // `stored` frees the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let header =
+                kafka_common_header_internals_RecordHeader_new_err(std::ptr::null(), kafka_Bytes_t::NULL, &mut err);
+            assert!(header.is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "Null header keys are not permitted");
         }
     }
 }

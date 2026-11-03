@@ -123,6 +123,10 @@ pub(crate) unsafe fn list_kafka_principals(list: *const kafka_List_t, param: &'s
 /// - `principal_type` - the principal type, e.g. `User`
 /// - `name` - the principal name
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Principal name cannot be null") if `name` is `NULL`.
+///
 /// # Safety
 ///
 /// `principal_type` and `name` must be valid NUL-terminated strings, copied. The returned handle is
@@ -153,6 +157,10 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
 /// - `principal_type` - the principal type, e.g. `User`
 /// - `name` - the principal name
 /// - `token_authenticated` - 1 if the principal authenticated with a delegation token, else 0
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Principal name cannot be null") if `name` is `NULL`.
 ///
 /// # Safety
 ///
@@ -360,6 +368,24 @@ mod tests {
             );
             kafka_common_security_auth_KafkaPrincipal_destroy(anonymous);
             kafka_common_security_auth_KafkaPrincipal_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn null_type_and_name_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: each call gets one `NULL` argument, the other a string literal, and
+        // a valid `err` slot pointing at null; `stored` frees the error stored there.
+        unsafe {
+            for (principal_type, name, text) in [
+                (std::ptr::null(), c"alice".as_ptr(), "Principal type cannot be null"),
+                (c"User".as_ptr(), std::ptr::null(), "Principal name cannot be null"),
+            ] {
+                let mut err = std::ptr::null_mut();
+                assert!(kafka_common_security_auth_KafkaPrincipal_new_err(principal_type, name, &mut err).is_null());
+                let error = crate::ffi::precondition::stored(err);
+                assert!(error.is_local_null_pointer_error(), "{error:?}");
+                assert_eq!(error.message(), text);
+            }
         }
     }
 }

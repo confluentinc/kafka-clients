@@ -98,18 +98,18 @@ pub(crate) unsafe fn destroy_config_element(element: *mut c_void) {
 ///
 /// # Parameters
 ///
-/// - `entries` - a borrowed list of `const kafka_admin_ConfigEntry_t *`, copied, `NULL` reading as
-///   empty; a later entry with the same name replaces an earlier one, as in Java
+/// - `entries` - a borrowed list of `const kafka_admin_ConfigEntry_t *`, copied; a later entry with
+///   the same name replaces an earlier one, as in Java
 ///
 /// # Safety
 ///
-/// `entries` must be `NULL` or a valid list whose elements are valid config-entry handles, all kept
+/// `entries` must be a valid list whose elements are valid config-entry handles, all kept
 /// alive and not mutated for this call. The config is owned by the caller, freed with
 /// `kafka_admin_Config_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) -> *mut kafka_admin_Config_t {
-    // SAFETY: Per this function's `# Safety`, `entries` is null or a valid list, alive and not
+    // SAFETY: Per this function's `# Safety`, `entries` is a valid list, alive and not
     // mutated for this call, as `require_list` requires; the borrowed slice is consumed by
     // `Config::new` within this call.
     let entries = unsafe { require_list(entries, "entries") }.iter().map(|&element| {

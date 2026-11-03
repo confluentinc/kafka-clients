@@ -301,6 +301,10 @@ unsafe fn headers_mut<'a>(self_: *mut kafka_common_header_Headers_t, param: &'st
 /// - `kafka_common_Error_is_local_illegal_state_error` is thrown if headers are in a read-only
 ///   state.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Header cannot be null.") if `header` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
@@ -344,6 +348,10 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
 /// - `kafka_common_Error_is_local_illegal_state_error` is thrown if headers are in a read-only
 ///   state.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Null header keys are not permitted") if `key` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
@@ -385,6 +393,10 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
 /// - `kafka_common_Error_is_local_illegal_state_error` is thrown if headers are in a read-only
 ///   state.
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("key cannot be null.") if `key` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
@@ -419,6 +431,10 @@ pub unsafe extern "C" fn kafka_common_header_Headers_remove(
 /// # Returns
 ///
 /// this last header matching the given key, returns `NULL` if not present.
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("key cannot be null.") if `key` is `NULL`.
 ///
 /// # Safety
 ///
@@ -460,6 +476,10 @@ pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
 ///
 /// all headers for the given key, in the order they were added in, if NO headers are present an
 /// empty iterable is returned.
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("key cannot be null.") if `key` is `NULL`.
 ///
 /// # Safety
 ///
@@ -654,6 +674,43 @@ mod tests {
             kafka_common_Error_destroy(err);
             assert_eq!(record_headers_ref(class, "class").to_array().len(), 2);
 
+            kafka_common_header_internals_RecordHeaders_destroy(class);
+        }
+    }
+
+    #[test]
+    fn null_keys_and_headers_are_javas_errors() {
+        let class = box_record_headers(RecordHeaders::new());
+        // SAFETY: Test code: `class` comes from `box_record_headers` and is destroyed once, at the
+        // end; `view` is its cached `Headers` view, used only while it lives; every call gets a
+        // `NULL` key or header and a valid `err` slot pointing at null, whose error `stored`
+        // frees.
+        unsafe {
+            let view = kafka_common_header_internals_RecordHeaders__as_Headers(class);
+            let check = |err, null_pointer: bool, text: &str| {
+                let error = crate::ffi::precondition::stored(err);
+                if null_pointer {
+                    assert!(error.is_local_null_pointer_error(), "{error:?}");
+                } else {
+                    assert!(error.is_local_illegal_argument_error(), "{error:?}");
+                }
+                assert_eq!(error.message(), text);
+            };
+            let mut err = std::ptr::null_mut();
+            kafka_common_header_Headers_add_with_header(view, std::ptr::null(), &mut err);
+            check(err, true, "Header cannot be null.");
+            let mut err = std::ptr::null_mut();
+            kafka_common_header_Headers_add_with_key_value(view, std::ptr::null(), kafka_Bytes_t::NULL, &mut err);
+            check(err, true, "Null header keys are not permitted");
+            let mut err = std::ptr::null_mut();
+            kafka_common_header_Headers_remove(view, std::ptr::null(), &mut err);
+            check(err, false, "key cannot be null.");
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_header_Headers_last_header_err(view, std::ptr::null(), &mut err).is_null());
+            check(err, false, "key cannot be null.");
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_header_Headers_headers_err(view, std::ptr::null(), &mut err).is_null());
+            check(err, false, "key cannot be null.");
             kafka_common_header_internals_RecordHeaders_destroy(class);
         }
     }

@@ -23,7 +23,8 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_mut, require_ref};
 use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::time::Duration;
@@ -218,6 +219,10 @@ pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> 
 ///
 /// A new `CloseOptions` instance with the specified group membership operation.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("operation should not be null") if `operation` is `NULL`.
+///
 /// # Safety
 ///
 /// `operation` must be a singleton returned by this module.
@@ -228,6 +233,9 @@ pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> 
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
     operation: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
 ) -> *mut kafka_consumer_CloseOptions_t {
+    if operation.is_null() {
+        fail(Error::local_null_pointer("operation should not be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // as `value_of` requires; the value is copied out.
     Box::into_raw(Box::new(CloseOptions::with_operation(unsafe {
@@ -265,6 +273,10 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
 /// - `operation` - The group membership operation to apply. Must be one of `LEAVE_GROUP`,
 ///   `REMAIN_IN_GROUP`, or `DEFAULT`.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("operation should not be null") if `operation` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle that no other call uses at the same time,
@@ -279,6 +291,9 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
     // from one of the two constructors, and no other call uses it at the same time, so the
     // exclusive reference is sound for this call, its only use.
     let slot = unsafe { require_mut::<_, CloseOptions>(self_, "self_") };
+    if operation.is_null() {
+        fail(Error::local_null_pointer("operation should not be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // as `value_of` requires; the value is copied out.
     *slot = slot
@@ -385,6 +400,25 @@ mod tests {
                 kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP
             );
             kafka_consumer_CloseOptions_destroy(by_op);
+        }
+    }
+
+    #[test]
+    fn a_null_operation_is_javas_null_pointer_error() {
+        // SAFETY: Test code: `options` is an owned handle destroyed once; each call gets a `NULL`
+        // operation and a valid `err` slot pointing at null, whose error `stored` frees.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_consumer_CloseOptions_with_operation_err(std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "operation should not be null");
+
+            let options = kafka_consumer_CloseOptions_new_with_timeout(1000);
+            let mut err = std::ptr::null_mut();
+            kafka_consumer_CloseOptions_with_group_membership_operation_err(options, std::ptr::null(), &mut err);
+            assert_eq!(crate::ffi::precondition::stored(err).message(), "operation should not be null");
+            kafka_consumer_CloseOptions_destroy(options);
         }
     }
 }
