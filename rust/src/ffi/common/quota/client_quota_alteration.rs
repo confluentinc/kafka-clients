@@ -258,9 +258,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
     // elements ends when the ops are collected.
     let ops = unsafe { require_list(ops, "ops") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `ops` is a valid op handle, as
-        // `op_ref` requires; the op is cloned, so the borrow lasts for this call only.
         .map(|&op| {
+            // SAFETY: Per this function's `# Safety`, every element of `ops` is a valid op handle, as
+            // `op_ref` requires; the op is cloned, so the borrow lasts for this call only.
             unsafe {
                 op_ref(
                     require_element(op, "ops") as *const kafka_common_quota_ClientQuotaAlteration_Op_t,
