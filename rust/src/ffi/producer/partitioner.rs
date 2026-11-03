@@ -85,13 +85,16 @@ pub type kafka_producer_Partitioner_close_fn_t = Option<unsafe extern "C" fn(sel
 /// # Safety
 ///
 /// `partitioner` must be a live handle, kept alive for `'a`.
-pub(crate) unsafe fn partitioner_ref<'a>(partitioner: *const kafka_producer_Partitioner_t) -> &'a SharedPartitioner {
+pub(crate) unsafe fn partitioner_ref<'a>(
+    partitioner: *const kafka_producer_Partitioner_t,
+    param: &'static str,
+) -> &'a SharedPartitioner {
     // SAFETY: Per this function's `# Safety`, `partitioner` is a live handle kept alive for `'a`:
     // an owned one, the `Interface::owned` box of `kafka_producer_Partitioner_new`, or the view a
     // class handle caches (`kafka_producer_RoundRobinPartitioner__as_Partitioner`), as
     // `Interface::from_ptr` requires. The implementation returned is borrowed from the handle, so
     // it lives as long as the handle does.
-    unsafe { Interface::<SharedPartitioner>::from_ptr(partitioner as *const Interface<SharedPartitioner>) }.get()
+    unsafe { Interface::<SharedPartitioner>::from_ptr(partitioner as *const Interface<SharedPartitioner>, param) }.get()
 }
 
 /// Takes the implementation a `*mut` parameter received: an owned handle is
@@ -296,7 +299,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
     let configs: HashMap<String, String> = unsafe { map_strings(_configs) }.into_iter().collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
-    unsafe { partitioner_ref(self_) }
+    unsafe { partitioner_ref(self_, "self_") }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .configure(&configs);
@@ -341,10 +344,10 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
     let value = (!value.is_null()).then(|| GenericValue::new(value as *mut c_void));
     // SAFETY: Per this function's `# Safety`, `cluster` is a live handle, as `cluster_ref`
     // requires; the reference is used only within this call.
-    let cluster = unsafe { crate::ffi::common::cluster::cluster_ref(cluster) };
+    let cluster = unsafe { crate::ffi::common::cluster::cluster_ref(cluster, "cluster") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
-    unsafe { partitioner_ref(self_) }
+    unsafe { partitioner_ref(self_, "self_") }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .partition(
@@ -373,7 +376,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
 pub unsafe extern "C" fn kafka_producer_Partitioner_close(self_: *const kafka_producer_Partitioner_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
-    unsafe { partitioner_ref(self_) }
+    unsafe { partitioner_ref(self_, "self_") }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .close();

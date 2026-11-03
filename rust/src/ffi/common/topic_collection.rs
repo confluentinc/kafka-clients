@@ -30,6 +30,7 @@
 use crate::common::TopicCollection;
 use crate::ffi::common::uuid::list_uuids;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{kafka_List_t, list_strings};
 
 /// Opaque handle to a [`TopicCollection`].
@@ -69,7 +70,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
 ) -> kafka_common_TopicCollection_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-collection handle, as
     // `topic_collection_ref` requires; the reference is used only for the match.
-    match unsafe { topic_collection_ref(self_) } {
+    match unsafe { topic_collection_ref(self_, "self_") } {
         TopicCollection::TopicIds(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS,
         TopicCollection::TopicNames(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES,
     }
@@ -80,12 +81,15 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
 /// # Safety
 ///
 /// `topics` must be a valid topic-collection handle, alive for `'a`.
-pub(crate) unsafe fn topic_collection_ref<'a>(topics: *const kafka_common_TopicCollection_t) -> &'a TopicCollection {
+pub(crate) unsafe fn topic_collection_ref<'a>(
+    topics: *const kafka_common_TopicCollection_t,
+    param: &'static str,
+) -> &'a TopicCollection {
     // SAFETY: Per this function's `# Safety`, `topics` is a valid topic-collection handle alive for
     // `'a`, i.e. the `Box::into_raw` of a `TopicCollection` in `boxed`, the only function that
     // makes one, not yet destroyed. No call mutates a `TopicCollection` handle, so the shared
     // reference is sound for `'a`.
-    unsafe { &*(topics as *const TopicCollection) }
+    unsafe { require_ref::<_, TopicCollection>(topics, param) }
 }
 
 fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
@@ -179,7 +183,7 @@ mod tests {
                 kafka_common_TopicCollection__enum(by_name),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES
             );
-            let TopicCollection::TopicNames(names_view) = topic_collection_ref(by_name) else {
+            let TopicCollection::TopicNames(names_view) = topic_collection_ref(by_name, "by_name") else {
                 panic!("ofTopicNames builds a TopicNameCollection");
             };
             assert_eq!(names_view.topic_names(), ["orders".to_string()]);
@@ -192,7 +196,7 @@ mod tests {
                 kafka_common_TopicCollection__enum(by_id),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS
             );
-            let TopicCollection::TopicIds(ids_view) = topic_collection_ref(by_id) else {
+            let TopicCollection::TopicIds(ids_view) = topic_collection_ref(by_id, "by_id") else {
                 panic!("ofTopicIds builds a TopicIdCollection");
             };
             assert_eq!(ids_view.topic_ids(), [Uuid::new(1, 2)]);

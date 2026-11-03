@@ -15,6 +15,7 @@
 //! `kafka_admin_DeletedRecords_t`: `org.apache.kafka.clients.admin.DeletedRecords`
 //! (CLAUDE.md §4). A plain value class: the handle points at the Rust value.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_void;
 
 use crate::admin::DeletedRecords;
@@ -37,12 +38,15 @@ pub(crate) fn box_deleted_records(records: DeletedRecords) -> *mut kafka_admin_D
 /// # Safety
 ///
 /// `records` must be a valid deleted-records handle, kept alive for `'a`.
-pub(crate) unsafe fn deleted_records_ref<'a>(records: *const kafka_admin_DeletedRecords_t) -> &'a DeletedRecords {
+pub(crate) unsafe fn deleted_records_ref<'a>(
+    records: *const kafka_admin_DeletedRecords_t,
+    param: &'static str,
+) -> &'a DeletedRecords {
     // SAFETY: Per this function's `# Safety`, `records` is a valid deleted-records handle kept
     // alive for `'a`; every `kafka_admin_DeletedRecords_t` is the `Box::into_raw` of a
     // `Box<DeletedRecords>` (`box_deleted_records`, the only producer), so the shared reference is
     // to a live `DeletedRecords`, which no entry point mutates.
-    unsafe { &*(records as *const DeletedRecords) }
+    unsafe { require_ref::<_, DeletedRecords>(records, param) }
 }
 
 /// Frees a `kafka_admin_DeletedRecords_t *` element of an owned container.
@@ -83,7 +87,7 @@ pub extern "C" fn kafka_admin_DeletedRecords_new(low_watermark: i64) -> *mut kaf
 pub unsafe extern "C" fn kafka_admin_DeletedRecords_low_watermark(self_: *const kafka_admin_DeletedRecords_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deleted-records handle, kept alive
     // for this call, as `deleted_records_ref` requires.
-    unsafe { deleted_records_ref(self_) }.low_watermark()
+    unsafe { deleted_records_ref(self_, "self_") }.low_watermark()
 }
 
 /// Frees an owned deleted-records handle; `NULL` is a no-op.

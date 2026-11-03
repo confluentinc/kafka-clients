@@ -28,6 +28,7 @@ use crate::ffi::common::topic_partition::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
+use crate::ffi::precondition::require_element;
 use crate::ffi::util::{kafka_Map_t, map_entries};
 
 /// Opaque handle to a [`DeleteRecordsResult`], owned by the caller and
@@ -50,12 +51,15 @@ pub(crate) fn box_delete_records_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DeleteRecordsResult_t) -> &'a ResultHandle<DeleteRecordsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DeleteRecordsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DeleteRecordsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DeleteRecordsResult_t` is built by
     // `box_result::<DeleteRecordsResult, _>` (in `box_delete_records_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Frees a `kafka_common_TopicPartition_t *` key of an owned map.
@@ -91,7 +95,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_low_watermarks(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&TopicPartition, &KafkaFuture<DeletedRecords>)> = h.result.low_watermarks().iter().collect();
     entries.sort_by(|a, b| (a.0.topic(), a.0.partition()).cmp(&(b.0.topic(), b.0.partition())));
     h.ctx.keyed_future_map(
@@ -133,7 +137,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 
@@ -163,21 +167,27 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_new(
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
     // the same time. That is what `map_entries` requires.
-    let futures = unsafe { map_entries(futures) }
+    let futures = unsafe { map_entries(futures, "futures") }
         .iter()
         .map(|&(k, v)| {
             (
                 // SAFETY: Per this function's `# Safety`, the key `k` is a valid topic-partition
                 // handle, which the caller keeps alive for this call, as `topic_partition_ref`
                 // requires; the borrow ends with the `clone`.
-                unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone(),
+                unsafe {
+                    topic_partition_ref(
+                        require_element(k, "futures") as *const kafka_common_TopicPartition_t,
+                        "futures",
+                    )
+                }
+                .clone(),
                 // SAFETY: Per this function's `# Safety`, the value `v` is a valid future handle,
                 // alive for this call, and a successful one's value a valid `kafka_admin_DeletedRecords_t *`
                 // borrowed from it, as `deleted_records_ref` requires; the value is cloned, so the borrow
                 // ends within the call, as `resolved_future` requires.
                 unsafe {
                     resolved_future(v as *const kafka_common_KafkaFuture_t, "DeleteRecordsResult", |value| {
-                        deleted_records_ref(value as *const kafka_admin_DeletedRecords_t).clone()
+                        deleted_records_ref(value as *const kafka_admin_DeletedRecords_t, "value").clone()
                     })
                 },
             )

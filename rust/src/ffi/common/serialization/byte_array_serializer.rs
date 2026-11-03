@@ -110,12 +110,15 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-serializer handle, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_serialization_ByteArraySerializer_t) -> &'a SerializerHandle {
+unsafe fn handle<'a>(
+    self_: *const kafka_common_serialization_ByteArraySerializer_t,
+    param: &'static str,
+) -> &'a SerializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-serializer handle alive
     // for `'a`, the `SerializerHandle::boxed` of
     // `kafka_common_serialization_ByteArraySerializer_new`, as `SerializerHandle::from_ptr`
     // requires.
-    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
+    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle, param) }
 }
 
 /// `new ByteArraySerializer()`.
@@ -150,7 +153,7 @@ pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Seri
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_serializer().cast_mut()
+    unsafe { handle(self_, "self_") }.as_serializer().cast_mut()
 }
 
 /// Frees an owned handle; null is a no-op.

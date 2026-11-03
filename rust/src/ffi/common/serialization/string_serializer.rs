@@ -114,11 +114,14 @@ impl Serializer<GenericValue> for GenericStringSerializer {
 /// # Safety
 ///
 /// `self_` must be a valid string-serializer handle, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringSerializer_t) -> &'a SerializerHandle {
+unsafe fn handle<'a>(
+    self_: *const kafka_common_serialization_StringSerializer_t,
+    param: &'static str,
+) -> &'a SerializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid string-serializer handle alive for
     // `'a`, the `SerializerHandle::boxed` of `kafka_common_serialization_StringSerializer_new`, as
     // `SerializerHandle::from_ptr` requires.
-    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
+    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle, param) }
 }
 
 /// `new StringSerializer()`.
@@ -157,7 +160,7 @@ pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Seriali
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_serializer().cast_mut()
+    unsafe { handle(self_, "self_") }.as_serializer().cast_mut()
 }
 
 /// Frees an owned handle; null is a no-op.

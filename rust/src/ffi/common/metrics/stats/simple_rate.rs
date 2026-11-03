@@ -40,11 +40,14 @@ pub struct kafka_common_metrics_stats_SimpleRate_t {
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_SimpleRate_t) -> &'a StatHandle<SimpleRate> {
+unsafe fn handle<'a>(
+    self_: *const kafka_common_metrics_stats_SimpleRate_t,
+    param: &'static str,
+) -> &'a StatHandle<SimpleRate> {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class alive for
     // `'a`, so it points at the `StatHandle<SimpleRate>` one of this class's constructors boxed, as
     // `StatHandle::from_ptr` requires.
-    unsafe { StatHandle::from_ptr(self_ as *const StatHandle<SimpleRate>) }
+    unsafe { StatHandle::from_ptr(self_ as *const StatHandle<SimpleRate>, param) }
 }
 
 /// `new SimpleRate()`.
@@ -83,11 +86,11 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires; the reference is used only within this call.
-    unsafe { handle(self_) }
+    unsafe { handle(self_, "self_") }
         .stat()
         // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as
         // `metric_config_ref` requires; the reference is used only within this call.
-        .window_size(unsafe { metric_config_ref(config) }, now)
+        .window_size(unsafe { metric_config_ref(config, "config") }, now)
 }
 
 /// Returns the stat as the `Stat` interface.
@@ -106,7 +109,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_stat()
+    unsafe { handle(self_, "self_") }.as_stat()
 }
 
 /// Returns the stat as the `Measurable` interface.
@@ -124,7 +127,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_measurable()
+    unsafe { handle(self_, "self_") }.as_measurable()
 }
 
 /// Returns the stat as the `MetricValueProvider` interface (Java's `Measurable` extends it).
@@ -142,7 +145,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MetricValuePr
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_metric_value_provider()
+    unsafe { handle(self_, "self_") }.as_metric_value_provider()
 }
 
 /// Returns the stat as the `MeasurableStat` interface; a sensor it is added to shares the stat.
@@ -160,7 +163,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableSta
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_measurable_stat()
+    unsafe { handle(self_, "self_") }.as_measurable_stat()
 }
 
 /// Returns `toString()`, as a string.
@@ -176,7 +179,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_to_string(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, as `handle` requires; the string is built during the call.
-    into_c_string(&unsafe { handle(self_) }.stat().to_string())
+    into_c_string(&unsafe { handle(self_, "self_") }.stat().to_string())
 }
 
 /// Frees an owned handle; null is a no-op. A sensor the stat was added to

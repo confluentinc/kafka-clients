@@ -121,11 +121,14 @@ pub(crate) fn box_measurable(measurable: Arc<dyn Measurable>) -> *mut kafka_comm
 /// # Safety
 ///
 /// `measurable` must be a valid measurable handle, alive for `'a`.
-pub(crate) unsafe fn measurable_ref<'a>(measurable: *const kafka_common_metrics_Measurable_t) -> &'a dyn Measurable {
+pub(crate) unsafe fn measurable_ref<'a>(
+    measurable: *const kafka_common_metrics_Measurable_t,
+    param: &'static str,
+) -> &'a dyn Measurable {
     // SAFETY: Per this function's `# Safety`, `measurable` is a valid measurable handle alive for
     // `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_Measurable_t` is an
     // `Interface<dyn Measurable>`, owned or a view; the reference returned lives for the same `'a`.
-    unsafe { Interface::<dyn Measurable>::from_ptr(measurable as *const Interface<dyn Measurable>) }.get()
+    unsafe { Interface::<dyn Measurable>::from_ptr(measurable as *const Interface<dyn Measurable>, param) }.get()
 }
 
 /// Takes the implementation a `*mut` parameter received (see
@@ -199,7 +202,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Measurable_measure(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable handle, as
     // `measurable_ref` requires, and `config` a valid metric-config handle, as `metric_config_ref`
     // requires; both references are used only within this call.
-    unsafe { measurable_ref(self_) }.measure(unsafe { metric_config_ref(config) }, now)
+    unsafe { measurable_ref(self_, "self_") }.measure(unsafe { metric_config_ref(config, "config") }, now)
 }
 
 /// Returns the provider's type name as `kafka_common_metrics_KafkaMetric_to_string` reports it,
@@ -216,7 +219,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Measurable_type_name(
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable handle, as `measurable_ref`
     // requires; the reference is used only within this call.
-    type_name_c_str(unsafe { measurable_ref(self_) }.type_name())
+    type_name_c_str(unsafe { measurable_ref(self_, "self_") }.type_name())
 }
 
 /// Frees an owned handle; null is a no-op. The view a class handle hands
@@ -268,7 +271,7 @@ mod tests {
         // not used; `config_handle` comes from `kafka_common_metrics_MetricConfig_new` and is
         // destroyed once.
         unsafe {
-            assert_eq!(measurable_ref(handle).measure(&config, 2), 6.5);
+            assert_eq!(measurable_ref(handle, "handle").measure(&config, 2), 6.5);
             let config_handle = kafka_common_metrics_MetricConfig_new();
             assert_eq!(
                 kafka_common_metrics_Measurable_measure(handle, config_handle, 2),
@@ -301,8 +304,8 @@ mod tests {
                 Ok("my.CMeasurable")
             );
             assert!(kafka_common_metrics_Measurable_type_name(unnamed).is_null());
-            assert_eq!(measurable_ref(named).type_name(), Some("my.CMeasurable"));
-            assert_eq!(measurable_ref(unnamed).type_name(), None);
+            assert_eq!(measurable_ref(named, "named").type_name(), Some("my.CMeasurable"));
+            assert_eq!(measurable_ref(unnamed, "unnamed").type_name(), None);
             // The shared-measurable adapter reports the measurable it wraps, not its own type.
             assert_eq!(ArcMeasurable(take_measurable(named)).type_name(), Some("my.CMeasurable"));
             kafka_common_metrics_Measurable_destroy(unnamed);

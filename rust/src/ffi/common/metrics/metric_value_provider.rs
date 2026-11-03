@@ -128,12 +128,15 @@ impl MetricValueProvider for ArcMetricValueProvider {
 /// `provider` must be a valid metric-value-provider handle, alive for `'a`.
 unsafe fn provider_ref<'a>(
     provider: *const kafka_common_metrics_MetricValueProvider_t,
+    param: &'static str,
 ) -> &'a Interface<dyn MetricValueProvider> {
     // SAFETY: Per this function's `# Safety`, `provider` is a valid metric-value-provider handle
     // alive for `'a`, as `Interface::from_ptr` requires: every
     // `kafka_common_metrics_MetricValueProvider_t` is an `Interface<dyn MetricValueProvider>`; the
     // reference returned lives for the same `'a`.
-    unsafe { Interface::<dyn MetricValueProvider>::from_ptr(provider as *const Interface<dyn MetricValueProvider>) }
+    unsafe {
+        Interface::<dyn MetricValueProvider>::from_ptr(provider as *const Interface<dyn MetricValueProvider>, param)
+    }
 }
 
 /// Takes the implementation a `*mut` parameter received (see
@@ -211,9 +214,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
     // requires; both references are used only within this call, and the reading is boxed into an
     // owned handle.
     box_metric_value(
-        unsafe { provider_ref(self_) }
+        unsafe { provider_ref(self_, "self_") }
             .get()
-            .value(unsafe { metric_config_ref(config) }, now),
+            .value(unsafe { metric_config_ref(config, "config") }, now),
     )
 }
 
@@ -231,7 +234,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_type_name(
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-value-provider handle, as
     // `provider_ref` requires; the reference is used only within this call.
-    type_name_c_str(unsafe { provider_ref(self_) }.get().type_name())
+    type_name_c_str(unsafe { provider_ref(self_, "self_") }.get().type_name())
 }
 
 /// Frees an owned metric-value-provider handle; null is a no-op. A registry

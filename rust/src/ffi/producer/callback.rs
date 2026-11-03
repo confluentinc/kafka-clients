@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(
             // SAFETY: Test code: `error` is the live `box_error` handle above, destroyed only at
             // the end.
-            unsafe { error_ref(error) }.error.message(),
+            unsafe { error_ref(error, "error") }.error.message(),
             "late",
             "the invoker borrows its arguments"
         );

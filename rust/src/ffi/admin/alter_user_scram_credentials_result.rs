@@ -50,12 +50,13 @@ pub(crate) fn box_alter_user_scram_credentials_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_AlterUserScramCredentialsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<AlterUserScramCredentialsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_AlterUserScramCredentialsResult_t` is built by
     // `box_result::<AlterUserScramCredentialsResult, _>` (in
     // `box_alter_user_scram_credentials_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// The Rust `KafkaFuture<Void>` standing for a C future that is already
@@ -107,7 +108,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_new(
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
     // the same time. That is what `map_entries` requires.
-    let futures: HashMap<String, KafkaFuture<()>> = unsafe { map_entries(futures) }
+    let futures: HashMap<String, KafkaFuture<()>> = unsafe { map_entries(futures, "futures") }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, the key `k` is a NUL-terminated string, as
@@ -142,7 +143,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.string_keyed_future_map(h.result.values().iter(), FutureCtx::void_future)
 }
 
@@ -164,7 +165,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

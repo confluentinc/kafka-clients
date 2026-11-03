@@ -45,6 +45,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
@@ -298,13 +299,14 @@ impl SerializerInner {
 /// `serializer` must be a valid serializer handle, alive for `'a`.
 pub(crate) unsafe fn serializer_ref<'a>(
     serializer: *const kafka_common_serialization_Serializer_t,
+    param: &'static str,
 ) -> &'a SerializerInner {
     // SAFETY: Per this function's `# Safety`, `serializer` is a valid serializer handle alive for
     // `'a`, so it points at a live `SerializerInner` inside an `Arc`: the one
     // `SerializerInner::owned` handed out, kept by the C caller or the client that consumed it, or
     // the view a `SerializerHandle` caches. A `SerializerInner` is changed only through its `output`
     // mutex, so the shared reference is sound for `'a`.
-    unsafe { &*serializer.cast::<SerializerInner>() }
+    unsafe { require_ref::<_, SerializerInner>(serializer, param) }
 }
 
 /// Takes the handle a `*mut` parameter received: an owned handle's reference
@@ -620,7 +622,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer__is_async(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
     // `serializer_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { serializer_ref(self_) }.get().is_async())
+    i8::from(unsafe { serializer_ref(self_, "self_") }.get().is_async())
 }
 
 /// Reports the outcome of the asynchronous call `callback_id`: on success
@@ -662,7 +664,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer__set_callback_res
     // its owner, by the client holding its `Arc`, or by the registry slot of the pending call
     // `callback_id` whose future was dropped (`CallbackResults::set_owner`), as `serializer_ref`
     // requires.
-    let kept = match unsafe { serializer_ref(self_) }.get() {
+    let kept = match unsafe { serializer_ref(self_, "self_") }.get() {
         FfiSerializer::C(c) => c.results.complete_owned(callback_id, result, error).1,
         _ => None,
     };
@@ -688,7 +690,7 @@ unsafe fn invoke(
 ) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
     // `serializer_ref` requires; the reference is used only within this call.
-    let inner = unsafe { serializer_ref(self_) };
+    let inner = unsafe { serializer_ref(self_, "self_") };
     let result = inner.get().invoke(topic, headers, data);
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. The array
     // returned borrows the handle's `output`, which `store` keeps until the next `serialize*` call
@@ -741,7 +743,7 @@ unsafe fn invoke_cb(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
     // `serializer_ref` requires; the reference is used only within this call.
-    let serializer = unsafe { serializer_ref(self_) }.get();
+    let serializer = unsafe { serializer_ref(self_, "self_") }.get();
     if let FfiSerializer::C(c) = serializer {
         let topic = owned_c_string(topic);
         // A handle on the caller's own headers, which it keeps valid and unused until `cb`
@@ -931,7 +933,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
     // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
-    let headers = unsafe { record_headers_mut(headers) };
+    let headers = unsafe { record_headers_mut(headers, "headers") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and `out_err` as
     // `invoke` requires; `data` is null or the representation the implementation reads, alive and
     // unchanged for this call.
@@ -989,7 +991,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_serialize_with_he
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
     // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
-    let headers = ptr::from_mut(unsafe { record_headers_mut(headers) });
+    let headers = ptr::from_mut(unsafe { record_headers_mut(headers, "headers") });
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, `headers` valid
     // and unused otherwise and `data` valid until `cb` fires, and `cb` a valid completion.
     unsafe { invoke_cb(self_, &topic, Some(headers), data, cb, opaque) }
@@ -1009,7 +1011,7 @@ unsafe fn invoke_void(
 ) -> Result<(), Error> {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
     // `serializer_ref` requires; the reference is used only within this call.
-    match unsafe { serializer_ref(self_) }.get() {
+    match unsafe { serializer_ref(self_, "self_") }.get() {
         FfiSerializer::C(c) => start(c).map_or(Ok(()), block_on_thread),
         _ => Ok(()),
     }
@@ -1032,7 +1034,7 @@ unsafe fn invoke_void_cb(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle, as
     // `serializer_ref` requires; the reference is used only within this call.
-    if let FfiSerializer::C(c) = unsafe { serializer_ref(self_) }.get()
+    if let FfiSerializer::C(c) = unsafe { serializer_ref(self_, "self_") }.get()
         && with_sink(c)
     {
         return;
@@ -1415,7 +1417,7 @@ mod tests {
         id: i64,
     ) {
         // SAFETY: Test code: `headers` are the record's, which the slot keeps until the report.
-        let has_k = unsafe { record_headers_ref(headers) }.last_header("k").is_some();
+        let has_k = unsafe { record_headers_ref(headers, "headers") }.last_header("k").is_some();
         async_upper(self_).calls.lock().unwrap().push(format!("with_headers k={has_k}"));
         take_call(self_, AsyncCall { id, topic: topic as usize, data: data as usize });
     }
@@ -1583,7 +1585,7 @@ mod tests {
             let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
             let value = runtime.block_on(async {
                 // SAFETY: Test code: the handle is valid until destroyed below.
-                let serializer = unsafe { serializer_ref(handle.get().cast()) }.get();
+                let serializer = unsafe { serializer_ref(handle.get().cast(), "value") }.get();
                 let mut headers = RecordHeaders::new();
                 headers.add_with_key_value("k", Some(b"v")).unwrap();
                 let data = GenericValue::new(late.as_ptr().cast_mut().cast());
@@ -1643,7 +1645,7 @@ mod tests {
         let first = CString::new("first").unwrap();
         let data = GenericValue::new(first.as_ptr().cast_mut().cast());
         // SAFETY: Test code: the handle is valid until destroyed below.
-        let serializer = unsafe { serializer_ref(handle) }.get();
+        let serializer = unsafe { serializer_ref(handle, "handle") }.get();
         let mut future = std::pin::pin!(Serializer::serialize(serializer, "t", Some(&data)));
         assert!(poll_once(future.as_mut()).is_pending());
         let call = imp.next_call();
@@ -1698,7 +1700,7 @@ mod tests {
         let imp = AsyncUpper::new(false);
         let handle = SendPtr(imp.register().cast());
         // SAFETY: Test code: the handle is valid until destroyed at the end.
-        let serializer = unsafe { serializer_ref(handle.get().cast()) }.get();
+        let serializer = unsafe { serializer_ref(handle.get().cast(), "value") }.get();
         // The caller's data stays valid until the report, as the `_async_fn_t` rustdoc requires;
         // the topic and headers are the handle's to keep.
         let value = CString::new("kept").unwrap();
@@ -2184,7 +2186,7 @@ mod tests {
                 let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
                 let value = runtime.block_on(async {
                     // SAFETY: Test code: the handle is valid until destroyed below.
-                    let serializer = unsafe { serializer_ref(handle.get().cast()) }.get();
+                    let serializer = unsafe { serializer_ref(handle.get().cast(), "value") }.get();
                     let data = GenericValue::new(data.as_ptr().cast_mut().cast());
                     Serializer::serialize_with_headers(serializer, "t", &mut headers, Some(&data))
                         .await
@@ -2231,7 +2233,7 @@ mod tests {
                     assert!(err.is_null());
                     assert_eq!(bytes_of(out), None);
                     assert_eq!(imp.seen.lock().unwrap().pop(), Some(address), "inline={inline}");
-                    assert_eq!(keys(record_headers_ref(headers)), ["k", "added"], "inline={inline}");
+                    assert_eq!(keys(record_headers_ref(headers, "headers")), ["k", "added"], "inline={inline}");
 
                     kafka_common_serialization_Serializer_serialize_with_headers_cb(
                         handle.get().cast(),
@@ -2244,7 +2246,11 @@ mod tests {
                     scope.spawn(reporter).join().unwrap();
                     assert_eq!(completions.lock().unwrap().len(), 1, "inline={inline}");
                     assert_eq!(imp.seen.lock().unwrap().pop(), Some(address), "inline={inline}");
-                    assert_eq!(keys(record_headers_ref(headers)), ["k", "added", "added"], "inline={inline}");
+                    assert_eq!(
+                        keys(record_headers_ref(headers, "headers")),
+                        ["k", "added", "added"],
+                        "inline={inline}"
+                    );
                     kafka_common_header_internals_RecordHeaders_destroy(headers);
                 }
             });
@@ -2460,7 +2466,7 @@ mod tests {
         let imp = HeaderAdder::quiet();
         let handle = imp.register();
         // SAFETY: Test code: the handle is valid until destroyed below.
-        let serializer = unsafe { serializer_ref(handle) }.get();
+        let serializer = unsafe { serializer_ref(handle, "handle") }.get();
         let (mut headers, _) = record_headers_with_k();
         let data = GenericValue::new(c"x".as_ptr().cast_mut().cast());
         let mut record = || {

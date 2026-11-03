@@ -123,7 +123,7 @@ pub(crate) unsafe fn require_list<'a>(list: *const kafka_List_t, param: &'static
     }
     // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid
     // list handle alive and unmutated for `'a`, as `list_ref` requires.
-    unsafe { list_ref(list) }.elements()
+    unsafe { list_ref(list, param) }.elements()
 }
 
 /// The entries of the mandatory map `map`; panics with [`null`] when it is
@@ -138,7 +138,18 @@ pub(crate) unsafe fn require_map<'a>(map: *const kafka_Map_t, param: &'static st
     }
     // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a valid
     // map handle alive and unmutated for `'a`, as `map_ref` requires.
-    unsafe { map_ref(map) }.entries()
+    unsafe { map_ref(map, param) }.entries()
+}
+
+/// The element `element` of the collection parameter `param`, checked: panics
+/// with Java's `NullPointerException` when it is `NULL`, a
+/// [`LocalNullPointerError`](crate::common::LocalNullPointerError) whose message
+/// is `<param> must not contain null`, as Java dereferences each element.
+pub(crate) fn require_element(element: *mut c_void, param: &'static str) -> *mut c_void {
+    if element.is_null() {
+        fail(Error::local_null_pointer(format!("{param} must not contain null")))
+    }
+    element
 }
 
 /// The mandatory function pointer `f`; panics with [`null`] when it is `NULL`.

@@ -15,6 +15,7 @@
 //! `kafka_common_resource_ResourcePattern_t`:
 //! `org.apache.kafka.common.resource.ResourcePattern` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 
 use crate::common::resource::ResourcePattern;
@@ -62,13 +63,16 @@ impl ResourcePatternInner {
 /// # Safety
 ///
 /// `pattern` must be a valid resource-pattern handle, alive for `'a`.
-unsafe fn inner_ref<'a>(pattern: *const kafka_common_resource_ResourcePattern_t) -> &'a ResourcePatternInner {
+unsafe fn inner_ref<'a>(
+    pattern: *const kafka_common_resource_ResourcePattern_t,
+    param: &'static str,
+) -> &'a ResourcePatternInner {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle alive
     // for `'a`, so it points at a live `ResourcePatternInner`: the `Box::into_raw` of
     // `box_resource_pattern`, or one a parent handle embeds and hands out a view on, which lives as
     // long as that parent. Nothing mutates a `ResourcePatternInner` while a handle to it exists, so
     // the shared reference is sound for `'a`.
-    unsafe { &*(pattern as *const ResourcePatternInner) }
+    unsafe { require_ref::<_, ResourcePatternInner>(pattern, param) }
 }
 
 /// The pattern behind a handle.
@@ -78,10 +82,11 @@ unsafe fn inner_ref<'a>(pattern: *const kafka_common_resource_ResourcePattern_t)
 /// `pattern` must be a valid resource-pattern handle, alive for `'a`.
 pub(crate) unsafe fn resource_pattern_ref<'a>(
     pattern: *const kafka_common_resource_ResourcePattern_t,
+    param: &'static str,
 ) -> &'a ResourcePattern {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(pattern) }.pattern
+    &unsafe { inner_ref(pattern, param) }.pattern
 }
 
 /// Hands `pattern` to C as an owned handle, freed with
@@ -157,7 +162,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_resource_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the value is copied out and mapped to its static singleton,
     // so the borrow lasts for this call only.
-    resource_type_singleton(unsafe { resource_pattern_ref(self_) }.resource_type())
+    resource_type_singleton(unsafe { resource_pattern_ref(self_, "self_") }.resource_type())
 }
 
 /// `name()`.
@@ -178,7 +183,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// `patternType()`.
@@ -199,7 +204,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_pattern_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the value is copied out and mapped to its static singleton,
     // so the borrow lasts for this call only.
-    pattern_type_singleton(unsafe { resource_pattern_ref(self_) }.pattern_type())
+    pattern_type_singleton(unsafe { resource_pattern_ref(self_, "self_") }.pattern_type())
 }
 
 /// `toFilter()`.
@@ -220,7 +225,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_filter(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    box_resource_pattern_filter(unsafe { resource_pattern_ref(self_) }.to_filter())
+    box_resource_pattern_filter(unsafe { resource_pattern_ref(self_, "self_") }.to_filter())
 }
 
 /// `isUnknown()`.
@@ -239,7 +244,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_is_unknown(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { resource_pattern_ref(self_) }.is_unknown())
+    i8::from(unsafe { resource_pattern_ref(self_, "self_") }.is_unknown())
 }
 
 /// Returns the text form of the pattern.
@@ -256,7 +261,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { resource_pattern_ref(self_) }.to_string())
+    into_c_string(&unsafe { resource_pattern_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned pattern handle. Null is a no-op; the pattern borrowed
@@ -318,7 +323,7 @@ mod tests {
             );
             assert!(err.is_null());
             let expected = ResourcePattern::new(ResourceType::Topic, "orders-", PatternType::Prefixed).unwrap();
-            assert_eq!(*resource_pattern_ref(pattern), expected);
+            assert_eq!(*resource_pattern_ref(pattern, "pattern"), expected);
             assert_eq!(
                 kafka_common_resource_ResourcePattern_resource_type(pattern),
                 kafka_common_resource_ResourceType_topic()
@@ -339,7 +344,7 @@ mod tests {
             kafka_string_destroy(s);
 
             let filter = kafka_common_resource_ResourcePattern_to_filter(pattern);
-            assert_eq!(*resource_pattern_filter_ref(filter), expected.to_filter());
+            assert_eq!(*resource_pattern_filter_ref(filter, "filter"), expected.to_filter());
             assert_eq!(kafka_common_resource_ResourcePatternFilter_matches(filter, pattern), 1);
             kafka_common_resource_ResourcePatternFilter_destroy(filter);
             kafka_common_resource_ResourcePattern_destroy(pattern);

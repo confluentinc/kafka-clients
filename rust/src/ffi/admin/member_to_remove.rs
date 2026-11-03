@@ -15,6 +15,7 @@
 //! `kafka_admin_MemberToRemove_t`:
 //! `org.apache.kafka.clients.admin.MemberToRemove` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::MemberToRemove;
@@ -46,12 +47,12 @@ impl MemberToRemoveInner {
 /// # Safety
 ///
 /// `member` must be a valid member-to-remove handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(member: *const kafka_admin_MemberToRemove_t) -> &'a MemberToRemoveInner {
+unsafe fn inner_ref<'a>(member: *const kafka_admin_MemberToRemove_t, param: &'static str) -> &'a MemberToRemoveInner {
     // SAFETY: Per this function's `# Safety`, `member` is a valid member-to-remove handle kept
     // alive for `'a`. Every `kafka_admin_MemberToRemove_t` comes from `box_member_to_remove`, which
     // boxes a `MemberToRemoveInner`, so the cast yields a valid shared reference. The type has no
     // setters, so nothing mutates it while borrowed.
-    unsafe { &*(member as *const MemberToRemoveInner) }
+    unsafe { require_ref::<_, MemberToRemoveInner>(member, param) }
 }
 
 /// The member behind a handle.
@@ -59,10 +60,13 @@ unsafe fn inner_ref<'a>(member: *const kafka_admin_MemberToRemove_t) -> &'a Memb
 /// # Safety
 ///
 /// `member` must be a valid member-to-remove handle, kept alive for `'a`.
-pub(crate) unsafe fn member_to_remove_ref<'a>(member: *const kafka_admin_MemberToRemove_t) -> &'a MemberToRemove {
+pub(crate) unsafe fn member_to_remove_ref<'a>(
+    member: *const kafka_admin_MemberToRemove_t,
+    param: &'static str,
+) -> &'a MemberToRemove {
     // SAFETY: Per this function's `# Safety`, `member` is a valid member-to-remove handle kept
     // alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(member) }.member
+    &unsafe { inner_ref(member, param) }.member
 }
 
 /// Hands `member` to C as an owned handle, freed with
@@ -118,7 +122,7 @@ pub unsafe extern "C" fn kafka_admin_MemberToRemove_group_instance_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-to-remove handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.group_instance_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.group_instance_id_c.as_ptr()
 }
 
 /// Frees an owned member handle; `NULL` is a no-op.
@@ -152,7 +156,7 @@ mod tests {
         // its destroy, and the borrowed instance id is read before it; destroying null is a no-op.
         unsafe {
             let member = kafka_admin_MemberToRemove_new(c"instance-1".as_ptr());
-            assert_eq!(*member_to_remove_ref(member), MemberToRemove::new("instance-1"));
+            assert_eq!(*member_to_remove_ref(member, "member"), MemberToRemove::new("instance-1"));
             assert_eq!(
                 CStr::from_ptr(kafka_admin_MemberToRemove_group_instance_id(member))
                     .to_str()

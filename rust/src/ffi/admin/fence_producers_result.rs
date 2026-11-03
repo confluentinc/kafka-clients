@@ -45,12 +45,15 @@ pub(crate) fn box_fence_producers_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_FenceProducersResult_t) -> &'a ResultHandle<FenceProducersResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_FenceProducersResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<FenceProducersResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_FenceProducersResult_t` is built by
     // `box_result::<FenceProducersResult, _>` (in `box_fence_producers_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a map from transactional ID to futures which can be used to check the status of
@@ -74,7 +77,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let fenced = h.result.fenced_producers();
     h.ctx.string_keyed_future_map(fenced.iter(), |ctx, f| ctx.void_future(f))
 }
@@ -108,7 +111,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
@@ -145,7 +148,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
     // as `c_str_to_string` requires; it is copied into a `String` during the call.
     let transactional_id = unsafe { c_str_to_string(transactional_id) };
@@ -172,7 +175,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

@@ -16,6 +16,7 @@
 //! `org.apache.kafka.clients.admin.UserScramCredentialsDescription`
 //! (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ScramCredentialInfo, UserScramCredentialsDescription};
@@ -54,6 +55,7 @@ impl UserScramCredentialsDescriptionInner {
 /// kept alive for `'a`.
 unsafe fn inner_ref<'a>(
     description: *const kafka_admin_UserScramCredentialsDescription_t,
+    param: &'static str,
 ) -> &'a UserScramCredentialsDescriptionInner {
     // SAFETY: Per this function's `# Safety`, `description` is a live
     // user-SCRAM-credentials-description handle kept alive for `'a`. Every
@@ -61,7 +63,7 @@ unsafe fn inner_ref<'a>(
     // `box_user_scram_credentials_description`, which boxes a
     // `UserScramCredentialsDescriptionInner`, so the cast yields a valid shared reference. The type
     // has no setters, so nothing mutates it while borrowed.
-    unsafe { &*(description as *const UserScramCredentialsDescriptionInner) }
+    unsafe { require_ref::<_, UserScramCredentialsDescriptionInner>(description, param) }
 }
 
 /// Hands `description` to C as an owned handle, freed with
@@ -81,10 +83,11 @@ pub(crate) fn box_user_scram_credentials_description(
 /// kept alive for `'a`.
 pub(crate) unsafe fn user_scram_credentials_description_ref<'a>(
     description: *const kafka_admin_UserScramCredentialsDescription_t,
+    param: &'static str,
 ) -> &'a UserScramCredentialsDescription {
     // SAFETY: Per this function's `# Safety`, `description` is a live
     // user-SCRAM-credentials-description handle kept alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(description) }.description
+    &unsafe { inner_ref(description, param) }.description
 }
 
 /// Frees a `kafka_admin_UserScramCredentialsDescription_t *` element of an
@@ -128,13 +131,19 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
     // SAFETY: Per this function's `# Safety`, `credential_infos` is null or a valid list, alive and
     // not mutated for this call, as `list_elements` requires; the borrowed slice does not outlive
     // the call.
-    let infos: Vec<ScramCredentialInfo> = unsafe { list_elements(credential_infos) }
+    let infos: Vec<ScramCredentialInfo> = unsafe { list_elements(credential_infos, "credential_infos") }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `credential_infos` is a
             // SCRAM-credential-info handle alive for this call, as `scram_credential_info_ref`
             // requires; the borrow ends with the clone.
-            unsafe { scram_credential_info_ref(element as *const kafka_admin_ScramCredentialInfo_t) }.clone()
+            unsafe {
+                scram_credential_info_ref(
+                    require_element(element, "credential_infos") as *const kafka_admin_ScramCredentialInfo_t,
+                    "credential_infos",
+                )
+            }
+            .clone()
         })
         .collect();
     box_user_scram_credentials_description(UserScramCredentialsDescription::new(
@@ -161,7 +170,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid user-SCRAM-credentials-description
     // handle, kept alive for this call, as `inner_ref` requires. The returned string is a `CString`
     // the handle owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// # Returns
@@ -180,7 +189,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid user-SCRAM-credentials-description
     // handle, kept alive for this call, as `user_scram_credentials_description_ref` requires.
-    let elements = unsafe { user_scram_credentials_description_ref(self_) }
+    let elements = unsafe { user_scram_credentials_description_ref(self_, "self_") }
         .credential_infos()
         .iter()
         .map(|info| box_scram_credential_info(info.clone()) as *mut c_void)
@@ -201,7 +210,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid user-SCRAM-credentials-description
     // handle, kept alive for this call, as `user_scram_credentials_description_ref` requires.
-    into_c_string(&unsafe { user_scram_credentials_description_ref(self_) }.to_string())
+    into_c_string(&unsafe { user_scram_credentials_description_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned user-SCRAM-credentials-description handle; `NULL` is a

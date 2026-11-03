@@ -17,6 +17,7 @@
 //! `org.apache.kafka.common.quota.ClientQuotaAlteration` and
 //! `ClientQuotaAlteration.Op` (CLAUDE.md §4 rule 7).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::quota::{ClientQuotaAlteration, Op};
@@ -62,12 +63,15 @@ impl OpInner {
 /// # Safety
 ///
 /// `op` must be a valid op handle, alive for `'a`.
-unsafe fn op_inner_ref<'a>(op: *const kafka_common_quota_ClientQuotaAlteration_Op_t) -> &'a OpInner {
+unsafe fn op_inner_ref<'a>(
+    op: *const kafka_common_quota_ClientQuotaAlteration_Op_t,
+    param: &'static str,
+) -> &'a OpInner {
     // SAFETY: Per this function's `# Safety`, `op` is a valid op handle alive for `'a`, so it
     // points at a live `OpInner`, the `Box::into_raw` of `box_op` (no view of this type is handed
     // out). Nothing mutates an `OpInner` while a handle to it exists, so the shared reference is
     // sound for `'a`.
-    unsafe { &*(op as *const OpInner) }
+    unsafe { require_ref::<_, OpInner>(op, param) }
 }
 
 /// The op behind a handle.
@@ -75,10 +79,13 @@ unsafe fn op_inner_ref<'a>(op: *const kafka_common_quota_ClientQuotaAlteration_O
 /// # Safety
 ///
 /// `op` must be a valid op handle, alive for `'a`.
-pub(crate) unsafe fn op_ref<'a>(op: *const kafka_common_quota_ClientQuotaAlteration_Op_t) -> &'a Op {
+pub(crate) unsafe fn op_ref<'a>(
+    op: *const kafka_common_quota_ClientQuotaAlteration_Op_t,
+    param: &'static str,
+) -> &'a Op {
     // SAFETY: Per this function's `# Safety`, `op` is a valid op handle, as `op_inner_ref`
     // requires; the reference returned lives for the same `'a`.
-    &unsafe { op_inner_ref(op) }.op
+    &unsafe { op_inner_ref(op, param) }.op
 }
 
 /// Hands `op` to C as an owned handle, freed with
@@ -94,13 +101,14 @@ pub(crate) fn box_op(op: Op) -> *mut kafka_common_quota_ClientQuotaAlteration_Op
 /// `alteration` must be a valid alteration handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_alteration_ref<'a>(
     alteration: *const kafka_common_quota_ClientQuotaAlteration_t,
+    param: &'static str,
 ) -> &'a ClientQuotaAlteration {
     // SAFETY: Per this function's `# Safety`, `alteration` is a valid alteration handle alive for
     // `'a`, so it points at a live `ClientQuotaAlteration`, the `Box::into_raw` of
     // `box_client_quota_alteration` (no view of this type is handed out). Nothing mutates a
     // `ClientQuotaAlteration` while a handle to it exists, so the shared reference is sound for
     // `'a`.
-    unsafe { &*(alteration as *const ClientQuotaAlteration) }
+    unsafe { require_ref::<_, ClientQuotaAlteration>(alteration, param) }
 }
 
 /// Hands `alteration` to C as an owned handle, freed with
@@ -153,7 +161,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_key(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid op handle, as `op_inner_ref`
     // requires; the string returned is the handle's own C string, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { op_inner_ref(self_) }.key_c.as_ptr()
+    unsafe { op_inner_ref(self_, "self_") }.key_c.as_ptr()
 }
 
 /// `value()`.
@@ -173,7 +181,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_value(
 ) -> f64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid op handle, as `op_ref` requires;
     // the reference is used only within this call.
-    unsafe { op_ref(self_) }.value().unwrap_or(f64::NAN)
+    unsafe { op_ref(self_, "self_") }.value().unwrap_or(f64::NAN)
 }
 
 /// # Returns
@@ -192,7 +200,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid op handle, as `op_ref` requires;
     // the result is copied into an owned value before return, so the borrow lasts for this call
     // only.
-    into_c_string(&unsafe { op_ref(self_) }.to_string())
+    into_c_string(&unsafe { op_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned op handle. Null is a no-op.
@@ -234,16 +242,16 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
     // SAFETY: Per this function's `# Safety`, `ops` is null or a valid list, which the caller keeps
     // alive and does not mutate for this call, as `list_elements` requires; the borrow of its
     // elements ends when the ops are collected.
-    let ops = unsafe { list_elements(ops) }
+    let ops = unsafe { list_elements(ops, "ops") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `ops` is a valid op handle, as
         // `op_ref` requires; the op is cloned, so the borrow lasts for this call only.
-        .map(|&op| unsafe { op_ref(op as *const kafka_common_quota_ClientQuotaAlteration_Op_t) }.clone())
+        .map(|&op| unsafe { op_ref(op as *const kafka_common_quota_ClientQuotaAlteration_Op_t, "op") }.clone())
         .collect();
     box_client_quota_alteration(ClientQuotaAlteration::new(
         // SAFETY: Per this function's `# Safety`, `entity` is a valid entity handle, as
         // `client_quota_entity_ref` requires; it is cloned, so the borrow lasts for this call only.
-        unsafe { client_quota_entity_ref(entity) }.clone(),
+        unsafe { client_quota_entity_ref(entity, "entity") }.clone(),
         ops,
     ))
 }
@@ -267,7 +275,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_entity(
     // `client_quota_alteration_ref` requires. `client_quota_entity_ptr` returns a handle on the
     // entity the alteration owns, so it lives as long as the alteration; that is the rustdoc's
     // "borrowed from the handle".
-    client_quota_entity_ptr(unsafe { client_quota_alteration_ref(self_) }.entity())
+    client_quota_entity_ptr(unsafe { client_quota_alteration_ref(self_, "self_") }.entity())
 }
 
 /// `ops()`.
@@ -289,7 +297,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_ops(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alteration handle, as
     // `client_quota_alteration_ref` requires; the result is copied into an owned value before
     // return, so the borrow lasts for this call only.
-    let elements = unsafe { client_quota_alteration_ref(self_) }
+    let elements = unsafe { client_quota_alteration_ref(self_, "self_") }
         .ops()
         .iter()
         .map(|op| box_op(op.clone()) as *mut c_void)
@@ -313,7 +321,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alteration handle, as
     // `client_quota_alteration_ref` requires; the result is copied into an owned value before
     // return, so the borrow lasts for this call only.
-    into_c_string(&unsafe { client_quota_alteration_ref(self_) }.to_string())
+    into_c_string(&unsafe { client_quota_alteration_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned alteration handle. Null is a no-op.
@@ -358,7 +366,7 @@ mod tests {
         // once.
         unsafe {
             let set = kafka_common_quota_ClientQuotaAlteration_Op_new(key.as_ptr(), 1024.0);
-            assert_eq!(*op_ref(set), Op::new("producer_byte_rate", Some(1024.0)));
+            assert_eq!(*op_ref(set, "set"), Op::new("producer_byte_rate", Some(1024.0)));
             assert_eq!(
                 CStr::from_ptr(kafka_common_quota_ClientQuotaAlteration_Op_key(set)).to_str(),
                 Ok("producer_byte_rate")
@@ -374,7 +382,7 @@ mod tests {
 
             // NAN is Java's null: the op removes the quota.
             let remove = kafka_common_quota_ClientQuotaAlteration_Op_new(key.as_ptr(), f64::NAN);
-            assert_eq!(*op_ref(remove), Op::new("producer_byte_rate", None));
+            assert_eq!(*op_ref(remove, "remove"), Op::new("producer_byte_rate", None));
             assert!(kafka_common_quota_ClientQuotaAlteration_Op_value(remove).is_nan());
             kafka_common_quota_ClientQuotaAlteration_Op_destroy(remove);
             kafka_common_quota_ClientQuotaAlteration_Op_destroy(ptr::null_mut());
@@ -413,16 +421,19 @@ mod tests {
             kafka_common_quota_ClientQuotaAlteration_Op_destroy(op1);
             kafka_common_quota_ClientQuotaEntity_destroy(entity_handle);
 
-            let view = client_quota_alteration_ref(alteration);
+            let view = client_quota_alteration_ref(alteration, "alteration");
             assert_eq!((view.entity(), view.ops()), (expected.entity(), expected.ops()));
             assert_eq!(
-                *client_quota_entity_ref(kafka_common_quota_ClientQuotaAlteration_entity(alteration)),
+                *client_quota_entity_ref(kafka_common_quota_ClientQuotaAlteration_entity(alteration), "value"),
                 entity
             );
             let copies = kafka_common_quota_ClientQuotaAlteration_ops(alteration);
             assert_eq!(kafka_List_size(copies), 2);
             assert_eq!(
-                *op_ref(kafka_List_get(copies, 1) as *const kafka_common_quota_ClientQuotaAlteration_Op_t),
+                *op_ref(
+                    kafka_List_get(copies, 1) as *const kafka_common_quota_ClientQuotaAlteration_Op_t,
+                    "value"
+                ),
                 Op::new("consumer_byte_rate", None)
             );
             kafka_List_destroy(copies);

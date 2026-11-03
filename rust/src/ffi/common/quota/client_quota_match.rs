@@ -26,6 +26,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::common::quota::ClientQuotaMatch;
@@ -80,13 +81,14 @@ pub(crate) fn client_quota_match_ptr(value: &ClientQuotaMatch) -> *const kafka_c
 /// `value` must be a valid match handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_match_ref<'a>(
     value: *const kafka_common_quota_ClientQuotaMatch_t,
+    param: &'static str,
 ) -> &'a ClientQuotaMatch {
     // SAFETY: Per this function's `# Safety`, `value` is a valid match handle alive for `'a`, so it
     // points at a live `ClientQuotaMatch`: the `DEFAULT` or `ANY` static, the `Box::into_raw` of
     // `kafka_common_quota_ClientQuotaMatch_exact`, or a match a filter component owns and hands out
     // through `client_quota_match_ptr`, which lives as long as that component. Nothing mutates a
     // `ClientQuotaMatch` while a handle to it exists, so the shared reference is sound for `'a`.
-    unsafe { &*(value as *const ClientQuotaMatch) }
+    unsafe { require_ref::<_, ClientQuotaMatch>(value, param) }
 }
 
 /// Returns the C enumerator of the match behind `self_`.
@@ -101,7 +103,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
 ) -> kafka_common_quota_ClientQuotaMatch_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid match handle, as
     // `client_quota_match_ref` requires; the reference is used only within this call.
-    match unsafe { client_quota_match_ref(self_) } {
+    match unsafe { client_quota_match_ref(self_, "self_") } {
         ClientQuotaMatch::Default => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_DEFAULT,
         ClientQuotaMatch::Any => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_ANY,
         ClientQuotaMatch::Exact(_) => kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_EXACT,
@@ -220,7 +222,10 @@ mod tests {
                 kafka_common_quota_ClientQuotaMatch__enum(exact),
                 kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_EXACT
             );
-            assert_eq!(*client_quota_match_ref(exact), ClientQuotaMatch::Exact("alice".to_string()));
+            assert_eq!(
+                *client_quota_match_ref(exact, "exact"),
+                ClientQuotaMatch::Exact("alice".to_string())
+            );
             // A borrowed `Exact` is the value itself, not a singleton.
             let value = ClientQuotaMatch::Exact("bob".to_string());
             assert_eq!(client_quota_match_ptr(&value), &value as *const ClientQuotaMatch as *const _);

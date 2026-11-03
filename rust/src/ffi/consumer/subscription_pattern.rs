@@ -16,6 +16,7 @@
 //! `org.apache.kafka.clients.consumer.SubscriptionPattern`, the server-side
 //! (RE2/J) regular expression of `subscribe(SubscriptionPattern)`.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 
 use crate::consumer::SubscriptionPattern;
@@ -40,12 +41,13 @@ struct SubscriptionPatternInner {
 /// `pattern` must be a valid subscription-pattern handle, kept alive for `'a`.
 pub(crate) unsafe fn subscription_pattern_ref<'a>(
     pattern: *const kafka_consumer_SubscriptionPattern_t,
+    param: &'static str,
 ) -> &'a SubscriptionPattern {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle kept
     // alive for `'a`: a `Box<SubscriptionPatternInner>` from `Box::into_raw` in
     // `kafka_consumer_SubscriptionPattern_new`, the only constructor, and never mutated after it,
     // so the shared reference is to a live value.
-    &unsafe { &*(pattern as *const SubscriptionPatternInner) }.pattern
+    &unsafe { require_ref::<_, SubscriptionPatternInner>(pattern, param) }.pattern
 }
 
 /// Create a subscription pattern, which the group coordinator validates.
@@ -120,7 +122,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_pattern_ref` requires.
-    into_c_string(&unsafe { subscription_pattern_ref(self_) }.to_string())
+    into_c_string(&unsafe { subscription_pattern_ref(self_, "self_") }.to_string())
 }
 
 /// Frees a handle; a null pointer is a no-op.
@@ -160,7 +162,7 @@ mod tests {
                 CStr::from_ptr(kafka_consumer_SubscriptionPattern_pattern(p)).to_str().unwrap(),
                 "topic-.*"
             );
-            assert_eq!(subscription_pattern_ref(p).pattern(), "topic-.*");
+            assert_eq!(subscription_pattern_ref(p, "value").pattern(), "topic-.*");
             let s = kafka_consumer_SubscriptionPattern_to_string(p);
             assert_eq!(
                 CStr::from_ptr(s).to_str().unwrap(),

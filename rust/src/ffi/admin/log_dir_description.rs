@@ -21,6 +21,7 @@
 //! which is also `DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`, the value the
 //! constructors read as "unknown".
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -64,12 +65,15 @@ impl LogDirDescriptionInner {
 ///
 /// `description` must be a valid log-dir-description handle, kept alive for
 /// `'a`.
-unsafe fn inner_ref<'a>(description: *const kafka_admin_LogDirDescription_t) -> &'a LogDirDescriptionInner {
+unsafe fn inner_ref<'a>(
+    description: *const kafka_admin_LogDirDescription_t,
+    param: &'static str,
+) -> &'a LogDirDescriptionInner {
     // SAFETY: Per this function's `# Safety`, `description` is a valid log-dir-description handle
     // kept alive for `'a`; every `kafka_admin_LogDirDescription_t` is the `Box::into_raw` of a
     // `Box<LogDirDescriptionInner>` (`box_log_dir_description`, the only producer), so the shared
     // reference is to a live `LogDirDescriptionInner`, which no entry point mutates.
-    unsafe { &*(description as *const LogDirDescriptionInner) }
+    unsafe { require_ref::<_, LogDirDescriptionInner>(description, param) }
 }
 
 /// Hands `description` to C as an owned handle, freed with
@@ -86,10 +90,11 @@ pub(crate) fn box_log_dir_description(description: LogDirDescription) -> *mut ka
 /// `'a`.
 pub(crate) unsafe fn log_dir_description_ref<'a>(
     description: *const kafka_admin_LogDirDescription_t,
+    param: &'static str,
 ) -> &'a LogDirDescription {
     // SAFETY: Per this function's `# Safety`, `description` is a valid log-dir-description handle
     // kept alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(description) }.description
+    &unsafe { inner_ref(description, param) }.description
 }
 
 /// Frees a `kafka_admin_LogDirDescription_t *` element of an owned
@@ -116,22 +121,26 @@ pub(crate) unsafe fn destroy_log_dir_description_element(element: *mut c_void) {
 /// `map` must be `NULL` or a valid map whose keys are valid topic-partition
 /// handles and whose values are valid replica-info handles, all kept alive
 /// and not mutated for this call.
-unsafe fn map_replica_infos(map: *const kafka_Map_t) -> HashMap<TopicPartition, ReplicaInfo> {
+unsafe fn map_replica_infos(map: *const kafka_Map_t, param: &'static str) -> HashMap<TopicPartition, ReplicaInfo> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
     // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { map_entries(map) }
+    unsafe { map_entries(map, param) }
         .iter()
         .map(|&(k, v)| {
             (
                 // SAFETY: Per this function's `# Safety`, each key `k` of `map` is a valid
                 // topic-partition handle, kept alive for this call, as `topic_partition_ref`
                 // requires; the value is cloned at once.
-                unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone(),
+                unsafe {
+                    topic_partition_ref(require_element(k, param) as *const kafka_common_TopicPartition_t, param)
+                }
+                .clone(),
                 // SAFETY: Per this function's `# Safety`, each value `v` of `map` is a valid
                 // replica-info handle, kept alive for this call, as `replica_info_ref` requires;
                 // the value is cloned at once.
-                unsafe { replica_info_ref(v as *const kafka_admin_ReplicaInfo_t) }.clone(),
+                unsafe { replica_info_ref(require_element(v, param) as *const kafka_admin_ReplicaInfo_t, param) }
+                    .clone(),
             )
         })
         .collect()
@@ -167,7 +176,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
     // handles and whose values are valid replica-info handles, all kept alive and not mutated for
     // this call, as `map_replica_infos` requires.
     box_log_dir_description(LogDirDescription::new(unsafe { take_error(error) }, unsafe {
-        map_replica_infos(replica_infos)
+        map_replica_infos(replica_infos, "replica_infos")
     }))
 }
 
@@ -202,7 +211,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
         // `replica_infos` is null or a valid map whose keys are valid topic-partition handles and
         // whose values are valid replica-info handles, all kept alive and not mutated for this
         // call, as `map_replica_infos` requires.
-        unsafe { map_replica_infos(replica_infos) },
+        unsafe { map_replica_infos(replica_infos, "replica_infos") },
         total_bytes,
         usable_bytes,
     ))
@@ -242,7 +251,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
         // `replica_infos` is null or a valid map whose keys are valid topic-partition handles and
         // whose values are valid replica-info handles, all kept alive and not mutated for this
         // call, as `map_replica_infos` requires.
-        unsafe { map_replica_infos(replica_infos) },
+        unsafe { map_replica_infos(replica_infos, "replica_infos") },
         total_bytes,
         usable_bytes,
         is_cordoned != 0,
@@ -268,7 +277,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     // alive for this call, as `inner_ref` requires; the returned view points at the `ErrorInner`
     // stored in the boxed `LogDirDescriptionInner`, which nothing mutates, so it stays in place
     // until `kafka_admin_LogDirDescription_destroy`, as a borrowed `kafka_common_Error_t` must.
-    unsafe { inner_ref(self_) }
+    unsafe { inner_ref(self_, "self_") }
         .error
         .as_ref()
         .map_or(ptr::null(), |error| error as *const ErrorInner as *const kafka_common_Error_t)
@@ -293,7 +302,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_replica_infos(
     let mut entries: Vec<(&TopicPartition, &ReplicaInfo)> =
         // SAFETY: Per this function's `# Safety`, `self_` is a valid log-dir-description handle,
         // kept alive for this call, as `log_dir_description_ref` requires.
-        unsafe { log_dir_description_ref(self_) }.replica_infos().iter().collect();
+        unsafe { log_dir_description_ref(self_, "self_") }.replica_infos().iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
     let entries = entries
         .into_iter()
@@ -330,7 +339,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_total_bytes(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid log-dir-description handle, kept
     // alive for this call, as `log_dir_description_ref` requires.
-    unsafe { log_dir_description_ref(self_) }.total_bytes().unwrap_or(-1)
+    unsafe { log_dir_description_ref(self_, "self_") }.total_bytes().unwrap_or(-1)
 }
 
 /// The usable size on the volume this log directory is on or empty if the broker did not return a
@@ -351,7 +360,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_usable_bytes(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid log-dir-description handle, kept
     // alive for this call, as `log_dir_description_ref` requires.
-    unsafe { log_dir_description_ref(self_) }.usable_bytes().unwrap_or(-1)
+    unsafe { log_dir_description_ref(self_, "self_") }.usable_bytes().unwrap_or(-1)
 }
 
 /// Whether this log directory is cordoned or not.
@@ -370,7 +379,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_is_cordoned(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid log-dir-description handle, kept
     // alive for this call, as `log_dir_description_ref` requires.
-    i8::from(unsafe { log_dir_description_ref(self_) }.is_cordoned())
+    i8::from(unsafe { log_dir_description_ref(self_, "self_") }.is_cordoned())
 }
 
 /// Returns the text form of the description.
@@ -386,7 +395,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid log-dir-description handle, kept
     // alive for this call, as `log_dir_description_ref` requires.
-    into_c_string(&unsafe { log_dir_description_ref(self_) }.to_string())
+    into_c_string(&unsafe { log_dir_description_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned log-dir-description handle, with the error it holds; `NULL`

@@ -62,7 +62,7 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
     // reference is used only within this call. The view returned is a `Payload<InvalidTopicError>`
     // cloned from the variant's payload into the `ErrorInner`'s payload slot, so it lives as long
     // as the error handle: until the error, or the owner it is borrowed from, is destroyed.
-    let inner = unsafe { error_ref(error) };
+    let inner = unsafe { error_ref(error, "error") };
     match &inner.error {
         Error::InvalidTopic(e) => inner.payload_view(e) as *const kafka_common_InvalidTopicError_t,
         _ => ptr::null(),
@@ -147,7 +147,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
         // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
         // requires (no call mutates a payload of this class). The borrow lasts for this call only:
         // the field is copied into the owned container returned.
-        unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }
+        unsafe { Payload::<InvalidTopicError>::from_ptr(self_, "self_") }
             .value()
             .invalid_topics(),
     )
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
     // mutates a payload of this class). `source_ptr` returns the cause handle the payload's
     // `source` slot owns, so it lives as long as the handle; that is the rustdoc's "borrowed from
     // the handle".
-    unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }.source_ptr()
+    unsafe { Payload::<InvalidTopicError>::from_ptr(self_, "self_") }.source_ptr()
 }
 
 /// Returns the text form of the error.
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_to_string(
     // error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires (no call
     // mutates a payload of this class). The borrow lasts for this call only: `to_c_string` copies
     // the text into an owned string.
-    unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }.to_c_string()
+    unsafe { Payload::<InvalidTopicError>::from_ptr(self_, "self_") }.to_c_string()
 }
 
 /// Frees an owned handle; `NULL` is a no-op. A view borrowed from a

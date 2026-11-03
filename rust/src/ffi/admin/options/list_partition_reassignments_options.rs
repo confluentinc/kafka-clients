@@ -21,6 +21,7 @@
 
 use crate::admin::ListPartitionReassignmentsOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`ListPartitionReassignmentsOptions`], owned by the caller and freed with
 /// [`kafka_admin_ListPartitionReassignmentsOptions_destroy`].
@@ -37,13 +38,14 @@ pub struct kafka_admin_ListPartitionReassignmentsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn list_partition_reassignments_options_ref<'a>(
     options: *const kafka_admin_ListPartitionReassignmentsOptions_t,
+    param: &'static str,
 ) -> &'a ListPartitionReassignmentsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_ListPartitionReassignmentsOptions_t` is
     // the `Box::into_raw` of a `Box<ListPartitionReassignmentsOptions>` (`boxed`), so the shared
     // reference is to a live `ListPartitionReassignmentsOptions` that nothing mutates while it is
     // used.
-    unsafe { &*(options as *const ListPartitionReassignmentsOptions) }
+    unsafe { require_ref::<_, ListPartitionReassignmentsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -54,13 +56,14 @@ pub(crate) unsafe fn list_partition_reassignments_options_ref<'a>(
 /// reference is live meanwhile.
 unsafe fn options_mut<'a>(
     options: *mut kafka_admin_ListPartitionReassignmentsOptions_t,
+    param: &'static str,
 ) -> &'a mut ListPartitionReassignmentsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every
     // `kafka_admin_ListPartitionReassignmentsOptions_t` is the `Box::into_raw` of a
     // `Box<ListPartitionReassignmentsOptions>` (`boxed`), so the exclusive reference is to a live
     // `ListPartitionReassignmentsOptions`.
-    unsafe { &mut *(options as *mut ListPartitionReassignmentsOptions) }
+    unsafe { require_mut::<_, ListPartitionReassignmentsOptions>(options, param) }
 }
 
 fn boxed(options: ListPartitionReassignmentsOptions) -> *mut kafka_admin_ListPartitionReassignmentsOptions_t {
@@ -100,7 +103,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsOptions_set_timeo
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -123,7 +126,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsOptions_timeout_m
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_partition_reassignments_options_ref`
     // requires.
-    unsafe { list_partition_reassignments_options_ref(self_) }
+    unsafe { list_partition_reassignments_options_ref(self_, "self_") }
         .timeout_ms()
         .unwrap_or(-1)
 }

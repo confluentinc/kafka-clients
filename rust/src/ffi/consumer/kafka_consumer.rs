@@ -558,7 +558,7 @@ mod tests {
         // SAFETY: Test code: `class` is a live class handle; the view is used only within this
         // call, while the handle lives.
         let client_ids = |class: *mut kafka_consumer_KafkaConsumer_t| unsafe {
-            crate::ffi::consumer::client_ref(kafka_consumer_KafkaConsumer__as_Consumer(class))
+            crate::ffi::consumer::client_ref(kafka_consumer_KafkaConsumer__as_Consumer(class), "value")
                 .handle()
                 .metrics()
                 .snapshot()

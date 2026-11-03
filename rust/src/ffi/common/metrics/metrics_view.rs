@@ -16,6 +16,7 @@
 //! [`MetricsView`], the live read-only metrics map the clients' `metrics()`
 //! return (Java's `Collections.unmodifiableMap(metrics.metrics())`).
 
+use crate::ffi::precondition::require_ref;
 use std::collections::hash_map;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -54,11 +55,11 @@ pub(crate) fn box_metrics_view(view: MetricsView) -> *mut kafka_common_metrics_M
 /// # Safety
 ///
 /// `self_` must be a valid view handle, alive for `'a`.
-unsafe fn view_ref<'a>(self_: *const kafka_common_metrics_MetricsView_t) -> &'a MetricsView {
+unsafe fn view_ref<'a>(self_: *const kafka_common_metrics_MetricsView_t, param: &'static str) -> &'a MetricsView {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid view handle alive for `'a`, the
     // `Box::into_raw` of `box_metrics_view`; only `_destroy` takes it back and the view is used
     // through `&self` only, so the shared reference is sound for `'a`.
-    unsafe { &*(self_ as *const MetricsView) }
+    unsafe { require_ref::<_, MetricsView>(self_, param) }
 }
 
 /// The entries of one snapshot of the map, built one at a time as C asks for
@@ -115,7 +116,7 @@ impl Iterator for SnapshotIter {
 pub unsafe extern "C" fn kafka_common_metrics_MetricsView_len(self_: *const kafka_common_metrics_MetricsView_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid view handle, as `view_ref`
     // requires; the reference is used only within this call.
-    i32::try_from(unsafe { view_ref(self_) }.len()).unwrap_or(i32::MAX)
+    i32::try_from(unsafe { view_ref(self_, "self_") }.len()).unwrap_or(i32::MAX)
 }
 
 /// Returns `1` if the registry holds no metric at the time of the call, else
@@ -135,7 +136,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsView_is_empty(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid view handle, as `view_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { view_ref(self_) }.is_empty())
+    i8::from(unsafe { view_ref(self_, "self_") }.is_empty())
 }
 
 /// Returns `1` if a metric is registered under `name` at the time of the
@@ -162,7 +163,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsView_contains_key(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid view handle and `name` a valid
     // metric-name handle, as `view_ref` and `metric_name_ref` require; both are used only within
     // this call.
-    i8::from(unsafe { view_ref(self_) }.contains_key(unsafe { metric_name_ref(name) }))
+    i8::from(unsafe { view_ref(self_, "self_") }.contains_key(unsafe { metric_name_ref(name, "name") }))
 }
 
 /// Returns the metric registered under `name` at the time of the call, or
@@ -190,8 +191,8 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsView_get(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid view handle and `name` a valid
     // metric-name handle, as `view_ref` and `metric_name_ref` require; both are used only within
     // this call.
-    unsafe { view_ref(self_) }
-        .get(unsafe { metric_name_ref(name) })
+    unsafe { view_ref(self_, "self_") }
+        .get(unsafe { metric_name_ref(name, "name") })
         .map_or(std::ptr::null_mut(), box_kafka_metric)
 }
 
@@ -222,7 +223,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsView_iterator(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid view handle, as `view_ref`
     // requires; the reference is used only within this call, and the iterator holds its own
     // `Arc` of the snapshot.
-    let snapshot = unsafe { view_ref(self_) }.snapshot();
+    let snapshot = unsafe { view_ref(self_, "self_") }.snapshot();
     box_iterator(Box::new(SnapshotIter::new(snapshot)), Some(destroy_map_entry_element))
 }
 
@@ -279,9 +280,11 @@ mod tests {
             let iterator = kafka_common_metrics_MetricsView_iterator(view);
             while kafka_Iterator_has_next(iterator) == 1 {
                 let entry = kafka_Iterator_next(iterator) as *const kafka_Map_Entry_t;
-                let name = metric_name_ref(kafka_Map_Entry_key(entry) as *const kafka_common_MetricName_t);
-                let metric =
-                    kafka_metric_ref(kafka_Map_Entry_value(entry) as *const kafka_common_metrics_KafkaMetric_t);
+                let name = metric_name_ref(kafka_Map_Entry_key(entry) as *const kafka_common_MetricName_t, "value");
+                let metric = kafka_metric_ref(
+                    kafka_Map_Entry_value(entry) as *const kafka_common_metrics_KafkaMetric_t,
+                    "value",
+                );
                 assert_eq!(metric.metric_name(), name, "an entry's value is the metric of its key");
                 names.push(name.clone());
             }
@@ -304,7 +307,7 @@ mod tests {
             assert_eq!(kafka_common_metrics_MetricsView_is_empty(view), 0);
             assert_eq!(kafka_common_metrics_MetricsView_contains_key(view, name_a), 1);
             let found = kafka_common_metrics_MetricsView_get(view, name_a);
-            assert!(Arc::ptr_eq(kafka_metric_ref(found), &metrics.metric(&a).unwrap()));
+            assert!(Arc::ptr_eq(kafka_metric_ref(found, "found"), &metrics.metric(&a).unwrap()));
             kafka_common_metrics_KafkaMetric_destroy(found);
 
             let held = kafka_common_metrics_MetricsView_iterator(view);
@@ -318,7 +321,7 @@ mod tests {
             let mut held_count = 0;
             while kafka_Iterator_has_next(held) == 1 {
                 let entry = kafka_Iterator_next(held) as *const kafka_Map_Entry_t;
-                let name = metric_name_ref(kafka_Map_Entry_key(entry) as *const kafka_common_MetricName_t);
+                let name = metric_name_ref(kafka_Map_Entry_key(entry) as *const kafka_common_MetricName_t, "value");
                 assert_ne!(name, &b, "the iterator taken before `b` never sees it");
                 held_count += 1;
             }

@@ -19,6 +19,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::admin::{FeatureUpdate, UpgradeType};
@@ -212,12 +213,15 @@ pub(crate) struct FeatureUpdateInner {
 /// # Safety
 ///
 /// `update` must be a valid feature-update handle, kept alive for `'a`.
-pub(crate) unsafe fn feature_update_ref<'a>(update: *const kafka_admin_FeatureUpdate_t) -> &'a FeatureUpdate {
+pub(crate) unsafe fn feature_update_ref<'a>(
+    update: *const kafka_admin_FeatureUpdate_t,
+    param: &'static str,
+) -> &'a FeatureUpdate {
     // SAFETY: Per this function's `# Safety`, `update` is a valid feature-update handle kept alive
     // for `'a`. Every `kafka_admin_FeatureUpdate_t` comes from `box_feature_update`, which boxes a
     // `FeatureUpdateInner`, so the cast yields a valid shared reference. The type has no setters,
     // so nothing mutates it while borrowed.
-    &unsafe { &*(update as *const FeatureUpdateInner) }.update
+    &unsafe { require_ref::<_, FeatureUpdateInner>(update, param) }.update
 }
 
 /// Hands `update` to C as an owned handle, freed with
@@ -272,7 +276,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_max_version_level(self_: *const kafka_admin_FeatureUpdate_t) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-update handle, kept alive
     // for this call, as `feature_update_ref` requires.
-    unsafe { feature_update_ref(self_) }.max_version_level()
+    unsafe { feature_update_ref(self_, "self_") }.max_version_level()
 }
 
 /// Returns the kind of upgrade to perform.
@@ -288,7 +292,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_upgrade_type(
 ) -> *const kafka_admin_FeatureUpdate_UpgradeType_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-update handle, kept alive
     // for this call, as `feature_update_ref` requires.
-    upgrade_type_singleton(unsafe { feature_update_ref(self_) }.upgrade_type())
+    upgrade_type_singleton(unsafe { feature_update_ref(self_, "self_") }.upgrade_type())
 }
 
 /// Returns the text form of the update.
@@ -302,7 +306,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_upgrade_type(
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_to_string(self_: *const kafka_admin_FeatureUpdate_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-update handle, kept alive
     // for this call, as `feature_update_ref` requires.
-    into_c_string(&unsafe { feature_update_ref(self_) }.to_string())
+    into_c_string(&unsafe { feature_update_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned update handle; `NULL` is a no-op.
@@ -370,14 +374,14 @@ mod tests {
             let failed = kafka_admin_FeatureUpdate_new(0, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut error);
             assert!(failed.is_null());
             assert!(!error.is_null());
-            assert!(error_ref(error).error.is_local_illegal_argument_error());
+            assert!(error_ref(error, "error").error.is_local_illegal_argument_error());
             kafka_common_Error_destroy(error);
             error = ptr::null_mut();
 
             let update = kafka_admin_FeatureUpdate_new(2, kafka_admin_FeatureUpdate_UpgradeType_upgrade(), &mut error);
             assert!(error.is_null());
             let expected = FeatureUpdate::new(2, UpgradeType::Upgrade).unwrap();
-            assert_eq!(*feature_update_ref(update), expected);
+            assert_eq!(*feature_update_ref(update, "update"), expected);
             assert_eq!(kafka_admin_FeatureUpdate_max_version_level(update), 2);
             assert_eq!(
                 kafka_admin_FeatureUpdate_upgrade_type(update),

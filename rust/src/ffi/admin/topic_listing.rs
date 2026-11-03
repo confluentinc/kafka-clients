@@ -15,6 +15,7 @@
 //! `kafka_admin_TopicListing_t`: `org.apache.kafka.clients.admin.TopicListing`
 //! (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::TopicListing;
@@ -47,12 +48,12 @@ impl TopicListingInner {
 /// # Safety
 ///
 /// `listing` must be a valid topic-listing handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(listing: *const kafka_admin_TopicListing_t) -> &'a TopicListingInner {
+unsafe fn inner_ref<'a>(listing: *const kafka_admin_TopicListing_t, param: &'static str) -> &'a TopicListingInner {
     // SAFETY: Per this function's `# Safety`, `listing` is a valid topic-listing handle kept alive
     // for `'a`; every `kafka_admin_TopicListing_t` is the `Box::into_raw` of a
     // `Box<TopicListingInner>` (`box_topic_listing`, the only producer), so the shared reference is
     // to a live `TopicListingInner`, which no entry point mutates.
-    unsafe { &*(listing as *const TopicListingInner) }
+    unsafe { require_ref::<_, TopicListingInner>(listing, param) }
 }
 
 /// Hands `listing` to C as an owned handle, freed with
@@ -66,10 +67,13 @@ pub(crate) fn box_topic_listing(listing: TopicListing) -> *mut kafka_admin_Topic
 /// # Safety
 ///
 /// `listing` must be a valid topic-listing handle, kept alive for `'a`.
-pub(crate) unsafe fn topic_listing_ref<'a>(listing: *const kafka_admin_TopicListing_t) -> &'a TopicListing {
+pub(crate) unsafe fn topic_listing_ref<'a>(
+    listing: *const kafka_admin_TopicListing_t,
+    param: &'static str,
+) -> &'a TopicListing {
     // SAFETY: Per this function's `# Safety`, `listing` is a valid topic-listing handle kept alive
     // for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(listing) }.listing
+    &unsafe { inner_ref(listing, param) }.listing
 }
 
 /// Frees a `kafka_admin_TopicListing_t *` element of an owned container.
@@ -130,7 +134,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_name(self_: *const kafka_admin
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-listing handle, kept alive
     // for this call, as `inner_ref` requires; the returned pointer borrows `name_c`, which lives as
     // long as the handle.
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// Returns the id of the topic.
@@ -146,7 +150,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-listing handle, kept alive
     // for this call, as `topic_listing_ref` requires.
-    box_uuid(unsafe { topic_listing_ref(self_) }.topic_id())
+    box_uuid(unsafe { topic_listing_ref(self_, "self_") }.topic_id())
 }
 
 /// Returns 1 if the topic is internal, else 0.
@@ -159,7 +163,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
 pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(self_: *const kafka_admin_TopicListing_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-listing handle, kept alive
     // for this call, as `topic_listing_ref` requires.
-    i8::from(unsafe { topic_listing_ref(self_) }.is_internal())
+    i8::from(unsafe { topic_listing_ref(self_, "self_") }.is_internal())
 }
 
 /// Returns the text form of the listing.
@@ -173,7 +177,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(self_: *const kafk
 pub unsafe extern "C" fn kafka_admin_TopicListing_to_string(self_: *const kafka_admin_TopicListing_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-listing handle, kept alive
     // for this call, as `topic_listing_ref` requires.
-    into_c_string(&unsafe { topic_listing_ref(self_) }.to_string())
+    into_c_string(&unsafe { topic_listing_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned topic-listing handle; `NULL` is a no-op.

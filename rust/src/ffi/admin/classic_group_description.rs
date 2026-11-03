@@ -19,6 +19,7 @@
 //! description (null for Java's null); `authorizedOperations()` is null when
 //! the broker did not report them.
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ClassicGroupDescription, MemberDescription};
@@ -64,13 +65,16 @@ impl ClassicGroupDescriptionInner {
 ///
 /// `description` must be a live classic-group-description handle, kept
 /// alive for `'a`.
-unsafe fn inner_ref<'a>(description: *const kafka_admin_ClassicGroupDescription_t) -> &'a ClassicGroupDescriptionInner {
+unsafe fn inner_ref<'a>(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+    param: &'static str,
+) -> &'a ClassicGroupDescriptionInner {
     // SAFETY: Per this function's `# Safety`, `description` is a live classic-group-description
     // handle kept alive for `'a`. Every `kafka_admin_ClassicGroupDescription_t` comes from
     // `box_classic_group_description`, which boxes a `ClassicGroupDescriptionInner`, so the cast
     // yields a valid shared reference. The type has no setters, so nothing mutates it while
     // borrowed.
-    unsafe { &*(description as *const ClassicGroupDescriptionInner) }
+    unsafe { require_ref::<_, ClassicGroupDescriptionInner>(description, param) }
 }
 
 /// Hands `description` to C as an owned handle, freed with
@@ -90,10 +94,11 @@ pub(crate) fn box_classic_group_description(
 /// alive for `'a`.
 pub(crate) unsafe fn classic_group_description_ref<'a>(
     description: *const kafka_admin_ClassicGroupDescription_t,
+    param: &'static str,
 ) -> &'a ClassicGroupDescription {
     // SAFETY: Per this function's `# Safety`, `description` is a live classic-group-description
     // handle kept alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(description) }.description
+    &unsafe { inner_ref(description, param) }.description
 }
 
 /// Frees a `kafka_admin_ClassicGroupDescription_t *` element of an owned
@@ -118,16 +123,21 @@ pub(crate) unsafe fn destroy_classic_group_description_element(element: *mut c_v
 ///
 /// `list` must be `NULL` or a valid list whose elements are member-description
 /// handles, alive and not mutated for this call.
-unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescription> {
+unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static str) -> Vec<MemberDescription> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
     // mutated for this call, as `list_elements` requires; the borrowed slice does not outlive the
     // call.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
         // handle alive for this call, as `member_description_ref` requires; the borrow ends with
         // the clone.
-        .map(|&element| unsafe { member_description_ref(element as *const kafka_admin_MemberDescription_t) }.clone())
+        .map(|&element| {
+            unsafe {
+                member_description_ref(require_element(element, param) as *const kafka_admin_MemberDescription_t, param)
+            }
+            .clone()
+        })
         .collect()
 }
 
@@ -173,7 +183,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
-        unsafe { list_member_descriptions(members) },
+        unsafe { list_member_descriptions(members, "members") },
         // SAFETY: Per this function's `# Safety`, `state` is a `kafka_common_ClassicGroupState_t`
         // singleton, as `classic_group_state::value_of` requires.
         unsafe { classic_group_state::value_of(state) },
@@ -227,7 +237,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_with_authorized_ope
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
-        unsafe { list_member_descriptions(members) },
+        unsafe { list_member_descriptions(members, "members") },
         // SAFETY: Per this function's `# Safety`, `state` is a `kafka_common_ClassicGroupState_t`
         // singleton, as `classic_group_state::value_of` requires.
         unsafe { classic_group_state::value_of(state) },
@@ -256,7 +266,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned string is a `CString` the
     // handle owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.group_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.group_id_c.as_ptr()
 }
 
 /// Returns the group protocol type.
@@ -273,7 +283,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned string is a `CString` the
     // handle owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.protocol_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.protocol_c.as_ptr()
 }
 
 /// Returns the group protocol data. The meaning depends on the group protocol type. For a classic
@@ -292,7 +302,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned string is a `CString` the
     // handle owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.protocol_data_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.protocol_data_c.as_ptr()
 }
 
 /// If the group is a simple consumer group or not.
@@ -311,7 +321,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `classic_group_description_ref` requires.
-    i8::from(unsafe { classic_group_description_ref(self_) }.is_simple_consumer_group())
+    i8::from(unsafe { classic_group_description_ref(self_, "self_") }.is_simple_consumer_group())
 }
 
 /// A list of the members of the classic group.
@@ -332,7 +342,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_members(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `classic_group_description_ref` requires.
-    let elements = unsafe { classic_group_description_ref(self_) }
+    let elements = unsafe { classic_group_description_ref(self_, "self_") }
         .members()
         .iter()
         .map(|m| box_member_description(m.clone()) as *mut c_void)
@@ -353,7 +363,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
 ) -> *const kafka_common_ClassicGroupState_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `classic_group_description_ref` requires.
-    classic_group_state::singleton(unsafe { classic_group_description_ref(self_) }.state())
+    classic_group_state::singleton(unsafe { classic_group_description_ref(self_, "self_") }.state())
 }
 
 /// The classic group coordinator, or `NULL` if the coordinator is not known.
@@ -375,7 +385,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned node points at the
     // `NodeInner` the handle owns, so it lives as long as the handle.
-    optional_node_ptr(unsafe { inner_ref(self_) }.coordinator.as_ref())
+    optional_node_ptr(unsafe { inner_ref(self_, "self_") }.coordinator.as_ref())
 }
 
 /// authorizedOperations for this group, or `NULL` if that information is not known.
@@ -395,7 +405,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid classic-group-description handle,
     // kept alive for this call, as `classic_group_description_ref` requires.
-    acl_operation_list(unsafe { classic_group_description_ref(self_) }.authorized_operations())
+    acl_operation_list(unsafe { classic_group_description_ref(self_, "self_") }.authorized_operations())
 }
 
 /// Returns the text form of the description.
@@ -412,7 +422,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a live classic-group-description handle, kept alive for
     // this call, as `classic_group_description_ref` requires.
-    into_c_string(&unsafe { classic_group_description_ref(self_) }.to_string())
+    into_c_string(&unsafe { classic_group_description_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned classic-group-description handle; `NULL` is a no-op.

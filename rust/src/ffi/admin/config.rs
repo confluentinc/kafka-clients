@@ -16,6 +16,7 @@
 //! (CLAUDE.md §4). `get` returns a borrowed entry handle valid as long as
 //! the config; `entries` returns owned copies.
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 
@@ -54,12 +55,12 @@ impl ConfigInner {
 /// # Safety
 ///
 /// `config` must be a valid config handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(config: *const kafka_admin_Config_t) -> &'a ConfigInner {
+unsafe fn inner_ref<'a>(config: *const kafka_admin_Config_t, param: &'static str) -> &'a ConfigInner {
     // SAFETY: Per this function's `# Safety`, `config` is a valid config handle kept alive for
     // `'a`; every `kafka_admin_Config_t` is the `Box::into_raw` of a `Box<ConfigInner>`
     // (`box_config`, the only producer), so the shared reference is to a live `ConfigInner`, which
     // no entry point mutates.
-    unsafe { &*(config as *const ConfigInner) }
+    unsafe { require_ref::<_, ConfigInner>(config, param) }
 }
 
 /// The config behind a handle.
@@ -67,10 +68,10 @@ unsafe fn inner_ref<'a>(config: *const kafka_admin_Config_t) -> &'a ConfigInner 
 /// # Safety
 ///
 /// `config` must be a valid config handle, kept alive for `'a`.
-pub(crate) unsafe fn config_ref<'a>(config: *const kafka_admin_Config_t) -> &'a Config {
+pub(crate) unsafe fn config_ref<'a>(config: *const kafka_admin_Config_t, param: &'static str) -> &'a Config {
     // SAFETY: Per this function's `# Safety`, `config` is a valid config handle kept alive for
     // `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(config) }.config
+    &unsafe { inner_ref(config, param) }.config
 }
 
 /// Hands `config` to C as an owned handle, freed with
@@ -111,12 +112,20 @@ pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) ->
     // SAFETY: Per this function's `# Safety`, `entries` is null or a valid list, alive and not
     // mutated for this call, as `list_elements` requires; the borrowed slice is consumed by
     // `Config::new` within this call.
-    let entries = unsafe { list_elements(entries) }
+    let entries = unsafe { list_elements(entries, "entries") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `entries` is a valid config-entry
         // handle, kept alive for this call, as `config_entry_ref` requires; the entry is cloned at
         // once.
-        .map(|&element| unsafe { config_entry_ref(element as *const kafka_admin_ConfigEntry_t) }.clone());
+        .map(|&element| {
+            unsafe {
+                config_entry_ref(
+                    require_element(element, "entries") as *const kafka_admin_ConfigEntry_t,
+                    "entries",
+                )
+            }
+            .clone()
+        });
     box_config(Config::new(entries))
 }
 
@@ -135,7 +144,7 @@ pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) ->
 pub unsafe extern "C" fn kafka_admin_Config_entries(self_: *const kafka_admin_Config_t) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config handle, kept alive for this
     // call, as `config_ref` requires.
-    let mut entries: Vec<_> = unsafe { config_ref(self_) }.entries().collect();
+    let mut entries: Vec<_> = unsafe { config_ref(self_, "self_") }.entries().collect();
     entries.sort_unstable_by(|a, b| a.name().cmp(b.name()));
     let elements = entries
         .into_iter()
@@ -171,7 +180,7 @@ pub unsafe extern "C" fn kafka_admin_Config_get(
     // call, as `inner_ref` requires; the returned view points at a `ConfigEntryInner` stored in the
     // `entries` map of the boxed `ConfigInner`, which nothing mutates, so it stays in place until
     // `kafka_admin_Config_destroy`.
-    unsafe { inner_ref(self_) }
+    unsafe { inner_ref(self_, "self_") }
         .entries
         .get(&name)
         .map_or(std::ptr::null(), ConfigEntryInner::as_ptr)
@@ -188,7 +197,7 @@ pub unsafe extern "C" fn kafka_admin_Config_get(
 pub unsafe extern "C" fn kafka_admin_Config_to_string(self_: *const kafka_admin_Config_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config handle, kept alive for this
     // call, as `config_ref` requires.
-    into_c_string(&unsafe { config_ref(self_) }.to_string())
+    into_c_string(&unsafe { config_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned config handle; `NULL` is a no-op.
@@ -246,8 +255,8 @@ mod tests {
             kafka_List_destroy(list);
 
             let expected = Config::new([b.clone(), a.clone()]);
-            assert_eq!(*config_ref(config), expected);
-            assert_eq!(*config_entry_ref(kafka_admin_Config_get(config, c"b".as_ptr())), b);
+            assert_eq!(*config_ref(config, "config"), expected);
+            assert_eq!(*config_entry_ref(kafka_admin_Config_get(config, c"b".as_ptr()), "value"), b);
             assert!(kafka_admin_Config_get(config, c"missing".as_ptr()).is_null());
 
             let entries = kafka_admin_Config_entries(config);
@@ -255,7 +264,7 @@ mod tests {
             let first = kafka_List_get(entries, 0) as *const kafka_admin_ConfigEntry_t;
             assert_eq!(CStr::from_ptr(kafka_admin_ConfigEntry_name(first)).to_str().unwrap(), "a");
             assert_eq!(
-                *config_entry_ref(kafka_List_get(entries, 1) as *const kafka_admin_ConfigEntry_t),
+                *config_entry_ref(kafka_List_get(entries, 1) as *const kafka_admin_ConfigEntry_t, "value"),
                 b
             );
             kafka_List_destroy(entries);

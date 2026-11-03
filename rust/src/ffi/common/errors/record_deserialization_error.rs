@@ -203,10 +203,11 @@ fn views(payload: &Payload<RecordDeserializationError>) -> &Views {
 /// called on it during `'a`.
 unsafe fn payload<'a>(
     self_: *const kafka_common_RecordDeserializationError_t,
+    param: &'static str,
 ) -> &'a Payload<RecordDeserializationError> {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-deserialization handle,
     // alive and not mutated through `with_source` for `'a`, as `Payload::from_ptr` requires.
-    unsafe { Payload::<RecordDeserializationError>::from_ptr(self_) }
+    unsafe { Payload::<RecordDeserializationError>::from_ptr(self_, param) }
 }
 
 /// Returns the payload of a `RecordDeserializationException` error, or `NULL` when the error is
@@ -231,7 +232,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
     // `Payload<RecordDeserializationError>` cloned from the variant's payload into the
     // `ErrorInner`'s payload slot, so it lives as long as the error handle: until the error, or the
     // owner it is borrowed from, is destroyed.
-    let inner = unsafe { error_ref(error) };
+    let inner = unsafe { error_ref(error, "error") };
     match &inner.error {
         Error::RecordDeserialization(e) => inner.payload_view(&**e) as *const kafka_common_RecordDeserializationError_t,
         _ => ptr::null(),
@@ -282,7 +283,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
         // SAFETY: `headers` is non-null (checked above) and, per this function's `# Safety`, a
         // valid record-headers handle, as `record_headers_ref` requires; the headers are cloned, so
         // the borrow lasts for this call only.
-        Some(unsafe { record_headers_ref(headers) }.clone())
+        Some(unsafe { record_headers_ref(headers, "headers") }.clone())
     };
     Payload::boxed(RecordDeserializationError::new(
         // SAFETY: Per this function's `# Safety`, `origin` is a singleton returned by this module,
@@ -290,7 +291,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
         unsafe { origin_value_of(origin) },
         // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
         // `topic_partition_ref` requires; it is cloned, so the borrow lasts for this call only.
-        unsafe { topic_partition_ref(partition) }.clone(),
+        unsafe { topic_partition_ref(partition, "partition") }.clone(),
         offset,
         timestamp,
         // SAFETY: Per this function's `# Safety`, `timestamp_type` is a `TimestampType` singleton,
@@ -339,7 +340,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_with_source(
     // SAFETY: Per this function's `# Safety`, `self_` is an owned handle not yet destroyed, never a
     // view, and no other call uses it at the same time, so no `from_ptr` reference on it is live,
     // as `Payload::from_ptr_mut` requires. The `&mut` lasts for this call only.
-    unsafe { Payload::<RecordDeserializationError>::from_ptr_mut(self_) }
+    unsafe { Payload::<RecordDeserializationError>::from_ptr_mut(self_, "self_") }
         .replace_value(|value| value.with_source(source));
 }
 
@@ -358,7 +359,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The borrow lasts for this call only: `origin()` is copied out and mapped to its
     // static singleton.
-    origin_singleton(unsafe { payload(self_) }.value().origin())
+    origin_singleton(unsafe { payload(self_, "self_") }.value().origin())
 }
 
 /// Returns the partition of the record (`topicPartition()`).
@@ -378,7 +379,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_topic_partition
     // meanwhile. `views` caches the topic-partition handle in the payload and `with_source` keeps
     // it, so, as the rustdoc states, the handle returned is borrowed from `self_` and valid as long
     // as it is.
-    views(unsafe { payload(self_) }).topic_partition.as_ptr()
+    views(unsafe { payload(self_, "self_") }).topic_partition.as_ptr()
 }
 
 /// Returns the offset of the record (`offset()`).
@@ -395,7 +396,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
     // view whose error is alive or an owned handle not yet destroyed), which is what `payload`
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The borrow lasts for this call only: the scalar is copied out.
-    unsafe { payload(self_) }.value().offset()
+    unsafe { payload(self_, "self_") }.value().offset()
 }
 
 /// Returns the timestamp of the record (`timestamp()`).
@@ -412,7 +413,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
     // view whose error is alive or an owned handle not yet destroyed), which is what `payload`
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The borrow lasts for this call only: the scalar is copied out.
-    unsafe { payload(self_) }.value().timestamp()
+    unsafe { payload(self_, "self_") }.value().timestamp()
 }
 
 /// Returns the timestamp type of the record (`timestampType()`).
@@ -430,7 +431,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The borrow lasts for this call only: `timestamp_type()` is copied out and mapped
     // to its static singleton.
-    timestamp_type::singleton(unsafe { payload(self_) }.value().timestamp_type())
+    timestamp_type::singleton(unsafe { payload(self_, "self_") }.value().timestamp_type())
 }
 
 /// Returns the raw key (`keyBuffer()`); `data` is `NULL` for Java's null.
@@ -450,7 +451,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The view returned points into the payload's own key bytes, so, as the rustdoc
     // states, it is valid as long as the handle, or until `with_source` replaces the value.
-    kafka_Bytes_t::from_option(unsafe { payload(self_) }.value().key_buffer())
+    kafka_Bytes_t::from_option(unsafe { payload(self_, "self_") }.value().key_buffer())
 }
 
 /// Returns the raw value (`valueBuffer()`); `data` is `NULL` for Java's null.
@@ -470,7 +471,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The view returned points into the payload's own value bytes, so, as the rustdoc
     // states, it is valid as long as the handle, or until `with_source` replaces the value.
-    kafka_Bytes_t::from_option(unsafe { payload(self_) }.value().value_buffer())
+    kafka_Bytes_t::from_option(unsafe { payload(self_, "self_") }.value().value_buffer())
 }
 
 /// Returns the record's headers (`headers()`), or `NULL` for Java's null. Read them through
@@ -491,7 +492,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_headers(
     // meanwhile. `views` caches the record-headers handle in the payload and `with_source` keeps
     // it, so, as the rustdoc states, the handle returned is borrowed from `self_` and valid as long
     // as it is.
-    views(unsafe { payload(self_) })
+    views(unsafe { payload(self_, "self_") })
         .headers
         .as_ref()
         .map_or(ptr::null(), |headers| headers.as_ptr())
@@ -514,7 +515,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_message(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. `message_ptr` points at the payload's own C string, so, as the rustdoc states, it
     // is valid as long as the handle, or until `with_source` rebuilds the string.
-    unsafe { payload(self_) }.message_ptr()
+    unsafe { payload(self_, "self_") }.message_ptr()
 }
 
 /// Returns the cause of the error (`getCause()`), or `NULL` if there is none.
@@ -534,7 +535,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_source(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. `source_ptr` returns the cause handle the payload's `source` slot owns, so, as the
     // rustdoc states, it is valid as long as the handle, or until `with_source` resets the slot.
-    unsafe { payload(self_) }.source_ptr()
+    unsafe { payload(self_, "self_") }.source_ptr()
 }
 
 /// Returns the text form of the error.
@@ -553,7 +554,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_to_string(
     // requires; the one mutator, `with_source`, requires that no other call uses the handle
     // meanwhile. The borrow lasts for this call only: `to_c_string` copies the text into an owned
     // string.
-    unsafe { payload(self_) }.to_c_string()
+    unsafe { payload(self_, "self_") }.to_c_string()
 }
 
 /// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
@@ -705,8 +706,10 @@ mod tests {
                 headers as *mut _,
             ));
             assert_eq!(kafka_List_size(array), 1);
-            let header =
-                record_header_ref(kafka_List_get(array, 0) as *const kafka_common_header_internals_RecordHeader_t);
+            let header = record_header_ref(
+                kafka_List_get(array, 0) as *const kafka_common_header_internals_RecordHeader_t,
+                "value",
+            );
             assert_eq!(header.key(), "h1");
             assert_eq!(header.value(), Some(&[9_u8, 9][..]));
             kafka_List_destroy(array);

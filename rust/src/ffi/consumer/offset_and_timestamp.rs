@@ -16,6 +16,7 @@
 //! `org.apache.kafka.clients.consumer.OffsetAndTimestamp`, the value of
 //! `offsetsForTimes`.
 
+use crate::ffi::precondition::require_ref;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -46,12 +47,13 @@ pub(crate) fn box_offset_and_timestamp(oat: OffsetAndTimestamp) -> *mut kafka_co
 /// `oat` must be a valid offset-and-timestamp handle, kept alive for `'a`.
 pub(crate) unsafe fn offset_and_timestamp_ref<'a>(
     oat: *const kafka_consumer_OffsetAndTimestamp_t,
+    param: &'static str,
 ) -> &'a OffsetAndTimestamp {
     // SAFETY: Per this function's `# Safety`, `oat` is a valid offset-and-timestamp handle kept
     // alive for `'a`: a `Box<OffsetAndTimestamp>` from `box_offset_and_timestamp`, the only place
     // handles are made, owned by the caller or by a map, and never mutated, so the shared reference
     // is to a live value.
-    unsafe { &*(oat as *const OffsetAndTimestamp) }
+    unsafe { require_ref::<_, OffsetAndTimestamp>(oat, param) }
 }
 
 /// Hands a Java `Map<TopicPartition, OffsetAndTimestamp>` to C as an owned
@@ -176,7 +178,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_timestamp_ref` requires.
-    into_c_string(&unsafe { offset_and_timestamp_ref(self_) }.to_string())
+    into_c_string(&unsafe { offset_and_timestamp_ref(self_, "self_") }.to_string())
 }
 
 /// `offset()`.
@@ -195,7 +197,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_timestamp_ref` requires.
-    unsafe { offset_and_timestamp_ref(self_) }.offset()
+    unsafe { offset_and_timestamp_ref(self_, "self_") }.offset()
 }
 
 /// `timestamp()`: milliseconds since the epoch.
@@ -214,7 +216,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_timestamp_ref` requires.
-    unsafe { offset_and_timestamp_ref(self_) }.timestamp()
+    unsafe { offset_and_timestamp_ref(self_, "self_") }.timestamp()
 }
 
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
@@ -233,7 +235,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_timestamp_ref` requires.
-    unsafe { offset_and_timestamp_ref(self_) }.leader_epoch().unwrap_or(-1)
+    unsafe { offset_and_timestamp_ref(self_, "self_") }.leader_epoch().unwrap_or(-1)
 }
 
 /// Frees an owned handle; a null pointer is a no-op. A handle borrowed from
@@ -300,7 +302,7 @@ mod tests {
         assert!(!error.is_null());
         assert!(oat.is_null());
         // SAFETY: Test code: `error` is the owned error just stored (non-null, asserted above).
-        assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
+        assert!(unsafe { error_ref(error, "error") }.error.is_local_illegal_argument_error());
         // SAFETY: Test code: `error` is the owned error stored above, destroyed once.
         unsafe { kafka_common_Error_destroy(error) };
     }
@@ -318,12 +320,12 @@ mod tests {
         // SAFETY: Test code: `c_map` is the live map just built, not mutated while its entries
         // are read; every key is a live topic-partition handle and every non-null value a live
         // offset-and-timestamp handle the map owns.
-        let entries: Vec<_> = unsafe { map_entries(c_map) }
+        let entries: Vec<_> = unsafe { map_entries(c_map, "c_map") }
             .iter()
             .map(|&(k, v)| unsafe {
                 (
-                    topic_partition_ref(k as *const _).clone(),
-                    (!v.is_null()).then(|| offset_and_timestamp_ref(v as *const _).offset()),
+                    topic_partition_ref(k as *const _, "value").clone(),
+                    (!v.is_null()).then(|| offset_and_timestamp_ref(v as *const _, "value").offset()),
                 )
             })
             .collect();

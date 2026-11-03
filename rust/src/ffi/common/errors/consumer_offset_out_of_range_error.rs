@@ -66,7 +66,7 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
     // `Payload<ConsumerOffsetOutOfRangeError>` cloned from the variant's payload into the
     // `ErrorInner`'s payload slot, so it lives as long as the error handle: until the error, or the
     // owner it is borrowed from, is destroyed.
-    let inner = unsafe { error_ref(error) };
+    let inner = unsafe { error_ref(error, "error") };
     match &inner.error {
         Error::ConsumerOffsetOutOfRange(e) => {
             inner.payload_view(e) as *const kafka_common_ConsumerOffsetOutOfRangeError_t
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_new(
     // `map_topic_partition_i64` requires; the entries are copied into an owned map, so nothing
     // borrows it after this call.
     Payload::boxed(ConsumerOffsetOutOfRangeError::new(unsafe {
-        map_topic_partition_i64(offset_out_of_range_partitions)
+        map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
     }))
 }
 
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_with_message
         // valid map of the stated types, `kafka_common_TopicPartition_t *` keys and `int64_t *`
         // values, as `map_topic_partition_i64` requires; the entries are copied into an owned map,
         // so nothing borrows it after this call.
-        unsafe { map_topic_partition_i64(offset_out_of_range_partitions) },
+        unsafe { map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions") },
     ))
 }
 
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_partitions(
         // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
         // requires (no call mutates a payload of this class). The borrow lasts for this call only:
         // the field is copied into the owned container returned.
-        unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }
+        unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_, "self_") }
             .value()
             .partitions(),
     )
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_o
         // view whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
         // requires (no call mutates a payload of this class). The borrow lasts for this call only:
         // the field is copied into the owned container returned.
-        unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }
+        unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_, "self_") }
             .value()
             .offset_out_of_range_partitions(),
     )
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_message(
     // (no call mutates a payload of this class). `message_ptr` points at the payload's own C
     // string, so the string lives as long as the handle; that is the rustdoc's "borrowed from the
     // handle".
-    unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }.message_ptr()
+    unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_, "self_") }.message_ptr()
 }
 
 /// Returns the cause of the error, or `NULL` if there is none.
@@ -220,7 +220,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_source(
     // (no call mutates a payload of this class). `source_ptr` returns the cause handle the
     // payload's `source` slot owns, so it lives as long as the handle; that is the rustdoc's
     // "borrowed from the handle".
-    unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }.source_ptr()
+    unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_, "self_") }.source_ptr()
 }
 
 /// Returns the text form of the error.
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_to_string(
     // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires
     // (no call mutates a payload of this class). The borrow lasts for this call only: `to_c_string`
     // copies the text into an owned string.
-    unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }.to_c_string()
+    unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_, "self_") }.to_c_string()
 }
 
 /// Frees an owned handle; `NULL` is a no-op. A view borrowed from a

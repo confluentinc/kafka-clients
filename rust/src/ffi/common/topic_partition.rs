@@ -21,6 +21,7 @@
 //! across the boundary: single handles, `kafka_List_t`s of them and the
 //! `kafka_Map_t` shape of Java's `Map<TopicPartition, Long>`.
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -76,13 +77,16 @@ pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_common_Topic
 /// # Safety
 ///
 /// `tp` must be a valid topic-partition handle, alive for `'a`.
-pub(crate) unsafe fn topic_partition_ref<'a>(tp: *const kafka_common_TopicPartition_t) -> &'a TopicPartition {
+pub(crate) unsafe fn topic_partition_ref<'a>(
+    tp: *const kafka_common_TopicPartition_t,
+    param: &'static str,
+) -> &'a TopicPartition {
     // SAFETY: Per this function's `# Safety`, `tp` is a valid topic-partition handle alive for
     // `'a`, so it points at a live `TopicPartitionInner`: the `Box::into_raw` of
     // `box_topic_partition`, or one a parent embeds and hands out through
     // `TopicPartitionInner::as_ptr`, which lives as long as that parent. No call mutates a
     // `TopicPartitionInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(tp as *const TopicPartitionInner) }.topic_partition()
+    unsafe { require_ref::<_, TopicPartitionInner>(tp, param) }.topic_partition()
 }
 
 /// Hands `tps` to C as an owned list of `kafka_common_TopicPartition_t *`,
@@ -107,16 +111,21 @@ pub(crate) fn sorted_topic_partition_list<'a>(tps: impl IntoIterator<Item = &'a 
 ///
 /// `list` must be null or a valid list whose elements are topic-partition
 /// handles.
-pub(crate) unsafe fn list_topic_partitions(list: *const kafka_List_t) -> Vec<TopicPartition> {
+pub(crate) unsafe fn list_topic_partitions(list: *const kafka_List_t, param: &'static str) -> Vec<TopicPartition> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
     // `list_elements` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `list` is a topic-partition
         // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
         // this call only.
-        .map(|&element| unsafe { topic_partition_ref(element as *const kafka_common_TopicPartition_t) }.clone())
+        .map(|&element| {
+            unsafe {
+                topic_partition_ref(require_element(element, param) as *const kafka_common_TopicPartition_t, param)
+            }
+            .clone()
+        })
         .collect()
 }
 
@@ -134,8 +143,8 @@ pub(crate) unsafe fn topic_partition_key_eq(a: *mut c_void, b: *mut c_void) -> b
     // topic-partition handles, as `topic_partition_ref` requires; both references are used only for
     // the comparison.
     unsafe {
-        topic_partition_ref(a as *const kafka_common_TopicPartition_t)
-            == topic_partition_ref(b as *const kafka_common_TopicPartition_t)
+        topic_partition_ref(a as *const kafka_common_TopicPartition_t, "a")
+            == topic_partition_ref(b as *const kafka_common_TopicPartition_t, "b")
     }
 }
 
@@ -169,16 +178,22 @@ pub(crate) fn topic_partition_i64_map(map: &HashMap<TopicPartition, i64>) -> *mu
 ///
 /// `map` must be null or a valid map whose keys are topic-partition handles
 /// and whose values point at `int64_t`s.
-pub(crate) unsafe fn map_topic_partition_i64(map: *const kafka_Map_t) -> HashMap<TopicPartition, i64> {
+pub(crate) unsafe fn map_topic_partition_i64(
+    map: *const kafka_Map_t,
+    param: &'static str,
+) -> HashMap<TopicPartition, i64> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, as `map_entries`
     // requires; the slice is used only within this call, while nothing mutates the map.
-    unsafe { map_entries(map) }
+    unsafe { map_entries(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key of `map` is a topic-partition
             // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts
             // for this call only.
-            let tp = unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone();
+            let tp = unsafe {
+                topic_partition_ref(require_element(k, param) as *const kafka_common_TopicPartition_t, param)
+            }
+            .clone();
             let offset = if v.is_null() {
                 0
             } else {
@@ -244,7 +259,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_topic(
 pub unsafe extern "C" fn kafka_common_TopicPartition_partition(self_: *const kafka_common_TopicPartition_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition handle, as
     // `topic_partition_ref` requires; the reference is used only within this call.
-    unsafe { topic_partition_ref(self_) }.partition()
+    unsafe { topic_partition_ref(self_, "self_") }.partition()
 }
 
 /// Returns `topic-partition`.
@@ -261,7 +276,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition handle, as
     // `topic_partition_ref` requires; the reference is used only within this call, and the text is
     // copied into an owned string.
-    into_c_string(&unsafe { topic_partition_ref(self_) }.to_string())
+    into_c_string(&unsafe { topic_partition_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned topic-partition handle. Null is a no-op.
@@ -325,13 +340,13 @@ mod tests {
         unsafe {
             assert_eq!(kafka_List_size(list), 3);
             let read = |i| {
-                let tp = topic_partition_ref(kafka_List_get(list, i) as *const kafka_common_TopicPartition_t);
+                let tp = topic_partition_ref(kafka_List_get(list, i) as *const kafka_common_TopicPartition_t, "value");
                 (tp.topic().to_string(), tp.partition())
             };
             assert_eq!(read(0), ("a".to_string(), 1));
             assert_eq!(read(1), ("a".to_string(), 2));
             assert_eq!(read(2), ("b".to_string(), 0));
-            assert_eq!(list_topic_partitions(list).len(), 3);
+            assert_eq!(list_topic_partitions(list, "value").len(), 3);
             kafka_List_destroy(list);
         }
     }
@@ -352,8 +367,8 @@ mod tests {
         unsafe {
             let value = kafka_Map_get(c_map, probe as *mut c_void) as *const i64;
             assert_eq!(*value, 10);
-            assert_eq!(map_topic_partition_i64(c_map), map);
-            assert!(map_topic_partition_i64(ptr::null()).is_empty());
+            assert_eq!(map_topic_partition_i64(c_map, "c_map"), map);
+            assert!(map_topic_partition_i64(ptr::null(), "value").is_empty());
             kafka_common_TopicPartition_destroy(probe);
             kafka_Map_destroy(c_map);
         }

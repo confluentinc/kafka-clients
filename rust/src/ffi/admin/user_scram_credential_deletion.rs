@@ -15,6 +15,7 @@
 //! `kafka_admin_UserScramCredentialDeletion_t`:
 //! `org.apache.kafka.clients.admin.UserScramCredentialDeletion` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 
 use crate::admin::UserScramCredentialDeletion;
@@ -51,13 +52,14 @@ impl UserScramCredentialDeletionInner {
 /// `deletion` must be a live deletion handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(
     deletion: *const kafka_admin_UserScramCredentialDeletion_t,
+    param: &'static str,
 ) -> &'a UserScramCredentialDeletionInner {
     // SAFETY: Per this function's `# Safety`, `deletion` is a live deletion handle kept alive for
     // `'a`. Every `kafka_admin_UserScramCredentialDeletion_t` comes from
     // `box_user_scram_credential_deletion`, which boxes a `UserScramCredentialDeletionInner`, so
     // the cast yields a valid shared reference. The type has no setters, so nothing mutates it
     // while borrowed.
-    unsafe { &*(deletion as *const UserScramCredentialDeletionInner) }
+    unsafe { require_ref::<_, UserScramCredentialDeletionInner>(deletion, param) }
 }
 
 /// Hands `deletion` to C as an owned handle, freed with
@@ -76,10 +78,11 @@ pub(crate) fn box_user_scram_credential_deletion(
 /// `deletion` must be a live deletion handle, kept alive for `'a`.
 pub(crate) unsafe fn user_scram_credential_deletion_ref<'a>(
     deletion: *const kafka_admin_UserScramCredentialDeletion_t,
+    param: &'static str,
 ) -> &'a UserScramCredentialDeletion {
     // SAFETY: Per this function's `# Safety`, `deletion` is a live deletion handle kept alive for
     // `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(deletion) }.deletion
+    &unsafe { inner_ref(deletion, param) }.deletion
 }
 
 /// Creates the deletion.
@@ -124,7 +127,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_user(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deletion handle, kept alive for
     // this call, as `inner_ref` requires. The returned string is a `CString` the handle owns, so it
     // lives as long as the handle.
-    unsafe { inner_ref(self_) }.user_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.user_c.as_ptr()
 }
 
 /// # Returns
@@ -142,7 +145,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_mechanism(
 ) -> *const kafka_admin_ScramMechanism_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deletion handle, kept alive for
     // this call, as `user_scram_credential_deletion_ref` requires.
-    scram_mechanism_singleton(unsafe { user_scram_credential_deletion_ref(self_) }.mechanism())
+    scram_mechanism_singleton(unsafe { user_scram_credential_deletion_ref(self_, "self_") }.mechanism())
 }
 
 /// Frees an owned deletion handle; `NULL` is a no-op.

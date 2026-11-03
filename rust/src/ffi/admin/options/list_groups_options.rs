@@ -22,6 +22,7 @@
 //! `kafka_common_GroupType_t` singletons both ways; the Java `Set`s come
 //! back as lists sorted by name so a C caller sees a deterministic order.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::collections::HashSet;
 use std::ffi::c_void;
 
@@ -47,12 +48,13 @@ pub struct kafka_admin_ListGroupsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn list_groups_options_ref<'a>(
     options: *const kafka_admin_ListGroupsOptions_t,
+    param: &'static str,
 ) -> &'a ListGroupsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_ListGroupsOptions_t` is the
     // `Box::into_raw` of a `Box<ListGroupsOptions>` (`boxed`), so the shared reference is to a live
     // `ListGroupsOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const ListGroupsOptions) }
+    unsafe { require_ref::<_, ListGroupsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -61,12 +63,15 @@ pub(crate) unsafe fn list_groups_options_ref<'a>(
 ///
 /// `options` must be a live handle, kept alive for `'a`, to which no other
 /// reference is live meanwhile.
-unsafe fn options_mut<'a>(options: *mut kafka_admin_ListGroupsOptions_t) -> &'a mut ListGroupsOptions {
+unsafe fn options_mut<'a>(
+    options: *mut kafka_admin_ListGroupsOptions_t,
+    param: &'static str,
+) -> &'a mut ListGroupsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_ListGroupsOptions_t` is the
     // `Box::into_raw` of a `Box<ListGroupsOptions>` (`boxed`), so the exclusive reference is to a
     // live `ListGroupsOptions`.
-    unsafe { &mut *(options as *mut ListGroupsOptions) }
+    unsafe { require_mut::<_, ListGroupsOptions>(options, param) }
 }
 
 fn boxed(options: ListGroupsOptions) -> *mut kafka_admin_ListGroupsOptions_t {
@@ -83,7 +88,7 @@ unsafe fn list_group_states(list: *const kafka_List_t) -> HashSet<GroupState> {
     // SAFETY: Per this function's `# Safety`, `list` is `NULL` or a valid list, which the caller
     // keeps alive for this call and nothing mutates meanwhile, as `list_elements` requires; the
     // borrow ends with the call.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, "list") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every `element` is a `kafka_common_GroupState_t`
         // singleton, which `group_state_ffi::value_of` requires.
@@ -101,7 +106,7 @@ unsafe fn list_group_types(list: *const kafka_List_t) -> HashSet<GroupType> {
     // SAFETY: Per this function's `# Safety`, `list` is `NULL` or a valid list, which the caller
     // keeps alive for this call and nothing mutates meanwhile, as `list_elements` requires; the
     // borrow ends with the call.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, "list") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every `element` is a `kafka_common_GroupType_t`
         // singleton, which `group_type_ffi::value_of` requires.
@@ -222,7 +227,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_in_group_states(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).in_group_states(group_states);
 }
 
@@ -251,7 +256,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_protocol_types(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).with_protocol_types(protocol_types);
 }
 
@@ -279,7 +284,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_types(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).with_types(types);
 }
 
@@ -303,7 +308,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -322,7 +327,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_group_states(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_groups_options_ref` requires.
-    group_state_list(unsafe { list_groups_options_ref(self_) }.group_states())
+    group_state_list(unsafe { list_groups_options_ref(self_, "self_") }.group_states())
 }
 
 /// Returns the list of protocol types that are requested or empty if no protocol types have
@@ -340,7 +345,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_protocol_types(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_groups_options_ref` requires.
-    sorted_string_list(unsafe { list_groups_options_ref(self_) }.protocol_types())
+    sorted_string_list(unsafe { list_groups_options_ref(self_, "self_") }.protocol_types())
 }
 
 /// Returns the list of group types that are requested or empty if no types have been
@@ -358,7 +363,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_types(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_groups_options_ref` requires.
-    group_type_list(unsafe { list_groups_options_ref(self_) }.types())
+    group_type_list(unsafe { list_groups_options_ref(self_, "self_") }.types())
 }
 
 /// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
@@ -379,7 +384,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_groups_options_ref` requires.
-    unsafe { list_groups_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { list_groups_options_ref(self_, "self_") }.timeout_ms().unwrap_or(-1)
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

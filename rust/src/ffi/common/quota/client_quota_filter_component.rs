@@ -15,6 +15,7 @@
 //! `kafka_common_quota_ClientQuotaFilterComponent_t`:
 //! `org.apache.kafka.common.quota.ClientQuotaFilterComponent` (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::ffi::{CString, c_char};
 
 use crate::common::quota::ClientQuotaFilterComponent;
@@ -49,13 +50,14 @@ impl ClientQuotaFilterComponentInner {
 /// `component` must be a valid filter-component handle, alive for `'a`.
 unsafe fn inner_ref<'a>(
     component: *const kafka_common_quota_ClientQuotaFilterComponent_t,
+    param: &'static str,
 ) -> &'a ClientQuotaFilterComponentInner {
     // SAFETY: Per this function's `# Safety`, `component` is a valid filter-component handle alive
     // for `'a`, so it points at a live `ClientQuotaFilterComponentInner`, the `Box::into_raw` of
     // `box_client_quota_filter_component` (no view of this type is handed out; a filter's
     // `components()` list owns its elements). Nothing mutates a `ClientQuotaFilterComponentInner`
     // while a handle to it exists, so the shared reference is sound for `'a`.
-    unsafe { &*(component as *const ClientQuotaFilterComponentInner) }
+    unsafe { require_ref::<_, ClientQuotaFilterComponentInner>(component, param) }
 }
 
 /// The component behind a handle.
@@ -65,10 +67,11 @@ unsafe fn inner_ref<'a>(
 /// `component` must be a valid filter-component handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_filter_component_ref<'a>(
     component: *const kafka_common_quota_ClientQuotaFilterComponent_t,
+    param: &'static str,
 ) -> &'a ClientQuotaFilterComponent {
     // SAFETY: Per this function's `# Safety`, `component` is a valid filter-component handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(component) }.component
+    &unsafe { inner_ref(component, param) }.component
 }
 
 /// Hands `component` to C as an owned handle, freed with
@@ -86,18 +89,24 @@ pub(crate) fn box_client_quota_filter_component(
 ///
 /// `list` must be null or a valid list whose elements are filter-component
 /// handles.
-pub(crate) unsafe fn list_client_quota_filter_components(list: *const kafka_List_t) -> Vec<ClientQuotaFilterComponent> {
+pub(crate) unsafe fn list_client_quota_filter_components(
+    list: *const kafka_List_t,
+    param: &'static str,
+) -> Vec<ClientQuotaFilterComponent> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, kept alive and
     // unmutated by the caller for this call, which is as long as the borrow of its elements lasts,
     // as `list_elements` requires.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a filter-component
             // handle, as `client_quota_filter_component_ref` requires; the component is cloned, so
             // the borrow lasts for this call only.
             unsafe {
-                client_quota_filter_component_ref(element as *const kafka_common_quota_ClientQuotaFilterComponent_t)
+                client_quota_filter_component_ref(
+                    require_element(element, param) as *const kafka_common_quota_ClientQuotaFilterComponent_t,
+                    param,
+                )
             }
             .clone()
         })
@@ -215,7 +224,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_entity_ty
     // SAFETY: Per this function's `# Safety`, `self_` is a valid filter-component handle, as
     // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.entity_type_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.entity_type_c.as_ptr()
 }
 
 /// `match()`.
@@ -240,7 +249,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_match(
     // `client_quota_filter_component_ref` requires. `client_quota_match_ptr` returns either a
     // static singleton or a handle on the match the component owns, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle".
-    client_quota_match_ptr(unsafe { client_quota_filter_component_ref(self_) }.r#match())
+    client_quota_match_ptr(unsafe { client_quota_filter_component_ref(self_, "self_") }.r#match())
 }
 
 /// # Returns
@@ -259,7 +268,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_to_string
     // SAFETY: Per this function's `# Safety`, `self_` is a valid filter-component handle, as
     // `client_quota_filter_component_ref` requires; the result is copied into an owned value before
     // return, so the borrow lasts for this call only.
-    into_c_string(&unsafe { client_quota_filter_component_ref(self_) }.to_string())
+    into_c_string(&unsafe { client_quota_filter_component_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned filter-component handle. Null is a no-op.
@@ -304,7 +313,7 @@ mod tests {
         unsafe {
             let exact = kafka_common_quota_ClientQuotaFilterComponent_of_entity(user.as_ptr(), alice.as_ptr());
             assert_eq!(
-                *client_quota_filter_component_ref(exact),
+                *client_quota_filter_component_ref(exact, "exact"),
                 ClientQuotaFilterComponent::of_entity("user", "alice")
             );
             assert_eq!(
@@ -316,7 +325,7 @@ mod tests {
                 kafka_common_quota_ClientQuotaMatch__enum(m),
                 kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_EXACT
             );
-            assert_eq!(*client_quota_match_ref(m), ClientQuotaMatch::Exact("alice".to_string()));
+            assert_eq!(*client_quota_match_ref(m, "m"), ClientQuotaMatch::Exact("alice".to_string()));
             let s = kafka_common_quota_ClientQuotaFilterComponent_to_string(exact);
             assert_eq!(
                 CStr::from_ptr(s).to_str().unwrap(),

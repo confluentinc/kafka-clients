@@ -20,6 +20,7 @@
 //! `kafka_Map_t` of `int32_t *` keys to `kafka_List_t *` values holding
 //! `int32_t *` elements.
 
+use crate::ffi::precondition::require_ref;
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -56,12 +57,12 @@ impl NewTopicInner {
 ///
 /// `topic` must be a valid new-topic handle, kept alive for `'a`, during
 /// which no setter runs on it.
-unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopicInner {
+unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t, param: &'static str) -> &'a NewTopicInner {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid new-topic handle kept alive for
     // `'a`, during which no setter runs on it; every `kafka_admin_NewTopic_t` is the
     // `Box::into_raw` of a `Box<NewTopicInner>` (`box_new_topic`, the only producer), so the shared
     // reference is to a live `NewTopicInner` that nothing mutates while it is held.
-    unsafe { &*(topic as *const NewTopicInner) }
+    unsafe { require_ref::<_, NewTopicInner>(topic, param) }
 }
 
 /// The topic behind a handle.
@@ -70,10 +71,10 @@ unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopicInn
 ///
 /// `topic` must be a valid new-topic handle, kept alive for `'a`, during
 /// which no setter runs on it.
-pub(crate) unsafe fn new_topic_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopic {
+pub(crate) unsafe fn new_topic_ref<'a>(topic: *const kafka_admin_NewTopic_t, param: &'static str) -> &'a NewTopic {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid new-topic handle kept alive for
     // `'a`, during which no setter runs on it, as `inner_ref` requires.
-    &unsafe { inner_ref(topic) }.topic
+    &unsafe { inner_ref(topic, param) }.topic
 }
 
 /// Hands `topic` to C as an owned handle, freed with
@@ -92,7 +93,7 @@ unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
     // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, "list") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
@@ -142,7 +143,7 @@ unsafe fn map_replicas_assignments(map: *const kafka_Map_t) -> BTreeMap<i32, Vec
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
     // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { map_entries(map) }
+    unsafe { map_entries(map, "map") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
         // read by copy, and each value `v` is a valid list whose elements point at `int32_t`s,
@@ -227,7 +228,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_New
     // call uses the handle at the same time, so none runs during the borrow, as `inner_ref`
     // requires; the returned pointer borrows `name_c`, which no setter replaces and which lives as
     // long as the handle.
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// The number of partitions for the new topic or -1 if a replica assignment has been specified.
@@ -246,7 +247,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    unsafe { new_topic_ref(self_) }.num_partitions()
+    unsafe { new_topic_ref(self_, "self_") }.num_partitions()
 }
 
 /// The replication factor for the new topic or -1 if a replica assignment has been specified.
@@ -266,7 +267,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const k
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    unsafe { new_topic_ref(self_) }.replication_factor()
+    unsafe { new_topic_ref(self_, "self_") }.replication_factor()
 }
 
 /// A map from partition id to replica ids (i.e. broker ids) or `NULL` if the number of partitions
@@ -290,7 +291,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    match unsafe { new_topic_ref(self_) }.replicas_assignments() {
+    match unsafe { new_topic_ref(self_, "self_") }.replicas_assignments() {
         None => std::ptr::null_mut(),
         Some(assignments) => {
             let entries = assignments
@@ -340,7 +341,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
         // SAFETY: `configs` is non-null (checked above) and, per this function's `# Safety`, a
         // valid map, kept alive by the caller for this call, which is as long as the borrow of its
         // entries lasts, as `map_entries` requires.
-        let entries = unsafe { map_entries(configs) };
+        let entries = unsafe { map_entries(configs, "configs") };
         let mut copied = BTreeMap::new();
         for &(name, value) in entries.iter() {
             // SAFETY: Per this function's `# Safety`, every key is a NUL-terminated string, as
@@ -380,7 +381,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    unsafe { new_topic_ref(self_) }
+    unsafe { new_topic_ref(self_, "self_") }
         .configs()
         .map_or(std::ptr::null_mut(), |configs| {
             box_string_keyed_map(
@@ -403,7 +404,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_to_string(self_: *const kafka_admi
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    into_c_string(&unsafe { new_topic_ref(self_) }.to_string())
+    into_c_string(&unsafe { new_topic_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned topic handle; `NULL` is a no-op.
@@ -449,7 +450,7 @@ mod tests {
         unsafe {
             let topic = kafka_admin_NewTopic_with_num_partitions_replication_factor(c"orders".as_ptr(), 3, -1);
             assert_eq!(
-                *new_topic_ref(topic),
+                *new_topic_ref(topic, "topic"),
                 NewTopic::with_num_partitions_replication_factor("orders", Some(3), None)
             );
             assert_eq!(CStr::from_ptr(kafka_admin_NewTopic_name(topic)).to_str().unwrap(), "orders");
@@ -476,7 +477,7 @@ mod tests {
             );
             kafka_Map_destroy(configs);
             let s = kafka_admin_NewTopic_to_string(topic);
-            assert_eq!(CStr::from_ptr(s).to_str().unwrap(), new_topic_ref(topic).to_string());
+            assert_eq!(CStr::from_ptr(s).to_str().unwrap(), new_topic_ref(topic, "topic").to_string());
             kafka_string_destroy(s);
             kafka_admin_NewTopic_destroy(topic);
             kafka_admin_NewTopic_destroy(ptr::null_mut());
@@ -502,12 +503,12 @@ mod tests {
             kafka_admin_NewTopic_set_configs(topic, configs);
             kafka_Map_destroy(configs);
             assert_eq!(
-                new_topic_ref(topic).configs(),
+                new_topic_ref(topic, "topic").configs(),
                 Some(&BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]))
             );
 
             kafka_admin_NewTopic_set_configs(topic, ptr::null());
-            assert_eq!(new_topic_ref(topic).configs(), None);
+            assert_eq!(new_topic_ref(topic, "topic").configs(), None);
             assert!(kafka_admin_NewTopic_configs(topic).is_null());
             kafka_admin_NewTopic_destroy(topic);
         }
@@ -549,7 +550,7 @@ mod tests {
             );
             kafka_common_Error_destroy(err);
             assert_eq!(
-                new_topic_ref(topic).configs(),
+                new_topic_ref(topic, "topic").configs(),
                 Some(&BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]))
             );
             kafka_admin_NewTopic_destroy(topic);
@@ -579,7 +580,7 @@ mod tests {
             kafka_List_destroy(brokers);
 
             let expected = NewTopic::with_replicas_assignments("orders", BTreeMap::from([(0, vec![1, 2])]));
-            assert_eq!(*new_topic_ref(topic), expected);
+            assert_eq!(*new_topic_ref(topic, "topic"), expected);
             assert_eq!(kafka_admin_NewTopic_num_partitions(topic), -1);
             let map = kafka_admin_NewTopic_replicas_assignments(topic);
             assert_eq!(kafka_Map_size(map), 1);

@@ -34,6 +34,7 @@
 //! configuration's warnings are logged once, when the handle is built; the
 //! copies log none of them.
 
+use crate::ffi::precondition::require_ref;
 use std::collections::HashMap;
 use std::ffi::c_char;
 
@@ -79,13 +80,14 @@ impl AdminClientConfigInner {
 /// `config` must be a live handle, kept alive for `'a`.
 pub(crate) unsafe fn admin_client_config_ref<'a>(
     config: *const kafka_admin_AdminClientConfig_t,
+    param: &'static str,
 ) -> &'a AdminClientConfigInner {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`: a
     // `Box<AdminClientConfigInner>` from `Box::into_raw` in `kafka_admin_AdminClientConfig_new`, the
     // only constructor. The handle has no setters (the lent strings and the used keys mutate behind
     // their `Mutex`es) and only its destroy takes the box back, so the shared reference is to a
     // live value no `&mut` aliases.
-    unsafe { &*(config as *const AdminClientConfigInner) }
+    unsafe { require_ref::<_, AdminClientConfigInner>(config, param) }
 }
 
 /// `new AdminClientConfig(Map<String, String> props)`: validates the properties. It first sets up
@@ -161,7 +163,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_short(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_short(key)) }
@@ -200,7 +202,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_int(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_int(key)) }
@@ -239,7 +241,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_long(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_long(key)) }
@@ -278,7 +280,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_double(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_double(key)) }
@@ -317,7 +319,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_boolean(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe {
@@ -359,7 +361,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_string(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_string` requires.
     unsafe { config_getters::get_string(&inner.strings, key, out_err, |key| inner.config.get_string(key)) }
 }
@@ -395,7 +397,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_get_list(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_list` requires.
     unsafe { config_getters::get_list(key, out_err, |key| inner.config.get_list(key)) }
 }
@@ -419,7 +421,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_unused(
     self_: *const kafka_admin_AdminClientConfig_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    sorted_string_list(unsafe { admin_client_config_ref(self_) }.config.unused())
+    sorted_string_list(unsafe { admin_client_config_ref(self_, "self_") }.config.unused())
 }
 
 /// `ignore(String key)`: marks the configuration `key` used without reading it.
@@ -438,7 +440,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_ignore(
     key: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { admin_client_config_ref(self_) };
+    let inner = unsafe { admin_client_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` is as `ignore` requires.
     unsafe { config_getters::ignore(key, |key| inner.config.ignore(key)) }
 }
@@ -452,7 +454,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_ignore(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClientConfig_log_unused(self_: *const kafka_admin_AdminClientConfig_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    unsafe { admin_client_config_ref(self_) }.config.log_unused();
+    unsafe { admin_client_config_ref(self_, "self_") }.config.log_unused();
 }
 
 /// Gets the set of all admin client configuration names.
@@ -661,7 +663,7 @@ mod tests {
             kafka_admin_AdminClientConfig_log_unused(config);
 
             // A configuration copied for a client starts with nothing used.
-            let built = admin_client_config_ref(config).build().expect("copied");
+            let built = admin_client_config_ref(config, "config").build().expect("copied");
             assert_eq!(built.unused().len(), 3);
 
             kafka_admin_AdminClientConfig_destroy(config);
@@ -718,9 +720,10 @@ mod tests {
                 "{new_lines:?}"
             );
             for _ in 0..2 {
-                let (built, copy_lines) = capture_logs(|| admin_client_config_ref(config).build().expect("copied"));
+                let (built, copy_lines) =
+                    capture_logs(|| admin_client_config_ref(config, "config").build().expect("copied"));
                 assert!(copy_lines.is_empty(), "{copy_lines:?}");
-                assert_eq!(built.unused(), admin_client_config_ref(config).config.unused());
+                assert_eq!(built.unused(), admin_client_config_ref(config, "config").config.unused());
             }
             kafka_admin_AdminClientConfig_destroy(config);
         }
@@ -738,10 +741,10 @@ mod tests {
             assert!(error.is_null());
             kafka_Map_destroy(props);
 
-            let built = admin_client_config_ref(config).build().expect("copied");
+            let built = admin_client_config_ref(config, "config").build().expect("copied");
             assert_eq!(built.request_timeout_ms(), 1234);
             // The handle copies its configuration for every client created from it.
-            admin_client_config_ref(config).build().expect("copied twice");
+            admin_client_config_ref(config, "config").build().expect("copied twice");
             kafka_admin_AdminClientConfig_destroy(config);
         }
     }

@@ -94,12 +94,15 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
 /// # Safety
 ///
 /// `self_` must be a valid string-deserializer handle, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringDeserializer_t) -> &'a DeserializerHandle {
+unsafe fn handle<'a>(
+    self_: *const kafka_common_serialization_StringDeserializer_t,
+    param: &'static str,
+) -> &'a DeserializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid string-deserializer handle alive
     // for `'a`, the `DeserializerHandle::boxed` of
     // `kafka_common_serialization_StringDeserializer_new`, as `DeserializerHandle::from_ptr`
     // requires.
-    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle) }
+    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle, param) }
 }
 
 /// `new StringDeserializer()`.
@@ -138,7 +141,7 @@ pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer__as_Deser
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_deserializer()
+    unsafe { handle(self_, "self_") }.as_deserializer()
 }
 
 /// Frees an owned handle; null is a no-op.

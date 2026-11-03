@@ -20,6 +20,7 @@
 //! (`upgraded`). The two assignment getters return borrowed handles valid as
 //! long as the description.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -64,12 +65,15 @@ impl MemberDescriptionInner {
 ///
 /// `description` must be a live member-description handle, kept alive for
 /// `'a`.
-unsafe fn inner_ref<'a>(description: *const kafka_admin_MemberDescription_t) -> &'a MemberDescriptionInner {
+unsafe fn inner_ref<'a>(
+    description: *const kafka_admin_MemberDescription_t,
+    param: &'static str,
+) -> &'a MemberDescriptionInner {
     // SAFETY: Per this function's `# Safety`, `description` is a live member-description handle
     // kept alive for `'a`. Every `kafka_admin_MemberDescription_t` comes from
     // `box_member_description`, which boxes a `MemberDescriptionInner`, so the cast yields a valid
     // shared reference. The type has no setters, so nothing mutates it while borrowed.
-    unsafe { &*(description as *const MemberDescriptionInner) }
+    unsafe { require_ref::<_, MemberDescriptionInner>(description, param) }
 }
 
 /// Hands `description` to C as an owned handle, freed with
@@ -86,10 +90,11 @@ pub(crate) fn box_member_description(description: MemberDescription) -> *mut kaf
 /// `'a`.
 pub(crate) unsafe fn member_description_ref<'a>(
     description: *const kafka_admin_MemberDescription_t,
+    param: &'static str,
 ) -> &'a MemberDescription {
     // SAFETY: Per this function's `# Safety`, `description` is a live member-description handle
     // kept alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(description) }.description
+    &unsafe { inner_ref(description, param) }.description
 }
 
 /// Frees a `kafka_admin_MemberDescription_t *` element of an owned
@@ -151,7 +156,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
         // SAFETY: Per this function's `# Safety`, `target_assignment` is null or a valid
         // member-assignment handle, and this branch runs only when it is non-null; it is kept alive
         // for this call, as `member_assignment_ref` requires, and the borrow ends with the clone.
-        Some(unsafe { member_assignment_ref(target_assignment) }.clone())
+        Some(unsafe { member_assignment_ref(target_assignment, "target_assignment") }.clone())
     };
     box_member_description(MemberDescription::new(
         // SAFETY: Per this function's `# Safety`, `member_id` is a valid NUL-terminated string, as
@@ -172,7 +177,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
         // SAFETY: Per this function's `# Safety`, `assignment` is a valid member-assignment handle,
         // kept alive for this call, as `member_assignment_ref` requires; the borrow ends with the
         // clone.
-        unsafe { member_assignment_ref(assignment) }.clone(),
+        unsafe { member_assignment_ref(assignment, "assignment") }.clone(),
         target_assignment,
         (member_epoch >= 0).then_some(member_epoch),
         (upgraded >= 0).then_some(upgraded != 0),
@@ -193,7 +198,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.member_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.member_id_c.as_ptr()
 }
 
 /// The instance id of the group member.
@@ -214,7 +219,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    optional_c_str(unsafe { inner_ref(self_) }.group_instance_id_c.as_ref())
+    optional_c_str(unsafe { inner_ref(self_, "self_") }.group_instance_id_c.as_ref())
 }
 
 /// The rack id of the group member.
@@ -238,7 +243,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    optional_c_str(unsafe { inner_ref(self_) }.rack_id_c.as_ref())
+    optional_c_str(unsafe { inner_ref(self_, "self_") }.rack_id_c.as_ref())
 }
 
 /// Returns the client id of the group member.
@@ -255,7 +260,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.client_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.client_id_c.as_ptr()
 }
 
 /// Returns the host where the group member is running.
@@ -272,7 +277,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.host_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.host_c.as_ptr()
 }
 
 /// Returns the assignment of the group member. Provided for both classic group and consumer
@@ -291,7 +296,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `member_description_ref` requires. The returned view points into the
     // handle's `MemberDescriptionInner`, so it lives as long as the handle.
-    member_assignment_ptr(unsafe { member_description_ref(self_) }.assignment())
+    member_assignment_ptr(unsafe { member_description_ref(self_, "self_") }.assignment())
 }
 
 /// The target assignment of the member. Provided only for consumer group.
@@ -313,7 +318,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `member_description_ref` requires. The returned view points into the
     // handle's `MemberDescriptionInner`, so it lives as long as the handle.
-    unsafe { member_description_ref(self_) }
+    unsafe { member_description_ref(self_, "self_") }
         .target_assignment()
         .map_or(ptr::null(), member_assignment_ptr)
 }
@@ -335,7 +340,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `member_description_ref` requires.
-    unsafe { member_description_ref(self_) }.member_epoch().unwrap_or(-1)
+    unsafe { member_description_ref(self_, "self_") }.member_epoch().unwrap_or(-1)
 }
 
 /// The flag indicating whether a member within a `CONSUMER` group uses the `CONSUMER` protocol.
@@ -354,7 +359,9 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
 pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(self_: *const kafka_admin_MemberDescription_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `member_description_ref` requires.
-    unsafe { member_description_ref(self_) }.upgraded().map_or(-1, i8::from)
+    unsafe { member_description_ref(self_, "self_") }
+        .upgraded()
+        .map_or(-1, i8::from)
 }
 
 /// Returns the text form of the description.
@@ -370,7 +377,7 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-description handle, kept
     // alive for this call, as `member_description_ref` requires.
-    into_c_string(&unsafe { member_description_ref(self_) }.to_string())
+    into_c_string(&unsafe { member_description_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned member-description handle; `NULL` is a no-op.

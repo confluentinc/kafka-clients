@@ -67,6 +67,7 @@
 // type names, which intentionally differs from Rust's snake_case convention.
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -536,12 +537,12 @@ fn box_inner(inner: FutureInner) -> *mut kafka_common_KafkaFuture_t {
 ///
 /// `future` must be a valid handle from [`box_future`], not destroyed for
 /// `'a`.
-unsafe fn future_ref<'a>(future: *const kafka_common_KafkaFuture_t) -> &'a FutureInner {
+unsafe fn future_ref<'a>(future: *const kafka_common_KafkaFuture_t, param: &'static str) -> &'a FutureInner {
     // SAFETY: per this function's `# Safety`, `future` came from `box_future`, whose
     // `Arc::into_raw` of a `FutureInner` is the allocation behind every future handle,
     // and the strong count that handle holds keeps it alive for `'a`. `FutureInner` is
     // only ever shared, so the `&` aliases nothing mutable.
-    unsafe { &*(future as *const FutureInner) }
+    unsafe { require_ref::<_, FutureInner>(future, param) }
 }
 
 /// A new strong reference to the future behind a handle, for a delivery that
@@ -769,7 +770,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get(
 ) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
     // borrow lasts for this call only, while the caller keeps the handle alive.
-    match unsafe { future_ref(self_) }.resolve(None) {
+    match unsafe { future_ref(self_, "self_") }.resolve(None) {
         Ok(value) => value.ptr(),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(e) => unsafe { fail_with(out_err, e) },
@@ -847,7 +848,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout(
 ) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
     // borrow lasts for this call only, while the caller keeps the handle alive.
-    match unsafe { future_ref(self_) }.resolve(Some(timeout_ms(timeout))) {
+    match unsafe { future_ref(self_, "self_") }.resolve(Some(timeout_ms(timeout))) {
         Ok(value) => value.ptr(),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(e) => unsafe { fail_with(out_err, e) },
@@ -914,7 +915,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_get_with_timeout_cb(
 pub unsafe extern "C" fn kafka_common_KafkaFuture_is_done(self_: *const kafka_common_KafkaFuture_t) -> i8 {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; the
     // borrow lasts for this call only.
-    i8::from(unsafe { future_ref(self_) }.future.is_done())
+    i8::from(unsafe { future_ref(self_, "self_") }.future.is_done())
 }
 
 /// Returns a new KafkaFuture that is completed when all the given futures have
@@ -942,7 +943,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: per this function's `# Safety`, `futures` is null or a valid list, which the
     // caller keeps alive for this call; the borrow ends before return.
-    let inners: Vec<Arc<FutureInner>> = unsafe { list_elements(futures) }
+    let inners: Vec<Arc<FutureInner>> = unsafe { list_elements(futures, "futures") }
         .iter()
         // SAFETY: per this function's `# Safety`, every element is a valid future handle,
         // alive for this call; each `future_arc` takes a reference of its own, which the
@@ -1016,12 +1017,15 @@ pub struct kafka_common_KafkaFuture_BaseFunction_t {
 ///
 /// `function` must be a valid handle from
 /// `kafka_common_KafkaFuture_BaseFunction_new`, not destroyed for `'a`.
-unsafe fn base_function_ref<'a>(function: *const kafka_common_KafkaFuture_BaseFunction_t) -> &'a BaseFunctionInner {
+unsafe fn base_function_ref<'a>(
+    function: *const kafka_common_KafkaFuture_BaseFunction_t,
+    param: &'static str,
+) -> &'a BaseFunctionInner {
     // SAFETY: per this function's `# Safety`, `function` came from
     // `kafka_common_KafkaFuture_BaseFunction_new`, whose `Box::into_raw` of a
     // `BaseFunctionInner` is the allocation behind every function handle, alive for `'a`.
     // Nothing mutates a registration, so the `&` aliases nothing mutable.
-    unsafe { &*(function as *const BaseFunctionInner) }
+    unsafe { require_ref::<_, BaseFunctionInner>(function, param) }
 }
 
 /// Returns a C `BaseFunction`: `apply` is called with `self_` first.
@@ -1077,7 +1081,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(
 ) -> *mut c_void {
     // SAFETY: per this function's `# Safety`, `self_` is a valid function handle; the
     // borrow lasts for this call only.
-    match unsafe { base_function_ref(self_) }.apply(a) {
+    match unsafe { base_function_ref(self_, "self_") }.apply(a) {
         Ok(value) => value,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(e) => unsafe { fail_with(out_err, e) },
@@ -1441,8 +1445,8 @@ mod tests {
         };
         // SAFETY: Test code: `derived` and `plain` are live handles.
         unsafe {
-            assert!(future_ref(derived).drains_queue, "then_apply inherits the drain");
-            assert!(!future_ref(plain).drains_queue, "box_future does not drain");
+            assert!(future_ref(derived, "derived").drains_queue, "then_apply inherits the drain");
+            assert!(!future_ref(plain, "plain").drains_queue, "box_future does not drain");
         }
         let caller = std::thread::current().id();
         let ran_on = Arc::new(Mutex::new(None));

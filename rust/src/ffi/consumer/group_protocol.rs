@@ -235,7 +235,7 @@ mod tests {
         assert!(out.is_null());
         // SAFETY: Test code: `error` is the owned error just returned (non-null, asserted above),
         // destroyed only after `inner`'s last use.
-        let inner = unsafe { error_ref(error) };
+        let inner = unsafe { error_ref(error, "error") };
         assert!(inner.error.is_local_illegal_argument_error());
         assert_eq!(
             inner.error.message(),

@@ -31,6 +31,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -182,12 +183,12 @@ pub(crate) unsafe fn serializer_from(
 /// # Safety
 ///
 /// `self_` must be a live handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_producer_KafkaProducer_t) -> &'a Handle {
+unsafe fn handle<'a>(self_: *const kafka_producer_KafkaProducer_t, param: &'static str) -> &'a Handle {
     // SAFETY: Per this function's `# Safety`, `self_` is a live class handle kept alive for `'a`,
     // i.e. the `Box::into_raw` of a `Handle` in `kafka_producer_KafkaProducer_new`, the only
     // constructor. `Handle` is only ever shared (`destroy` takes it back by `Box::from_raw`), so
     // the shared reference is sound.
-    unsafe { &*(self_ as *const Handle) }
+    unsafe { require_ref::<_, Handle>(self_, param) }
 }
 
 /// The handle's `__as_Producer` view.
@@ -199,7 +200,7 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
     // SAFETY: Per this function's `# Safety`, `self_` is a live class handle, as `handle` requires;
     // the view returned is the address of the handle's `client` field, which lives as long as the
     // handle.
-    unsafe { handle(self_) }.as_producer()
+    unsafe { handle(self_, "self_") }.as_producer()
 }
 
 /// A producer is instantiated by providing a set of key-value pairs as configuration, a key and a
@@ -255,7 +256,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     // `kafka_producer_ProducerConfig_set_partitioner` call can run on it meanwhile, since that
     // function's `# Safety` excludes any other call using the handle at the same time, so
     // `producer_config_ref`'s requirement holds for this statement, the only use of the reference.
-    let config = match unsafe { producer_config_ref(config) }.build() {
+    let config = match unsafe { producer_config_ref(config, "config") }.build() {
         Ok(config) => config,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => return unsafe { fail_with(out_err, error) },
@@ -1044,7 +1045,7 @@ mod tests {
                 let producer = kafka_producer_KafkaProducer_new(config, key, value, &raw mut err);
                 assert!(err.is_null());
                 let view = kafka_producer_KafkaProducer__as_Producer(producer);
-                assert_eq!(client_ref(view).tries_send_inline, inline, "{kind}");
+                assert_eq!(client_ref(view, "view").tries_send_inline, inline, "{kind}");
                 kafka_producer_KafkaProducer_destroy(producer);
             }
             kafka_common_serialization_StringSerializer_destroy(string);
@@ -1063,7 +1064,7 @@ mod tests {
         // SAFETY: Test code: `producer` is a live class handle; the view is used only within this
         // call, while the handle lives.
         let client_ids = |producer: *mut kafka_producer_KafkaProducer_t| unsafe {
-            client_ref(kafka_producer_KafkaProducer__as_Producer(producer))
+            client_ref(kafka_producer_KafkaProducer__as_Producer(producer), "value")
                 .producer()
                 .expect("not destroyed")
                 .metrics()
@@ -1196,7 +1197,7 @@ mod tests {
             unsafe {
                 let producer = unreachable_producer("60000");
                 let view = kafka_producer_KafkaProducer__as_Producer(producer);
-                let client = Arc::clone(client_ref(view));
+                let client = Arc::clone(client_ref(view, "view"));
                 let record =
                     kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
                 let gate = client.submission_gate.try_lock().expect("the gate is free");
@@ -1264,7 +1265,7 @@ mod tests {
     unsafe fn live_tasks(view: *const kafka_producer_Producer_t) -> usize {
         // SAFETY: Per this function's `# Safety`, `view` is a live view, as `client_ref` requires;
         // the reference is used only within this call.
-        let client = unsafe { client_ref(view) };
+        let client = unsafe { client_ref(view, "view") };
         client.tasks.lock().unwrap().iter().filter(|task| !task.is_finished()).count()
     }
 
@@ -1393,7 +1394,7 @@ mod tests {
         unsafe {
             let producer = unreachable_producer("500");
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
-            let client = Arc::clone(client_ref(view));
+            let client = Arc::clone(client_ref(view, "view"));
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let gate = client.submission_gate.try_lock().expect("the gate is free");
@@ -1840,7 +1841,7 @@ mod tests {
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            drop(client_ref(view).submit_tx.lock().unwrap().take());
+            drop(client_ref(view, "view").submit_tx.lock().unwrap().take());
             kafka_producer_Producer_send_cb(
                 view,
                 record,

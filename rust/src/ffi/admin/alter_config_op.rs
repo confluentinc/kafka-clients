@@ -20,6 +20,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::admin::{AlterConfigOp, OpType};
@@ -208,12 +209,12 @@ impl AlterConfigOpInner {
 /// # Safety
 ///
 /// `op` must be a valid alter-config-op handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConfigOpInner {
+unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t, param: &'static str) -> &'a AlterConfigOpInner {
     // SAFETY: Per this function's `# Safety`, `op` is a valid alter-config-op handle kept alive for
     // `'a`; every `kafka_admin_AlterConfigOp_t` is the `Box::into_raw` of a
     // `Box<AlterConfigOpInner>` (`box_alter_config_op`, the only producer), so the shared reference
     // is to a live `AlterConfigOpInner`, which no entry point mutates.
-    unsafe { &*(op as *const AlterConfigOpInner) }
+    unsafe { require_ref::<_, AlterConfigOpInner>(op, param) }
 }
 
 /// The operation behind a handle.
@@ -221,10 +222,13 @@ unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConf
 /// # Safety
 ///
 /// `op` must be a valid alter-config-op handle, kept alive for `'a`.
-pub(crate) unsafe fn alter_config_op_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConfigOp {
+pub(crate) unsafe fn alter_config_op_ref<'a>(
+    op: *const kafka_admin_AlterConfigOp_t,
+    param: &'static str,
+) -> &'a AlterConfigOp {
     // SAFETY: Per this function's `# Safety`, `op` is a valid alter-config-op handle kept alive for
     // `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(op) }.op
+    &unsafe { inner_ref(op, param) }.op
 }
 
 /// Hands `op` to C as an owned handle, freed with
@@ -253,9 +257,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
     // SAFETY: Per this function's `# Safety`, `config_entry` is a valid config-entry handle, kept
     // alive for this call, as `config_entry_ref` requires (the entry is cloned at once), and
     // `operation_type` an op-type singleton, as `op_type_value_of` requires.
-    box_alter_config_op(AlterConfigOp::new(unsafe { config_entry_ref(config_entry) }.clone(), unsafe {
-        op_type_value_of(operation_type)
-    }))
+    box_alter_config_op(AlterConfigOp::new(
+        unsafe { config_entry_ref(config_entry, "config_entry") }.clone(),
+        unsafe { op_type_value_of(operation_type) },
+    ))
 }
 
 /// Returns the entry to alter, as `configEntry()`.
@@ -273,7 +278,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
     // for this call, as `inner_ref` requires; the returned view points at the `ConfigEntryInner`
     // stored inside the boxed `AlterConfigOpInner`, which does not move and lives until
     // `kafka_admin_AlterConfigOp_destroy`.
-    unsafe { inner_ref(self_) }.config_entry.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.config_entry.as_ptr()
 }
 
 /// Returns the operation type, as `opType()`.
@@ -290,7 +295,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
 ) -> *const kafka_admin_AlterConfigOp_OpType_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
     // for this call, as `alter_config_op_ref` requires.
-    op_type_singleton(unsafe { alter_config_op_ref(self_) }.op_type())
+    op_type_singleton(unsafe { alter_config_op_ref(self_, "self_") }.op_type())
 }
 
 /// Returns the operation's string form, as Java's `toString()`.
@@ -304,7 +309,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka_admin_AlterConfigOp_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
     // for this call, as `alter_config_op_ref` requires.
-    into_c_string(&unsafe { alter_config_op_ref(self_) }.to_string())
+    into_c_string(&unsafe { alter_config_op_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned operation handle; `NULL` is a no-op.
@@ -380,7 +385,7 @@ mod tests {
             let op = kafka_admin_AlterConfigOp_new(entry_handle, kafka_admin_AlterConfigOp_OpType_append());
             kafka_admin_ConfigEntry_destroy(entry_handle);
             let expected = AlterConfigOp::new(entry, OpType::Append);
-            assert_eq!(*alter_config_op_ref(op), expected);
+            assert_eq!(*alter_config_op_ref(op, "op"), expected);
             assert_eq!(kafka_admin_AlterConfigOp_op_type(op), kafka_admin_AlterConfigOp_OpType_append());
             assert_eq!(
                 CStr::from_ptr(kafka_admin_ConfigEntry_name(kafka_admin_AlterConfigOp_config_entry(op)))

@@ -20,6 +20,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::config::ConfigResource;
@@ -245,12 +246,15 @@ impl ConfigResourceInner {
 /// # Safety
 ///
 /// `resource` must be a valid config-resource handle, alive for `'a`.
-unsafe fn inner_ref<'a>(resource: *const kafka_common_config_ConfigResource_t) -> &'a ConfigResourceInner {
+unsafe fn inner_ref<'a>(
+    resource: *const kafka_common_config_ConfigResource_t,
+    param: &'static str,
+) -> &'a ConfigResourceInner {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle alive
     // for `'a`, so it points at a live `ConfigResourceInner`, the `Box::into_raw` of
     // `box_config_resource` (no view of this type is handed out). Nothing mutates a
     // `ConfigResourceInner` while a handle to it exists, so the shared reference is sound for `'a`.
-    unsafe { &*(resource as *const ConfigResourceInner) }
+    unsafe { require_ref::<_, ConfigResourceInner>(resource, param) }
 }
 
 /// The resource behind a handle.
@@ -260,10 +264,11 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_config_ConfigResource_t) -
 /// `resource` must be a valid config-resource handle, alive for `'a`.
 pub(crate) unsafe fn config_resource_ref<'a>(
     resource: *const kafka_common_config_ConfigResource_t,
+    param: &'static str,
 ) -> &'a ConfigResource {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(resource) }.resource
+    &unsafe { inner_ref(resource, param) }.resource
 }
 
 /// Frees a `kafka_common_config_ConfigResource_t *` element of an owned
@@ -288,8 +293,8 @@ pub(crate) unsafe fn config_resource_key_eq(a: *mut c_void, b: *mut c_void) -> b
     // SAFETY: Per this function's `# Safety`, `a` and `b` are valid config-resource handles, alive
     // for this call, as `config_resource_ref` requires; both borrows end with the comparison.
     unsafe {
-        config_resource_ref(a as *const kafka_common_config_ConfigResource_t)
-            == config_resource_ref(b as *const kafka_common_config_ConfigResource_t)
+        config_resource_ref(a as *const kafka_common_config_ConfigResource_t, "a")
+            == config_resource_ref(b as *const kafka_common_config_ConfigResource_t, "b")
     }
 }
 
@@ -342,7 +347,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `config_resource_ref` requires; the value is copied out and mapped to its static singleton,
     // so the borrow lasts for this call only.
-    type_singleton(unsafe { config_resource_ref(self_) }.r#type())
+    type_singleton(unsafe { config_resource_ref(self_, "self_") }.r#type())
 }
 
 /// Return the resource name.
@@ -363,7 +368,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// Returns 1 if this is the default resource of a resource type, else 0.
@@ -379,7 +384,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `config_resource_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { config_resource_ref(self_) }.is_default())
+    i8::from(unsafe { config_resource_ref(self_, "self_") }.is_default())
 }
 
 /// Returns the text form of the resource.
@@ -396,7 +401,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `config_resource_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { config_resource_ref(self_) }.to_string())
+    into_c_string(&unsafe { config_resource_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned config-resource handle; null is a no-op.
@@ -475,7 +480,7 @@ mod tests {
             let topic =
                 kafka_common_config_ConfigResource_new(kafka_common_config_ConfigResource_Type_topic(), name.as_ptr());
             assert_eq!(
-                *config_resource_ref(topic),
+                *config_resource_ref(topic, "topic"),
                 ConfigResource::new(Type::Topic, "orders".to_string())
             );
             assert_eq!(

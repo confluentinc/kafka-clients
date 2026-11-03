@@ -250,7 +250,7 @@ unsafe fn invoke_blocking(
 ) {
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
     // are topic-partition handles, as `list_topic_partitions` requires.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let (tx, rx) = std::sync::mpsc::channel();
     registration.fire(
         method,
@@ -284,7 +284,7 @@ unsafe fn invoke_cb(
 ) {
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
     // are topic-partition handles, as `list_topic_partitions` requires.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let opaque = SendPtr(opaque);
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
@@ -687,7 +687,7 @@ mod tests {
             imp.fail.store(true, Ordering::Relaxed);
             kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked(listener, partitions, &mut err);
             assert!(!err.is_null());
-            assert_eq!(error_ref(err).error.message(), "listener failed");
+            assert_eq!(error_ref(err, "err").error.message(), "listener failed");
             kafka_common_Error_destroy(err);
             kafka_List_destroy(partitions);
             kafka_consumer_ConsumerRebalanceListener_destroy(listener);

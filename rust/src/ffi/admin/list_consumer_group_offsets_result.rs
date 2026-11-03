@@ -116,12 +116,13 @@ pub(crate) fn box_list_consumer_group_offsets_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<ListConsumerGroupOffsetsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_ListConsumerGroupOffsetsResult_t` is built by
     // `box_result::<ListConsumerGroupOffsetsResult, _>` (in
     // `box_list_consumer_group_offsets_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a future which yields a map of topic partitions to OffsetAndMetadata objects. If the
@@ -151,7 +152,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid
     // slot, as `deliver_value` requires. For `handle_future`, `destroy_map_element` frees exactly the
     // map `group_offsets_map` makes through `box_map`, and the handle holds only owned data and no
@@ -195,7 +196,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
     // `c_str_to_string` requires; it is copied into a `String` during the call.
     let group_id = unsafe { c_str_to_string(group_id) };
@@ -234,7 +235,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `all_map` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
     // may be freed from any thread and read from several at once, as `handle_future` requires.

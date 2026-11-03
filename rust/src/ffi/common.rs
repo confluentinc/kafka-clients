@@ -87,7 +87,7 @@ use crate::common::protocol::Errors;
 use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::PreconditionPanic;
+use crate::ffi::precondition::{PreconditionPanic, require_ref};
 use crate::ffi::util::{c_str_to_option, c_str_to_string, kafka_List_t, list_strings};
 // The 169 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
@@ -620,6 +620,7 @@ pub(crate) mod panic_probe {
     use std::sync::Mutex;
 
     use super::{kafka_common_Error_t, take_error};
+    use crate::ffi::precondition::require_ref;
 
     /// What each completion fired with, in firing order: the error message,
     /// or `"<no error>"` for a completion without one.
@@ -666,11 +667,11 @@ pub(crate) mod panic_probe {
     /// # Safety
     ///
     /// `opaque` must be [`Probe::as_opaque`] of a `Probe` that outlives `'a`.
-    unsafe fn probe<'a>(opaque: *mut c_void) -> &'a Probe {
+    unsafe fn probe<'a>(opaque: *mut c_void, param: &'static str) -> &'a Probe {
         // SAFETY: Test code: per this function's `# Safety`, `opaque` came from
         // `Probe::as_opaque` of a live `Probe` that outlives `'a`; the reference is shared, and
         // `Probe` mutates only through its `Mutex`.
-        unsafe { &*(opaque as *const Probe) }
+        unsafe { require_ref::<_, Probe>(opaque, param) }
     }
 
     /// An `(error, opaque)` completion.
@@ -678,7 +679,7 @@ pub(crate) mod panic_probe {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired, and a completion owns
         // the error handle it receives.
-        unsafe { probe(opaque).record(error) }
+        unsafe { probe(opaque, "opaque").record(error) }
     }
 
     /// A `(value *, error, opaque)` completion: a failure has a NULL value.
@@ -687,7 +688,7 @@ pub(crate) mod panic_probe {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired, and a completion owns
         // the error handle it receives.
-        unsafe { probe(opaque).record(error) }
+        unsafe { probe(opaque, "opaque").record(error) }
     }
 
     /// An `(int64_t value, error, opaque)` completion: a failure has -1.
@@ -696,14 +697,18 @@ pub(crate) mod panic_probe {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired, and a completion owns
         // the error handle it receives.
-        unsafe { probe(opaque).record(error) }
+        unsafe { probe(opaque, "opaque").record(error) }
     }
 
     /// An `(opaque)` completion, which carries no error.
     pub(crate) unsafe extern "C" fn on_opaque(opaque: *mut c_void) {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired.
-        unsafe { probe(opaque) }.fired.lock().unwrap().push("<no error>".to_string());
+        unsafe { probe(opaque, "opaque") }
+            .fired
+            .lock()
+            .unwrap()
+            .push("<no error>".to_string());
     }
 }
 
@@ -923,7 +928,7 @@ pub(crate) unsafe fn deliver_unit(result: Result<(), Error>, out_err: *mut *mut 
 /// (not passed to `kafka_common_Error_destroy` nor consumed by
 /// [`take_error`]) for as long as the returned reference, or anything borrowed
 /// from it, is used: the `'static` lifetime is not real.
-pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
+pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t, param: &'static str) -> &'static ErrorInner {
     // SAFETY: Per this function's `# Safety`, `error` is non-null and points at a live
     // `ErrorInner`: an owned handle (the `Box::into_raw` of `box_error`) or one borrowed from
     // a live owner (an `ErrorInner` held inside another handle). Either way the cast targets
@@ -931,7 +936,7 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
     // contract makes the caller
     // keep the handle alive while it uses the reference, which is shared, so nothing writes
     // the `ErrorInner` under it (its lazy slots are `OnceLock`s).
-    unsafe { &*(error as *const ErrorInner) }
+    unsafe { require_ref::<_, ErrorInner>(error, param) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2532,7 +2537,7 @@ pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Err
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The `&'static ErrorInner` is used only to read `.error` for the duration of this
     // call, during which the C caller keeps the handle alive.
-    error_code_of(&unsafe { error_ref(error) }.error)
+    error_code_of(&unsafe { error_ref(error, "error") }.error)
 }
 
 /// Returns the error message as a null-terminated C string.
@@ -2567,7 +2572,7 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
     // this function's rustdoc states, it stays valid while the handle does: until
     // `kafka_common_Error_destroy` is called on it, or, for a borrowed one, until its owner
     // is destroyed by that owner's own `_destroy`.
-    unsafe { error_ref(error) }.message_cstring.as_ptr()
+    unsafe { error_ref(error, "error") }.message_cstring.as_ptr()
 }
 
 /// Returns the error's cause (`Throwable.getCause()`), or null when it has
@@ -2597,7 +2602,7 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The returned cause is a borrowed handle owned by that `ErrorInner` (its `source`
     // slot), so, as this function's rustdoc states, it stays valid while `error` does.
-    unsafe { error_ref(error) }.source_ptr()
+    unsafe { error_ref(error, "error") }.source_ptr()
 }
 
 /// Returns the throttle time the broker reported with this error
@@ -2621,7 +2626,7 @@ pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka
     // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The borrow lasts only for this call, while the caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.throttle_time_ms().unwrap_or(-1)
+    unsafe { error_ref(error, "error") }.error.throttle_time_ms().unwrap_or(-1)
 }
 
 // NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported

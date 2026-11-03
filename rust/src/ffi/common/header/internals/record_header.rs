@@ -20,6 +20,7 @@
 //! handle, so every owner keeps a [`RecordHeaderInner`] boxed and never moves
 //! it after the view exists.
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::ffi::c_char;
 use std::sync::OnceLock;
 
@@ -129,13 +130,14 @@ pub(crate) fn box_record_header(header: RecordHeader) -> *mut kafka_common_heade
 /// `header` must be a valid record-header handle, alive for `'a`.
 pub(crate) unsafe fn record_header_ref<'a>(
     header: *const kafka_common_header_internals_RecordHeader_t,
+    param: &'static str,
 ) -> &'a RecordHeader {
     // SAFETY: Per this function's `# Safety`, `header` is a valid record-header handle alive for
     // `'a`, so it points at a live `RecordHeaderInner`: the `Box::into_raw` of `box_record_header`,
     // or an element of a `HeadersInner`'s `views` (alive until that headers handle's next mutation,
     // as the module docs of `ffi::common::header` state). No code mutates a `RecordHeaderInner`'s
     // `header`, so the shared reference is sound for `'a`.
-    unsafe { &*(header as *const RecordHeaderInner) }.header()
+    unsafe { require_ref::<_, RecordHeaderInner>(header, param) }.header()
 }
 
 /// Reads a list of `const kafka_common_header_internals_RecordHeader_t *`
@@ -145,17 +147,23 @@ pub(crate) unsafe fn record_header_ref<'a>(
 ///
 /// `list` must be null or a valid list whose elements are record-header
 /// handles.
-pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t) -> Vec<RecordHeader> {
+pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t, param: &'static str) -> Vec<RecordHeader> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
     // `list_elements` requires; the slice is used only within this call, which does not mutate the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a record-header
             // handle, as `record_header_ref` requires; the header is cloned, so the borrow lasts
             // for this call only.
-            unsafe { record_header_ref(element as *const kafka_common_header_internals_RecordHeader_t) }.clone()
+            unsafe {
+                record_header_ref(
+                    require_element(element, param) as *const kafka_common_header_internals_RecordHeader_t,
+                    param,
+                )
+            }
+            .clone()
         })
         .collect()
 }
@@ -206,7 +214,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-header handle, as
     // `record_header_ref` requires; the result is copied into an owned value before return, so the
     // borrow lasts for this call only.
-    into_c_string(&unsafe { record_header_ref(self_) }.to_string())
+    into_c_string(&unsafe { record_header_ref(self_, "self_") }.to_string())
 }
 
 /// Returns the handle as the `Header` interface it implements.
@@ -272,7 +280,7 @@ mod tests {
             let header =
                 kafka_common_header_internals_RecordHeader_new(key.as_ptr(), kafka_Bytes_t::from_slice(&bytes));
             assert_eq!(
-                record_header_ref(header),
+                record_header_ref(header, "header"),
                 &RecordHeader::new("h1".to_string(), Some(vec![9, 9]))
             );
             let s = kafka_common_header_internals_RecordHeader_to_string(header);
@@ -312,9 +320,9 @@ mod tests {
             let second = kafka_common_header_internals_RecordHeader_new(b.as_ptr(), kafka_Bytes_t::NULL);
             kafka_List_add(list, first as *mut c_void);
             kafka_List_add(list, second as *mut c_void);
-            let headers = list_record_headers(list);
+            let headers = list_record_headers(list, "value");
             assert_eq!(headers.iter().map(|h| h.key()).collect::<Vec<_>>(), ["a", "b"]);
-            assert!(list_record_headers(ptr::null()).is_empty());
+            assert!(list_record_headers(ptr::null(), "value").is_empty());
             kafka_List_destroy(list);
             kafka_common_header_internals_RecordHeader_destroy(first);
             kafka_common_header_internals_RecordHeader_destroy(second);

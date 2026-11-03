@@ -16,6 +16,7 @@
 //! `org.apache.kafka.clients.admin.NewPartitionReassignment` (CLAUDE.md §4).
 //! A `List<Integer>` crosses as a `kafka_List_t` of `int32_t *`.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_void;
 
 use crate::admin::NewPartitionReassignment;
@@ -43,13 +44,14 @@ pub(crate) struct NewPartitionReassignmentInner {
 /// alive for `'a`.
 pub(crate) unsafe fn new_partition_reassignment_ref<'a>(
     reassignment: *const kafka_admin_NewPartitionReassignment_t,
+    param: &'static str,
 ) -> &'a NewPartitionReassignment {
     // SAFETY: Per this function's `# Safety`, `reassignment` is a valid new-partition-reassignment
     // handle kept alive for `'a`; every `kafka_admin_NewPartitionReassignment_t` is the
     // `Box::into_raw` of a `Box<NewPartitionReassignmentInner>` (`box_new_partition_reassignment`,
     // the only producer), so the shared reference is to a live `NewPartitionReassignmentInner`,
     // which no entry point mutates.
-    &unsafe { &*(reassignment as *const NewPartitionReassignmentInner) }.reassignment
+    &unsafe { require_ref::<_, NewPartitionReassignmentInner>(reassignment, param) }.reassignment
 }
 
 /// Hands `reassignment` to C as an owned handle, freed with
@@ -86,7 +88,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
     // SAFETY: Per this function's `# Safety`, `target_replicas` is null or a valid list, alive and
     // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
     // end of this statement.
-    let target_replicas = unsafe { list_elements(target_replicas) }
+    let target_replicas = unsafe { list_elements(target_replicas, "target_replicas") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `target_replicas` points at a
         // live `int32_t`, read by copy while the list is alive.
@@ -115,7 +117,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partition-reassignment handle,
     // kept alive for this call, as `new_partition_reassignment_ref` requires.
-    let elements = unsafe { new_partition_reassignment_ref(self_) }
+    let elements = unsafe { new_partition_reassignment_ref(self_, "self_") }
         .target_replicas()
         .iter()
         .map(|&replica| Box::into_raw(Box::new(replica)) as *mut c_void)
@@ -167,7 +169,7 @@ mod tests {
             assert!(failed.is_null());
             assert!(!error.is_null());
             assert_eq!(
-                error_ref(error).error.message(),
+                error_ref(error, "error").error.message(),
                 "Cannot create a new partition reassignment without any replicas"
             );
             kafka_common_Error_destroy(error);
@@ -180,7 +182,10 @@ mod tests {
             let reassignment = kafka_admin_NewPartitionReassignment_new(list, &mut error);
             assert!(error.is_null());
             kafka_List_destroy(list);
-            assert_eq!(new_partition_reassignment_ref(reassignment).target_replicas(), [5, 7]);
+            assert_eq!(
+                new_partition_reassignment_ref(reassignment, "reassignment").target_replicas(),
+                [5, 7]
+            );
             let replicas = kafka_admin_NewPartitionReassignment_target_replicas(reassignment);
             assert_eq!(kafka_List_size(replicas), 2);
             assert_eq!(*(kafka_List_get(replicas, 1) as *const i32), 7);

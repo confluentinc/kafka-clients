@@ -23,6 +23,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::time::Duration;
@@ -105,13 +106,16 @@ unsafe fn value_of(
 ///
 /// `options` must be a valid close-options handle, kept alive and not modified
 /// for `'a`.
-pub(crate) unsafe fn close_options_ref<'a>(options: *const kafka_consumer_CloseOptions_t) -> &'a CloseOptions {
+pub(crate) unsafe fn close_options_ref<'a>(
+    options: *const kafka_consumer_CloseOptions_t,
+    param: &'static str,
+) -> &'a CloseOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a valid close-options handle kept alive
     // and unmodified for `'a`: a `Box<CloseOptions>` from `Box::into_raw` in
     // `kafka_consumer_CloseOptions_new_with_timeout` or
     // `kafka_consumer_CloseOptions_with_operation`, the only constructors, so the shared reference
     // is to a live `CloseOptions`.
-    unsafe { &*(options as *const CloseOptions) }
+    unsafe { require_ref::<_, CloseOptions>(options, param) }
 }
 
 /// A Java `Duration` in milliseconds; a negative value is clamped to zero,
@@ -294,7 +298,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka
     // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
     // time, so `close_options_ref`'s requirement holds for this expression, the only use of the
     // reference.
-    unsafe { close_options_ref(self_) }
+    unsafe { close_options_ref(self_, "self_") }
         .timeout()
         .map_or(-1, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
@@ -318,7 +322,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_group_membership_operation(
     // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
     // time, so `close_options_ref`'s requirement holds for this expression, the only use of the
     // reference.
-    singleton(unsafe { close_options_ref(self_) }.group_membership_operation())
+    singleton(unsafe { close_options_ref(self_, "self_") }.group_membership_operation())
 }
 
 /// Frees a handle; a null pointer is a no-op.
@@ -361,7 +365,7 @@ mod tests {
             kafka_consumer_CloseOptions_with_timeout(options, 10);
             assert_eq!(kafka_consumer_CloseOptions_timeout(options), 10);
             assert_eq!(
-                close_options_ref(options).group_membership_operation(),
+                close_options_ref(options, "options").group_membership_operation(),
                 GroupMembershipOperation::RemainInGroup
             );
             kafka_consumer_CloseOptions_destroy(options);

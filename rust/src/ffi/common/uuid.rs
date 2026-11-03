@@ -65,7 +65,7 @@ pub(crate) unsafe fn list_uuids(list: *const kafka_List_t) -> Vec<Uuid> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
     // `list_elements` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, "list") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `list` is a uuid handle, as
         // `uuid_of` requires; the `Uuid` is copied out.

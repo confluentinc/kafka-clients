@@ -258,11 +258,11 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
     // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as
     // `map_offset_and_metadata` requires.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     // SAFETY: `error` is non-null (checked in this expression) and, per this function's `# Safety`,
     // a live error handle, as `error_ref` requires; the reference is used only to clone the error,
     // within this expression.
-    let error = (!error.is_null()).then(|| unsafe { error_ref(error) }.error.clone());
+    let error = (!error.is_null()).then(|| unsafe { error_ref(error, "error") }.error.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     registration.fire(
         &offsets,
@@ -344,11 +344,11 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as
     // `map_offset_and_metadata` requires.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     // SAFETY: `error` is non-null (checked in this expression) and, per this function's `# Safety`,
     // a live error handle, as `error_ref` requires; the reference is used only to clone the error,
     // within this expression.
-    let error = (!error.is_null()).then(|| unsafe { error_ref(error) }.error.clone());
+    let error = (!error.is_null()).then(|| unsafe { error_ref(error, "error") }.error.clone());
     let opaque = SendPtr(opaque);
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
@@ -452,8 +452,12 @@ mod tests {
             kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, std::ptr::null(), &mut raised);
             assert!(raised.is_null(), "no error reported");
             kafka_consumer_OffsetCommitCallback_on_complete(handle, c_offsets, error, &mut raised);
-            assert_eq!(error_ref(error).error.message(), "late", "borrowed, not consumed");
-            assert_eq!(error_ref(raised).error.message(), "raised: late", "the reported error, owned");
+            assert_eq!(error_ref(error, "error").error.message(), "late", "borrowed, not consumed");
+            assert_eq!(
+                error_ref(raised, "raised").error.message(),
+                "raised: late",
+                "the reported error, owned"
+            );
             kafka_common_Error_destroy(raised);
             kafka_common_Error_destroy(error);
             kafka_Map_destroy(c_offsets);

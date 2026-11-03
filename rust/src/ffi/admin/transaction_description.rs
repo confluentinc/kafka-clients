@@ -18,6 +18,7 @@
 //! `OptionalLong transactionStartTimeMs()` crosses as `-1` for
 //! `OptionalLong.empty()`.
 
+use crate::ffi::precondition::require_ref;
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 
@@ -52,12 +53,13 @@ pub(crate) fn box_transaction_description(
 /// for `'a`.
 pub(crate) unsafe fn transaction_description_ref<'a>(
     description: *const kafka_admin_TransactionDescription_t,
+    param: &'static str,
 ) -> &'a TransactionDescription {
     // SAFETY: Per this function's `# Safety`, `description` is a live transaction-description
     // handle kept alive for `'a`. Every `kafka_admin_TransactionDescription_t` comes from
     // `box_transaction_description`, which boxes a `TransactionDescription`, so the cast yields a
     // valid shared reference. The type has no setters, so nothing mutates it while borrowed.
-    unsafe { &*(description as *const TransactionDescription) }
+    unsafe { require_ref::<_, TransactionDescription>(description, param) }
 }
 
 /// Frees a `kafka_admin_TransactionDescription_t *` element of an owned
@@ -107,7 +109,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
     let topic_partitions: HashSet<TopicPartition> =
         // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
         // topic-partition handles, as `list_topic_partitions` requires.
-        unsafe { list_topic_partitions(topic_partitions) }.into_iter().collect();
+        unsafe { list_topic_partitions(topic_partitions, "topic_partitions") }.into_iter().collect();
     box_transaction_description(TransactionDescription::new(
         coordinator_id,
         // SAFETY: Per this function's `# Safety`, `state` is a transaction-state singleton; only
@@ -133,7 +135,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_coordinator_id(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    unsafe { transaction_description_ref(self_) }.coordinator_id()
+    unsafe { transaction_description_ref(self_, "self_") }.coordinator_id()
 }
 
 /// Returns the state of the transaction.
@@ -149,7 +151,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_state(
 ) -> *const kafka_admin_TransactionState_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    transaction_state_singleton(unsafe { transaction_description_ref(self_) }.state())
+    transaction_state_singleton(unsafe { transaction_description_ref(self_, "self_") }.state())
 }
 
 /// Returns the producer id of the transaction.
@@ -164,7 +166,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_id(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    unsafe { transaction_description_ref(self_) }.producer_id()
+    unsafe { transaction_description_ref(self_, "self_") }.producer_id()
 }
 
 /// Returns the producer epoch of the transaction.
@@ -179,7 +181,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_epoch(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    unsafe { transaction_description_ref(self_) }.producer_epoch()
+    unsafe { transaction_description_ref(self_, "self_") }.producer_epoch()
 }
 
 /// Returns the transaction timeout, in milliseconds.
@@ -194,7 +196,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_timeout_
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    unsafe { transaction_description_ref(self_) }.transaction_timeout_ms()
+    unsafe { transaction_description_ref(self_, "self_") }.transaction_timeout_ms()
 }
 
 /// Returns the start time of the transaction, in milliseconds, or `-1` for
@@ -210,7 +212,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_start_ti
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    unsafe { transaction_description_ref(self_) }
+    unsafe { transaction_description_ref(self_, "self_") }
         .transaction_start_time_ms()
         .unwrap_or(-1)
 }
@@ -228,7 +230,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_topic_partitions(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    sorted_topic_partition_list(unsafe { transaction_description_ref(self_) }.topic_partitions())
+    sorted_topic_partition_list(unsafe { transaction_description_ref(self_, "self_") }.topic_partitions())
 }
 
 /// Returns the text form of the description.
@@ -244,7 +246,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-description handle,
     // kept alive for this call, as `transaction_description_ref` requires.
-    into_c_string(&unsafe { transaction_description_ref(self_) }.to_string())
+    into_c_string(&unsafe { transaction_description_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned transaction-description handle; `NULL` is a no-op.

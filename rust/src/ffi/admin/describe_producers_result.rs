@@ -16,6 +16,7 @@
 //! `kafka_admin_DescribeProducersResult_PartitionProducerState_t`:
 //! `org.apache.kafka.clients.admin.DescribeProducersResult` (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_element, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -61,6 +62,7 @@ pub(crate) fn box_partition_producer_state(
 /// `'a`.
 pub(crate) unsafe fn partition_producer_state_ref<'a>(
     state: *const kafka_admin_DescribeProducersResult_PartitionProducerState_t,
+    param: &'static str,
 ) -> &'a PartitionProducerState {
     // SAFETY: Per this function's `# Safety`, `state` is a live partition-producer-state handle
     // kept alive for `'a`. Every `kafka_admin_DescribeProducersResult_PartitionProducerState_t` is
@@ -68,7 +70,7 @@ pub(crate) unsafe fn partition_producer_state_ref<'a>(
     // only place one is made, for an owned handle or a value a map or future owns), so it points at
     // a live `PartitionProducerState`. Nothing takes a `&mut` to it: only the destroy takes the box
     // back, and its `# Safety` excludes any other use at the same time or afterwards.
-    unsafe { &*(state as *const PartitionProducerState) }
+    unsafe { require_ref::<_, PartitionProducerState>(state, param) }
 }
 
 /// Frees a `kafka_admin_DescribeProducersResult_PartitionProducerState_t *`
@@ -111,11 +113,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     // SAFETY: Per this function's `# Safety`, `active_producers` is null or a valid list handle,
     // which the caller keeps alive for this call and nothing mutates meanwhile, as `list_elements`
     // requires; the borrow ends with the call.
-    let active_producers = unsafe { list_elements(active_producers) }
+    let active_producers = unsafe { list_elements(active_producers, "active_producers") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element `p` is a live producer-state
         // handle, as `producer_state_ref` requires; the borrow ends with the `clone`.
-        .map(|&p| unsafe { producer_state_ref(p as *const kafka_admin_ProducerState_t) }.clone())
+        .map(|&p| {
+            unsafe {
+                producer_state_ref(
+                    require_element(p, "active_producers") as *const kafka_admin_ProducerState_t,
+                    "active_producers",
+                )
+            }
+            .clone()
+        })
         .collect();
     box_partition_producer_state(PartitionProducerState::new(active_producers))
 }
@@ -136,7 +146,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     // SAFETY: Per this function's `# Safety`, `self_` is a live partition-producer-state handle,
     // kept alive for this call, as `partition_producer_state_ref` requires; the borrow ends once
     // the copies are made.
-    let state = unsafe { partition_producer_state_ref(self_) };
+    let state = unsafe { partition_producer_state_ref(self_, "self_") };
     let elements = state
         .active_producers()
         .iter()
@@ -160,7 +170,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     // SAFETY: Per this function's `# Safety`, `self_` is a live partition-producer-state handle,
     // kept alive for this call, as `partition_producer_state_ref` requires; the borrow ends with
     // `to_string`.
-    into_c_string(&unsafe { partition_producer_state_ref(self_) }.to_string())
+    into_c_string(&unsafe { partition_producer_state_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned partition-producer-state handle; `NULL` is a no-op.
@@ -242,12 +252,15 @@ pub(crate) fn box_describe_producers_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DescribeProducersResult_t) -> &'a ResultHandle<DescribeProducersResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DescribeProducersResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DescribeProducersResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeProducersResult_t` is built by
     // `box_result::<DescribeProducersResult, _>` (in `box_describe_producers_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Returns the future of the producer state of `partition`, whose `get` yields a
@@ -276,11 +289,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
     // `topic_partition_ref` requires; the caller keeps it alive for this call, which the borrow
     // does not outlive.
-    let partition = unsafe { topic_partition_ref(partition) };
+    let partition = unsafe { topic_partition_ref(partition, "partition") };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. For `handle_future`, `destroy_partition_producer_state_element` frees exactly the
     // handle `box_partition_producer_state` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
@@ -312,7 +325,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `states_map` makes through `box_map`, and
     // the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.

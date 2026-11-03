@@ -51,12 +51,13 @@ pub(crate) fn box_describe_consumer_groups_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeConsumerGroupsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<DescribeConsumerGroupsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeConsumerGroupsResult_t` is built by
     // `box_result::<DescribeConsumerGroupsResult, _>` (in `box_describe_consumer_groups_result`),
     // as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// The C shape of `all()`'s value: an owned map, sorted by group id, of
@@ -91,7 +92,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_described_grou
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let groups = h.result.described_groups();
     h.ctx.string_keyed_future_map(groups.iter(), |ctx, future| {
         // SAFETY: `destroy_consumer_group_description_element` frees exactly the handle
@@ -128,7 +129,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `box_descriptions` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
     // may be freed from any thread and read from several at once, as `handle_future` requires.
@@ -166,7 +167,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_new(
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
     // the same time. That is what `map_entries` requires.
-    let futures = unsafe { map_entries(futures) }
+    let futures = unsafe { map_entries(futures, "futures") }
         .iter()
         .map(|&(k, v)| {
             (
@@ -183,8 +184,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_new(
                         v as *const kafka_common_KafkaFuture_t,
                         "DescribeConsumerGroupsResult",
                         |value| {
-                            consumer_group_description_ref(value as *const kafka_admin_ConsumerGroupDescription_t)
-                                .clone()
+                            consumer_group_description_ref(
+                                value as *const kafka_admin_ConsumerGroupDescription_t,
+                                "value",
+                            )
+                            .clone()
                         },
                     )
                 },

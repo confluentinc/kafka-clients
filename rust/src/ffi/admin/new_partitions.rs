@@ -17,6 +17,7 @@
 //! `List<List<Integer>>` crosses as a `kafka_List_t` of `kafka_List_t *`
 //! holding `int32_t *` elements.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::admin::NewPartitions;
@@ -39,12 +40,15 @@ pub(crate) struct NewPartitionsInner {
 /// # Safety
 ///
 /// `partitions` must be a valid new-partitions handle, kept alive for `'a`.
-pub(crate) unsafe fn new_partitions_ref<'a>(partitions: *const kafka_admin_NewPartitions_t) -> &'a NewPartitions {
+pub(crate) unsafe fn new_partitions_ref<'a>(
+    partitions: *const kafka_admin_NewPartitions_t,
+    param: &'static str,
+) -> &'a NewPartitions {
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid new-partitions handle kept
     // alive for `'a`; every `kafka_admin_NewPartitions_t` is the `Box::into_raw` of a
     // `Box<NewPartitionsInner>` (`box_new_partitions`, the only producer), so the shared reference
     // is to a live `NewPartitionsInner`, which no entry point mutates.
-    &unsafe { &*(partitions as *const NewPartitionsInner) }.partitions
+    &unsafe { require_ref::<_, NewPartitionsInner>(partitions, param) }.partitions
 }
 
 /// Hands `partitions` to C as an owned handle, freed with
@@ -63,7 +67,7 @@ unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
     // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list) }
+    unsafe { list_elements(list, "list") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
@@ -142,7 +146,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignme
     // SAFETY: Per this function's `# Safety`, `new_assignments` is null or a valid list, alive and
     // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
     // end of this statement.
-    let new_assignments = unsafe { list_elements(new_assignments) }
+    let new_assignments = unsafe { list_elements(new_assignments, "new_assignments") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `new_assignments` is a valid list
         // whose elements point at `int32_t`s, alive and not mutated for this call, as `list_i32`
@@ -162,7 +166,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignme
 pub unsafe extern "C" fn kafka_admin_NewPartitions_total_count(self_: *const kafka_admin_NewPartitions_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partitions handle, kept alive
     // for this call, as `new_partitions_ref` requires.
-    unsafe { new_partitions_ref(self_) }.total_count()
+    unsafe { new_partitions_ref(self_, "self_") }.total_count()
 }
 
 /// The replica assignments for the new partitions, or `NULL` if the assignment will be done by
@@ -183,7 +187,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_assignments(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partitions handle, kept alive
     // for this call, as `new_partitions_ref` requires.
-    match unsafe { new_partitions_ref(self_) }.assignments() {
+    match unsafe { new_partitions_ref(self_, "self_") }.assignments() {
         None => std::ptr::null_mut(),
         Some(assignments) => {
             let elements = assignments.iter().map(|brokers| box_i32_list(brokers) as *mut c_void).collect();
@@ -203,7 +207,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_assignments(
 pub unsafe extern "C" fn kafka_admin_NewPartitions_to_string(self_: *const kafka_admin_NewPartitions_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-partitions handle, kept alive
     // for this call, as `new_partitions_ref` requires.
-    into_c_string(&unsafe { new_partitions_ref(self_) }.to_string())
+    into_c_string(&unsafe { new_partitions_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned handle; `NULL` is a no-op.
@@ -240,7 +244,7 @@ mod tests {
         // once, last; `s` is the owned string `kafka_admin_NewPartitions_to_string` returned, read
         // while alive and freed once with `kafka_string_destroy`; destroying null is a no-op.
         unsafe {
-            let view = new_partitions_ref(partitions);
+            let view = new_partitions_ref(partitions, "partitions");
             assert_eq!((view.total_count(), view.assignments()), (4, None));
             assert_eq!(kafka_admin_NewPartitions_total_count(partitions), 4);
             assert!(kafka_admin_NewPartitions_assignments(partitions).is_null());
@@ -272,7 +276,7 @@ mod tests {
             kafka_List_destroy(outer);
             kafka_List_destroy(inner);
 
-            let view = new_partitions_ref(partitions);
+            let view = new_partitions_ref(partitions, "partitions");
             assert_eq!((view.total_count(), view.assignments()), (2, Some(&vec![vec![1, 2]])));
             let assignments = kafka_admin_NewPartitions_assignments(partitions);
             assert_eq!(kafka_List_size(assignments), 1);

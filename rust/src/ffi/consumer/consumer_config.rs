@@ -34,6 +34,7 @@
 //! `kafka_consumer_ConsumerConfig_get_string`, ...), not through per-key
 //! getters, which would freeze a key's Java type.
 
+use crate::ffi::precondition::require_ref;
 use std::collections::HashMap;
 use std::os::raw::c_char;
 
@@ -67,12 +68,15 @@ struct ConsumerConfigHandle {
 /// # Safety
 ///
 /// `config` must be a live handle, kept alive for `'a`.
-unsafe fn handle_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a ConsumerConfigHandle {
+unsafe fn handle_ref<'a>(
+    config: *const kafka_consumer_ConsumerConfig_t,
+    param: &'static str,
+) -> &'a ConsumerConfigHandle {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`: a
     // `Box<ConsumerConfigHandle>` from `Box::into_raw` in `kafka_consumer_ConsumerConfig_new`, the
     // only constructor, never reached through a `&mut` afterwards (the lent strings and the used keys
     // mutate behind their `Mutex`es), so the shared reference is to a live value no `&mut` aliases.
-    unsafe { &*(config as *const ConsumerConfigHandle) }
+    unsafe { require_ref::<_, ConsumerConfigHandle>(config, param) }
 }
 
 /// The configuration of a consumer created from the handle: a copy of the
@@ -92,7 +96,7 @@ pub(crate) unsafe fn consumer_config_build(
 ) -> Result<ConsumerConfig, Error> {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for this call,
     // as `handle_ref` requires; the reference does not outlive it.
-    unsafe { handle_ref(config) }.config.copy_for_client()
+    unsafe { handle_ref(config, "config") }.config.copy_for_client()
 }
 
 /// The configuration behind a handle.
@@ -101,10 +105,13 @@ pub(crate) unsafe fn consumer_config_build(
 ///
 /// `config` must be a live handle, kept alive for `'a`.
 #[cfg(test)]
-pub(crate) unsafe fn consumer_config_ref<'a>(config: *const kafka_consumer_ConsumerConfig_t) -> &'a ConsumerConfig {
+pub(crate) unsafe fn consumer_config_ref<'a>(
+    config: *const kafka_consumer_ConsumerConfig_t,
+    param: &'static str,
+) -> &'a ConsumerConfig {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`, as
     // `handle_ref` requires.
-    &unsafe { handle_ref(config) }.config
+    &unsafe { handle_ref(config, param) }.config
 }
 
 /// Constructs a new ConsumerConfig with the given properties.
@@ -183,7 +190,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_short(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_short(key)) }
@@ -222,7 +229,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_int(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_int(key)) }
@@ -261,7 +268,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_long(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_long(key)) }
@@ -300,7 +307,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_double(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_double(key)) }
@@ -339,7 +346,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_boolean(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe {
@@ -381,7 +388,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_list(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_list` requires.
     unsafe { config_getters::get_list(key, out_err, |key| handle.config.get_list(key)) }
 }
@@ -405,7 +412,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_unused(
     self_: *const kafka_consumer_ConsumerConfig_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    sorted_string_list(unsafe { handle_ref(self_) }.config.unused())
+    sorted_string_list(unsafe { handle_ref(self_, "self_") }.config.unused())
 }
 
 /// `ignore(String key)`: marks the configuration `key` used without reading it.
@@ -424,7 +431,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_ignore(
     key: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` is as `ignore` requires.
     unsafe { config_getters::ignore(key, |key| handle.config.ignore(key)) }
 }
@@ -438,7 +445,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_ignore(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_log_unused(self_: *const kafka_consumer_ConsumerConfig_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    unsafe { handle_ref(self_) }.config.log_unused();
+    unsafe { handle_ref(self_, "self_") }.config.log_unused();
 }
 
 /// Gets the set of all consumer configuration names.
@@ -492,7 +499,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_string(
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this call, as
     // `handle_ref` requires; the reference does not outlive the call.
-    let handle = unsafe { handle_ref(self_) };
+    let handle = unsafe { handle_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_string` requires.
     unsafe { config_getters::get_string(&handle.strings, key, out_err, |key| handle.config.get_string(key)) }
 }
@@ -557,7 +564,7 @@ mod tests {
             let config = kafka_consumer_ConsumerConfig_new(props, &mut err);
             assert!(err.is_null());
             kafka_Map_destroy(props);
-            let parsed = consumer_config_ref(config);
+            let parsed = consumer_config_ref(config, "config");
             assert_eq!(parsed.bootstrap_servers(), ["localhost:9092".to_string()]);
             assert_eq!(parsed.group_id(), Some("g"));
             assert!(parsed.enable_auto_commit());

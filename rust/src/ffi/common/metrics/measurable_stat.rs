@@ -146,12 +146,13 @@ impl Measurable for ArcMeasurableStat {
 /// `stat` must be a valid measurable-stat handle, alive for `'a`.
 pub(crate) unsafe fn measurable_stat_ref<'a>(
     stat: *const kafka_common_metrics_MeasurableStat_t,
+    param: &'static str,
 ) -> &'a dyn MeasurableStat {
     // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable-stat handle alive for
     // `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_MeasurableStat_t` is an
     // `Interface<dyn MeasurableStat>`, owned or a view; the reference returned lives for the same
     // `'a`.
-    unsafe { Interface::<dyn MeasurableStat>::from_ptr(stat as *const Interface<dyn MeasurableStat>) }.get()
+    unsafe { Interface::<dyn MeasurableStat>::from_ptr(stat as *const Interface<dyn MeasurableStat>, param) }.get()
 }
 
 /// Takes the implementation a `*mut` parameter received (see
@@ -228,7 +229,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_record(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
     // `measurable_stat_ref` requires, and `config` a valid metric-config handle, as
     // `metric_config_ref` requires; both references are used only within this call.
-    unsafe { measurable_stat_ref(self_) }.record(unsafe { metric_config_ref(config) }, value, time_ms);
+    unsafe { measurable_stat_ref(self_, "self_") }.record(
+        unsafe { metric_config_ref(config, "config") },
+        value,
+        time_ms,
+    );
 }
 
 /// `measure(MetricConfig config, long now)`.
@@ -256,7 +261,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
     // `measurable_stat_ref` requires, and `config` a valid metric-config handle, as
     // `metric_config_ref` requires; both references are used only within this call.
-    unsafe { measurable_stat_ref(self_) }.measure(unsafe { metric_config_ref(config) }, now)
+    unsafe { measurable_stat_ref(self_, "self_") }.measure(unsafe { metric_config_ref(config, "config") }, now)
 }
 
 /// Returns the provider's type name as `kafka_common_metrics_KafkaMetric_to_string` reports it,
@@ -273,7 +278,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_type_name(
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
     // `measurable_stat_ref` requires; the reference is used only within this call.
-    type_name_c_str(unsafe { measurable_stat_ref(self_) }.type_name())
+    type_name_c_str(unsafe { measurable_stat_ref(self_, "self_") }.type_name())
 }
 
 /// Frees an owned handle; null is a no-op. The view a class handle hands
@@ -340,7 +345,7 @@ mod tests {
         // not used; `config_handle` comes from `kafka_common_metrics_MetricConfig_new` and is
         // destroyed once.
         unsafe {
-            measurable_stat_ref(handle).record(&config, 1.5, 0);
+            measurable_stat_ref(handle, "handle").record(&config, 1.5, 0);
             let config_handle = kafka_common_metrics_MetricConfig_new();
             kafka_common_metrics_MeasurableStat_record(handle, config_handle, 2.0, 0);
             assert_eq!(kafka_common_metrics_MeasurableStat_measure(handle, config_handle, 0), 3.5);
@@ -372,8 +377,8 @@ mod tests {
                 Ok("my.CMeasurableStat")
             );
             assert!(kafka_common_metrics_MeasurableStat_type_name(unnamed).is_null());
-            assert_eq!(measurable_stat_ref(named).type_name(), Some("my.CMeasurableStat"));
-            assert_eq!(measurable_stat_ref(unnamed).type_name(), None);
+            assert_eq!(measurable_stat_ref(named, "named").type_name(), Some("my.CMeasurableStat"));
+            assert_eq!(measurable_stat_ref(unnamed, "unnamed").type_name(), None);
             // The shared-stat adapter `take_measurable_stat` returns reports the stat it wraps, not its
             // own type.
             assert_eq!(take_measurable_stat(named).type_name(), Some("my.CMeasurableStat"));

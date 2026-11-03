@@ -15,6 +15,7 @@
 //! `kafka_common_TopicIdPartition_t`:
 //! `org.apache.kafka.common.TopicIdPartition` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::common::TopicIdPartition;
@@ -49,12 +50,12 @@ impl TopicIdPartitionInner {
 /// # Safety
 ///
 /// `tip` must be a valid topic-id-partition handle, alive for `'a`.
-unsafe fn inner_ref<'a>(tip: *const kafka_common_TopicIdPartition_t) -> &'a TopicIdPartitionInner {
+unsafe fn inner_ref<'a>(tip: *const kafka_common_TopicIdPartition_t, param: &'static str) -> &'a TopicIdPartitionInner {
     // SAFETY: Per this function's `# Safety`, `tip` is a valid topic-id-partition handle alive for
     // `'a`, i.e. the `Box::into_raw` of a `TopicIdPartitionInner` in `boxed`, the only function
     // that makes one, not yet destroyed. No call mutates a `TopicIdPartitionInner`, so the shared
     // reference is sound for `'a`.
-    unsafe { &*(tip as *const TopicIdPartitionInner) }
+    unsafe { require_ref::<_, TopicIdPartitionInner>(tip, param) }
 }
 
 fn boxed(tip: TopicIdPartition) -> *mut kafka_common_TopicIdPartition_t {
@@ -86,7 +87,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
         // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition
         // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
         // this call only.
-        unsafe { topic_partition_ref(topic_partition) }.clone(),
+        unsafe { topic_partition_ref(topic_partition, "topic_partition") }.clone(),
     ))
 }
 
@@ -137,7 +138,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
     // `inner_ref` requires; the uuid is copied into a new owned handle.
-    box_uuid(unsafe { inner_ref(self_) }.tip.topic_id())
+    box_uuid(unsafe { inner_ref(self_, "self_") }.tip.topic_id())
 }
 
 /// # Returns
@@ -157,7 +158,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
     // `inner_ref` requires. The string returned is the embedded `TopicPartitionInner`'s own topic,
     // so it lives as long as the handle; that is the rustdoc's "borrowed from the handle, valid
     // until it is destroyed".
-    unsafe { inner_ref(self_) }.topic_partition.topic_ptr()
+    unsafe { inner_ref(self_, "self_") }.topic_partition.topic_ptr()
 }
 
 /// # Returns
@@ -172,7 +173,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(self_: *const kafka_common_TopicIdPartition_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
     // `inner_ref` requires; the reference is used only within this call.
-    unsafe { inner_ref(self_) }.tip.partition()
+    unsafe { inner_ref(self_, "self_") }.tip.partition()
 }
 
 /// # Returns
@@ -192,7 +193,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
     // `inner_ref` requires. The handle returned points at the `TopicPartitionInner` the inner
     // embeds, so it lives as long as the handle; that is the rustdoc's "borrowed from the handle,
     // valid until it is destroyed".
-    unsafe { inner_ref(self_) }.topic_partition.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.topic_partition.as_ptr()
 }
 
 /// Returns `topicId:topic-partition`.
@@ -209,7 +210,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-id-partition handle, as
     // `inner_ref` requires; the reference is used only within this call, and the text is copied
     // into an owned string.
-    into_c_string(&unsafe { inner_ref(self_) }.tip.to_string())
+    into_c_string(&unsafe { inner_ref(self_, "self_") }.tip.to_string())
 }
 
 /// Frees an owned topic-id-partition handle. Null is a no-op.

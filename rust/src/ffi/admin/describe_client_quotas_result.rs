@@ -81,8 +81,8 @@ unsafe fn client_quota_entity_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     // alive for this call, as `client_quota_entity_ref` requires; both borrows end with the
     // comparison.
     unsafe {
-        client_quota_entity_ref(a as *const kafka_common_quota_ClientQuotaEntity_t)
-            == client_quota_entity_ref(b as *const kafka_common_quota_ClientQuotaEntity_t)
+        client_quota_entity_ref(a as *const kafka_common_quota_ClientQuotaEntity_t, "a")
+            == client_quota_entity_ref(b as *const kafka_common_quota_ClientQuotaEntity_t, "b")
     }
 }
 
@@ -135,16 +135,17 @@ unsafe fn entities_of(map: *const kafka_Map_t) -> Entities {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and not
     // mutated for this call, as `map_entries` requires; the borrow of its entries ends with the
     // call.
-    unsafe { map_entries(map) }
+    unsafe { map_entries(map, "map") }
         .iter()
         .map(|&(entity, quotas)| {
             // SAFETY: Per this function's `# Safety`, the key `entity` is a valid
             // client-quota-entity handle, alive for this call, as `client_quota_entity_ref`
             // requires; the borrow ends with the `clone` below.
-            let entity = unsafe { client_quota_entity_ref(entity as *const kafka_common_quota_ClientQuotaEntity_t) };
+            let entity =
+                unsafe { client_quota_entity_ref(entity as *const kafka_common_quota_ClientQuotaEntity_t, "entity") };
             // SAFETY: Per this function's `# Safety`, the value `quotas` is null or a valid map
             // handle, alive and not mutated for this call, as `map_entries` requires.
-            let quotas = unsafe { map_entries(quotas as *const kafka_Map_t) }
+            let quotas = unsafe { map_entries(quotas as *const kafka_Map_t, "quotas") }
                 .iter()
                 .map(|&(name, value)| {
                     // SAFETY: Per this function's `# Safety`, the inner key `name` is a valid
@@ -185,11 +186,12 @@ pub(crate) fn box_describe_client_quotas_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeClientQuotasResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<DescribeClientQuotasResultInner> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeClientQuotasResult_t` is built by
     // `box_result::<DescribeClientQuotasResultInner, _>`, as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Maps an entity to its configured quota value(s). Note if no value is defined for a quota type
@@ -268,7 +270,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
 ) -> *const kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    unsafe { handle(self_) }.result.entities
+    unsafe { handle(self_, "self_") }.result.entities
 }
 
 /// Frees a result handle and the future borrowed from it; `NULL` is a no-op.
