@@ -23,8 +23,8 @@
 # Usage, from the repository root:
 #   .semaphore/pack-nupkg.sh <natives-dir> <out-dir> [<rid> ...]
 #       <natives-dir> holds <rid>/<library> for each RID and nothing else; the RIDs default to
-#       linux-x64 linux-arm64 osx-arm64. Each library must pass check-nupkg.py's native
-#       checks, platform floors included. The package sources (dotnet/src and what it builds with)
+#       linux-x64 linux-arm64 osx-arm64 win-x64 win-x86. Each library must pass check-nupkg.py's
+#       native checks, platform floors included. The package sources (dotnet/src and what it builds with)
 #       must be those of HEAD. Writes Confluent.Kafka.<version>.nupkg into <out-dir>, which must
 #       not exist or be empty, and prints its SHA-256.
 #   .semaphore/pack-nupkg.sh --dev <out-dir>
@@ -38,7 +38,7 @@
 
 set -eu
 
-ALL_RIDS="linux-x64 linux-arm64 osx-arm64"
+ALL_RIDS="linux-x64 linux-arm64 osx-arm64 win-x64 win-x86"
 PROJECT=dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj
 
 die() {
@@ -66,6 +66,7 @@ library_of() {
     case "$1" in
         linux-*) echo libconfluent_kafka.so ;;
         osx-*) echo libconfluent_kafka.dylib ;;
+        win-*) echo confluent_kafka.dll ;;
         *) die "$1 is not one of: $ALL_RIDS" ;;
     esac
 }

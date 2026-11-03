@@ -26,7 +26,8 @@
 #   check-nupkg.py native <rid> <file> [--dev]
 #       Checks that <file> is the native library of <rid>: its file name, its binary format and
 #       architecture, the system libraries it loads, and its platform floor (glibc 2.28 on Linux,
-#       macOS 11.0 on macOS).
+#       macOS 11.0 on macOS). On Windows there is no floor to read: it checks that the library loads
+#       no C runtime, which it links statically, and has ASLR and DEP.
 #   check-nupkg.py package <nupkg> --version <v> --rids "<rid> ..." [--commit <sha>] [--dev]
 #       Checks the package: its file name, the exact list of its entries and how they are stored,
 #       its nuspec, its assemblies, and each native library as `native` does.
@@ -37,7 +38,8 @@
 #
 # The checks read the files as NuGet and the dynamic loaders do, and refuse what those would read
 # differently: a zip entry name with a NUL, a nuspec element or attribute NuGet would act on that
-# is not expected here, an ELF version requirement or a Mach-O load command it cannot vouch for.
+# is not expected here, an ELF version requirement, a Mach-O load command or a PE import it cannot
+# vouch for.
 
 import argparse
 import os
@@ -74,6 +76,8 @@ NATIVE_FILES = {
     "linux-x64": "libconfluent_kafka.so",
     "linux-arm64": "libconfluent_kafka.so",
     "osx-arm64": "libconfluent_kafka.dylib",
+    "win-x64": "confluent_kafka.dll",
+    "win-x86": "confluent_kafka.dll",
 }
 
 GLIBC_FLOOR = (2, 28)
@@ -86,6 +90,13 @@ GLIBC_LIBRARIES = {"libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "l
 LIBGCC_FLOOR = (7, 0, 0)
 # The directories of the libraries a macOS native may load: the system's.
 MACOS_SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
+# The libraries a Windows native may load, all of them part of every supported Windows, plus its
+# api-ms-win-core-* API sets. The C runtime is not among them: the library links it statically
+# (rust/.cargo/config.toml), so an application needs no Visual C++ Redistributable.
+WINDOWS_LIBRARIES = {"kernel32.dll", "ntdll.dll", "ws2_32.dll", "bcrypt.dll", "bcryptprimitives.dll",
+                     "advapi32.dll", "userenv.dll", "secur32.dll", "crypt32.dll", "ncrypt.dll"}
+WINDOWS_API_SET = re.compile(r"api-ms-win-core-[a-z0-9-]+-l\d+-\d+-\d+\.dll")
+WINDOWS_CRT = re.compile(r"(vcruntime|msvcp|ucrtbase|api-ms-win-crt-).*\.dll")
 REPOSITORY_URL = "https://github.com/confluentinc/kafka-clients"
 # nuget.org refuses a package larger than 250 MB.
 MAX_PACKAGE_BYTES = 250 * 1000 * 1000
@@ -314,6 +325,72 @@ def check_macho(rid, name, data, dev):
     return problems
 
 
+def check_pe(rid, name, data):
+    """Reads the PE headers and import tables as the Windows loader does, from the data
+    directories, and checks the architecture, ASLR, DEP and the libraries the DLL loads."""
+    machine, magic = {"win-x64": (0x8664, 0x20B), "win-x86": (0x14C, 0x10B)}[rid]  # AMD64/PE32+, I386/PE32
+    (pe,) = struct.unpack_from("<I", data, 0x3C)
+    if data[pe:pe + 4] != b"PE\0\0":
+        return [f"{rid}: {name} has no PE signature"]
+    file_machine, nsections, _time, _symbols, _nsymbols, optsize, characteristics = struct.unpack_from("<HHIIIHH", data, pe + 4)
+    opt = pe + 24
+    (file_magic,) = struct.unpack_from("<H", data, opt)
+    problems = []
+    if file_machine != machine:
+        problems.append(f"{rid}: {name} is for PE machine {file_machine:#x}, not {machine:#x}")
+    if file_magic != magic:
+        problems.append(f"{rid}: {name} has the optional header magic {file_magic:#x}, not {magic:#x}")
+    if not characteristics & 0x2000:  # IMAGE_FILE_DLL
+        problems.append(f"{rid}: {name} is not a DLL")
+    if problems:
+        return problems
+    (dll_characteristics,) = struct.unpack_from("<H", data, opt + 70)
+    for flag, what in ((0x40, "ASLR (DYNAMIC_BASE)"), (0x100, "DEP (NX_COMPAT)")):
+        if not dll_characteristics & flag:
+            problems.append(f"{rid}: {name} does not have {what}")
+    count_at = opt + (108 if magic == 0x20B else 92)
+    (ndirectories,) = struct.unpack_from("<I", data, count_at)
+    directories = [struct.unpack_from("<II", data, count_at + 4 + 8 * i) for i in range(min(ndirectories, 16))]
+    sections = [struct.unpack_from("<IIII", data, opt + optsize + 40 * i + 8) for i in range(nsections)]
+
+    def file_offset(rva):
+        for vsize, vaddr, rawsize, rawptr in sections:
+            if vaddr <= rva < vaddr + max(vsize, rawsize):
+                if rva - vaddr >= rawsize:
+                    break
+                return rawptr + rva - vaddr
+        raise ValueError(f"RVA {rva:#x} is outside its sections")
+
+    def string(rva):
+        start = file_offset(rva)
+        return data[start:data.index(b"\0", start)].decode("ascii", "replace").lower()
+
+    imports = []
+    # The import directory (1), of 20-byte descriptors, and the delay-load import directory (13),
+    # of 32-byte ones, each ending with a zero descriptor; the name RVA is at 12 and 4.
+    for index, size, name_at in ((1, 20, 12), (13, 32, 4)):
+        if index >= len(directories) or directories[index][0] == 0:
+            continue
+        pos = file_offset(directories[index][0])
+        while True:
+            descriptor = data[pos:pos + size]
+            if len(descriptor) < size:
+                raise ValueError("an import table extends beyond the end of the file")
+            if descriptor == bytes(size):
+                break
+            imports.append(string(struct.unpack_from("<I", descriptor, name_at)[0]))
+            pos += size
+    if "kernel32.dll" not in imports:
+        problems.append(f"{rid}: {name} does not load kernel32.dll, so its imports were not read")
+    for library in imports:
+        if WINDOWS_CRT.fullmatch(library):
+            problems.append(f"{rid}: {name} loads {library}, a C runtime it must link statically "
+                            "(rust/.cargo/config.toml), or applications need the Visual C++ Redistributable")
+        elif library not in WINDOWS_LIBRARIES and not WINDOWS_API_SET.fullmatch(library):
+            problems.append(f"{rid}: {name} loads {library}, which is not a library of every supported Windows")
+    return problems
+
+
 def check_native(rid, name, data, dev):
     """Returns the problems of the native library `name` of `rid`, whose bytes are `data`."""
     if rid not in NATIVE_FILES:
@@ -333,11 +410,17 @@ def check_native(rid, name, data, dev):
             if e_machine != machine:
                 return [f"{rid}: {name} is for ELF machine {e_machine}, not {machine}"]
             return check_elf(rid, name, data, dev)
+        if rid.startswith("win-"):
+            if data[:2] != b"MZ":
+                return [f"{rid}: {name} is not a PE file"]
+            return check_pe(rid, name, data)
         if data[:4] != b"\xcf\xfa\xed\xfe":
             return [f"{rid}: {name} is not a thin 64-bit little-endian Mach-O file"]
         return check_macho(rid, name, data, dev)
     except struct.error as error:
         return [f"{rid}: {name} is truncated: {error}"]
+    except ValueError as error:
+        return [f"{rid}: the imports of {name} cannot be read: {error}"]
 
 
 def check_nuspec(text, version, commit):

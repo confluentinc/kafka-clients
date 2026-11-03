@@ -16,7 +16,7 @@
 #
 #
 # Tests the Confluent.Kafka NuGet package as a user receives it, the counterpart of
-# test-wheels.sh. The smoke project (dotnet/tools/PackageSmoke), a copy outside the repository,
+# test-wheels.sh, on Linux and macOS; test-nupkg.ps1 tests it on Windows. The smoke project (dotnet/tools/PackageSmoke), a copy outside the repository,
 # references the package by its exact version from that one feed (packageSourceMapping), with
 # an empty NuGet cache, so nothing but the package can be used. It is built on this machine and
 # run for net8.0 and net10.0: on macOS on the runner, on Linux on the runner and then in a

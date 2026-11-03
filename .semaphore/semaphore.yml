@@ -450,8 +450,8 @@ blocks:
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make test-integration-dotnet-native
 
   - name: "Verify language bindings (Windows amd64)"
-    # The .NET client on Windows, whose package is to carry a win-x64 and a
-    # win-x86 library: each job builds the library of its platform, then runs
+    # The .NET client on Windows, whose package carries a win-x64 and a win-x86
+    # library: each job builds the library of its platform, then runs
     # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
     # net10.0 in a process of that platform
     # (.semaphore/verify-dotnet-windows.ps1). The broker-backed tests and the
@@ -1339,22 +1339,27 @@ blocks:
   # under runtimes/<rid>/native/.
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (.NET): native library (<platform>)" builds the native
-  #      library for one RID (.semaphore/build-dotnet-native.sh), alongside CI,
-  #      the way the Python wheels' library is built: on Linux in the
-  #      manylinux_2_28 image, so that it needs glibc 2.28 at most; on macOS
-  #      for macOS 11.0. It records the library and its C ABI header.
-  #   2. "Release (.NET): pack" packs the three libraries with the managed
+  #      library for one RID, alongside CI: on Linux and macOS the way the
+  #      Python wheels' library is built (.semaphore/build-dotnet-native.sh),
+  #      in the manylinux_2_28 image on Linux, so that it needs glibc 2.28 at
+  #      most, and for macOS 11.0 on macOS; on Windows with the C runtime
+  #      linked statically (.semaphore/build-dotnet-native.ps1), for win-x64
+  #      and win-x86, the Windows platforms of confluent-kafka-dotnet's
+  #      librdkafka.redist. It records the library and its C ABI header.
+  #   2. "Release (.NET): pack" packs the five libraries with the managed
   #      assembly (.semaphore/pack-nupkg.sh), checks the package
   #      (check-nupkg.py) and records it.
   #   3. "Release (.NET): package verification (<platform>)" tests that
   #      package as users receive it, on a VM that built nothing
-  #      (.semaphore/test-nupkg.sh): a project outside the repository installs
-  #      it from a local feed and runs a smoke program on net8.0 and net10.0,
-  #      on Linux also in a container of each supported distribution; a
-  #      self-contained publish runs; and the binding's unit tests run against
-  #      the package. It records the SHA-256 of the tested package.
+  #      (.semaphore/test-nupkg.sh, .semaphore/test-nupkg.ps1 on Windows): a
+  #      project outside the repository installs it from a local feed and runs
+  #      a smoke program on net8.0 and net10.0, on Windows also on .NET
+  #      Framework, and on Linux also in a container of each supported
+  #      distribution; a self-contained publish runs; and the binding's unit
+  #      tests run against the package. It records the SHA-256 of the tested
+  #      package.
   #   4. "Release (.NET): packaging" depends on "Release: CI passed" and on
-  #      the three verification blocks, so it starts only when every CI block
+  #      the five verification blocks, so it starts only when every CI block
   #      and all of them have passed. It checks the tag, the version, the
   #      package id and that nuget.org does not have the version yet, and
   #      records the tested package
@@ -1365,9 +1370,11 @@ blocks:
   # recorded release is downloaded from the tag build's artifacts and uploaded
   # to nuget.org by hand.
   #
-  # The package has no Windows library yet (dotnet/README.md): CI builds and
-  # tests one for win-x64 and win-x86 ("Verify language bindings (Windows
-  # amd64)"), and these blocks do not build them yet.
+  # The Windows blocks run PowerShell, so their prologue and epilogue are
+  # job-start.ps1 and ci-result.ps1, as in "Verify language bindings
+  # (Windows amd64)". The Semaphore agent runs each command in a new
+  # PowerShell process, so a command passes values to the next one in
+  # environment variables only.
   #
   # To resume an interrupted release, rerun the failed blocks of the tag build.
   - name: "Release (.NET): native library (Linux amd64)"
@@ -1439,11 +1446,69 @@ blocks:
             - artifact push workflow "/tmp/native/${NUGET_RID}/libconfluent_kafka.dylib" --destination "nuget/native/${NUGET_RID}/libconfluent_kafka.dylib" --force
             - artifact push workflow "/tmp/native/${NUGET_RID}/confluent_kafka_bindings.h" --destination "nuget/include/${NUGET_RID}/confluent_kafka_bindings.h" --force
 
+  - name: "Release (.NET): native library (Windows amd64)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: NUGET_RID
+          value: win-x64
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "Build the native library (Windows amd64)"
+          commands:
+            - .\.semaphore\build-dotnet-native.ps1 -Platform x64 -OutDir "$env:TEMP\native"
+            - artifact push workflow "$env:TEMP\native\$env:NUGET_RID\confluent_kafka.dll" --destination "nuget/native/$env:NUGET_RID/confluent_kafka.dll" --force
+            - artifact push workflow "$env:TEMP\native\$env:NUGET_RID\confluent_kafka_bindings.h" --destination "nuget/include/$env:NUGET_RID/confluent_kafka_bindings.h" --force
+
+  - name: "Release (.NET): native library (Windows x86)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: NUGET_RID
+          value: win-x86
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "Build the native library (Windows x86)"
+          commands:
+            - .\.semaphore\build-dotnet-native.ps1 -Platform x86 -OutDir "$env:TEMP\native"
+            - artifact push workflow "$env:TEMP\native\$env:NUGET_RID\confluent_kafka.dll" --destination "nuget/native/$env:NUGET_RID/confluent_kafka.dll" --force
+            - artifact push workflow "$env:TEMP\native\$env:NUGET_RID\confluent_kafka_bindings.h" --destination "nuget/include/$env:NUGET_RID/confluent_kafka_bindings.h" --force
+
   - name: "Release (.NET): pack"
     dependencies:
       - "Release (.NET): native library (Linux amd64)"
       - "Release (.NET): native library (Linux arm64)"
       - "Release (.NET): native library (macOS arm64)"
+      - "Release (.NET): native library (Windows amd64)"
+      - "Release (.NET): native library (Windows x86)"
     execution_time_limit:
       minutes: 20
     task:
@@ -1458,7 +1523,7 @@ blocks:
             # nothing else.
             - |
               for native in linux-x64/libconfluent_kafka.so linux-arm64/libconfluent_kafka.so \
-                  osx-arm64/libconfluent_kafka.dylib; do
+                  osx-arm64/libconfluent_kafka.dylib win-x64/confluent_kafka.dll win-x86/confluent_kafka.dll; do
                 mkdir -p "/tmp/natives/${native%/*}" \
                   && artifact pull workflow "nuget/native/${native}" --destination "/tmp/natives/${native}" \
                   || exit 1
@@ -1567,6 +1632,86 @@ blocks:
             - sh .semaphore/test-nupkg.sh /tmp/package /tmp/confluent_kafka_bindings.h /tmp/tested.sha256
             - artifact push workflow /tmp/tested.sha256 --destination "nuget/tested/${NUGET_PLATFORM}" --force
 
+  - name: "Release (.NET): package verification (Windows amd64)"
+    dependencies: ["Release (.NET): pack"]
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: NUGET_PLATFORM
+          value: windows-amd64
+        - name: NUGET_RID
+          value: win-x64
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "Test the package (Windows amd64)"
+          commands:
+            # The version is the one the pack block checked; test-nupkg.ps1 takes a directory
+            # that holds the package and nothing else.
+            - $env:NUGET_VERSION = (Select-Xml -Path dotnet\Directory.Build.props -XPath '//Version').Node.InnerText.Trim()
+            - New-Item -ItemType Directory -Force -Path "$env:TEMP\package" | Out-Null
+            - artifact pull workflow "nuget/built/$env:NUGET_PACKAGE.$env:NUGET_VERSION.nupkg" --destination "$env:TEMP\package\$env:NUGET_PACKAGE.$env:NUGET_VERSION.nupkg"
+            # The C ABI header of the library this platform loads, for the unit tests' ABI
+            # conformance test.
+            - artifact pull workflow "nuget/include/$env:NUGET_RID/confluent_kafka_bindings.h" --destination "$env:TEMP\confluent_kafka_bindings.h"
+            # Some unit tests read the Java sources in the kafka submodule.
+            - git config core.longpaths true
+            - git submodule update --init --depth=1 kafka
+            - .\.semaphore\test-nupkg.ps1 -Platform x64 -PackageDir "$env:TEMP\package" -Header "$env:TEMP\confluent_kafka_bindings.h" -ChecksumFile "$env:TEMP\tested.sha256"
+            - artifact push workflow "$env:TEMP\tested.sha256" --destination "nuget/tested/$env:NUGET_PLATFORM" --force
+
+  - name: "Release (.NET): package verification (Windows x86)"
+    dependencies: ["Release (.NET): pack"]
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-windows
+      env_vars:
+        - name: NUGET_PLATFORM
+          value: windows-x86
+        - name: NUGET_RID
+          value: win-x86
+      prologue:
+        commands:
+          - .\.semaphore\job-start.ps1
+      epilogue:
+        on_pass:
+          commands:
+            - .\.semaphore\ci-result.ps1 passed
+        on_fail:
+          commands:
+            - .\.semaphore\ci-result.ps1 failed
+      jobs:
+        - name: "Test the package (Windows x86)"
+          commands:
+            # The version is the one the pack block checked; test-nupkg.ps1 takes a directory
+            # that holds the package and nothing else.
+            - $env:NUGET_VERSION = (Select-Xml -Path dotnet\Directory.Build.props -XPath '//Version').Node.InnerText.Trim()
+            - New-Item -ItemType Directory -Force -Path "$env:TEMP\package" | Out-Null
+            - artifact pull workflow "nuget/built/$env:NUGET_PACKAGE.$env:NUGET_VERSION.nupkg" --destination "$env:TEMP\package\$env:NUGET_PACKAGE.$env:NUGET_VERSION.nupkg"
+            # The C ABI header of the library this platform loads, for the unit tests' ABI
+            # conformance test.
+            - artifact pull workflow "nuget/include/$env:NUGET_RID/confluent_kafka_bindings.h" --destination "$env:TEMP\confluent_kafka_bindings.h"
+            # Some unit tests read the Java sources in the kafka submodule.
+            - git config core.longpaths true
+            - git submodule update --init --depth=1 kafka
+            - .\.semaphore\test-nupkg.ps1 -Platform x86 -PackageDir "$env:TEMP\package" -Header "$env:TEMP\confluent_kafka_bindings.h" -ChecksumFile "$env:TEMP\tested.sha256"
+            - artifact push workflow "$env:TEMP\tested.sha256" --destination "nuget/tested/$env:NUGET_PLATFORM" --force
+
   - name: "Release (.NET): packaging"
     # Starts only when the package was tested on every platform, and every CI
     # block has passed ("Release: CI passed"). The checks this block makes are
@@ -1576,6 +1721,8 @@ blocks:
       - "Release (.NET): package verification (Linux amd64)"
       - "Release (.NET): package verification (Linux arm64)"
       - "Release (.NET): package verification (macOS arm64)"
+      - "Release (.NET): package verification (Windows amd64)"
+      - "Release (.NET): package verification (Windows x86)"
     run:
       when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
@@ -1585,7 +1732,7 @@ blocks:
         # The platforms of the verification blocks above, whose checksums are
         # recorded under nuget/tested/<platform>.
         - name: NUGET_PLATFORMS
-          value: linux-amd64 linux-arm64 macos-arm64
+          value: linux-amd64 linux-arm64 macos-arm64 windows-amd64 windows-x86
       prologue:
         commands:
           - . .semaphore/job-start.sh
