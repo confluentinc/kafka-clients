@@ -54,9 +54,8 @@ name: build-test-release
 #   8. "Audit Rust dependencies (Linux amd64)" -- checks rust/Cargo.lock
 #      against the RustSec advisory database; a vulnerable dependency fails.
 #   9. The "Release (Rust):", "Release (Python):" and "Release (.NET):"
-#      blocks, which run only on a release tag of their package, except the
-#      .NET blocks that build and test the package, which run on every build
-#      (see the comments above them).
+#      blocks, which run only on a release tag of their package (see the
+#      comments above them).
 #
 # Each verify block sets execution_time_limit to about twice its typical job
 # duration, so a hung test fails the job early instead of running until the
@@ -133,10 +132,10 @@ name: build-test-release
 #      workflow's artifacts and upload it to nuget.org by hand. Before the
 #      upload, compare its SHA-256 with the one the "Package the tested
 #      package" job printed in its log, which no later job can change.
-# A release tag pushed by other means follows the same path from step 3. On
-# every other build the release blocks are skipped, except the .NET blocks that
-# build and test the package, and the Python promotions publish nothing, so the
-# crate is the only package published without a manual step.
+# A release tag pushed by other means follows the same path from step 3. The
+# release blocks are skipped on every other build, and the Python promotions
+# publish nothing there, so the crate is the only package published without a
+# manual step.
 #
 # Every job records its result and the commit it tested as
 # `ci-result/<job name>` in the workflow's artifacts (the global epilogue
@@ -580,11 +579,10 @@ blocks:
     # of every CI job before it tags a commit. The release blocks that need CI
     # depend on it: "Release (Rust): pre-publish package check", "Release
     # (Python): packaging" and "Release (.NET): packaging". A new CI block must
-    # be added to this list, except the .NET package blocks, which "Release
-    # (.NET): packaging" waits for itself (see the .NET release blocks' header).
-    # Semaphore treats a skipped block as passed, so this block runs on every
-    # tag build, which covers every block that depends on it. It is skipped on
-    # branch builds, so it records no CI result there.
+    # be added to this list. Semaphore treats a skipped block as passed, so
+    # this block runs on every tag build, which covers every block that
+    # depends on it. It is skipped on branch builds, so it records no CI
+    # result there.
     dependencies:
       # In this order, Semaphore draws the gate, and the Rust release row after it, near the
       # top of the CI column: it places the gate level with the middle block of the list.
@@ -1322,16 +1320,11 @@ blocks:
           commands:
             - bash .semaphore/publish-wheels.sh package
 
-  # .NET release blocks. The native library, pack and package verification
-  # blocks (1 to 3 below) run on every build, as the CI blocks do, so that every
-  # commit builds and tests the package; their jobs are in REQUIRED_CI_JOBS of
-  # create-release-tag.yml. They are left out of "Release: CI passed", because
-  # only "Release (.NET): packaging" needs them, and it waits for them itself.
-  # The packaging block runs only on the build of a .NET release tag,
+  # .NET release blocks. They run only on the build of a .NET release tag,
   # dotnet/v<version> where <version> is <major>.<minor>.<patch> with an
   # optional -alpha.N, -beta.N, -dev.N or -rc.N suffix (NuGet's SemVer 2.0),
-  # and is skipped on every other build. The pattern must stay identical in
-  # that block and in the scripts that check it: release-nupkg.sh
+  # and are skipped on every other build. The pattern must stay identical in
+  # all of the blocks that use it, and in the scripts that check it: release-nupkg.sh
   # (release_version) and create-release-tag.yml for the tag, and, for the
   # version without its dotnet/v prefix, check-nupkg.py (VERSION_PATTERN) and
   # test-nupkg.sh. The version is <Version> in dotnet/Directory.Build.props.
@@ -1381,6 +1374,8 @@ blocks:
   # To resume an interrupted release, rerun the failed blocks of the tag build.
   - name: "Release (.NET): native library (Linux amd64)"
     dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1402,6 +1397,8 @@ blocks:
 
   - name: "Release (.NET): native library (Linux arm64)"
     dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1423,6 +1420,8 @@ blocks:
 
   - name: "Release (.NET): native library (macOS arm64)"
     dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1450,6 +1449,8 @@ blocks:
 
   - name: "Release (.NET): native library (Windows amd64)"
     dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1478,6 +1479,8 @@ blocks:
 
   - name: "Release (.NET): native library (Windows x86)"
     dependencies: []
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1511,6 +1514,8 @@ blocks:
       - "Release (.NET): native library (macOS arm64)"
       - "Release (.NET): native library (Windows amd64)"
       - "Release (.NET): native library (Windows x86)"
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1530,16 +1535,17 @@ blocks:
                   && artifact pull workflow "nuget/native/${native}" --destination "/tmp/natives/${native}" \
                   || exit 1
               done
-            # The version packed is <Version> in dotnet/Directory.Build.props. On a .NET release
-            # tag build it must be the tag's; the packaging block checks it again before
-            # anything is released.
+            # The version packed is <Version> in dotnet/Directory.Build.props, which must be the
+            # tag's; the packaging block checks it again before anything is released.
             - NUGET_VERSION=$(python3 .semaphore/check-nupkg.py version) && export NUGET_VERSION
-            - case "${SEMAPHORE_GIT_TAG_NAME:-}" in dotnet/v*) test "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" = "${NUGET_VERSION}" ;; esac
+            - test "${SEMAPHORE_GIT_TAG_NAME#dotnet/v}" = "${NUGET_VERSION}"
             - sh .semaphore/pack-nupkg.sh /tmp/natives /tmp/package
             - artifact push workflow "/tmp/package/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --destination "nuget/built/${NUGET_PACKAGE}.${NUGET_VERSION}.nupkg" --force
 
   - name: "Release (.NET): package verification (Linux amd64)"
     dependencies: ["Release (.NET): pack"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1572,6 +1578,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Linux arm64)"
     dependencies: ["Release (.NET): pack"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1604,6 +1612,8 @@ blocks:
 
   - name: "Release (.NET): package verification (macOS arm64)"
     dependencies: ["Release (.NET): pack"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1636,6 +1646,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Windows amd64)"
     dependencies: ["Release (.NET): pack"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1676,6 +1688,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Windows x86)"
     dependencies: ["Release (.NET): pack"]
+    run:
+      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
