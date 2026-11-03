@@ -17,8 +17,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { KafkaError } = require('confluent-kafka-javascript-rust/common');
-const { KafkaProducer } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
 
 test('an invalid config is a KafkaError with the core message', () => {
   assert.throws(() => new KafkaProducer({ 'bootstrap.servers': 'localhost:9092', acks: 'bogus' }), (e) => {

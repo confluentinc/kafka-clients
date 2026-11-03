@@ -17,7 +17,7 @@
 // through package.json's `exports` (the package's own name). Every
 // `@ts-expect-error` line must be a type error.
 
-import { common, producer } from 'confluent-kafka-javascript-rust';
+import { common, producer } from '@confluentinc/kafka-javascript';
 import {
   type Callback,
   type CloseOptions,
@@ -28,8 +28,8 @@ import {
   ProducerRecord,
   type ProducerRecordOptions,
   RecordMetadata,
-} from 'confluent-kafka-javascript-rust/producer';
-import { KafkaError, KafkaFuture } from 'confluent-kafka-javascript-rust/common';
+} from '@confluentinc/kafka-javascript/producer';
+import { KafkaError, KafkaFuture } from '@confluentinc/kafka-javascript/common';
 
 // The root exports the namespaces, the same classes as the entry points.
 const SameProducer: typeof KafkaProducer = producer.KafkaProducer;
@@ -118,4 +118,4 @@ void badCallback;
 
 // The private files are not entry points.
 // @ts-expect-error lib/_config.js is not exported
-import('confluent-kafka-javascript-rust/lib/_config');
+import('@confluentinc/kafka-javascript/lib/_config');

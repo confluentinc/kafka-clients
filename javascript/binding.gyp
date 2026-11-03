@@ -24,7 +24,7 @@
   },
   "targets": [
     {
-      "target_name": "confluent_kafka_js",
+      "target_name": "confluent-kafka-javascript",
       "sources": [
         "src/addon.c",
         "src/callback_queue.c",

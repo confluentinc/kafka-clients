@@ -64,8 +64,8 @@ test('the declarations type-check under "module": "commonjs" (node10 resolution,
   // the package linked in and a copy of usage.ts.
   const dir = path.join(ROOT, 'build', 'typing-commonjs');
   fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(path.join(dir, 'node_modules'), { recursive: true });
-  fs.symlinkSync(ROOT, path.join(dir, 'node_modules', 'confluent-kafka-javascript-rust'), 'junction');
+  fs.mkdirSync(path.join(dir, 'node_modules', '@confluentinc'), { recursive: true });
+  fs.symlinkSync(ROOT, path.join(dir, 'node_modules', '@confluentinc', 'kafka-javascript'), 'junction');
   fs.copyFileSync(path.join(ROOT, 'test', 'typing', 'usage.ts'), path.join(dir, 'usage.ts'));
   const config = writeConfig(dir, {
     compilerOptions: {

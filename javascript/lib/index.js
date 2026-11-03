@@ -15,9 +15,9 @@
 'use strict';
 
 // The package root: the module namespaces, Java's packages
-// (`require('confluent-kafka-javascript-rust').producer` is
+// (`require('@confluentinc/kafka-javascript').producer` is
 // `org.apache.kafka.clients.producer`, `.common` is `org.apache.kafka.common`).
-// Each is also its own entry point (`require('confluent-kafka-javascript-rust/producer')`).
+// Each is also its own entry point (`require('@confluentinc/kafka-javascript/producer')`).
 
 const producer = require('./producer');
 const common = require('./common');

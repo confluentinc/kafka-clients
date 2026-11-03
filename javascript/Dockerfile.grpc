@@ -28,7 +28,7 @@
 # which bookworm's glibc 2.36 lacks.
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build confluent_kafka_js.node against the prebuilt Rust shared lib
+# Stage 1: Build confluent-kafka-javascript.node against the prebuilt Rust shared lib
 # and install the gRPC packages.
 # ---------------------------------------------------------------------------
 FROM node:22-trixie AS builder
@@ -79,7 +79,7 @@ WORKDIR /app
 # it there, since the addon's rpath names the builder's directory.
 COPY --from=builder /workspace/rust/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 # lib/_native.js loads the addon from ../build/Release relative to lib/.
-COPY --from=builder /workspace/javascript/build/Release/confluent_kafka_js.node /app/javascript/build/Release/confluent_kafka_js.node
+COPY --from=builder /workspace/javascript/build/Release/confluent-kafka-javascript.node /app/javascript/build/Release/confluent-kafka-javascript.node
 COPY --from=builder /workspace/javascript/lib /app/javascript/lib
 COPY --from=builder /workspace/javascript/grpc_server.js /workspace/javascript/grpc_translate.js /app/javascript/
 # Beside the server, so `require('@grpc/grpc-js')` resolves without NODE_PATH.

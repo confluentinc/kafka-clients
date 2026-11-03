@@ -1,14 +1,19 @@
 # Changelog
 
-All notable changes to the Node.js client (`confluent-kafka-javascript-rust`,
-a working name) are documented in this file.
+All notable changes to the Node.js client (`@confluentinc/kafka-javascript`)
+are documented in this file.
 
 Before GA the public API is not stable, and an interface may change even in a
 minor release.
 
-## [Unreleased]
+## [4.4.0-beta.1] - Unreleased
 
-Not published: the package is `private`.
+Not published: the package is `private`. It takes the npm name of the
+librdkafka-based client, `@confluentinc/kafka-javascript`, and is told apart
+from it by version, as the Rust-based Python client reuses PyPI's
+`confluent-kafka` at `4.4.0b1`: `4.4.0-beta.1` is npm's form of that version
+(the existing package's releases are 0.x and 1.x). Publishing under the shared
+name needs the agreement of the team that owns it.
 
 ### Producer
 

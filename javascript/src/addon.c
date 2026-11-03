@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The entry point of the Node-API addon `confluent_kafka_js`: the instance
+// The entry point of the Node-API addon `confluent-kafka-javascript`: the instance
 // data, the helpers every client uses, and the registration of every native
 // function. The public JS surface lives in lib/; the addon exports only what
 // lib/ calls, all of it registered here.
