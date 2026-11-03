@@ -7684,6 +7684,21 @@ static PyObject* fast_rows(PyObject* seq, const char* what) {
     return PySequence_Fast(seq, what);
 }
 
+// Java's null collection or string (decision 8): `ADMIN_NONE_AS_EMPTY(py)`
+// reads a None `py` as an empty sequence while the rows are built, and
+// `ADMIN_NULLABLE(py, container)` hands the entry point NULL in place of the
+// container built from it, which the C API reports as its own
+// `LocalNullPointerError("<param> must not be null")`.
+static PyObject* admin_empty_rows(void) {
+    static PyObject* empty = NULL;
+    if (empty == NULL) empty = PyTuple_New(0);   // kept for the module's lifetime
+    return empty;
+}
+#define ADMIN_NONE_AS_EMPTY(py) \
+    const int py##_none = (py) == Py_None; \
+    if (py##_none && ((py) = admin_empty_rows()) == NULL) return NULL
+#define ADMIN_NULLABLE(py, container) (py##_none ? NULL : (container))
+
 // ---- data-class converters -------------------------------------------------------
 //
 // Every value here is BORROWED from the future that delivered it (or from a
@@ -9188,12 +9203,25 @@ static int admin_option_i32(PyObject* value, int32_t* out) {
     }
 #define ADMIN_SETTER(Rpc, field) {#field, Rpc##Options__##field}
 
+// An RPC's `options` given as None, Java's null: the entry point is handed
+// NULL (`admin_opts`), which the C API reports as its own
+// `LocalNullPointerError("options must not be null")`. A non-NULL marker, so
+// that NULL keeps meaning "failed, a Python exception is set".
+static char admin_no_options_marker;
+#define ADMIN_NO_OPTIONS ((void*)&admin_no_options_marker)
+static inline void* admin_opts(void* options) { return options == ADMIN_NO_OPTIONS ? NULL : options; }
+
 // Applies the `(setter, value)` pairs to the OWNED `options` of `desc` (from
 // `<Rpc>Options_new` or a constructor of its own, `ListOffsetsOptions`):
 // `options`, or NULL with a Python exception set (a core error raised through
 // ffi_raise) and `options` destroyed.
 static void* admin_options_apply(const AdminOptionsDesc* desc, void* options, PyObject* pairs) {
     kafka_common_Error_t* err = NULL;
+    if (pairs == Py_None) {
+        desc->destroy(options, &err);
+        ffi_unraisable(err);
+        return ADMIN_NO_OPTIONS;
+    }
     PyObject* fast = PySequence_Fast(pairs, "options must be a sequence of (setter, value)");
     int failed = fast == NULL;
     for (Py_ssize_t i = 0; !failed && i < PySequence_Fast_GET_SIZE(fast); i++) {
@@ -9224,6 +9252,7 @@ static void* admin_options_apply(const AdminOptionsDesc* desc, void* options, Py
 // or NULL with a Python exception set.
 static void* admin_options_build(const AdminOptionsDesc* desc, PyObject* pairs) {
     kafka_common_Error_t* err = NULL;
+    if (pairs == Py_None) return ADMIN_NO_OPTIONS;
     void* options = desc->create(&err);
     if (ffi_raise(err)) return NULL;
     if (options == NULL) {
@@ -9234,7 +9263,7 @@ static void* admin_options_build(const AdminOptionsDesc* desc, PyObject* pairs) 
 }
 
 static void admin_options_free(const AdminOptionsDesc* desc, void* options) {
-    if (options == NULL) return;
+    if (options == NULL || options == ADMIN_NO_OPTIONS) return;
     kafka_common_Error_t* err = NULL;
     desc->destroy(options, &err);
     ffi_unraisable(err);
@@ -9287,6 +9316,7 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "new_topics must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -9349,7 +9379,7 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_CreateTopicsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_create_topics_with_options_err(
-            a->admin, topics.list, (kafka_admin_CreateTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, topics.list), (kafka_admin_CreateTopicsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&topics);
         Py_DECREF(fast);
         return admin_rpc_return(&CreateTopicsOptions_desc, o, err, r, &CreateTopicsResult_desc);
@@ -9416,7 +9446,7 @@ static PyObject* py_Admin_delete_topics(PyObject* self, PyObject* args) {
         o = admin_options_build(&DeleteTopicsOptions_desc, opts);
         if (o == NULL) { str_list_free(&l); return NULL; }
         err = (r = kafka_admin_Admin_delete_topics_with_string_slice_options_err(
-            a->admin, l.list, (kafka_admin_DeleteTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, l.list, (kafka_admin_DeleteTopicsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         str_list_free(&l);
     } else {
         kafka_common_TopicCollection_t* topics;
@@ -9430,7 +9460,7 @@ static PyObject* py_Admin_delete_topics(PyObject* self, PyObject* args) {
             return NULL;
         }
         err = (r = kafka_admin_Admin_delete_topics_with_topic_collection_options_err(
-            a->admin, topics, (kafka_admin_DeleteTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, topics, (kafka_admin_DeleteTopicsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
     }
     return admin_rpc_return(&DeleteTopicsOptions_desc, o, err, r, &DeleteTopicsResult_desc);
@@ -9458,7 +9488,7 @@ static PyObject* py_Admin_list_topics(PyObject* self, PyObject* args) {
     if (o == NULL) return NULL;
     kafka_admin_ListTopicsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_list_topics_with_options_err(
-        a->admin, (kafka_admin_ListTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_ListTopicsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&ListTopicsOptions_desc, o, err, r, &ListTopicsResult_desc);
 }
 
@@ -9496,7 +9526,7 @@ static PyObject* py_Admin_describe_topics(PyObject* self, PyObject* args) {
         o = admin_options_build(&DescribeTopicsOptions_desc, opts);
         if (o == NULL) { str_list_free(&l); return NULL; }
         err = (r = kafka_admin_Admin_describe_topics_with_topic_names_options_err(
-            a->admin, l.list, (kafka_admin_DescribeTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, l.list, (kafka_admin_DescribeTopicsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         str_list_free(&l);
     } else {
         kafka_common_TopicCollection_t* topics;
@@ -9510,7 +9540,7 @@ static PyObject* py_Admin_describe_topics(PyObject* self, PyObject* args) {
             return NULL;
         }
         err = (r = kafka_admin_Admin_describe_topics_with_topics_options_err(
-            a->admin, topics, (kafka_admin_DescribeTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, topics, (kafka_admin_DescribeTopicsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
     }
     return admin_rpc_return(&DescribeTopicsOptions_desc, o, err, r, &DescribeTopicsResult_desc);
@@ -9537,6 +9567,7 @@ static PyObject* py_Admin_create_partitions(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "new_partitions must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -9572,7 +9603,7 @@ static PyObject* py_Admin_create_partitions(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_CreatePartitionsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_create_partitions_with_options_err(
-            a->admin, m.map, (kafka_admin_CreatePartitionsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_CreatePartitionsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
         return admin_rpc_return(&CreatePartitionsOptions_desc, o, err, r, &CreatePartitionsResult_desc);
@@ -9601,6 +9632,7 @@ static PyObject* py_Admin_delete_records(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "records_to_delete must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -9624,7 +9656,7 @@ static PyObject* py_Admin_delete_records(PyObject* self, PyObject* args) {
     if (o == NULL) { obj_map_free(&m); return NULL; }
     kafka_admin_DeleteRecordsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_delete_records_with_options_err(
-        a->admin, m.map, (kafka_admin_DeleteRecordsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_DeleteRecordsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     obj_map_free(&m);
     return admin_rpc_return(&DeleteRecordsOptions_desc, o, err, r, &DeleteRecordsResult_desc);
 }
@@ -9659,7 +9691,7 @@ static PyObject* py_Admin_describe_cluster(PyObject* self, PyObject* args) {
     if (o == NULL) return NULL;
     kafka_admin_DescribeClusterResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_cluster_with_options_err(
-        a->admin, (kafka_admin_DescribeClusterOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_DescribeClusterOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&DescribeClusterOptions_desc, o, err, r, &DescribeClusterResult_desc);
 }
 
@@ -9716,7 +9748,7 @@ static PyObject* py_Admin_describe_configs(PyObject* self, PyObject* args) {
     if (o == NULL) { obj_list_free(&resources); return NULL; }
     kafka_admin_DescribeConfigsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_configs_with_options_err(
-        a->admin, resources.list, (kafka_admin_DescribeConfigsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, resources.list, (kafka_admin_DescribeConfigsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     obj_list_free(&resources);
     return admin_rpc_return(&DescribeConfigsOptions_desc, o, err, r, &DescribeConfigsResult_desc);
 }
@@ -9842,6 +9874,7 @@ static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* ar
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "configs must be a sequence of rows");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -9895,7 +9928,7 @@ static PyObject* py_Admin_incremental_alter_configs(PyObject* self, PyObject* ar
         if (o == NULL) goto fail;
         kafka_admin_AlterConfigsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_incremental_alter_configs_with_options_err(
-            a->admin, m.map, (kafka_admin_AlterConfigsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_AlterConfigsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
         return admin_rpc_return(&AlterConfigsOptions_desc, o, err, r, &AlterConfigsResult_desc);
@@ -9924,6 +9957,7 @@ static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) 
     unsigned long long h; PyObject* types; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &types, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(types);
     PyObject* fast = fast_rows(types, "resource_types must be a sequence of int");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -9949,7 +9983,7 @@ static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) 
     if (o == NULL) { ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); return NULL; }
     kafka_admin_ListConfigResourcesResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_list_config_resources_with_options_err(
-        a->admin, list, (kafka_admin_ListConfigResourcesOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(types, list), (kafka_admin_ListConfigResourcesOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err)));
     return admin_rpc_return(&ListConfigResourcesOptions_desc, o, err, r, &ListConfigResourcesResult_desc);
 }
@@ -9973,13 +10007,14 @@ static PyObject* py_Admin_describe_log_dirs(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* brokers; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &brokers, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(brokers);
     i32_list_t ids;
     if (i32_list_build(brokers, &ids, "brokers must be a sequence of int") < 0) return NULL;
     void* o = admin_options_build(&DescribeLogDirsOptions_desc, opts);
     if (o == NULL) { i32_list_free(&ids); return NULL; }
     kafka_admin_DescribeLogDirsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_log_dirs_with_options_err(
-        a->admin, ids.list, (kafka_admin_DescribeLogDirsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(brokers, ids.list), (kafka_admin_DescribeLogDirsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     i32_list_free(&ids);
     return admin_rpc_return(&DescribeLogDirsOptions_desc, o, err, r, &DescribeLogDirsResult_desc);
 }
@@ -10001,6 +10036,7 @@ static PyObject* py_Admin_alter_replica_log_dirs(PyObject* self, PyObject* args)
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     tpr_list_t replicas; PyObject* fast = NULL; const char** dirs = NULL;
     if (tpr_list_build(spec, &replicas, 1, &fast, &dirs) < 0) return NULL;
     kafka_Map_t* m = NULL;   // borrowed TPReplica* -> borrowed char* (owned by fast)
@@ -10014,7 +10050,7 @@ static PyObject* py_Admin_alter_replica_log_dirs(PyObject* self, PyObject* args)
         o = admin_options_build(&AlterReplicaLogDirsOptions_desc, opts);
         if (o != NULL) {
             err = (r = kafka_admin_Admin_alter_replica_log_dirs_with_options_err(
-                a->admin, m, (kafka_admin_AlterReplicaLogDirsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+                a->admin, ADMIN_NULLABLE(spec, m), (kafka_admin_AlterReplicaLogDirsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         }
     }
     if (m) ffi_unraisable((kafka_Map_destroy_err(m, &ffi_err), ffi_take(&ffi_err)));
@@ -10044,13 +10080,14 @@ static PyObject* py_Admin_describe_replica_log_dirs(PyObject* self, PyObject* ar
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     tpr_list_t replicas;
     if (tpr_list_build(spec, &replicas, 0, NULL, NULL) < 0) return NULL;
     void* o = admin_options_build(&DescribeReplicaLogDirsOptions_desc, opts);
     if (o == NULL) { tpr_list_free(&replicas); return NULL; }
     kafka_admin_DescribeReplicaLogDirsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_replica_log_dirs_with_options_err(
-        a->admin, replicas.list, (kafka_admin_DescribeReplicaLogDirsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(spec, replicas.list), (kafka_admin_DescribeReplicaLogDirsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     tpr_list_free(&replicas);
     return admin_rpc_return(&DescribeReplicaLogDirsOptions_desc, o, err, r, &DescribeReplicaLogDirsResult_desc);
 }
@@ -10072,11 +10109,15 @@ static const AdminResultDesc ElectLeadersResult_desc = {
 
 static PyObject* py_Admin_elect_leaders(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; int election_type; PyObject* spec; PyObject* opts;
-    if (!PyArg_ParseTuple(args, "KiOO", &h, &election_type, &spec, &opts)) return NULL;
+    unsigned long long h; PyObject* election_type; PyObject* spec; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KOOO", &h, &election_type, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     const kafka_common_ElectionType_t* et = NULL;
-    if (ffi_raise((et = kafka_common_ElectionType_value_of((int8_t)election_type, &ffi_err), ffi_take(&ffi_err)))) return NULL;
+    if (election_type != Py_None) {   // None is Java's null election type: the C API reports it
+        long code = PyLong_AsLong(election_type);
+        if (code == -1 && PyErr_Occurred()) return NULL;
+        if (ffi_raise((et = kafka_common_ElectionType_value_of((int8_t)code, &ffi_err), ffi_take(&ffi_err)))) return NULL;
+    }
     tp_list_t tps;
     memset(&tps, 0, sizeof(tps));
     if (spec != Py_None && tp_list_build(spec, &tps) < 0) return NULL;
@@ -10084,7 +10125,7 @@ static PyObject* py_Admin_elect_leaders(PyObject* self, PyObject* args) {
     if (o == NULL) { tp_list_free(&tps); return NULL; }
     kafka_admin_ElectLeadersResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_elect_leaders_with_options_err(
-        a->admin, et, spec == Py_None ? NULL : tps.list, (kafka_admin_ElectLeadersOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, et, spec == Py_None ? NULL : tps.list, (kafka_admin_ElectLeadersOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     tp_list_free(&tps);
     return admin_rpc_return(&ElectLeadersOptions_desc, o, err, r, &ElectLeadersResult_desc);
 }
@@ -10111,6 +10152,7 @@ static PyObject* py_Admin_alter_partition_reassignments(PyObject* self, PyObject
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "reassignments must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -10140,7 +10182,7 @@ static PyObject* py_Admin_alter_partition_reassignments(PyObject* self, PyObject
         if (o == NULL) goto fail;
         kafka_admin_AlterPartitionReassignmentsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_alter_partition_reassignments_with_options_err(
-            a->admin, m.map, (kafka_admin_AlterPartitionReassignmentsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_AlterPartitionReassignmentsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
         return admin_rpc_return(&AlterPartitionReassignmentsOptions_desc, o, err, r,
@@ -10181,10 +10223,10 @@ static PyObject* py_Admin_list_partition_reassignments(PyObject* self, PyObject*
     kafka_common_Error_t* err;
     if (spec == Py_None) {
         err = (r = kafka_admin_Admin_list_partition_reassignments_with_options_err(
-            a->admin, (kafka_admin_ListPartitionReassignmentsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, (kafka_admin_ListPartitionReassignmentsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     } else {
         err = (r = kafka_admin_Admin_list_partition_reassignments_with_partitions_options_err(
-            a->admin, tps.list, (kafka_admin_ListPartitionReassignmentsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, tps.list, (kafka_admin_ListPartitionReassignmentsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     }
     tp_list_free(&tps);
     return admin_rpc_return(&ListPartitionReassignmentsOptions_desc, o, err, r,
@@ -10227,6 +10269,7 @@ static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; int isolation_level; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOiO", &h, &spec, &isolation_level, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     const kafka_common_IsolationLevel_t* il = NULL;
     if (ffi_raise((il = kafka_common_IsolationLevel_for_id((int8_t)isolation_level, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     PyObject* fast = fast_rows(spec, "topic_partition_offsets must be a sequence");
@@ -10275,7 +10318,7 @@ static PyObject* py_Admin_list_offsets(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_ListOffsetsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_list_offsets_with_options_err(
-            a->admin, m.map, (kafka_admin_ListOffsetsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_ListOffsetsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&owned);
         obj_map_free(&m);
         Py_DECREF(fast);
@@ -10378,7 +10421,7 @@ static PyObject* py_Admin_list_groups(PyObject* self, PyObject* args) {
     if (o == NULL) return NULL;
     kafka_admin_ListGroupsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_list_groups_with_options_err(
-        a->admin, (kafka_admin_ListGroupsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_ListGroupsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&ListGroupsOptions_desc, o, err, r, &ListGroupsResult_desc);
 }
 
@@ -10402,13 +10445,14 @@ static PyObject* py_Admin_describe_consumer_groups(PyObject* self, PyObject* arg
     unsigned long long h; PyObject *ids, *opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(ids);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "group_ids must be a sequence of str") < 0) return NULL;
     void* o = admin_options_build(&DescribeConsumerGroupsOptions_desc, opts);
     if (o == NULL) { str_list_free(&l); return NULL; }
     kafka_admin_DescribeConsumerGroupsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_consumer_groups_with_options_err(
-        a->admin, l.list, (kafka_admin_DescribeConsumerGroupsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(ids, l.list), (kafka_admin_DescribeConsumerGroupsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     str_list_free(&l);
     return admin_rpc_return(&DescribeConsumerGroupsOptions_desc, o, err, r, &DescribeConsumerGroupsResult_desc);
 }
@@ -10433,13 +10477,14 @@ static PyObject* py_Admin_describe_classic_groups(PyObject* self, PyObject* args
     unsigned long long h; PyObject *ids, *opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(ids);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "group_ids must be a sequence of str") < 0) return NULL;
     void* o = admin_options_build(&DescribeClassicGroupsOptions_desc, opts);
     if (o == NULL) { str_list_free(&l); return NULL; }
     kafka_admin_DescribeClassicGroupsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_classic_groups_with_options_err(
-        a->admin, l.list, (kafka_admin_DescribeClassicGroupsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(ids, l.list), (kafka_admin_DescribeClassicGroupsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     str_list_free(&l);
     return admin_rpc_return(&DescribeClassicGroupsOptions_desc, o, err, r, &DescribeClassicGroupsResult_desc);
 }
@@ -10469,13 +10514,14 @@ static const AdminResultDesc ListConsumerGroupOffsetsResult_desc = {
 
 static PyObject* py_Admin_list_consumer_group_offsets(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; const char* group_id; PyObject *spec, *opts;
-    if (!PyArg_ParseTuple(args, "KzOO", &h, &group_id, &spec, &opts)) return NULL;
+    unsigned long long h; int specs_form; const char* group_id; PyObject *spec, *opts;
+    if (!PyArg_ParseTuple(args, "KpzOO", &h, &specs_form, &group_id, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     obj_map_t m;   // borrowed char* (owned by fast) -> owned ListConsumerGroupOffsetsSpec*
     memset(&m, 0, sizeof(m));
     PyObject* fast = NULL;
-    if (group_id == NULL) {
+    if (specs_form) {
         fast = fast_rows(spec, "group_specs must be a sequence");
         if (fast == NULL) return NULL;
         Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -10502,12 +10548,12 @@ static PyObject* py_Admin_list_consumer_group_offsets(PyObject* self, PyObject* 
         void* o = admin_options_build(&ListConsumerGroupOffsetsOptions_desc, opts);
         if (o == NULL) goto fail;
         kafka_admin_ListConsumerGroupOffsetsResult_t* r = NULL;
-        kafka_common_Error_t* err = group_id != NULL
+        kafka_common_Error_t* err = !specs_form
             ? (r = kafka_admin_Admin_list_consumer_group_offsets_with_group_id_options_err(
-                   a->admin, group_id, (kafka_admin_ListConsumerGroupOffsetsOptions_t*)o, &ffi_err), ffi_take(&ffi_err))
+                   a->admin, group_id, (kafka_admin_ListConsumerGroupOffsetsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err))
             : (r = kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options_err(
-                   a->admin, m.map, (kafka_admin_ListConsumerGroupOffsetsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
-        if (group_id == NULL) obj_map_free(&m);
+                   a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_ListConsumerGroupOffsetsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
+        if (specs_form) obj_map_free(&m);
         Py_XDECREF(fast);
         return admin_rpc_return(&ListConsumerGroupOffsetsOptions_desc, o, err, r, &ListConsumerGroupOffsetsResult_desc);
     }
@@ -10537,8 +10583,9 @@ static const AdminResultDesc AlterConsumerGroupOffsetsResult_desc = {
 static PyObject* py_Admin_alter_consumer_group_offsets(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h; const char* gid; PyObject *spec, *opts;
-    if (!PyArg_ParseTuple(args, "KsOO", &h, &gid, &spec, &opts)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzOO", &h, &gid, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "offsets must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -10564,7 +10611,7 @@ static PyObject* py_Admin_alter_consumer_group_offsets(PyObject* self, PyObject*
         if (o == NULL) goto fail;
         kafka_admin_AlterConsumerGroupOffsetsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_alter_consumer_group_offsets_with_options_err(
-            a->admin, gid, m.map, (kafka_admin_AlterConsumerGroupOffsetsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, gid, ADMIN_NULLABLE(spec, m.map), (kafka_admin_AlterConsumerGroupOffsetsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
         return admin_rpc_return(&AlterConsumerGroupOffsetsOptions_desc, o, err, r, &AlterConsumerGroupOffsetsResult_desc);
@@ -10595,15 +10642,16 @@ static const AdminResultDesc DeleteConsumerGroupOffsetsResult_desc = {
 static PyObject* py_Admin_delete_consumer_group_offsets(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h; const char* gid; PyObject *spec, *opts;
-    if (!PyArg_ParseTuple(args, "KsOO", &h, &gid, &spec, &opts)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzOO", &h, &gid, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     tp_list_t tps;
     if (tp_list_build(spec, &tps) < 0) return NULL;
     void* o = admin_options_build(&DeleteConsumerGroupOffsetsOptions_desc, opts);
     if (o == NULL) { tp_list_free(&tps); return NULL; }
     kafka_admin_DeleteConsumerGroupOffsetsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_delete_consumer_group_offsets_with_options_err(
-        a->admin, gid, tps.list, (kafka_admin_DeleteConsumerGroupOffsetsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, gid, ADMIN_NULLABLE(spec, tps.list), (kafka_admin_DeleteConsumerGroupOffsetsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     tp_list_free(&tps);
     return admin_rpc_return(&DeleteConsumerGroupOffsetsOptions_desc, o, err, r, &DeleteConsumerGroupOffsetsResult_desc);
 }
@@ -10626,13 +10674,14 @@ static PyObject* py_Admin_delete_consumer_groups(PyObject* self, PyObject* args)
     unsigned long long h; PyObject *ids, *opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(ids);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "group_ids must be a sequence of str") < 0) return NULL;
     void* o = admin_options_build(&DeleteConsumerGroupsOptions_desc, opts);
     if (o == NULL) { str_list_free(&l); return NULL; }
     kafka_admin_DeleteConsumerGroupsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_delete_consumer_groups_with_options_err(
-        a->admin, l.list, (kafka_admin_DeleteConsumerGroupsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(ids, l.list), (kafka_admin_DeleteConsumerGroupsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     str_list_free(&l);
     return admin_rpc_return(&DeleteConsumerGroupsOptions_desc, o, err, r, &DeleteConsumerGroupsResult_desc);
 }
@@ -10675,7 +10724,7 @@ static const AdminResultDesc RemoveMembersFromConsumerGroupResult_desc = {
 static PyObject* py_Admin_remove_members_from_consumer_group(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h; const char* gid; PyObject *ids, *opts;
-    if (!PyArg_ParseTuple(args, "KsOO", &h, &gid, &ids, &opts)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzOO", &h, &gid, &ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     void* o = NULL;
     if (ids == Py_None) {
@@ -10703,7 +10752,7 @@ static PyObject* py_Admin_remove_members_from_consumer_group(PyObject* self, PyO
     if (o == NULL) return NULL;
     kafka_admin_RemoveMembersFromConsumerGroupResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_remove_members_from_consumer_group_with_options_err(
-        a->admin, gid, (kafka_admin_RemoveMembersFromConsumerGroupOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, gid, (kafka_admin_RemoveMembersFromConsumerGroupOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&RemoveMembersFromConsumerGroupOptions_desc, o, err, r,
                             &RemoveMembersFromConsumerGroupResult_desc);
 }
@@ -10802,7 +10851,7 @@ static PyObject* py_Admin_describe_acls(PyObject* self, PyObject* args) {
     kafka_common_Error_t* err = NULL;
     if (o != NULL) {
         err = (r = kafka_admin_Admin_describe_acls_with_options_err(
-            a->admin, filter, (kafka_admin_DescribeAclsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, filter, (kafka_admin_DescribeAclsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     }
     ffi_unraisable((kafka_common_acl_AclBindingFilter_destroy_err(filter, &ffi_err), ffi_take(&ffi_err)));
     if (o == NULL) return NULL;
@@ -10828,6 +10877,7 @@ static PyObject* py_Admin_create_acls(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "acls must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -10847,7 +10897,7 @@ static PyObject* py_Admin_create_acls(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_CreateAclsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_create_acls_with_options_err(
-            a->admin, l.list, (kafka_admin_CreateAclsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, l.list), (kafka_admin_CreateAclsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&l);
         Py_DECREF(fast);
         return admin_rpc_return(&CreateAclsOptions_desc, o, err, r, &CreateAclsResult_desc);
@@ -10878,6 +10928,7 @@ static PyObject* py_Admin_delete_acls(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "filters must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -10892,7 +10943,7 @@ static PyObject* py_Admin_delete_acls(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_DeleteAclsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_delete_acls_with_options_err(
-            a->admin, l.list, (kafka_admin_DeleteAclsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, l.list), (kafka_admin_DeleteAclsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&l);
         Py_DECREF(fast);
         return admin_rpc_return(&DeleteAclsOptions_desc, o, err, r, &DeleteAclsResult_desc);
@@ -10969,7 +11020,7 @@ static PyObject* py_Admin_describe_client_quotas(PyObject* self, PyObject* args)
     kafka_common_Error_t* err = NULL;
     if (o != NULL) {
         err = (r = kafka_admin_Admin_describe_client_quotas_with_options_err(
-            a->admin, filter, (kafka_admin_DescribeClientQuotasOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, filter, (kafka_admin_DescribeClientQuotasOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     }
     ffi_unraisable((kafka_common_quota_ClientQuotaFilter_destroy_err(filter, &ffi_err), ffi_take(&ffi_err)));
     if (o == NULL) return NULL;
@@ -10998,6 +11049,7 @@ static PyObject* py_Admin_alter_client_quotas(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "entries must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -11061,7 +11113,7 @@ static PyObject* py_Admin_alter_client_quotas(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_AlterClientQuotasResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_alter_client_quotas_with_options_err(
-            a->admin, l.list, (kafka_admin_AlterClientQuotasOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, l.list), (kafka_admin_AlterClientQuotasOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&l);
         Py_DECREF(fast);
         return admin_rpc_return(&AlterClientQuotasOptions_desc, o, err, r, &AlterClientQuotasResult_desc);
@@ -11130,7 +11182,7 @@ static PyObject* py_Admin_describe_user_scram_credentials(PyObject* self, PyObje
     if (o == NULL) { str_list_free(&l); return NULL; }
     kafka_admin_DescribeUserScramCredentialsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_user_scram_credentials_with_users_options_err(
-        a->admin, l.list, (kafka_admin_DescribeUserScramCredentialsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, l.list, (kafka_admin_DescribeUserScramCredentialsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     str_list_free(&l);
     return admin_rpc_return(&DescribeUserScramCredentialsOptions_desc, o, err, r,
                             &DescribeUserScramCredentialsResult_desc);
@@ -11157,6 +11209,7 @@ static PyObject* py_Admin_alter_user_scram_credentials(PyObject* self, PyObject*
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "alterations must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -11222,7 +11275,7 @@ static PyObject* py_Admin_alter_user_scram_credentials(PyObject* self, PyObject*
         if (o == NULL) goto fail;
         kafka_admin_AlterUserScramCredentialsResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_alter_user_scram_credentials_with_options_err(
-            a->admin, l.list, (kafka_admin_AlterUserScramCredentialsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, l.list), (kafka_admin_AlterUserScramCredentialsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_list_free(&l);
         Py_DECREF(fast);
         return admin_rpc_return(&AlterUserScramCredentialsOptions_desc, o, err, r,
@@ -11288,7 +11341,7 @@ static PyObject* py_Admin_create_delegation_token(PyObject* self, PyObject* args
     if (o == NULL) return NULL;
     kafka_admin_CreateDelegationTokenResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_create_delegation_token_with_options_err(
-        a->admin, (kafka_admin_CreateDelegationTokenOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_CreateDelegationTokenOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&CreateDelegationTokenOptions_desc, o, err, r, &CreateDelegationTokenResult_desc);
 }
 
@@ -11321,7 +11374,7 @@ static PyObject* py_Admin_renew_delegation_token(PyObject* self, PyObject* args)
     if (o == NULL) { PyBuffer_Release(&hmac); return NULL; }
     kafka_admin_RenewDelegationTokenResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_renew_delegation_token_with_options_err(
-        a->admin, bytes, (kafka_admin_RenewDelegationTokenOptions_t*)o, &ffi_err), ffi_take(&ffi_err));  // copied
+        a->admin, bytes, (kafka_admin_RenewDelegationTokenOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));  // copied
     PyBuffer_Release(&hmac);
     return admin_rpc_return(&RenewDelegationTokenOptions_desc, o, err, r, &RenewDelegationTokenResult_desc);
 }
@@ -11355,7 +11408,7 @@ static PyObject* py_Admin_expire_delegation_token(PyObject* self, PyObject* args
     if (o == NULL) { PyBuffer_Release(&hmac); return NULL; }
     kafka_admin_ExpireDelegationTokenResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_expire_delegation_token_with_options_err(
-        a->admin, bytes, (kafka_admin_ExpireDelegationTokenOptions_t*)o, &ffi_err), ffi_take(&ffi_err));  // copied
+        a->admin, bytes, (kafka_admin_ExpireDelegationTokenOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));  // copied
     PyBuffer_Release(&hmac);
     return admin_rpc_return(&ExpireDelegationTokenOptions_desc, o, err, r, &ExpireDelegationTokenResult_desc);
 }
@@ -11399,7 +11452,7 @@ static PyObject* py_Admin_describe_delegation_token(PyObject* self, PyObject* ar
     if (o == NULL) return NULL;
     kafka_admin_DescribeDelegationTokenResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_delegation_token_with_options_err(
-        a->admin, (kafka_admin_DescribeDelegationTokenOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_DescribeDelegationTokenOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&DescribeDelegationTokenOptions_desc, o, err, r, &DescribeDelegationTokenResult_desc);
 }
 
@@ -11429,7 +11482,7 @@ static PyObject* py_Admin_describe_features(PyObject* self, PyObject* args) {
     if (o == NULL) return NULL;
     kafka_admin_DescribeFeaturesResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_features_with_options_err(
-        a->admin, (kafka_admin_DescribeFeaturesOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_DescribeFeaturesOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&DescribeFeaturesOptions_desc, o, err, r, &DescribeFeaturesResult_desc);
 }
 
@@ -11456,6 +11509,7 @@ static PyObject* py_Admin_update_features(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     PyObject* fast = fast_rows(spec, "feature_updates must be a sequence");
     if (fast == NULL) return NULL;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -11477,7 +11531,7 @@ static PyObject* py_Admin_update_features(PyObject* self, PyObject* args) {
         if (o == NULL) goto fail;
         kafka_admin_UpdateFeaturesResult_t* r = NULL;
         kafka_common_Error_t* err = (r = kafka_admin_Admin_update_features_with_options(
-            a->admin, m.map, (kafka_admin_UpdateFeaturesOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, ADMIN_NULLABLE(spec, m.map), (kafka_admin_UpdateFeaturesOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
         obj_map_free(&m);
         Py_DECREF(fast);
         return admin_rpc_return(&UpdateFeaturesOptions_desc, o, err, r, &UpdateFeaturesResult_desc);
@@ -11511,13 +11565,14 @@ static PyObject* py_Admin_describe_producers(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* spec; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &spec, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(spec);
     tp_list_t tps;
     if (tp_list_build(spec, &tps) < 0) return NULL;
     void* o = admin_options_build(&DescribeProducersOptions_desc, opts);
     if (o == NULL) { tp_list_free(&tps); return NULL; }
     kafka_admin_DescribeProducersResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_producers_with_options_err(
-        a->admin, tps.list, (kafka_admin_DescribeProducersOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(spec, tps.list), (kafka_admin_DescribeProducersOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     tp_list_free(&tps);
     return admin_rpc_return(&DescribeProducersOptions_desc, o, err, r, &DescribeProducersResult_desc);
 }
@@ -11543,13 +11598,14 @@ static PyObject* py_Admin_describe_transactions(PyObject* self, PyObject* args) 
     unsigned long long h; PyObject* ids; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(ids);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "transactional_ids must be a sequence of str") < 0) return NULL;
     void* o = admin_options_build(&DescribeTransactionsOptions_desc, opts);
     if (o == NULL) { str_list_free(&l); return NULL; }
     kafka_admin_DescribeTransactionsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_describe_transactions_with_options_err(
-        a->admin, l.list, (kafka_admin_DescribeTransactionsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(ids, l.list), (kafka_admin_DescribeTransactionsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     str_list_free(&l);
     return admin_rpc_return(&DescribeTransactionsOptions_desc, o, err, r, &DescribeTransactionsResult_desc);
 }
@@ -11577,13 +11633,14 @@ static PyObject* py_Admin_fence_producers(PyObject* self, PyObject* args) {
     unsigned long long h; PyObject* ids; PyObject* opts;
     if (!PyArg_ParseTuple(args, "KOO", &h, &ids, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
+    ADMIN_NONE_AS_EMPTY(ids);
     str_list_t l;
     if (str_list_build_msg(ids, &l, "transactional_ids must be a sequence of str") < 0) return NULL;
     void* o = admin_options_build(&FenceProducersOptions_desc, opts);
     if (o == NULL) { str_list_free(&l); return NULL; }
     kafka_admin_FenceProducersResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_fence_producers_with_options_err(
-        a->admin, l.list, (kafka_admin_FenceProducersOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, ADMIN_NULLABLE(ids, l.list), (kafka_admin_FenceProducersOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     str_list_free(&l);
     return admin_rpc_return(&FenceProducersOptions_desc, o, err, r, &FenceProducersResult_desc);
 }
@@ -11703,7 +11760,7 @@ static PyObject* py_Admin_list_transactions(PyObject* self, PyObject* args) {
     if (o == NULL) return NULL;
     kafka_admin_ListTransactionsResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_list_transactions_with_options_err(
-        a->admin, (kafka_admin_ListTransactionsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (kafka_admin_ListTransactionsOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&ListTransactionsOptions_desc, o, err, r, &ListTransactionsResult_desc);
 }
 
@@ -11746,7 +11803,7 @@ static PyObject* py_Admin_abort_transaction(PyObject* self, PyObject* args) {
     kafka_common_Error_t* err = NULL;
     if (o != NULL) {
         err = (r = kafka_admin_Admin_abort_transaction_with_options_err(
-            a->admin, spec, (kafka_admin_AbortTransactionOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+            a->admin, spec, (kafka_admin_AbortTransactionOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     }
     ffi_unraisable((kafka_admin_AbortTransactionSpec_destroy_err(spec, &ffi_err), ffi_take(&ffi_err)));
     if (o == NULL) return NULL;
@@ -11775,7 +11832,7 @@ static PyObject* py_Admin_unregister_controller(PyObject* self, PyObject* args) 
     if (o == NULL) return NULL;
     kafka_admin_UnregisterControllerResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_unregister_controller_with_options_err(
-        a->admin, (int32_t)controller_id, (kafka_admin_UnregisterControllerOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, (int32_t)controller_id, (kafka_admin_UnregisterControllerOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&UnregisterControllerOptions_desc, o, err, r, &UnregisterControllerResult_desc);
 }
 
@@ -11797,13 +11854,13 @@ static PyObject* py_Admin_force_terminate_transaction(PyObject* self, PyObject* 
     kafka_common_Error_t *ffi_err = NULL;
     (void)self;
     unsigned long long h; const char* tid; PyObject* opts;
-    if (!PyArg_ParseTuple(args, "KsO", &h, &tid, &opts)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzO", &h, &tid, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
     void* o = admin_options_build(&TerminateTransactionOptions_desc, opts);
     if (o == NULL) return NULL;
     kafka_admin_TerminateTransactionResult_t* r = NULL;
     kafka_common_Error_t* err = (r = kafka_admin_Admin_force_terminate_transaction_with_options_err(
-        a->admin, tid, (kafka_admin_TerminateTransactionOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        a->admin, tid, (kafka_admin_TerminateTransactionOptions_t*)admin_opts(o), &ffi_err), ffi_take(&ffi_err));
     return admin_rpc_return(&TerminateTransactionOptions_desc, o, err, r, &TerminateTransactionResult_desc);
 }
 

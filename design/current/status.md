@@ -94,7 +94,8 @@
 >   fallible functions, `_err` twins and `_cb` completions deliver it, a
 >   `confluent_kafka.h` export with no error channel aborts. `check-ffi-null-checks`
 >   enforces the checks; Python maps `LOCAL_NULL_POINTER` to `TypeError` and lets a
->   `None` reach the core (consumer and producer; the admin binding keeps its checks).
+>   `None` reach the core (consumer, producer and admin; the admin binding checks only
+>   values that cross as fields or by value, and a `None` options Java reads first).
 > - **The admin client supports security.** `AdminClientConfig` carries
 >   `security.protocol` and the SSL / SASL settings, and
 >   `KafkaAdminClient::new` builds its channel builder from them

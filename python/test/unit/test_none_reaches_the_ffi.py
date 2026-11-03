@@ -30,6 +30,7 @@ import _confluentkafka  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalArgumentError
+from confluent_kafka.admin import Admin, NewTopic
 from confluent_kafka.consumer import KafkaConsumer
 from confluent_kafka.producer import KafkaProducer
 
@@ -85,3 +86,60 @@ def test_send_of_a_null_record_raises_from_the_call(recorder: Callable[[str], li
     assert str(e.value) == "record must not be None"
     assert len(calls) == 1 and calls[0][1] is None
     assert fired == []
+
+
+ADMIN_CONFIGS = {"bootstrap.servers": "localhost:1"}
+
+
+def test_admin_a_null_collection_reaches_the_ffi(recorder: Callable[[str], list[tuple[Any, ...]]]) -> None:
+    # KafkaAdminClient#createTopics dereferences the null collection (newTopics.size()).
+    calls = recorder("Admin_create_topics")
+    with Admin.create(configs=ADMIN_CONFIGS) as admin:
+        with pytest.raises(TypeError) as e:
+            admin.create_topics(new_topics=None)  # type: ignore[call-overload]
+    assert type(e.value) is TypeError
+    assert str(e.value) == "new_topics must not be None"
+    assert len(calls) == 1 and calls[0][1] is None
+
+
+def test_admin_null_options_reach_the_ffi(recorder: Callable[[str], list[tuple[Any, ...]]]) -> None:
+    # KafkaAdminClient#createTopics reads options.timeoutMs() of the null options.
+    calls = recorder("Admin_create_topics")
+    with Admin.create(configs=ADMIN_CONFIGS) as admin:
+        with pytest.raises(TypeError) as e:
+            admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=1, replication_factor=1)],
+                                options=None)  # type: ignore[call-overload]
+    assert str(e.value) == "options must not be None"
+    assert len(calls) == 1 and calls[0][-1] is None
+
+
+def test_admin_a_null_string_reaches_the_ffi(recorder: Callable[[str], list[tuple[Any, ...]]]) -> None:
+    # KafkaAdminClient#alterConsumerGroupOffsets: the null group id is the C API's to report.
+    calls = recorder("Admin_alter_consumer_group_offsets")
+    with Admin.create(configs=ADMIN_CONFIGS) as admin:
+        with pytest.raises(TypeError) as e:
+            admin.alter_consumer_group_offsets(group_id=None, offsets={})  # type: ignore[call-overload]
+    assert str(e.value) == "group_id must not be None"
+    assert len(calls) == 1 and calls[0][1] is None
+
+
+def test_admin_a_null_enum_reaches_the_ffi(recorder: Callable[[str], list[tuple[Any, ...]]]) -> None:
+    # KafkaAdminClient#electLeaders: the null election type is the C API's to report.
+    calls = recorder("Admin_elect_leaders")
+    with Admin.create(configs=ADMIN_CONFIGS) as admin:
+        with pytest.raises(TypeError) as e:
+            admin.elect_leaders(election_type=None, partitions=None)  # type: ignore[call-overload]
+    assert str(e.value) == "election_type must not be None"
+    assert len(calls) == 1 and calls[0][1] is None
+
+
+def test_admin_null_options_come_before_a_later_null(
+        recorder: Callable[[str], list[tuple[Any, ...]]]) -> None:
+    # KafkaAdminClient#forceTerminateTransaction reads options before the null id,
+    # which the C API checks first: Python keeps Java's order.
+    calls = recorder("Admin_force_terminate_transaction")
+    with Admin.create(configs=ADMIN_CONFIGS) as admin:
+        with pytest.raises(TypeError) as e:
+            admin.force_terminate_transaction(transactional_id=None, options=None)  # type: ignore[call-overload]
+    assert str(e.value) == "options must not be None"
+    assert calls == []
