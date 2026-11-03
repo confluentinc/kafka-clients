@@ -27,23 +27,25 @@ name: build-test-release
 # pipeline's SHA):
 #   1. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
 #      suite, including the native-Rust arm of the multilanguage tests.
-#   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python, and
-#      verify-dotnet, each over PLAINTEXT, SSL and SASL_SSL, including the gRPC
-#      multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet). The .NET
-#      gRPC images are built for linux/amd64: Grpc.Tools' linux_arm64 protoc
-#      SIGSEGVs during C# codegen inside an arm64 Linux container, so they need
-#      an amd64 Linux agent (which this block uses anyway).
+#   2. "Verify language bindings (Linux amd64)" -- verify-c, verify-python,
+#      verify-dotnet and verify-javascript, each over PLAINTEXT, SSL and
+#      SASL_SSL, including the gRPC multilanguage arm (__grpc_c /
+#      __grpc_python / __grpc_dotnet / __grpc_js). The .NET gRPC images are
+#      built for linux/amd64: Grpc.Tools' linux_arm64 protoc SIGSEGVs during
+#      C# codegen inside an arm64 Linux container, so they need an amd64 Linux
+#      agent (which this block uses anyway).
 #   3. "Verify Rust (macOS arm64)" -- native Rust unit + integration + perf on
 #      s1-macos-15-arm64-8. dependencies-macos.sh brings up Docker via Colima
 #      for the broker the integration/perf tests need.
 #   4. "Verify language bindings (macOS arm64)" -- verify-c (ctest),
-#      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
-#      net10.0), each followed by the gRPC multilanguage arm with the gRPC
-#      server running as a native host process (MULTILANG_BACKEND_MODE=native),
-#      which tests the macOS build of each binding. The broker runs in Docker via
-#      Colima. The native .NET server is the net10.0 build; Grpc.Tools has no
-#      macOS arm64 protoc and runs its macosx_x64 one under Rosetta 2, which is
-#      unaffected by the linux_arm64 SIGSEGV in item 2.
+#      verify-python (pytest test/unit), verify-dotnet (dotnet test, net8.0 +
+#      net10.0) and verify-javascript (node --test test/unit), each followed
+#      by the gRPC multilanguage arm with the gRPC server running as a native
+#      host process (MULTILANG_BACKEND_MODE=native), which tests the macOS
+#      build of each binding. The broker runs in Docker via Colima. The native
+#      .NET server is the net10.0 build; Grpc.Tools has no macOS arm64 protoc
+#      and runs its macosx_x64 one under Rosetta 2, which is unaffected by the
+#      linux_arm64 SIGSEGV in item 2.
 #   5. "Check Rust docs (Linux amd64)" -- builds the rustdoc of every workspace
 #      crate with warnings denied.
 #   6. "Check crate package (Linux amd64)" -- packages the crate and checks its
@@ -267,18 +269,26 @@ blocks:
     #
     # Each binding runs across the three protocols, following the same pattern
     # as the "Verify Rust" block. The gRPC multilanguage container arm
-    # (__grpc_c / __grpc_python / __grpc_dotnet) connects to the broker over the
-    # CONTAINER listener for the active protocol:
+    # (__grpc_c / __grpc_python / __grpc_dotnet / __grpc_js) connects to the
+    # broker over the CONTAINER listener for the active protocol:
     #   - PLAINTEXT: `make verify-c` / `make verify-python` / `make verify-dotnet`
-    #     — the full binding gate (ctest / pytest / dotnet test unit tests, the
-    #     PLAINTEXT gRPC arm, check-bindings, and the Python and .NET perf
-    #     suites).
+    #     / `make verify-javascript` — the full binding gate (ctest / pytest /
+    #     dotnet test / node --test unit tests, the PLAINTEXT gRPC arm,
+    #     check-bindings, the Python and .NET perf suites, and the Node.js
+    #     client's static, typing and broker-backed tests).
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
     #     unit tests, check-bindings and perf are protocol-independent, so
-    #     running them once in the PLAINTEXT job is enough. The .NET protocol
-    #     jobs install no host .NET: the gRPC images build inside the .NET SDK
-    #     image, and the harness is Rust.
+    #     running them once in the PLAINTEXT job is enough. The .NET and
+    #     JavaScript protocol jobs install no host .NET or Node.js: the .NET gRPC
+    #     images build inside the .NET SDK image, javascript/Dockerfile.grpc
+    #     builds the addon inside the node:22 image, and the harness is Rust.
+    #
+    # Node.js comes from `sem-version node 22`, as confluent-kafka-javascript's
+    # CI installs it. npm packages come from the public npm registry, as pip's
+    # come from public PyPI: NPM_CONFIG_REGISTRY overrides any registry the
+    # agent's npm config names, and package-lock.json resolves every package
+    # there.
     #
     # Every job runs under this block's 30-minute limit. verify-dotnet's
     # plaintext job is the longest: 26 minutes on 2026-09-30 and 20 on
@@ -286,7 +296,7 @@ blocks:
     # timing out, move the .NET jobs to a block of their own with a longer limit
     # (see the note at the top of this file).
     #
-    # Each job is a separate VM with its own broker, so the nine jobs do not
+    # Each job is a separate VM with its own broker, so the twelve jobs do not
     # contend for Docker resources.
     dependencies: []
     execution_time_limit:
@@ -332,6 +342,23 @@ blocks:
         - name: "verify-dotnet (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make test-integration-dotnet-sasl-ssl
+        - name: "verify-javascript (Linux amd64) — plaintext"
+          env_vars:
+            - name: NPM_CONFIG_REGISTRY
+              value: https://registry.npmjs.org/
+          commands:
+            - sem-version node 22
+            - node --version && npm --version
+            # The devDependencies, from package-lock.json: typescript and
+            # @types/node for the typing tests, which skip without them.
+            - (cd javascript && npm ci --no-audit --no-fund)
+            - make verify-javascript
+        - name: "verify-javascript (Linux amd64) — ssl"
+          commands:
+            - make test-integration-javascript-ssl
+        - name: "verify-javascript (Linux amd64) — sasl_ssl (plain)"
+          commands:
+            - make test-integration-javascript-sasl-ssl
 
   - name: "Verify Rust (macOS arm64)"
     dependencies: []
@@ -362,11 +389,12 @@ blocks:
 
   - name: "Verify language bindings (macOS arm64)"
     # verify-c runs the C ctest suite; verify-python runs pytest test/unit;
-    # verify-dotnet runs the .NET unit tests. Each job then runs its binding's
-    # gRPC multilanguage arm (__grpc_c / __grpc_python / __grpc_dotnet) with the
-    # gRPC server as a native host process rather than a container. Containers
-    # on macOS run Linux, so a container would only test the Linux build of the
-    # binding. The broker runs in Docker via Colima. The verify-dotnet job sets
+    # verify-dotnet runs the .NET unit tests; verify-javascript runs node --test
+    # test/unit. Each job then runs its binding's gRPC multilanguage arm
+    # (__grpc_c / __grpc_python / __grpc_dotnet / __grpc_js) with the gRPC server
+    # as a native host process rather than a container. Containers on macOS run
+    # Linux, so a container would only test the Linux build of the binding. The
+    # broker runs in Docker via Colima. The verify-dotnet job sets
     # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
     # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
     # package with this machine's native library and installs it into a fresh
@@ -447,6 +475,16 @@ blocks:
             # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
             # on the make's own command line.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make test-integration-dotnet-native
+        - name: "verify-javascript (macOS arm64)"
+          env_vars:
+            # The native arm installs @grpc/grpc-js and @grpc/proto-loader with
+            # npm (make -C javascript grpc-native); see the Linux block.
+            - name: NPM_CONFIG_REGISTRY
+              value: https://registry.npmjs.org/
+          commands:
+            - sem-version node 22
+            - node --version && npm --version
+            - make verify-javascript-macos-docker
 
   - name: "Verify language bindings (Windows amd64)"
     # The .NET client on Windows, whose package carries a win-x64 and a win-x86
