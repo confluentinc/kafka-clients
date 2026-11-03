@@ -207,7 +207,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -224,7 +224,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_short(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_short(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_int(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -302,7 +302,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_int(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -324,7 +324,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_long(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -341,7 +341,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_long(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -363,7 +363,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_double(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -380,7 +380,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_double(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -406,7 +406,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 ///
 /// # Returns
 ///
@@ -424,7 +424,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_err` a valid slot pointing at null. The string is borrowed from the
 /// handle, valid until it is destroyed.
 #[ffi_guard]
@@ -445,7 +445,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 ///
 /// # Returns
 ///
@@ -461,7 +461,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_err` a valid slot pointing at null. The list of `char *` is owned by the
 /// caller, freed with `kafka_List_destroy`.
 #[ffi_guard]

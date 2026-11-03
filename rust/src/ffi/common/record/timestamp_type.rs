@@ -27,7 +27,7 @@ use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::precondition::require_ref;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TimestampType`] singleton.
 #[repr(C)]
@@ -181,7 +181,8 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
 ///
 /// # Parameters
 ///
-/// - `name` - The name of the type, as `kafka_common_record_TimestampType_to_string` prints it.
+/// - `name` - The name of the type, as `kafka_common_record_TimestampType_to_string` prints it, or `NULL`,
+///   which matches no type.
 ///
 /// # Errors
 ///
@@ -191,8 +192,8 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `out_err` a valid slot
-/// pointing at `NULL`. The returned singleton is static, never freed, and comparable
+/// `name` must be `NULL` or a valid NUL-terminated string and `out_err` a valid
+/// slot pointing at `NULL`. The returned singleton is static, never freed, and comparable
 /// with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -200,10 +201,11 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
     name: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const kafka_common_record_TimestampType_t {
-    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
-    // this call.
-    match TimestampType::for_name(&unsafe { c_str_to_string(name) }) {
+    // SAFETY: Per this function's `# Safety`, `name` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call. Java's `forName(null)` matches no constant and prints `null` in its error, which
+    // is what the name `null`, matching none either, gives.
+    match TimestampType::for_name(unsafe { c_str_to_option(name) }.as_deref().unwrap_or("null")) {
         Ok(timestamp_type) => singleton(timestamp_type),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -232,7 +234,7 @@ mod tests {
     use std::ptr;
 
     use super::*;
-    use crate::ffi::common::kafka_common_Error_destroy;
+    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::util::kafka_string_destroy;
 
     #[test]
@@ -281,6 +283,14 @@ mod tests {
             let unknown = kafka_common_record_TimestampType_for_name(bogus.as_ptr(), &mut error);
             assert!(unknown.is_null());
             assert!(!error.is_null());
+            kafka_common_Error_destroy(error);
+            // Java's `forName(null)` prints `null` in its error.
+            error = ptr::null_mut();
+            assert!(kafka_common_record_TimestampType_for_name(ptr::null(), &mut error).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
+                "Invalid timestamp type null"
+            );
             kafka_common_Error_destroy(error);
 
             let s = kafka_common_record_TimestampType_to_string(kafka_common_record_TimestampType_log_append_time());
