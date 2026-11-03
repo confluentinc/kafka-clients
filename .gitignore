@@ -47,3 +47,4 @@ tools/java-perf-test/bin/
 /javascript/build/
 /javascript/node_modules/
 !/javascript/package.json
+!/javascript/package-lock.json
