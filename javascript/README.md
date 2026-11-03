@@ -84,12 +84,19 @@ namespace is also an entry point of its own:
 const { producer, common } = require('@confluentinc/kafka-javascript');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+const { SaslAuthenticationError } = require('@confluentinc/kafka-javascript/common/errors');
+const { SslConfigs, SaslConfigs } = require('@confluentinc/kafka-javascript/common/config');
 ```
 
 ```
-lib/index.js           the namespaces { producer, common }
-lib/producer/          KafkaProducer, ProducerRecord, RecordMetadata, Callback (a type)
-lib/common/            KafkaError, KafkaFuture
+lib/index.js           the namespaces { producer, common, consumer } and the Java built-in
+                       errors (IllegalStateError, IllegalArgumentError, ...)
+lib/producer/          KafkaProducer, ProducerRecord, RecordMetadata, Callback (a type),
+                       ProducerConfig, BufferExhaustedError
+lib/common/            KafkaError, KafkaFuture; errors/ (Java's common.errors), config/
+                       (SslConfigs, SaslConfigs, SecurityConfig, SslClientAuth, ConfigError),
+                       security/auth/ (SecurityProtocol), ...
+lib/consumer/          the consumer's errors only (no consumer yet)
 lib/_*.js              private helpers (not exported)
 src/                   the addon: util.h, addon.c, callback_queue.c, error.c, record.c, producer.c
 test/static|unit|typing|integration
@@ -179,11 +186,50 @@ venv/bin/python python/verifiable_clients/verifiable_consumer.py --bootstrap-ser
   --reset-policy earliest
 ```
 
+## Security
+
+`security.protocol` takes `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`
+(`SecurityProtocol`). The SSL keys are Java's (`SslConfigs`); stores are PEM,
+as files (`ssl.truststore.location`, and for mTLS `ssl.keystore.location`, one
+file holding the client certificate chain and its private key) or inline
+(`ssl.truststore.certificates`, `ssl.keystore.certificate.chain` with
+`ssl.keystore.key`). SASL credentials go in `sasl.jaas.config`, the only way to
+give them:
+
+```js
+const producer = new KafkaProducer({
+  'bootstrap.servers': 'broker:9093',
+  'security.protocol': 'SASL_SSL',
+  'sasl.mechanism': 'PLAIN',
+  'sasl.jaas.config':
+    'org.apache.kafka.common.security.plain.PlainLoginModule required username="alice" password="secret";',
+  'ssl.truststore.location': '/etc/kafka/ca.pem',
+});
+```
+
+Limitations: of the SASL mechanisms, only `PLAIN` is supported (any other,
+Java's `GSSAPI` default included, fails the configuration with a
+`ConfigError`), so `sasl.mechanism` must be set under `SASL_*`. Keys and
+certificates must be PEM (no JKS or PKCS12), and encrypted private keys are
+rejected. `SslConfigs.DEFAULT_SSL_KEYSTORE_TYPE` / `DEFAULT_SSL_TRUSTSTORE_TYPE`
+are Java's `JKS`; the client's own default is `PEM`. A password-type value of
+the wrong JavaScript type is reported without its value.
+
 ## Errors
 
-Every error the client reports is a `KafkaError` (it extends `Error`) with
-`code` (the C FFI's `kafka_common_Error_e` value), `name` (its enumerator
+The error classes are Java's, `Exception` read as `Error`, with Java's
+`extends` chain: `SaslAuthenticationError extends AuthenticationError extends
+ApiError extends KafkaError extends Error`, `NotLeaderOrFollowerError` is a
+`RetriableError`, and so on (`common/errors/`, generated from the Java
+sources). Every error the client reports is an instance of the class of its
+error code, so `instanceof` tells them apart. Each has `name` (its class name),
+`code` (the C FFI's `kafka_common_Error_e` value), `errorName` (its enumerator
 name, e.g. `TOPIC_AUTHORIZATION_FAILED`), `message`, `retriable`, `apiError`
-and `cause`. A value of the wrong JavaScript type throws a `TypeError`.
+and `cause`. Java's built-in exceptions (`IllegalStateError`,
+`IllegalArgumentError`, ...) are at the package root and, as in Java, are not
+`KafkaError`s: `send()` on a closed producer throws an `IllegalStateError`. A
+config value of the wrong JavaScript type for its key throws a `ConfigError`
+with Java's message; any other value of the wrong JavaScript type throws a
+`TypeError`.
 
 See `CLAUDE.md` for the binding's rules.
