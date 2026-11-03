@@ -2714,6 +2714,9 @@ fn print_help() {
                     --python-version PEP440 gives the Python packages their own version;
                     Python versions are a separate line that only moves up, so one below
                     a package's current version is refused (rfc/versioning.md)
+                    --dotnet-version SEMVER sets the .NET package's version
+                    (dotnet/Directory.Build.props), a third line, left as it is without it;
+                    it only moves up too
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2767,7 +2770,7 @@ Usage:
   cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
