@@ -50,14 +50,23 @@ zstd = ["dep:zstd"]
 # crypto provider of `rustls`, which therefore enables it.
 aws-lc-rs = ["dep:aws-lc-rs"]
 # TLS: `security.protocol` SSL and SASL_SSL. It needs a default trust store,
-# so it is enabled through `webpki-roots` below.
+# so it is enabled through `webpki-roots` or `platform-verifier` below.
 rustls = ["dep:rustls", "dep:tokio-rustls", "aws-lc-rs"]
-# Without `ssl.truststore.location` or `ssl.truststore.certificates` the broker
-# certificate is verified against Mozilla's root certificates, compiled in by
-# `webpki-roots`. It is a default feature so that another default trust store
-# can be added later as a feature of its own: `default-features = false` then
-# selects that one, without the Mozilla bundle.
+# The default trust store, used without `ssl.truststore.location` or
+# `ssl.truststore.certificates` (`security/ssl/ssl_factory.rs`). One of the two
+# features below must be on with `rustls`; with both, `platform-verifier` wins.
+#
+# `webpki-roots`: Mozilla's root certificates, compiled in, as the JDK bundles
+# its own. A default feature, so `default-features = false` with
+# `platform-verifier` leaves the bundle out of the build.
 webpki-roots = ["rustls", "dep:webpki-roots"]
+# `platform-verifier`: the platform's certificate verifier, as Java's
+# `TrustManagerFactory.init(null)` trusts the JDK's default trust store, so a
+# CA installed in the operating system is trusted. The C library and the
+# Python wheel (`rust/Makefile` `build-cdylib`) are built with it and without
+# `webpki-roots`. Without hostname verification the OS root certificates are
+# trusted through the WebPKI verifier instead (`rustls-native-certs`).
+platform-verifier = ["rustls", "dep:rustls-platform-verifier", "dep:rustls-native-certs"]
 # The integration tests run every security protocol and compression type
 # against a real broker, so they need all of the features above.
 integration-tests = ["gzip", "snappy", "lz4", "zstd", "webpki-roots"]
@@ -83,6 +92,17 @@ tokio-rustls = { version = "0.26", optional = true }
 # At least 0.23.46: earlier releases print TLS session secrets in the `Debug`
 # output of their client session values (RUSTSEC-2026-0346).
 rustls = { version = "0.23.46", features = ["logging", "std", "tls12"], optional = true }
+# The platform's certificate verifier (`platform-verifier` feature), used when
+# no `ssl.truststore.*` key is set: the OS verifier on macOS and Windows, the OS
+# root store on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override it).
+rustls-platform-verifier = { version = "0.7", optional = true }
+# The OS root certificates (`platform-verifier` feature), trusted through the
+# WebPKI verifier when no `ssl.truststore.*` key is set and
+# `ssl.endpoint.identification.algorithm` is empty: the OS verifiers on macOS and
+# Windows do not document that a hostname mismatch implies a trusted chain.
+rustls-native-certs = { version = "0.8", optional = true }
+# Mozilla's root certificates (`webpki-roots` feature, default), trusted when no
+# `ssl.truststore.*` key is set and the `platform-verifier` feature is off.
 # At least 1.0.10: earlier releases trust the leaked emSign intermediate CAs
 # (RUSTSEC-2026-0381).
 webpki-roots = { version = "1.0.10", optional = true }
@@ -424,6 +444,12 @@ cbindgen = { version = "0.29", optional = true, features = ["unstable_ir"] }
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# The C library and the Python wheel (`make -C rust build-cdylib`): the release
+# optimizations, in its own target/release-cdylib/, so a release build with
+# another feature set never replaces the library the bindings link.
+[profile.release-cdylib]
+inherits = "release"
 
 [lints.clippy]
 exhaustive_structs = "deny"

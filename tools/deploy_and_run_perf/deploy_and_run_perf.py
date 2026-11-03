@@ -95,6 +95,20 @@ echo "== apt: base packages =="
 sudo apt update && sudo apt install -y wget curl git unzip zip build-essential cmake pkg-config \
   tmux gnupg ca-certificates
 
+# The bindings' library, tuned for this host: `make -C rust build-cdylib` (the
+# feature set the C library and the Python wheel ship) in a tree that has it,
+# else, for an older tree, `cargo build --features ffi --release`. Sets
+# CDYLIB_DIR to the directory holding libconfluent_kafka.
+build_cdylib() {
+  if grep -q '^build-cdylib:' "$REPO/rust/Makefile"; then
+    make -C "$REPO/rust" build-cdylib RUSTFLAGS_NATIVE="-C target-cpu=native"
+    CDYLIB_DIR="$REPO/rust/target/release-cdylib"
+  else
+    ( cd "$REPO/rust" && RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release )
+    CDYLIB_DIR="$REPO/rust/target/release"
+  fi
+}
+
 # JRE + Apache Kafka CLI at /opt/kafka: kafka-producer-perf-test.sh generates
 # load and kafka-topics.sh creates topics for the consumer tests.
 install_kafka_cli() {
@@ -214,14 +228,13 @@ if [[ "$TEST" == python-* ]]; then
   [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   export PATH="$HOME/.cargo/bin:$PATH"
   echo "== Building Rust (FFI, release) in $REPO/rust =="
-  cd "$REPO/rust"
-  RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release
+  build_cdylib
   echo "== Creating venv + building the _confluentkafka extension =="
   python3 -m venv "$REPO/venv"
   set +u; . "$REPO/venv/bin/activate"; set -u
   pip install --upgrade pip setuptools wheel
   ( cd "$REPO/python" && \
-    CONFLUENT_KAFKA_LIB_DIR="$REPO/rust/target/release" CFLAGS="-O2 -march=native" pip install -e . )
+    CONFLUENT_KAFKA_LIB_DIR="$CDYLIB_DIR" CFLAGS="-O2 -march=native" pip install -e . )
   # pytest: consumer_performance_test.py imports it at module level.
   pip install psutil pytest
   echo "== Creating the librdkafka venv (confluent-kafka, CLIENT_VERSION=2) =="
@@ -244,9 +257,10 @@ install_librdkafka
 echo "== Building Rust (FFI, release) + C producer_perf_test in $REPO =="
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 export PATH="$HOME/.cargo/bin:$PATH"
-( cd "$REPO/rust" && RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release )
+build_cdylib
 cd "$REPO"
-cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DCMAKE_C_FLAGS="-O2 -march=native"
+cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DRUST_LIB_DIR="$CDYLIB_DIR" \
+  -DCMAKE_C_FLAGS="-O2 -march=native"
 cmake --build c/build --target producer_perf_test
 echo "== Bootstrap complete =="
 """

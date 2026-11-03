@@ -11,6 +11,12 @@ sources are the `kafka/` submodule at the repository root).
 - **C FFI: (experimental)** Behind the `ffi` feature, the crate exports the C API that the
   bindings in `../c/` and `../python/` are built on; the build writes its header
   to `target/include/confluent_kafka.h` for C users or to `target/include/confluent_kafka_bindings.h` for usage by other bindings. The FFI layer is experimental right now, it means it's not supported and its API is not stable yet.
+- **Root certificates:** Without `ssl.truststore.location` /
+  `ssl.truststore.certificates` the broker certificate is verified against
+  Mozilla's root certificates (the default `webpki-roots` feature); with
+  `default-features = false` and the `platform-verifier` feature the platform's
+  certificate verifier is used instead, so a CA installed in the operating
+  system is trusted and no bundle is compiled in
 
 ## Status
 
@@ -162,6 +168,7 @@ every compression type, TLS and SCRAM credential salting:
 | `aws-lc-rs` | yes | PBKDF2 for `Admin::alter_user_scram_credentials` upsertions, and the crypto provider of `rustls` |
 | `rustls` | yes | `security.protocol` `SSL` and `SASL_SSL`; implies `aws-lc-rs` |
 | `webpki-roots` | yes | Mozilla's root certificates, trusted without `ssl.truststore.location` or `ssl.truststore.certificates`; implies `rustls` |
+| `platform-verifier` | no | the platform's certificate verifier, used without those keys instead of Mozilla's root certificates (it wins over `webpki-roots`): the operating system's verifier on macOS and Windows, its root certificates on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override them); with hostname verification off, the operating system's root certificates through the WebPKI verifier; implies `rustls` |
 | `ffi` | no | the C API |
 | `integration-tests` | no | the broker-backed test suites; implies every codec and `webpki-roots` |
 
@@ -175,14 +182,21 @@ need it:
 - a SCRAM upsertion without `aws-lc-rs` fails its user's future with a
   `LocalUnsupportedOperationError`, while deletions still work.
 
-`rustls` needs a default trust store, and `webpki-roots` is the only one so
-far, so TLS is enabled through `webpki-roots`. For example, a client with lz4
-and TLS only:
+`rustls` needs a default trust store, so TLS is enabled through
+`webpki-roots` or `platform-verifier`; a build with `rustls` and neither stops
+with "confluent-kafka needs a default trust store". For example, a client with
+lz4 and TLS only:
 
 ```toml
 [dependencies]
 confluent-kafka = { version = "1.0.0", default-features = false, features = ["lz4", "webpki-roots"] }
 ```
+
+With `platform-verifier` instead of `webpki-roots` the Mozilla bundle is not
+compiled in, and a CA installed in the operating system is trusted, as the
+Java client trusts the JDK's default trust store; the C library and the Python
+wheel are built that way. On Linux a host without a CA bundle (a `scratch` or
+distroless image) must then set one of the truststore keys or `SSL_CERT_FILE`.
 
 ## Examples
 

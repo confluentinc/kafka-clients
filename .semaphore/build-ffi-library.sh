@@ -76,12 +76,19 @@ build_and_stage() {
     dest="$1"
     lib="$2"
     rm -f rust/target/include/confluent_kafka.h rust/target/include/confluent_kafka_bindings.h
-    (cd rust && cargo build --locked --features ffi --release)
+    # The wheel ships the library `make -C rust build-cdylib` builds, the one
+    # the binding's tests run against, with its target CPU (x86-64-v3 on
+    # x86_64). The wheel's tag cannot state a CPU level, so the extension
+    # checks it at import and raises ImportError on an older CPU (python/setup.py,
+    # CONFLUENT_KAFKA_TARGET_CPU). `cargo fetch --locked` fails if Cargo.lock is
+    # out of date, so the build uses exactly the committed dependencies.
+    (cd rust && cargo fetch --locked)
+    make -C rust build-cdylib
     test -f rust/target/include/confluent_kafka.h
     test -f rust/target/include/confluent_kafka_bindings.h
     rm -rf "$dest/python/native"
     mkdir -p "$dest/python/native/lib" "$dest/python/native/include"
-    cp "rust/target/release/$lib" "$dest/python/native/lib/"
+    cp "rust/target/release-cdylib/$lib" "$dest/python/native/lib/"
     cp rust/target/include/confluent_kafka.h rust/target/include/confluent_kafka_bindings.h \
         "$dest/python/native/include/"
 }
@@ -104,6 +111,7 @@ if [ "${1:-}" = "--in-docker" ]; then
     if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi
     command -v cmake >/dev/null 2>&1 || retry "$PKG" install -y cmake
     command -v perl  >/dev/null 2>&1 || retry "$PKG" install -y perl
+    command -v make  >/dev/null 2>&1 || retry "$PKG" install -y make
     if [ "$(uname -m)" = "x86_64" ]; then
         command -v nasm >/dev/null 2>&1 || retry "$PKG" install -y nasm
     fi

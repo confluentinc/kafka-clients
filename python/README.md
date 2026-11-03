@@ -318,10 +318,10 @@ The extension links the Rust library and includes its C header, so build the
 Rust client first:
 
 ```bash
-make -C ../rust build-all-features   # or: cd ../rust && cargo build --all-features --release
+make -C ../rust build-cdylib   # cargo build --profile release-cdylib, features ffi + platform-verifier, no webpki-roots
 ```
 
-This produces `../rust/target/release/libconfluent_kafka.*` and
+This produces `../rust/target/release-cdylib/libconfluent_kafka.*` and
 `../rust/target/include/confluent_kafka.h`. `setup.py` finds them there;
 set `CONFLUENT_KAFKA_LIB_DIR` to link a library from another directory
 (e.g. `../rust/target/debug`).
