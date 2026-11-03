@@ -369,7 +369,7 @@ test('queued hand-overs of a second caller do not keep the first from yielding',
     const b = (async () => {
       while (!aDone) {
         const future = await producer.send(new ProducerRecord({ topic, partition: 1000, value: 'b' }));
-        const outcome = future.get().then(() => 'ok', (e) => e.name);
+        const outcome = future.get().then(() => 'ok', (e) => e.errorName);
         if (bFirst === null) bFirst = await outcome;
         bSends++;
       }

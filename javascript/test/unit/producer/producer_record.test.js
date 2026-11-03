@@ -17,6 +17,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
@@ -33,19 +34,23 @@ test('the fields Java leaves out default to null and no headers', () => {
 test("Java's constructor checks keep Java's messages", () => {
   for (const topic of [undefined, null]) {
     assert.throws(() => new ProducerRecord({ topic }), (e) => {
-      assert.ok(e instanceof KafkaError);
-      assert.equal(e.name, 'LOCAL_ILLEGAL_ARGUMENT');
+      assert.ok(e instanceof IllegalArgumentError);
+      assert.ok(!(e instanceof KafkaError));
+      assert.equal(e.name, 'IllegalArgumentError');
+      assert.equal(e.errorName, 'LOCAL_ILLEGAL_ARGUMENT');
       assert.equal(e.code, -3);
       assert.equal(e.message, 'Topic cannot be null.');
       return true;
     });
   }
   assert.throws(() => new ProducerRecord({ topic: 't', timestamp: -1 }), {
-    name: 'LOCAL_ILLEGAL_ARGUMENT',
+    name: 'IllegalArgumentError',
+    errorName: 'LOCAL_ILLEGAL_ARGUMENT',
     message: 'Invalid timestamp: -1. Timestamp should always be non-negative or null.',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', partition: -2 }), {
-    name: 'LOCAL_ILLEGAL_ARGUMENT',
+    name: 'IllegalArgumentError',
+    errorName: 'LOCAL_ILLEGAL_ARGUMENT',
     message: 'Invalid partition: -2. Partition number should always be non-negative or null.',
   });
   assert.throws(() => new ProducerRecord({ topic: 't', headers: [{ value: 'x' }] }), {

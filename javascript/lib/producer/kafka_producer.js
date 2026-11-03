@@ -110,7 +110,9 @@ class KafkaProducer {
    * ProducerConfig.
    *
    * @param {ProducerConfigs} configs The producer configs
-   * @throws {import('../common/kafka_error').KafkaError} when the configuration is invalid or the producer cannot be built
+   * @throws {import('../common/kafka_error').KafkaError} when the configuration is invalid
+   *   (`ConfigError`, also for a value of the wrong type for its key) or the producer cannot
+   *   be built
    */
   constructor(configs) {
     this.#handle = native.producerCreate(configEntries(configs));
@@ -160,10 +162,9 @@ class KafkaProducer {
    * @param {import('./callback').Callback | null} [callback] A user-supplied callback to execute
    *   when the record has been acknowledged by the server
    * @returns {Promise<KafkaFuture<import('./record_metadata').RecordMetadata>>} resolving at
-   *   hand-over to the future of the record's metadata, rejecting with the KafkaError Java's
+   *   hand-over to the future of the record's metadata, rejecting with the error Java's
    *   send() would throw
-   * @throws {import('../common/kafka_error').KafkaError} `LOCAL_ILLEGAL_STATE` when the producer
-   *   is closed
+   * @throws {import('../illegal_state_error').IllegalStateError} when the producer is closed
    * @throws {TypeError} when `record` is not a ProducerRecord or `callback` not a function
    */
   send(record, callback) {
@@ -291,7 +292,7 @@ class KafkaProducer {
    *
    * @param {CloseOptions} [options] `timeoutMs`: the maximum time to wait for the producer to
    *   complete any pending requests. A timeout of zero means do not wait.
-   * @returns {Promise<void>} rejecting with `LOCAL_ILLEGAL_ARGUMENT` for a negative `timeoutMs`
+   * @returns {Promise<void>} rejecting with an `IllegalArgumentError` for a negative `timeoutMs`
    * @throws {TypeError} when `timeoutMs` is not an integer
    */
   close(options) {

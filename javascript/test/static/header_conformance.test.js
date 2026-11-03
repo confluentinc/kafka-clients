@@ -103,8 +103,12 @@ test('the one blocking close is the finalizer force-close (rule 4 exception)', (
   }
 });
 
-test("the binding's own error codes are the header's", () => {
+test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both ways", () => {
+  // lib/_error_registry.js is generated from rust/src/ffi/common.rs; the addon
+  // is built against the header cbindgen generates from it.
+  const { FFI_NAMES } = require('../../lib/_error_registry');
   const values = new Map(errorEnumerators(header));
+  assert.deepEqual([...FFI_NAMES].sort((a, b) => a[0] - b[0]), [...values].map(([n, v]) => [v, n]).sort((a, b) => a[0] - b[0]));
   assert.equal(values.get('LOCAL_ILLEGAL_ARGUMENT'), -3);
   assert.equal(values.get('LOCAL_ILLEGAL_STATE'), -4);
 });

@@ -86,8 +86,8 @@ export class ProducerRecord {
      * @param {ProducerRecordOptions} options The topic, and optionally the partition, the timestamp
      *   (in milliseconds since epoch; if null, the producer will assign the timestamp using
      *   System.currentTimeMillis()), the key, the value and the headers of the record
-     * @throws {import('../common/kafka_error').KafkaError} `LOCAL_ILLEGAL_ARGUMENT` when the topic is null, or the timestamp or the
-     *   partition is negative, as Java's IllegalArgumentException
+     * @throws {import('../illegal_argument_error').IllegalArgumentError} when the topic is null, or
+     *   the timestamp or the partition is negative, as Java's IllegalArgumentException
      * @throws {TypeError} when an argument has the wrong type
      */
     constructor(options: ProducerRecordOptions);

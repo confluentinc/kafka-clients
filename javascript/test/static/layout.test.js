@@ -97,29 +97,45 @@ function parseIndex(dir) {
   return { requires, exports: exportsLiterals[0] };
 }
 
-test('the root index.js requires each module folder and exports exactly those namespaces', () => {
-  const { requires, exports } = parseIndex('');
+/**
+ * Checks `lib/<dir>index.js`: a destructuring require names a public .js of
+ * the folder, a plain one a child module folder, bound to the folder's name;
+ * every child module folder is required, and module.exports is exactly the
+ * names bound.
+ */
+function checkIndex(dir) {
+  const { requires, exports } = parseIndex(dir);
+  const children = moduleDirs.filter((d) => `${d}/`.startsWith(dir) && d.slice(dir.length) !== '' && !d.slice(dir.length).includes('/'));
+  const bound = [];
+  const requiredDirs = [];
   for (const r of requires) {
-    assert.ok(!r.destructured, `lib/index.js destructures ${r.path}: the root exports namespaces only`);
-    assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `lib/index.js requires ${r.path}, not a module folder`);
-    assert.ok(moduleDirs.includes(r.path.slice(2)), `lib/index.js requires ${r.path}, not a public lib/ folder`);
-    assert.equal(r.names[0], r.path.slice(2), `lib/index.js binds ${r.path} as ${r.names[0]}`);
+    assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `lib/${dir}index.js requires ${r.path}, not a file or folder of its own`);
+    const target = `${dir}${r.path.slice(2)}`;
+    if (r.destructured) {
+      assert.ok(libFiles.includes(`${target}.js`), `lib/${dir}index.js destructures ${r.path}, not a public .js of lib/${dir}`);
+    } else {
+      assert.ok(moduleDirs.includes(target), `lib/${dir}index.js requires ${r.path}, not a public lib/ folder`);
+      assert.equal(r.names[0], r.path.slice(2), `lib/${dir}index.js binds ${r.path} as ${r.names[0]}`);
+      requiredDirs.push(target);
+    }
+    bound.push(...r.names);
   }
-  assert.deepEqual(requires.map((r) => r.path.slice(2)).sort(), [...moduleDirs].sort(), 'lib/index.js requires');
-  assert.deepEqual([...exports].sort(), [...moduleDirs].sort(), 'lib/index.js module.exports');
+  assert.deepEqual(requiredDirs.sort(), [...children].sort(), `lib/${dir}index.js requires its module folders`);
+  assert.deepEqual([...exports].sort(), bound.sort(), `lib/${dir}index.js module.exports`);
+}
+
+test('the root index.js exports the module namespaces and its own classes, the Java built-in errors', () => {
+  checkIndex('');
+  const { requires } = parseIndex('');
+  for (const r of requires.filter((x) => x.destructured)) {
+    assert.match(r.path, /_error$/, `lib/index.js destructures ${r.path}: the only modules of the root are Java built-in errors`);
+  }
 });
 
-test('a module folder index.js requires only public files of its own folder, and exports what it requires', () => {
+test('a module folder index.js requires public files of its own folder and its module folders, and exports what it requires', () => {
   for (const dir of libDirs) {
     if (dir === '' || isPrivate(dir)) continue;
-    const { requires, exports } = parseIndex(dir);
-    const bound = [];
-    for (const r of requires) {
-      assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `lib/${dir}index.js requires ${r.path}, not a file of its folder`);
-      assert.ok(libFiles.includes(`${dir}${r.path.slice(2)}.js`), `lib/${dir}index.js requires ${r.path}, not a public .js of lib/${dir}`);
-      bound.push(...r.names);
-    }
-    assert.deepEqual([...exports].sort(), bound.sort(), `lib/${dir}index.js module.exports`);
+    checkIndex(dir);
   }
 });
 

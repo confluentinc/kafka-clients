@@ -22,6 +22,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
+const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
@@ -60,7 +61,8 @@ test('send resolves at hand-over; the future fails after the callback ran once',
     assert.equal(future.isCancelled(), false);
     await assert.rejects(future.get(), (e) => {
       assert.ok(e instanceof KafkaError);
-      assert.equal(e.name, 'REQUEST_TIMED_OUT');
+      assert.equal(e.name, 'TimeoutError');
+      assert.equal(e.errorName, 'REQUEST_TIMED_OUT');
       assert.equal(e.code, 7);
       assert.equal(e.message, TIMEOUT_MESSAGE('unit-t'));
       assert.equal(e.retriable, true);
@@ -68,7 +70,7 @@ test('send resolves at hand-over; the future fails after the callback ran once',
       return true;
     });
     // get() again rejects the same way.
-    await assert.rejects(future.get(), { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-t') });
+    await assert.rejects(future.get(), { name: 'TimeoutError', errorName: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-t') });
     const [{ metadata, error }] = calls;
     assert.ok(metadata instanceof RecordMetadata);
     assert.equal(metadata.topic, 'unit-t');
@@ -88,7 +90,8 @@ test('a send without a callback fails its future the same way', async () => {
   try {
     const future = await producer.send(new ProducerRecord({ topic: 'unit-u', value: Buffer.from([0]) }));
     await assert.rejects(future.get(), {
-      name: 'REQUEST_TIMED_OUT',
+      name: 'TimeoutError',
+      errorName: 'REQUEST_TIMED_OUT',
       message: TIMEOUT_MESSAGE('unit-u'),
     });
   } finally {
@@ -104,7 +107,7 @@ test('a throwing callback does not change the outcome', async () => {
       ran++;
       throw new Error('boom');
     });
-    await assert.rejects(future.get(), { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-x') });
+    await assert.rejects(future.get(), { name: 'TimeoutError', errorName: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-x') });
     assert.equal(ran, 1);
   } finally {
     await producer.close();
@@ -118,7 +121,7 @@ test('flush inside a callback rejects with the core error', async () => {
     const future = await producer.send(new ProducerRecord({ topic: 'unit-f', value: 'v' }), () => {
       flushed = producer.flush();
     });
-    await assert.rejects(future.get(), { name: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-f') });
+    await assert.rejects(future.get(), { name: 'TimeoutError', errorName: 'REQUEST_TIMED_OUT', message: TIMEOUT_MESSAGE('unit-f') });
     assert.ok(flushed instanceof Promise);
     await assert.rejects(flushed, (e) => {
       assert.ok(e instanceof KafkaError);
@@ -143,7 +146,8 @@ test('a hand-over failure rejects send() and never reaches the callback', async 
       producer.send(new ProducerRecord({ topic: 'unit-h', value: 'v' }), () => calls++),
       (e) => {
         assert.ok(e instanceof KafkaError);
-        assert.equal(e.name, 'BOOTSTRAP_RESOLUTION');
+        assert.equal(e.name, 'BootstrapResolutionError');
+        assert.equal(e.errorName, 'BOOTSTRAP_RESOLUTION');
         assert.equal(e.message, BOOTSTRAP_MESSAGE);
         return true;
       },
@@ -164,8 +168,11 @@ test('after close: send throws, flush resolves, close is idempotent', async () =
   // While closing too.
   assert.equal(producer.close(), first);
   assert.throws(() => producer.send(new ProducerRecord({ topic: 't', value: 'v' })), (e) => {
-    assert.ok(e instanceof KafkaError);
-    assert.equal(e.name, 'LOCAL_ILLEGAL_STATE');
+    // Java's IllegalStateException is a java.lang exception, not a KafkaException.
+    assert.ok(e instanceof IllegalStateError);
+    assert.ok(!(e instanceof KafkaError));
+    assert.equal(e.name, 'IllegalStateError');
+    assert.equal(e.errorName, 'LOCAL_ILLEGAL_STATE');
     assert.equal(e.code, -4);
     assert.equal(e.message, CLOSED_MESSAGE);
     return true;
@@ -180,8 +187,11 @@ test('after close: send throws, flush resolves, close is idempotent', async () =
 
 test("close checks its timeout as Java's close(Duration) does, whatever the state", async () => {
   const negative = (e) => {
-    assert.ok(e instanceof KafkaError);
-    assert.equal(e.name, 'LOCAL_ILLEGAL_ARGUMENT');
+    // Java's IllegalArgumentException is a java.lang exception, not a KafkaException.
+    assert.ok(e instanceof IllegalArgumentError);
+    assert.ok(!(e instanceof KafkaError));
+    assert.equal(e.name, 'IllegalArgumentError');
+    assert.equal(e.errorName, 'LOCAL_ILLEGAL_ARGUMENT');
     assert.equal(e.code, -3);
     assert.equal(e.message, 'The timeout cannot be negative.');
     return true;
@@ -201,8 +211,11 @@ test("close checks its timeout as Java's close(Duration) does, whatever the stat
 
 test('a negative close timeout on an open producer is rejected first and changes nothing', async () => {
   const negative = (e) => {
-    assert.ok(e instanceof KafkaError);
-    assert.equal(e.name, 'LOCAL_ILLEGAL_ARGUMENT');
+    // Java's IllegalArgumentException is a java.lang exception, not a KafkaException.
+    assert.ok(e instanceof IllegalArgumentError);
+    assert.ok(!(e instanceof KafkaError));
+    assert.equal(e.name, 'IllegalArgumentError');
+    assert.equal(e.errorName, 'LOCAL_ILLEGAL_ARGUMENT');
     assert.equal(e.code, -3);
     assert.equal(e.message, 'The timeout cannot be negative.');
     return true;
@@ -219,7 +232,8 @@ test('a negative close timeout on an open producer is rejected first and changes
   await producer.close();
   await assert.rejects(future.get(), (e) => {
     assert.ok(e instanceof KafkaError);
-    assert.equal(e.name, 'REQUEST_TIMED_OUT');
+    assert.equal(e.name, 'TimeoutError');
+    assert.equal(e.errorName, 'REQUEST_TIMED_OUT');
     assert.equal(e.message, TIMEOUT_MESSAGE('unit-n'));
     return true;
   });
@@ -355,7 +369,7 @@ test('an un-awaited send whose hand-over fails surfaces as an unhandled rejectio
     p.send(new ProducerRecord({ topic: 'h', value: 'v' }), () => console.log('callback ran'));
   `);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, `unhandled: BOOTSTRAP_RESOLUTION ${BOOTSTRAP_MESSAGE}\n`);
+  assert.equal(r.stdout, `unhandled: BootstrapResolutionError ${BOOTSTRAP_MESSAGE}\n`);
 });
 
 test('a failed future whose get() is never called raises no unhandled rejection', () => {

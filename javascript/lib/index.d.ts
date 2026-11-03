@@ -16,4 +16,13 @@
 
 import producer = require("./producer");
 import common = require("./common");
-export { producer, common };
+import { ConcurrentModificationError } from "./concurrent_modification_error";
+import { ExecutionError } from "./execution_error";
+import { IllegalArgumentError } from "./illegal_argument_error";
+import { IllegalStateError } from "./illegal_state_error";
+import { IndexOutOfBoundsError } from "./index_out_of_bounds_error";
+import { NoSuchElementError } from "./no_such_element_error";
+import { TimeoutError } from "./timeout_error";
+import { UnsupportedOperationError } from "./unsupported_operation_error";
+import consumer = require("./consumer");
+export { producer, common, ConcurrentModificationError, ExecutionError, IllegalArgumentError, IllegalStateError, IndexOutOfBoundsError, NoSuchElementError, TimeoutError, UnsupportedOperationError, consumer };

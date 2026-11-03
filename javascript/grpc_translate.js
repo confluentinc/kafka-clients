@@ -24,8 +24,17 @@
 // / uint64 fields arrive as decimal strings, and an unset field -- a proto3
 // `optional` one or a scalar at its default -- is absent (undefined).
 
-const { KafkaError } = require('./lib/common');
+const { errorClasses } = require('./lib/_errors');
 const { ProducerRecord } = require('./lib/producer');
+
+// The client's error classes at the top of a chain: KafkaError and the Java
+// built-ins (IllegalStateError, ...). Every error the client reports or throws
+// is an instance of one.
+let clientRoots = null;
+function isClientError(err) {
+  if (clientRoots === null) clientRoots = errorClasses().filter((c) => Object.getPrototypeOf(c) === Error);
+  return clientRoots.some((c) => err instanceof c);
+}
 
 // The FFI error codes (kafka_common_Error_e in confluent_kafka_bindings.h,
 // mirrored by rust/tests/common/error_code.rs) of the only errors this server
@@ -49,7 +58,8 @@ const KIND_DELIVERY = 'delivery';
  * Translate an error into a proto KafkaError (python/grpc_translate.py's
  * `_kafka_error_to_proto`).
  *
- * A KafkaError from the client crosses with its FFI code and the core's message
+ * An error from the client (a KafkaError or a Java built-in such as
+ * IllegalStateError) crosses with its FFI code and the core's message
  * unchanged: `code` is the only discriminator the proto carries, and it is
  * injective over the client's error classes. Anything else (a TypeError from
  * an argument check, a bug in this server) is this server's own failure, not
@@ -60,7 +70,7 @@ const KIND_DELIVERY = 'delivery';
  * @returns {{code: number, message: string}}
  */
 function kafkaErrorToProto(err) {
-  if (err instanceof KafkaError) return { code: err.code, message: err.message || '' };
+  if (isClientError(err)) return { code: /** @type {any} */ (err).code, message: /** @type {any} */ (err).message || '' };
   if (err instanceof Error) return serverError(`${err.name}: ${err.message}`);
   return serverError(`${typeof err}: ${String(err)}`);
 }

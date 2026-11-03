@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use crate::config_consts;
 use crate::java_parse::{parse_expr, strip_comments, Expr};
 
+pub(crate) mod js;
+
 type Res<T> = anyhow::Result<T>;
 
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
@@ -436,8 +438,15 @@ fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> 
 
 /// The null rule of a key from its validator's source, read as Java's
 /// `ConfigDef` validators treat `null`. An unknown validator kind stops
-/// generation.
-fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str, def: &KeyDef) -> Res<NullRule> {
+/// generation. `null_spelling` is how the binding's language spells Java's
+/// `null` in a message the validator builds from the value (`None`, `null`).
+fn null_rule(
+    reader: &mut Reader,
+    consts: &mut config_consts::Reader,
+    key: &str,
+    def: &KeyDef,
+    null_spelling: &str,
+) -> Res<NullRule> {
     let Some(src) = def.validator.as_deref() else {
         return Ok(NullRule::Allowed);
     };
@@ -549,8 +558,9 @@ fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str,
         if !rejects_null {
             anyhow::bail!("config types: `{fqn}.{parser}` does not reject null");
         }
-        // The message as Python builds it, `null` spelled `None` (Types).
-        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, "None"), ("name", key)])?;
+        // The message as the binding builds it, `null` spelled its way
+        // (Python's `None`, Types).
+        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, null_spelling), ("name", key)])?;
         return Ok(NullRule::Named { kind: "custom Validator", message });
     }
     anyhow::bail!("config types: `{key}` in `{}` has an unknown validator `{src}`", def.class)
@@ -640,7 +650,7 @@ pub fn generated_output(repo_root: &Path) -> Res<(PathBuf, String)> {
     for (name, fqn) in CLIENTS {
         let mut table = Table::new();
         for (key, def) in client_types(&mut reader, fqn)? {
-            let rule = null_rule(&mut reader, &mut consts, &key, &def)?;
+            let rule = null_rule(&mut reader, &mut consts, &key, &def, "None")?;
             table.insert(key, (def.ty, rule));
         }
         tables.push((name, table));
