@@ -3920,9 +3920,11 @@ static void test_mock_admin_remove_members_rejects_an_empty_member_list(void) {
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Invalid empty members has been provided");
     err = NULL;
+    // Java's constructor dereferences a null collection (`members.isEmpty()`).
     options = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(NULL, &err);
     TEST_ASSERT_NULL(options);
-    assert_error_message(err, "Invalid empty members has been provided");
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_null_pointer_error(err));
+    assert_error_message(err, "members must not be null");
     kafka_List_destroy(empty);
 }
 
