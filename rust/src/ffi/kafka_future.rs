@@ -937,7 +937,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_is_done(self_: *const kafka_co
 ///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid list whose elements are valid future
+/// `futures` must be a valid list whose elements are valid future
 /// handles. The list and the futures stay the caller's, and may be destroyed
 /// right after this returns. The returned future is owned, freed with
 /// `kafka_common_KafkaFuture_destroy`.

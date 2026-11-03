@@ -113,7 +113,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
 ///
 /// # Safety
 ///
-/// `partitions` must be `NULL` or a valid list of topic-partition handles.
+/// `partitions` must be a valid list of topic-partition handles.
 ///
 /// The returned handle is owned by the caller, freed with
 /// `kafka_common_ConsumerNoOffsetForPartitionError_destroy`.

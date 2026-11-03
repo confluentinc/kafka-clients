@@ -147,6 +147,8 @@ unsafe fn map_replica_infos(map: *const kafka_Map_t, param: &'static str) -> Has
 
 /// Creates the description of a log directory.
 ///
+/// WARNING: `NULL` `replica_infos` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `error` - the error describing the log directory, `NULL` for none; consumed.
@@ -154,12 +156,16 @@ unsafe fn map_replica_infos(map: *const kafka_Map_t, param: &'static str) -> Has
 ///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
 ///   must not be `NULL`.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `replica_infos` is `NULL`
+///
 /// # Safety
 ///
 /// `error` must be `NULL` or an owned error handle not yet destroyed, that no
 /// other call uses at the same time, which this call consumes: the description
 /// takes ownership of it, the caller does not destroy it;
-/// `replica_infos` `NULL` or a valid map whose keys are valid topic-partition
+/// `replica_infos` a valid map whose keys are valid topic-partition
 /// handles and whose values are valid replica-info handles, all kept alive
 /// and not mutated for this call. The returned handle is owned, freed with
 /// [`kafka_admin_LogDirDescription_destroy`].
@@ -181,6 +187,8 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
 
 /// Creates the description of a log directory, with the sizes of its volume.
 ///
+/// WARNING: `NULL` `replica_infos` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `error` - the error describing the log directory, `NULL` for none; consumed.
@@ -189,6 +197,10 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
 ///   must not be `NULL`.
 /// - `total_bytes` - the total size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 /// - `usable_bytes` - the usable size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `replica_infos` is `NULL`
 ///
 /// # Safety
 ///
@@ -219,6 +231,8 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
 /// Creates the description of a log directory, with the sizes of its volume and its cordoned
 /// flag.
 ///
+/// WARNING: `NULL` `replica_infos` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `error` - the error describing the log directory, `NULL` for none; consumed.
@@ -228,6 +242,10 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
 /// - `total_bytes` - the total size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 /// - `usable_bytes` - the usable size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 /// - `is_cordoned` - 1 if the log directory is cordoned, else 0.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `replica_infos` is `NULL`
 ///
 /// # Safety
 ///

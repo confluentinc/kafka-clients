@@ -125,7 +125,7 @@ pub(crate) fn box_token_information(
 /// # Safety
 ///
 /// `token_id` must be a valid NUL-terminated string, `owner` a valid
-/// principal handle and `renewers` `NULL` or a valid list of principal handles.
+/// principal handle and `renewers` a valid list of principal handles.
 /// The returned handle is owned, freed with
 /// `kafka_common_security_token_delegation_TokenInformation_destroy`.
 #[ffi_guard]
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// # Safety
 ///
 /// `token_id` must be a valid NUL-terminated string, `owner` and
-/// `token_requester` valid principal handles and `renewers` `NULL` or a valid
+/// `token_requester` valid principal handles and `renewers` a valid
 /// list of principal handles.
 /// The returned handle is owned, freed with
 /// `kafka_common_security_token_delegation_TokenInformation_destroy`.

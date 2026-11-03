@@ -503,7 +503,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid kind handle, `samples` null or a valid list of
+/// `self_` must be a valid kind handle, `samples` a valid list of
 /// sample handles and `config` a valid metric-config handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]

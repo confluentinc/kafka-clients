@@ -152,7 +152,7 @@ pub extern "C" fn kafka_admin_MockAdminClient_new() -> *mut kafka_admin_MockAdmi
 ///
 /// # Safety
 ///
-/// `brokers` must be `NULL` or a valid list of valid node handles, `controller` a valid node handle,
+/// `brokers` must be a valid list of valid node handles, `controller` a valid node handle,
 /// and `out_err` a valid slot pointing at `NULL`. The mock is owned by the caller, freed with
 /// `kafka_admin_MockAdminClient_destroy`.
 #[ffi_guard]
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` `NULL` or a live map of the types above, each key
+/// `self_` must be a live handle and `new_offsets` a live map of the types above, each key
 /// and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` `NULL` or a live map of the types above, each key
+/// `self_` must be a live handle and `new_offsets` a live map of the types above, each key
 /// and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` `NULL` or a live map of the types above, each key
+/// `self_` must be a live handle and `new_offsets` a live map of the types above, each key
 /// and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -270,6 +270,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
 /// `MockAdminClient.addTopic(boolean internal, String name, List<TopicPartitionInfo> partitions,
 /// Map<String, String> configs)`.
 ///
+/// WARNING: `NULL` `name` panics; Java adds a topic named `null`.
+///
 /// # Parameters
 ///
 /// - `internal` - whether the topic is internal (0 or 1)
@@ -285,9 +287,13 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
 ///   already added, or if any partition names a broker the mock does not have as its leader, in its
 ///   replica list, or in its ISR
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+///
 /// # Safety
 ///
-/// `self_` must be a live handle, `name` a C string, `partitions` `NULL` or a live list and `configs`
+/// `self_` must be a live handle, `name` a C string, `partitions` a live list and `configs`
 /// `NULL` or a live map, of the element types above, each element live. `out_err` must be a valid slot
 /// pointing at `NULL`.
 #[ffi_guard]
@@ -563,9 +569,15 @@ pub extern "C" fn kafka_admin_MockAdminClient_Builder_new() -> *mut kafka_admin_
 
 /// `Builder.clusterId(String clusterId)`.
 ///
+/// WARNING: `NULL` `cluster_id` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `cluster_id` - the cluster id, copied
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `cluster_id` is `NULL`
 ///
 /// # Safety
 ///
@@ -605,8 +617,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_cluster_id(
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same time, `brokers` `NULL` or
-/// a valid list of valid node handles, and `out_err` a valid slot pointing at `NULL`.
+/// `self_` must be a live builder handle that no other call uses at the same time, `brokers` a valid
+/// list of valid node handles, and `out_err` a valid slot pointing at `NULL`.
 ///
 /// The returned `self_` is borrowed: it stays owned by the caller.
 #[ffi_guard]
@@ -696,15 +708,21 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_controller(
 /// `Builder.brokerLogDirs(List<List<String>> brokerLogDirs)`. As in Java, the length is not checked
 /// against the broker count.
 ///
+/// WARNING: `NULL` `broker_log_dirs` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `broker_log_dirs` - a `kafka_List_t` of `const kafka_List_t *`, one per broker id, each of
 ///   `const char *`; all copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `broker_log_dirs` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a live builder handle that no other call uses at the same time, and
-/// `broker_log_dirs` `NULL` or a valid list whose elements are valid lists of C strings.
+/// `broker_log_dirs` a valid list whose elements are valid lists of C strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs(
@@ -873,15 +891,21 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_max_supported_f
 /// `Builder.defaultGroupConfigs(Map<String, String> defaultGroupConfigs)`: the defaults are
 /// overlaid onto every group's configs.
 ///
+/// WARNING: `NULL` `default_group_configs` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `default_group_configs` - a `kafka_Map_t` of `const char *` to `const char *`, copied during
 ///   the call; must not be `NULL`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `default_group_configs` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a live builder handle that no other call uses at the same time, and
-/// `default_group_configs` `NULL` or a valid map of C strings to C strings.
+/// `default_group_configs` a valid map of C strings to C strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_group_configs(

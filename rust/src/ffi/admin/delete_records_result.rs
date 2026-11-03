@@ -143,15 +143,21 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_all(
 
 /// Creates a result from a map of partition to the future of its deleted records.
 ///
+/// WARNING: `NULL` `futures` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `futures` - a map of `const kafka_common_TopicPartition_t *` to `const
 ///   kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_DeletedRecords_t *`, copied during
 ///   the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `futures` is `NULL`
+///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid map whose keys are valid topic-partition handles and whose
+/// `futures` must be a valid map whose keys are valid topic-partition handles and whose
 /// values are valid future handles, each successful one's value a valid
 /// `kafka_admin_DeletedRecords_t *`. The caller keeps ownership of the map, its keys, its futures
 /// and their values. Each future should already be complete (`kafka_common_KafkaFuture_is_done`):

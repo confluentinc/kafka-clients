@@ -94,7 +94,7 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 ///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid map whose keys are valid NUL-terminated strings and whose
+/// `futures` must be a valid map whose keys are valid NUL-terminated strings and whose
 /// values are valid future handles. The caller keeps ownership of the map, its keys and its
 /// futures. Each future should already be complete (`kafka_common_KafkaFuture_is_done`): its
 /// outcome is copied as it stands, and one still pending stands as one failed with

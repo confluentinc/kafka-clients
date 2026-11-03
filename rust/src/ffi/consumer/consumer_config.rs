@@ -133,7 +133,7 @@ pub(crate) unsafe fn consumer_config_ref<'a>(
 ///
 /// # Safety
 ///
-/// `props` must be null or a valid map of `char *` keys and values, which stays the
+/// `props` must be a valid map of `char *` keys and values, which stays the
 /// caller's, and `out_err` a valid slot pointing at null. The configuration is owned
 /// by the caller, freed with [`kafka_consumer_ConsumerConfig_destroy`].
 #[ffi_guard]

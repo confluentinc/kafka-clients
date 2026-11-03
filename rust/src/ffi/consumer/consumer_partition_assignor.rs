@@ -159,9 +159,17 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 ///
 /// - `topics` - The list of topics to subscribe to
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topics` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of strings.
+/// `topics` must be a valid list of strings.
 ///
 /// `topics` is copied during the call. The returned handle is owned by the caller, freed with
 /// [`kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy`].
@@ -183,9 +191,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_n
 /// - `topics` - The list of topics to subscribe to
 /// - `user_data` - Nullable user data to include in the subscription
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topics` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of strings; `user_data`'s `data`
+/// `topics` must be a valid list of strings; `user_data`'s `data`
 /// null or pointing to `len` readable bytes not written during the call.
 ///
 /// `topics` and `user_data` are copied during the call. The returned handle is owned by the caller,
@@ -216,9 +232,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 /// - `user_data` - Nullable user data to include in the subscription
 /// - `owned_partitions` - The partitions currently owned by this consumer
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+/// - `LocalNullPointerError` if `owned_partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topics`, `owned_partitions` panic; Java stores `null`.
+///
 /// # Safety
 ///
-/// `topics` and `owned_partitions` must be null or valid lists of the
+/// `topics` and `owned_partitions` must be valid lists of the
 /// documented element types; `user_data`'s `data` null or pointing to `len`
 /// readable bytes not written during the call.
 #[ffi_guard]
@@ -494,7 +519,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 ///
 /// # Safety
 ///
-/// `partitions` must be null or a valid list of topic-partition handles.
+/// `partitions` must be a valid list of topic-partition handles.
 ///
 /// `partitions` is copied during the call. The returned handle is owned by the caller, freed with
 /// [`kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy`].
@@ -528,7 +553,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new
 ///
 /// # Safety
 ///
-/// `partitions` must be null or a valid list of topic-partition handles;
+/// `partitions` must be a valid list of topic-partition handles;
 /// `user_data`'s `data` null or pointing to `len` readable bytes not written
 /// during the call.
 ///
@@ -677,14 +702,20 @@ pub extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_new() -> *mut kafka_
 
 /// Sets the subscribed topics.
 ///
+/// WARNING: `NULL` `topics` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `topics` - the subscribed topics (mandatory), a list of `char *` copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the
-/// same time, and `topics` null or a valid list of strings.
+/// same time, and `topics` a valid list of strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
@@ -727,14 +758,20 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data
 
 /// Sets the owned partitions.
 ///
+/// WARNING: `NULL` `owned_partitions` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `owned_partitions` - the owned partitions, a list of `kafka_common_TopicPartition_t *` copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `owned_partitions` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the
-/// same time, and `owned_partitions` null or a valid list of
+/// same time, and `owned_partitions` a valid list of
 /// topic-partition handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -157,7 +157,7 @@ pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t, param: &'st
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string, `leader` `NULL` or a valid
-/// node handle, and each list `NULL` or a valid list of node handles; all are copied. The
+/// node handle, and each list a valid list of node handles; all are copied. The
 /// returned handle is owned, freed with `kafka_common_PartitionInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -210,8 +210,8 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
 ///
 /// # Safety
 ///
-/// As `kafka_common_PartitionInfo_new`, plus `offline_replicas` `NULL` or a
-/// valid list of node handles.
+/// As `kafka_common_PartitionInfo_new`, plus `offline_replicas` a valid
+/// list of node handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_with_offline_replicas(

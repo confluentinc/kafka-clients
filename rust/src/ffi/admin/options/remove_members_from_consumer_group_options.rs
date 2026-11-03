@@ -154,7 +154,7 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
 ///
 /// # Safety
 ///
-/// `members` must be `NULL` or a valid list, not mutated during the call, whose
+/// `members` must be a valid list, not mutated during the call, whose
 /// elements are live member-to-remove handles; `out_err` a valid slot pointing
 /// at `NULL`. The list and its elements are borrowed and copied during the call. The handle is
 /// owned by the caller, freed with `kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`.

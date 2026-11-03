@@ -112,8 +112,8 @@ pub(crate) fn box_topic_partition_info(info: TopicPartitionInfo) -> *mut kafka_c
 ///
 /// # Safety
 ///
-/// `leader` must be `NULL` or a valid node handle and each list `NULL` or a
-/// valid list of node handles; all are copied. The returned handle is owned, freed with
+/// `leader` must be `NULL` or a valid node handle and each list a valid
+/// list of node handles; all are copied. The returned handle is owned, freed with
 /// `kafka_common_TopicPartitionInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -153,7 +153,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
 /// # Safety
 ///
 /// As `kafka_common_TopicPartitionInfo_new`, plus `elr` and
-/// `last_known_elr` `NULL` or valid lists of node handles; a `NULL` list reads as empty.
+/// `last_known_elr` valid lists of node handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr(

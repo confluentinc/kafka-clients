@@ -238,8 +238,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_controller(
 ///
 /// # Safety
 ///
-/// As `kafka_common_Cluster_with_controller`, plus `invalid_topics` `NULL` or
-/// a valid list of strings.
+/// As `kafka_common_Cluster_with_controller`, plus `invalid_topics` a valid list of strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller(
@@ -300,7 +299,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller(
 /// # Safety
 ///
 /// As `kafka_common_Cluster_with_invalid_topics_controller`, plus
-/// `topic_ids` `NULL` or a valid map of `const char *` topic names to
+/// `topic_ids` a valid map of `const char *` topic names to
 /// `const kafka_common_Uuid_t *`, copied.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -396,7 +395,7 @@ pub extern "C" fn kafka_common_Cluster_empty() -> *mut kafka_common_Cluster_t {
 ///
 /// # Safety
 ///
-/// `addresses` must be `NULL` or a valid list of NUL-terminated strings of the form `host:port`,
+/// `addresses` must be a valid list of NUL-terminated strings of the form `host:port`,
 /// as Java's `Utils.getHost` / `Utils.getPort` accept them (an optional `scheme://` prefix and
 /// `[ipv6]` brackets included), each with a port in `0..=65535`. This precondition is not
 /// checked: a malformed element yields a node with the whole string as host and port `0`. The
@@ -432,7 +431,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_bootstrap(addresses: *const kafka_
 ///
 /// # Safety
 ///
-/// `self_` must be a valid cluster handle and `partitions` `NULL` or a valid
+/// `self_` must be a valid cluster handle and `partitions` a valid
 /// map of the stated key and value types. The returned handle is owned, freed with
 /// `kafka_common_Cluster_destroy`.
 #[ffi_guard]

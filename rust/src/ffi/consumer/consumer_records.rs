@@ -154,6 +154,14 @@ pub extern "C" fn kafka_consumer_ConsumerRecords_empty() -> *mut kafka_consumer_
 ///
 /// The new records handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `records` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `records` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `records` and `next_offsets` must be valid maps of

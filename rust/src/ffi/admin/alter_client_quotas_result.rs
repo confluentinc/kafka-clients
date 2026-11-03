@@ -132,9 +132,17 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 ///
 /// - `futures` - maps entity to its alteration result
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `futures` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `futures` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid map whose keys are valid client-quota-entity handles and whose
+/// `futures` must be a valid map whose keys are valid client-quota-entity handles and whose
 /// values are valid future handles. The caller keeps ownership of the map, its keys and its
 /// futures. Each future should already be complete (`kafka_common_KafkaFuture_is_done`): its
 /// outcome is copied as it stands, and one still pending stands as one failed with

@@ -222,7 +222,7 @@ unsafe fn list_topic_partition_infos(list: *const kafka_List_t, param: &'static 
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `partitions` `NULL` or a
+/// `name` must be a valid NUL-terminated string and `partitions` a
 /// valid list whose elements are valid topic-partition-info handles, all
 /// kept alive and not mutated for this call.
 ///

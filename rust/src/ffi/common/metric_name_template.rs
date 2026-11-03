@@ -94,7 +94,7 @@ pub(crate) unsafe fn metric_name_template_ref<'a>(
 ///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings and `tag_names` `NULL` or a valid list of
+/// The strings must be valid NUL-terminated strings and `tag_names` a valid list of
 /// NUL-terminated strings; everything is copied. The returned handle is owned, freed with
 /// `kafka_common_MetricNameTemplate_destroy`.
 #[ffi_guard]

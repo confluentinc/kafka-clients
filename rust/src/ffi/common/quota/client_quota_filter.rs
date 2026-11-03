@@ -67,9 +67,17 @@ pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_c
 ///
 /// the new filter
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `components` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `components` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `components` must be null or a valid list of borrowed
+/// `components` must be a valid list of borrowed
 /// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during the call.
 /// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]
@@ -96,9 +104,17 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
 ///
 /// the new filter
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `components` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `components` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `components` must be null or a valid list of borrowed
+/// `components` must be a valid list of borrowed
 /// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during the call.
 /// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]

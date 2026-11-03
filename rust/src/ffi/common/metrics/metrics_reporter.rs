@@ -231,7 +231,7 @@ pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metrics-reporter handle and `metrics` null or a
+/// `self_` must be a valid metrics-reporter handle and `metrics` a
 /// valid list of metric handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]

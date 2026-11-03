@@ -89,6 +89,14 @@ pub(crate) fn sorted_entries(entity: &ClientQuotaEntity) -> Vec<(&str, Option<&s
 ///
 /// - `entries` - maps entity type to its name
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `entries` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `entries` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `entries` must be a valid map of NUL-terminated keys and NUL-terminated or

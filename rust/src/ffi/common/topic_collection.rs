@@ -106,7 +106,7 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 ///
 /// # Safety
 ///
-/// `topics` must be `NULL` or a valid list of uuid handles. The returned handle is owned, freed
+/// `topics` must be a valid list of uuid handles. The returned handle is owned, freed
 /// with `kafka_common_TopicCollection_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 ///
 /// # Safety
 ///
-/// `topics` must be `NULL` or a valid list of NUL-terminated strings. The returned handle is
+/// `topics` must be a valid list of NUL-terminated strings. The returned handle is
 /// owned, freed with `kafka_common_TopicCollection_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]

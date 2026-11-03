@@ -312,6 +312,14 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
 ///
 /// - `kafka_common_Error_is_local_illegal_state_error` if the consumer is closed
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topic` panics.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle, `topic` a valid string and `partitions` a
@@ -429,7 +437,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_assignment` null or a valid list of
+/// `self_` must be a live handle and `new_assignment` a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
 #[ffi_guard]
@@ -546,7 +554,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `partitions_lost` null or a valid list of
+/// `self_` must be a live handle and `partitions_lost` a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
 #[ffi_guard]

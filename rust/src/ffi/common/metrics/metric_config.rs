@@ -354,14 +354,20 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_tags(
 
 /// Sets the tags.
 ///
+/// WARNING: `NULL` `tags` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `tags` - A map of `const char *` to `const char *`, copied.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `tags` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid owned metric-config handle that no other call uses at the same time,
-/// and `tags` `NULL` or a valid map of NUL-terminated strings.
+/// and `tags` a valid map of NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(

@@ -79,6 +79,8 @@ pub(crate) unsafe fn destroy_transaction_description_element(element: *mut c_voi
 
 /// Creates the description of a transaction.
 ///
+/// WARNING: `NULL` `topic_partitions` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `coordinator_id` - the broker id of the transaction coordinator.
@@ -90,9 +92,13 @@ pub(crate) unsafe fn destroy_transaction_description_element(element: *mut c_voi
 ///   none.
 /// - `topic_partitions` - the partitions in the transaction, `NULL` for none.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic_partitions` is `NULL`
+///
 /// # Safety
 ///
-/// `state` must be a transaction-state singleton and `topic_partitions` `NULL` or a valid borrowed
+/// `state` must be a transaction-state singleton and `topic_partitions` a valid borrowed
 /// list of `const kafka_common_TopicPartition_t *`, copied. The returned handle is owned, freed
 /// with [`kafka_admin_TransactionDescription_destroy`].
 #[ffi_guard]

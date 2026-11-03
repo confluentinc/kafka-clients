@@ -145,14 +145,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
 
 /// Creates a result from a map of group id to the future of its description.
 ///
+/// WARNING: `NULL` `futures` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `futures` - a map of `const char *` group ids to `const kafka_common_KafkaFuture_t *` whose
 ///   value is a `kafka_admin_ClassicGroupDescription_t *`, copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `futures` is `NULL`
+///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid map whose keys are valid NUL-terminated strings and whose
+/// `futures` must be a valid map whose keys are valid NUL-terminated strings and whose
 /// values are valid future handles, each successful one's value a valid
 /// `kafka_admin_ClassicGroupDescription_t *`. The caller keeps ownership of the map, its keys, its
 /// futures and their values. Each future should already be complete

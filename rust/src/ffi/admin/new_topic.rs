@@ -221,7 +221,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `replicas_assignments`
-/// `NULL` or a valid map whose keys point at `int32_t`s and whose values are
+/// a valid map whose keys point at `int32_t`s and whose values are
 /// valid lists whose elements point at `int32_t`s, all kept alive and not
 /// mutated for this call.
 ///

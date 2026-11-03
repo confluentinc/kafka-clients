@@ -2876,7 +2876,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout_
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `offsets` null or a valid map of
+/// `self_` must be a live handle and `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one. `out_err` must be a valid slot
 /// pointing at null.
@@ -2988,7 +2988,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `offsets` null or a valid map of
+/// `self_` must be a live handle and `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one. `out_err` must be a valid slot
 /// pointing at null.
@@ -3336,7 +3336,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `offsets` null or a valid map of
+/// `self_` must be a live handle, `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one, and `callback` a live callback
 /// handle. `out_err` must be a valid slot pointing at null.

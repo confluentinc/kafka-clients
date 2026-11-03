@@ -224,7 +224,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated and
-/// `tags` null or a valid map of NUL-terminated strings.
+/// `tags` a valid map of NUL-terminated strings.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated and
-/// `tags` null or a valid map of NUL-terminated strings.
+/// `tags` a valid map of NUL-terminated strings.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
@@ -326,7 +326,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated,
-/// `key_value` null or a valid list of NUL-terminated strings and `out_err` a
+/// `key_value` a valid list of NUL-terminated strings and `out_err` a
 /// valid slot pointing at null.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
@@ -1153,8 +1153,8 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid registry handle, `template` a valid template handle, `key_value` `NULL`
-/// or a valid list of NUL-terminated strings and `out_err` a valid slot pointing at `NULL`. The
+/// `self_` must be a valid registry handle, `template` a valid template handle, `key_value` a valid
+/// list of NUL-terminated strings and `out_err` a valid slot pointing at `NULL`. The
 /// returned name is owned by the caller and freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -1196,7 +1196,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_key_v
 ///
 /// # Safety
 ///
-/// `self_` must be a valid registry handle, `template` a valid template handle, `tags` `NULL` or a
+/// `self_` must be a valid registry handle, `template` a valid template handle, `tags` a
 /// valid map of NUL-terminated strings and `out_err` a valid slot pointing at `NULL`. The returned
 /// name is owned by the caller and freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]

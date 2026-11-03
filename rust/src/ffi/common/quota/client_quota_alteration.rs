@@ -234,9 +234,17 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_destroy(
 /// - `entity` - the entity whose config will be modified
 /// - `ops` - the alteration to perform
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `ops` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `ops` panics.
+///
 /// # Safety
 ///
-/// `entity` must be a valid entity handle and `ops` null or a valid list of borrowed
+/// `entity` must be a valid entity handle and `ops` a valid list of borrowed
 /// `kafka_common_quota_ClientQuotaAlteration_Op_t` handles; both are copied during the call.
 /// The returned handle is owned, freed with `kafka_common_quota_ClientQuotaAlteration_destroy`.
 #[ffi_guard]

@@ -143,15 +143,21 @@ pub extern "C" fn kafka_admin_CreateDelegationTokenOptions_new() -> *mut kafka_a
 
 /// `CreateDelegationTokenOptions.renewers(List<KafkaPrincipal> renewers)`.
 ///
+/// WARNING: `NULL` `renewers` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `renewers` - the principals allowed to renew the token, a `kafka_List_t` of
 ///   `kafka_common_security_auth_KafkaPrincipal_t *`; must not be `NULL`.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `renewers` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `renewers` must be `NULL` or a valid list whose elements are live
+/// `renewers` must be a valid list whose elements are live
 /// principal handles. The list and its elements are borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]

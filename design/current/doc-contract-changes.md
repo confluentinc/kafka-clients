@@ -240,3 +240,143 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Contract change: a `NULL` `partitions` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
    - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be stored; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
    - Accepted: 2026-11-03 Emanuele Sabellico
+1. `kafka_admin_LogDirDescription_new`
+   - Java member: `org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription(ApiException,Map)`
+   - Contract change: a `NULL` `replica_infos` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_LogDirDescription_with_total_bytes_usable_bytes`
+   - Java member: `org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription(ApiException,Map,long,long)`
+   - Contract change: a `NULL` `replica_infos` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_LogDirDescription_with_total_bytes_usable_bytes_is_cordoned`
+   - Java member: `org.apache.kafka.clients.admin.LogDirDescription#LogDirDescription(ApiException,Map,long,long,boolean)`
+   - Contract change: a `NULL` `replica_infos` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_TransactionDescription_new`
+   - Java member: `org.apache.kafka.clients.admin.TransactionDescription#TransactionDescription`
+   - Contract change: a `NULL` `topic_partitions` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_common_quota_ClientQuotaAlteration_new`
+   - Java member: `org.apache.kafka.common.quota.ClientQuotaAlteration#ClientQuotaAlteration`
+   - Contract change: a `NULL` `ops` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_common_quota_ClientQuotaEntity_new`
+   - Java member: `org.apache.kafka.common.quota.ClientQuotaEntity#ClientQuotaEntity`
+   - Contract change: a `NULL` `entries` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_ConsumerPartitionAssignor_Subscription_new`
+   - Java member: `org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription(List)`
+   - Contract change: a `NULL` `topics` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data`
+   - Java member: `org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription(List,ByteBuffer)`
+   - Contract change: a `NULL` `topics` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data_owned_partitions`
+   - Java member: `org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription(List,ByteBuffer,List)`
+   - Contract change: a `NULL` `topics`, `owned_partitions` panic with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_ConsumerRecords_with_next_offsets`
+   - Java member: `org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)`
+   - Contract change: a `NULL` `records` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_DescribeProducersResult_PartitionProducerState_new`
+   - Java member: `org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#PartitionProducerState`
+   - Contract change: a `NULL` `active_producers` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_AlterClientQuotasResult_new`
+   - Java member: `org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult`
+   - Contract change: a `NULL` `futures` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_DeleteRecordsResult_new`
+   - Java member: `org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult`
+   - Contract change: a `NULL` `futures` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_DescribeClassicGroupsResult_new`
+   - Java member: `org.apache.kafka.clients.admin.DescribeClassicGroupsResult#DescribeClassicGroupsResult`
+   - Contract change: a `NULL` `futures` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_DescribeConsumerGroupsResult_new`
+   - Java member: `org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#DescribeConsumerGroupsResult`
+   - Contract change: a `NULL` `futures` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_ListOffsetsResult_new`
+   - Java member: `org.apache.kafka.clients.admin.ListOffsetsResult#ListOffsetsResult`
+   - Contract change: a `NULL` `futures` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_common_quota_ClientQuotaFilter_contains`
+   - Java member: `org.apache.kafka.common.quota.ClientQuotaFilter#contains`
+   - Contract change: a `NULL` `components` panics with `LocalNullPointerError` (`<param> must not be null`), where Java builds a filter holding `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_common_quota_ClientQuotaFilter_contains_only`
+   - Java member: `org.apache.kafka.common.quota.ClientQuotaFilter#containsOnly`
+   - Contract change: a `NULL` `components` panics with `LocalNullPointerError` (`<param> must not be null`), where Java builds a filter holding `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_ConfigEntryOptionsBuilder_set_synonyms`
+   - Java member: `org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry(String,String,ConfigSource,boolean,boolean,List,ConfigType,String)`
+   - Contract change: a `NULL` `synonyms` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_common_metrics_MetricConfig_set_tags`
+   - Java member: `org.apache.kafka.common.metrics.MetricConfig#tags(Map)`
+   - Contract change: a `NULL` `tags` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_CreateDelegationTokenOptions_set_renewers`
+   - Java member: `org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers`
+   - Contract change: a `NULL` `renewers` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_SubscriptionOptionsBuilder_set_topics`
+   - Java member: `org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription(List,ByteBuffer,List,int,Optional)`
+   - Contract change: a `NULL` `topics` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_SubscriptionOptionsBuilder_set_owned_partitions`
+   - Java member: `org.apache.kafka.clients.consumer.ConsumerPartitionAssignor$Subscription#Subscription(List,ByteBuffer,List,int,Optional)`
+   - Contract change: a `NULL` `owned_partitions` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
+   - Why: the Rust constructor takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_MockAdminClient_Builder_set_cluster_id`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient$Builder#clusterId`
+   - Contract change: a `NULL` `cluster_id` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_MockAdminClient_Builder_set_broker_log_dirs`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient$Builder#brokerLogDirs`
+   - Contract change: a `NULL` `broker_log_dirs` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_MockAdminClient_Builder_set_default_group_configs`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient$Builder#defaultGroupConfigs`
+   - Contract change: a `NULL` `default_group_configs` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_MockAdminClient_add_topic`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient#addTopic(boolean,String,List,Map,boolean)`
+   - Contract change: a `NULL` `name` panics with `LocalNullPointerError` (`<param> must not be null`), where Java adds a topic named `null`.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_consumer_MockConsumer_update_partitions`
+   - Java member: `org.apache.kafka.clients.consumer.MockConsumer#updatePartitions`
+   - Contract change: a `NULL` `topic` panics with `LocalNullPointerError` (`<param> must not be null`), where Java stores the partitions under a `null` topic.
+   - Why: the Rust method takes the value, not an `Option`, so `null` cannot be passed on; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:

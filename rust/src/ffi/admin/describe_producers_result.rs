@@ -94,14 +94,20 @@ pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_vo
 
 /// Creates the producer state of a partition.
 ///
+/// WARNING: `NULL` `active_producers` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `active_producers` - a list of `const kafka_admin_ProducerState_t *`, copied during the call;
 ///   must not be `NULL`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `active_producers` is `NULL`
+///
 /// # Safety
 ///
-/// `active_producers` must be `NULL` or a valid list handle, not mutated
+/// `active_producers` must be a valid list handle, not mutated
 /// during the call, whose elements are live producer-state handles; the
 /// caller keeps ownership of it. The returned handle is owned and freed with
 /// `kafka_admin_DescribeProducersResult_PartitionProducerState_destroy`.

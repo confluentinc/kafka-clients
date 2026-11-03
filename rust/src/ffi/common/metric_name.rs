@@ -108,7 +108,7 @@ unsafe fn inner<'a>(self_: *const kafka_common_MetricName_t, param: &'static str
 ///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings and `tags` null or a
+/// The strings must be valid NUL-terminated strings and `tags` a
 /// valid map of NUL-terminated strings.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.

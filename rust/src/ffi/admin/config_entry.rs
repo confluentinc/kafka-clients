@@ -873,15 +873,21 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
 
 /// Sets Java's `synonyms`.
 ///
+/// WARNING: `NULL` `synonyms` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `synonyms` - a borrowed list of `const kafka_admin_ConfigEntry_ConfigSynonym_t *`, copied;
 ///   must not be `NULL`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `synonyms` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the same time, and `synonyms`
-/// `NULL` or a valid list whose elements are valid config-synonym handles, all kept alive and not
+/// a valid list whose elements are valid config-synonym handles, all kept alive and not
 /// mutated for this call.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -183,7 +183,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `states` must be `NULL` or a valid list, not mutated during the call,
+/// `states` must be a valid list, not mutated during the call,
 /// whose elements are `kafka_admin_TransactionState_t` singletons.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `producer_ids` must be `NULL` or a valid list, not mutated during the
+/// `producer_ids` must be a valid list, not mutated during the
 /// call, whose elements point at readable, aligned `int64_t`s. The list is borrowed and copied
 /// during the call.
 #[ffi_guard]
