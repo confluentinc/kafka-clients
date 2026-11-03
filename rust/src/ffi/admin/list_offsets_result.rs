@@ -146,12 +146,10 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_tim
 
 /// Returns `-1` for Java's empty `Optional`.
 ///
-/// A caught Rust panic returns -2, which is no leader epoch.
-///
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch(
     self_: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,

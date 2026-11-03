@@ -59,6 +59,14 @@ pub enum kafka_common_metrics_Sensor_RecordingLevel_e {
     kafka_common_metrics_Sensor_RecordingLevel_TRACE,
 }
 
+/// The value an `_err` twin returning [`kafka_common_metrics_Sensor_RecordingLevel_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_metrics_Sensor_RecordingLevel_e {
+    fn fail() -> Self {
+        Self::kafka_common_metrics_Sensor_RecordingLevel_INFO
+    }
+}
+
 /// One instance per value; the singletons point into this array.
 static VARIANTS: [RecordingLevel; 3] = [RecordingLevel::Info, RecordingLevel::Debug, RecordingLevel::Trace];
 
@@ -119,14 +127,10 @@ pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_trace()
 
 /// Returns the enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_metrics_Sensor_RecordingLevel_INFO`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_metrics_Sensor_RecordingLevel_e::kafka_common_metrics_Sensor_RecordingLevel_INFO)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel__enum(
     self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,

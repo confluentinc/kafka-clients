@@ -186,7 +186,7 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
 ///
 /// `self_` must be a valid group-authorization handle.
 /// The returned handle is borrowed, valid until `self_` is destroyed.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
     self_: *const kafka_common_GroupAuthorizationError_t,

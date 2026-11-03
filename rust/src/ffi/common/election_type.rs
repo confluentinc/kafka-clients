@@ -42,6 +42,14 @@ pub enum kafka_common_ElectionType_e {
     kafka_common_ElectionType_UNCLEAN,
 }
 
+/// The value an `_err` twin returning [`kafka_common_ElectionType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_ElectionType_e {
+    fn fail() -> Self {
+        Self::kafka_common_ElectionType_PREFERRED
+    }
+}
+
 /// One static instance per value, indexed by `kafka_common_ElectionType_e`.
 static VARIANTS: [ElectionType; 2] = [ElectionType::Preferred, ElectionType::Unclean];
 
@@ -95,14 +103,10 @@ pub extern "C" fn kafka_common_ElectionType_unclean() -> *const kafka_common_Ele
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_ElectionType_PREFERRED`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_ElectionType_e::kafka_common_ElectionType_PREFERRED)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType__enum(
     self_: *const kafka_common_ElectionType_t,
@@ -128,13 +132,10 @@ pub unsafe extern "C" fn kafka_common_ElectionType_to_string(self_: *const kafka
 
 /// Returns the wire-protocol value of the type (Java's `value` field).
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `PREFERRED`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_common_ElectionType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as

@@ -1162,6 +1162,24 @@ pub unsafe extern "C" fn kafka_Map_Entry_value(self_: *const kafka_Map_Entry_t) 
     unsafe { map_entry_ref(self_) }.value
 }
 
+/// Asserts that `iterator` is past its end: `kafka_Iterator_next` would panic
+/// with Java's `NoSuchElementException` message, which its `_err` twin stores.
+///
+/// # Safety
+///
+/// `iterator` must be a valid iterator handle, used by no other call meanwhile.
+#[cfg(test)]
+pub(crate) unsafe fn assert_past_the_end(iterator: *mut kafka_Iterator_t) {
+    let mut err = ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`; `err` is a live local pointing at null.
+    let element = unsafe { kafka_Iterator_next_err(iterator, &mut err) };
+    assert!(element.is_null(), "past the end the twin returns NULL");
+    // SAFETY: `err` is the handle the twin stored, consumed once.
+    let error = unsafe { crate::ffi::common::take_error(err) }.expect("past the end is an error");
+    assert!(error.is_local_illegal_state_error(), "{error:?}");
+    assert!(error.message().ends_with("the iteration has no more elements"), "{error:?}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1428,7 +1446,7 @@ mod tests {
                 assert_eq!(DROPS.load(Ordering::SeqCst), expected as usize - 1, "the previous one is freed");
             }
             assert_eq!(kafka_Iterator_has_next(iterator), 0);
-            assert!(kafka_Iterator_next(iterator).is_null(), "a panic past the end returns NULL");
+            assert_past_the_end(iterator);
             kafka_Iterator_destroy(iterator);
         }
         assert_eq!(DROPS.load(Ordering::SeqCst), 3, "destroy frees the last element");

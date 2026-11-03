@@ -45,6 +45,14 @@ pub enum kafka_admin_TransactionState_e {
     kafka_admin_TransactionState_UNKNOWN,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_TransactionState_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_TransactionState_e {
+    fn fail() -> Self {
+        Self::kafka_admin_TransactionState_UNKNOWN
+    }
+}
+
 /// One static instance per value, indexed by
 /// [`kafka_admin_TransactionState_e`].
 static VARIANTS: [TransactionState; 8] = [
@@ -153,12 +161,10 @@ pub extern "C" fn kafka_admin_TransactionState_unknown() -> *const kafka_admin_T
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_TransactionState_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_TransactionState_e::kafka_admin_TransactionState_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
     self_: *const kafka_admin_TransactionState_t,

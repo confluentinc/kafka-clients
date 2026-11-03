@@ -49,6 +49,14 @@ pub enum kafka_common_metrics_TimeUnit_e {
     kafka_common_metrics_TimeUnit_DAYS,
 }
 
+/// The value an `_err` twin returning [`kafka_common_metrics_TimeUnit_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_metrics_TimeUnit_e {
+    fn fail() -> Self {
+        Self::kafka_common_metrics_TimeUnit_NANOSECONDS
+    }
+}
+
 /// One static instance per value, indexed by `kafka_common_metrics_TimeUnit_e`.
 static VARIANTS: [TimeUnit; 7] = [
     TimeUnit::Nanoseconds,
@@ -142,14 +150,10 @@ pub extern "C" fn kafka_common_metrics_TimeUnit_days() -> *const kafka_common_me
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_metrics_TimeUnit_NANOSECONDS`, the first enumerator:
-/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
-/// only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_NANOSECONDS)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit__enum(
     self_: *const kafka_common_metrics_TimeUnit_t,

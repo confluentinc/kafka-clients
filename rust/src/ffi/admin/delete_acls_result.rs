@@ -136,7 +136,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
 /// `self_` must be a valid filter-result handle.
 ///
 /// The returned error is borrowed from `self_` and is never passed to `kafka_common_Error_destroy`.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
     self_: *const kafka_admin_DeleteAclsResult_FilterResult_t,

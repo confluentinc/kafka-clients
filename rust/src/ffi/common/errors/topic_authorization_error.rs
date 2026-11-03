@@ -170,7 +170,7 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topic
 ///
 /// `self_` must be a valid topic-authorization handle.
 /// The returned handle is borrowed, valid until `self_` is destroyed.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_source(
     self_: *const kafka_common_TopicAuthorizationError_t,

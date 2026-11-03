@@ -43,6 +43,14 @@ pub enum kafka_common_record_TimestampType_e {
     kafka_common_record_TimestampType_LOG_APPEND_TIME,
 }
 
+/// The value an `_err` twin returning [`kafka_common_record_TimestampType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_record_TimestampType_e {
+    fn fail() -> Self {
+        Self::kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE
+    }
+}
+
 /// One static instance per value, indexed by
 /// `kafka_common_record_TimestampType_e`.
 static VARIANTS: [TimestampType; 3] = [
@@ -120,14 +128,10 @@ pub extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const 
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
     self_: *const kafka_common_record_TimestampType_t,
@@ -139,12 +143,10 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
 
 /// Returns the id of the type (Java's `id` field): `-1`, `0` or `1`.
 ///
-/// A caught Rust panic returns -2, which is no id of this enum: its ids are -1, 0 and 1.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
     self_: *const kafka_common_record_TimestampType_t,

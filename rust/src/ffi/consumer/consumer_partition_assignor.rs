@@ -419,15 +419,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_ref` requires.
-    // A caught Rust panic returns -2, which is no generation: Java's `Subscription` stores a
-    // negative one as `Optional.empty()`.
     unsafe { subscription_ref(self_) }.generation_id().unwrap_or(-1)
 }
 

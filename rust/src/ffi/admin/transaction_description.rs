@@ -200,13 +200,10 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_timeout_
 /// Returns the start time of the transaction, in milliseconds, or `-1` for
 /// `OptionalLong.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no transaction start time: Java reads a negative one as
-/// `OptionalLong.empty()`.
-///
 /// # Safety
 ///
 /// `self_` must be a valid transaction-description handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_start_time_ms(
     self_: *const kafka_admin_TransactionDescription_t,

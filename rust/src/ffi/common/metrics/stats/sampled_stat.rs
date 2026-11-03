@@ -721,12 +721,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_initial_v
 
 /// Returns the number of events recorded into the sample.
 ///
-/// A caught Rust panic returns -1, which no count is.
-///
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_event_count(
     self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,

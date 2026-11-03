@@ -68,13 +68,13 @@ pub extern "C" fn kafka_common_metrics_stats_SimpleRate_new() -> *mut kafka_comm
 ///
 /// # Returns
 ///
-/// The elapsed window in milliseconds; -1 on a caught Rust panic, which no window size is.
+/// The elapsed window in milliseconds.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class and `config` a valid
 /// metric-config handle.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
     self_: *const kafka_common_metrics_stats_SimpleRate_t,

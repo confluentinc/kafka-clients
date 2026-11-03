@@ -88,12 +88,10 @@ pub extern "C" fn kafka_admin_ReplicaInfo_new(
 /// Returns the total size of the log segments in this replica in bytes. This value does not
 /// include the size of data stored in remote storage.
 ///
-/// A caught Rust panic returns -1, which no replica size is.
-///
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive

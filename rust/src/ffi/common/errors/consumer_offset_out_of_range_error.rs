@@ -210,7 +210,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_message(
 ///
 /// `self_` must be a valid offset-out-of-range handle.
 /// The returned handle is borrowed, valid until `self_` is destroyed.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_source(
     self_: *const kafka_common_ConsumerOffsetOutOfRangeError_t,

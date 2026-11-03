@@ -47,6 +47,14 @@ pub enum kafka_admin_OffsetSpec_e {
     kafka_admin_OffsetSpec_TIMESTAMP,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_OffsetSpec_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_OffsetSpec_e {
+    fn fail() -> Self {
+        Self::kafka_admin_OffsetSpec_EARLIEST
+    }
+}
+
 /// One static instance per kind without data, indexed by
 /// [`kafka_admin_OffsetSpec_e`] (the `timestamp` kind has no singleton).
 static VARIANTS: [OffsetSpec; 6] = [
@@ -206,15 +214,11 @@ pub extern "C" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut k
 
 /// Returns the C enumerator of a handle, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_OffsetSpec_EARLIEST`, the first enumerator: the enum
-/// has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a handle returned by this module and, if owned, not yet
 /// destroyed.
-#[ffi_guard(fallback = kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(
     self_: *const kafka_admin_OffsetSpec_t,

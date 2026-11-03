@@ -50,6 +50,14 @@ pub enum kafka_common_quota_ClientQuotaMatch_e {
     kafka_common_quota_ClientQuotaMatch_EXACT,
 }
 
+/// The value an `_err` twin returning [`kafka_common_quota_ClientQuotaMatch_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_quota_ClientQuotaMatch_e {
+    fn fail() -> Self {
+        Self::kafka_common_quota_ClientQuotaMatch_DEFAULT
+    }
+}
+
 static DEFAULT: ClientQuotaMatch = ClientQuotaMatch::Default;
 static ANY: ClientQuotaMatch = ClientQuotaMatch::Any;
 
@@ -83,14 +91,10 @@ pub(crate) unsafe fn client_quota_match_ref<'a>(
 
 /// Returns the C enumerator of the match behind `self_`.
 ///
-/// A caught Rust panic returns `kafka_common_quota_ClientQuotaMatch_DEFAULT`, the first enumerator:
-/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
-/// only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a valid match handle.
-#[ffi_guard(fallback = kafka_common_quota_ClientQuotaMatch_e::kafka_common_quota_ClientQuotaMatch_DEFAULT)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
     self_: *const kafka_common_quota_ClientQuotaMatch_t,

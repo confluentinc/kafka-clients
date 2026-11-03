@@ -467,9 +467,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle. A caught Rust panic returns -2, which is no
-/// record timestamp: Java's `ProducerRecord` rejects a negative one.
-#[ffi_guard(fallback = -2)]
+/// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const kafka_producer_ProducerRecord_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`
@@ -483,9 +482,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const k
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle. A caught Rust panic returns -2, which is no
-/// partition: Java's `ProducerRecord` rejects a negative one.
-#[ffi_guard(fallback = -2)]
+/// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const kafka_producer_ProducerRecord_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`

@@ -259,7 +259,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
 ///
 /// `self_` must be a valid log-dir-description handle. The returned error is borrowed, valid as
 /// long as the description, never passed to `kafka_common_Error_destroy`.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     self_: *const kafka_admin_LogDirDescription_t,

@@ -253,8 +253,8 @@ mod tests {
     use crate::ffi::common::metric_name::kafka_common_MetricName_destroy;
     use crate::ffi::common::metrics::kafka_metric::{kafka_common_metrics_KafkaMetric_destroy, kafka_metric_ref};
     use crate::ffi::util::{
-        kafka_Iterator_destroy, kafka_Iterator_has_next, kafka_Iterator_next, kafka_Map_Entry_key, kafka_Map_Entry_t,
-        kafka_Map_Entry_value,
+        assert_past_the_end, kafka_Iterator_destroy, kafka_Iterator_has_next, kafka_Iterator_next, kafka_Map_Entry_key,
+        kafka_Map_Entry_t, kafka_Map_Entry_value,
     };
 
     fn add(metrics: &Metrics, name: &str) -> MetricName {
@@ -285,7 +285,7 @@ mod tests {
                 assert_eq!(metric.metric_name(), name, "an entry's value is the metric of its key");
                 names.push(name.clone());
             }
-            assert!(kafka_Iterator_next(iterator).is_null(), "past the end the guard returns NULL");
+            assert_past_the_end(iterator);
             kafka_Iterator_destroy(iterator);
         }
         names

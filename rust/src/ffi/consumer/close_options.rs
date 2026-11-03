@@ -51,6 +51,14 @@ pub enum kafka_consumer_CloseOptions_GroupMembershipOperation_e {
     kafka_consumer_CloseOptions_GroupMembershipOperation_DEFAULT,
 }
 
+/// The value an `_err` twin returning [`kafka_consumer_CloseOptions_GroupMembershipOperation_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_consumer_CloseOptions_GroupMembershipOperation_e {
+    fn fail() -> Self {
+        Self::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP
+    }
+}
+
 /// One static instance per value, indexed by
 /// [`kafka_consumer_CloseOptions_GroupMembershipOperation_e`].
 static VARIANTS: [GroupMembershipOperation; 3] = [
@@ -139,14 +147,10 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_default()
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP`,
-/// the first enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from
-/// that value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__enum(
     self_: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
@@ -276,8 +280,6 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
 
 /// `timeout()`: the timeout configured for this close.
 ///
-/// A caught Rust panic returns -2, which is no close timeout: Java's `close` rejects a negative one.
-///
 /// # Returns
 ///
 /// The timeout in milliseconds, or `-1` if using the default timeout
@@ -285,7 +287,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka_consumer_CloseOptions_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it

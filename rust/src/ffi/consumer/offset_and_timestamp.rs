@@ -219,8 +219,6 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no leader epoch.
-///
 /// # Returns
 ///
 /// The leader epoch or empty if it is not known
@@ -228,7 +226,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_leader_epoch(
     self_: *const kafka_consumer_OffsetAndTimestamp_t,

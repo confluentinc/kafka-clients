@@ -49,16 +49,20 @@ pub enum kafka_common_TopicCollection_e {
     kafka_common_TopicCollection_TOPIC_NAMES,
 }
 
+/// The value an `_err` twin returning [`kafka_common_TopicCollection_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_TopicCollection_e {
+    fn fail() -> Self {
+        Self::kafka_common_TopicCollection_TOPIC_IDS
+    }
+}
+
 /// Returns which variant `self_` holds.
-///
-/// A caught Rust panic returns `kafka_common_TopicCollection_TOPIC_IDS`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-collection handle.
-#[ffi_guard(fallback = kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
     self_: *const kafka_common_TopicCollection_t,

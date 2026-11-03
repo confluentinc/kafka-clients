@@ -42,6 +42,14 @@ pub enum kafka_admin_ScramMechanism_e {
     kafka_admin_ScramMechanism_SCRAM_SHA_512,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_ScramMechanism_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_ScramMechanism_e {
+    fn fail() -> Self {
+        Self::kafka_admin_ScramMechanism_UNKNOWN
+    }
+}
+
 /// One static instance per value, indexed by [`kafka_admin_ScramMechanism_e`].
 static VARIANTS: [ScramMechanism; 3] = [
     ScramMechanism::Unknown,
@@ -105,12 +113,10 @@ pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_adm
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_ScramMechanism_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
     self_: *const kafka_admin_ScramMechanism_t,
@@ -209,9 +215,8 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module. A caught Rust panic returns -1, which is
-/// no code of this Java `byte` enum: its 0 is the valid `UNKNOWN`.
-#[ffi_guard(fallback = -1)]
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_type(self_: *const kafka_admin_ScramMechanism_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as

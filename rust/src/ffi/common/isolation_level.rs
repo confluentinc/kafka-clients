@@ -44,6 +44,14 @@ pub enum kafka_common_IsolationLevel_e {
     kafka_common_IsolationLevel_READ_COMMITTED,
 }
 
+/// The value an `_err` twin returning [`kafka_common_IsolationLevel_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_IsolationLevel_e {
+    fn fail() -> Self {
+        Self::kafka_common_IsolationLevel_READ_UNCOMMITTED
+    }
+}
+
 /// One static instance per value, indexed by `kafka_common_IsolationLevel_e`.
 static VARIANTS: [IsolationLevel; 2] = [IsolationLevel::ReadUncommitted, IsolationLevel::ReadCommitted];
 
@@ -97,14 +105,10 @@ pub extern "C" fn kafka_common_IsolationLevel_read_committed() -> *const kafka_c
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_IsolationLevel_READ_UNCOMMITTED`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
     self_: *const kafka_common_IsolationLevel_t,
@@ -116,13 +120,10 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
 
 /// Returns the wire-protocol id of the level (`id()`).
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `READ_UNCOMMITTED`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_common_IsolationLevel_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as

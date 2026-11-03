@@ -39,6 +39,14 @@ pub enum kafka_admin_EndpointType_e {
     kafka_admin_EndpointType_CONTROLLER,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_EndpointType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_EndpointType_e {
+    fn fail() -> Self {
+        Self::kafka_admin_EndpointType_UNKNOWN
+    }
+}
+
 /// One static instance per value, indexed by [`kafka_admin_EndpointType_e`].
 static VARIANTS: [EndpointType; 3] = [EndpointType::Unknown, EndpointType::Broker, EndpointType::Controller];
 
@@ -105,12 +113,10 @@ pub extern "C" fn kafka_admin_EndpointType_controller() -> *const kafka_admin_En
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_EndpointType_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_EndpointType_e::kafka_admin_EndpointType_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_EndpointType__enum(
     self_: *const kafka_admin_EndpointType_t,
@@ -138,13 +144,10 @@ pub unsafe extern "C" fn kafka_admin_EndpointType_to_string(self_: *const kafka_
 
 /// Returns the wire-protocol byte of the endpoint type (`EndpointType.id()`).
 ///
-/// A caught Rust panic returns -1, which is no id of this Java `byte` enum: its
-/// 0 is the valid `UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_EndpointType_id(self_: *const kafka_admin_EndpointType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as

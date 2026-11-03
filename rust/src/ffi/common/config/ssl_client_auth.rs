@@ -42,6 +42,14 @@ pub enum kafka_common_config_SslClientAuth_e {
     kafka_common_config_SslClientAuth_NONE,
 }
 
+/// The value an `_err` twin returning [`kafka_common_config_SslClientAuth_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_config_SslClientAuth_e {
+    fn fail() -> Self {
+        Self::kafka_common_config_SslClientAuth_REQUIRED
+    }
+}
+
 /// One static instance per value, indexed by `kafka_common_config_SslClientAuth_e`.
 static VARIANTS: [SslClientAuth; 3] = [SslClientAuth::Required, SslClientAuth::Requested, SslClientAuth::None];
 
@@ -95,14 +103,10 @@ pub extern "C" fn kafka_common_config_SslClientAuth_none() -> *const kafka_commo
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_config_SslClientAuth_REQUIRED`, the first enumerator:
-/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
-/// only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_config_SslClientAuth_e::kafka_common_config_SslClientAuth_REQUIRED)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
     self_: *const kafka_common_config_SslClientAuth_t,

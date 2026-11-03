@@ -47,6 +47,14 @@ pub enum kafka_admin_AlterConfigOp_OpType_e {
     kafka_admin_AlterConfigOp_OpType_SUBTRACT,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_AlterConfigOp_OpType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_AlterConfigOp_OpType_e {
+    fn fail() -> Self {
+        Self::kafka_admin_AlterConfigOp_OpType_SET
+    }
+}
+
 /// One static instance per value, indexed by
 /// [`kafka_admin_AlterConfigOp_OpType_e`].
 static VARIANTS: [OpType; 4] = [OpType::Set, OpType::Delete, OpType::Append, OpType::Subtract];
@@ -110,14 +118,10 @@ pub extern "C" fn kafka_admin_AlterConfigOp_OpType_subtract() -> *const kafka_ad
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_AlterConfigOp_OpType_SET`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_SET)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
     self_: *const kafka_admin_AlterConfigOp_OpType_t,
@@ -145,13 +149,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
 
 /// Returns the wire-protocol byte of the operation, as `OpType.id()`.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte` enum: its 0 is the valid
-/// `SET`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_id(self_: *const kafka_admin_AlterConfigOp_OpType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as

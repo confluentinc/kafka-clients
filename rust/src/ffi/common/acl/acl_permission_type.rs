@@ -44,6 +44,14 @@ pub enum kafka_common_acl_AclPermissionType_e {
     kafka_common_acl_AclPermissionType_ALLOW,
 }
 
+/// The value an `_err` twin returning [`kafka_common_acl_AclPermissionType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_acl_AclPermissionType_e {
+    fn fail() -> Self {
+        Self::kafka_common_acl_AclPermissionType_UNKNOWN
+    }
+}
+
 /// One static instance per value, indexed by `kafka_common_acl_AclPermissionType_e`.
 static VARIANTS: [AclPermissionType; 4] = [
     AclPermissionType::Unknown,
@@ -126,12 +134,10 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_allow() -> *const kafka_com
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_acl_AclPermissionType_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_acl_AclPermissionType_e::kafka_common_acl_AclPermissionType_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType__enum(
     self_: *const kafka_common_acl_AclPermissionType_t,
@@ -150,7 +156,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_code(
     self_: *const kafka_common_acl_AclPermissionType_t,

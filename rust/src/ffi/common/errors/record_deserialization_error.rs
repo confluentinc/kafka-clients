@@ -57,6 +57,14 @@ pub enum kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e {
     kafka_common_RecordDeserializationError_DeserializationErrorOrigin_VALUE,
 }
 
+/// The value an `_err` twin returning [`kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e {
+    fn fail() -> Self {
+        Self::kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY
+    }
+}
+
 /// One static instance per value, indexed by
 /// `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e`.
 static ORIGINS: [DeserializationErrorOrigin; 2] = [DeserializationErrorOrigin::Key, DeserializationErrorOrigin::Value];
@@ -122,15 +130,10 @@ pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOr
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns
-/// `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY`, the first enumerator:
-/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
-/// only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e::kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum(
     self_: *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t,
@@ -521,7 +524,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_message(
 /// `self_` must be a valid record-deserialization handle. The returned handle is borrowed,
 /// valid until `self_` is destroyed, or until
 /// `kafka_common_RecordDeserializationError_with_source` is called on it.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_source(
     self_: *const kafka_common_RecordDeserializationError_t,

@@ -726,13 +726,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
 ///
 /// # Returns
 ///
-/// The last poll timeout in milliseconds, or `-1` if `poll` has not been called; `-2` on a
-/// caught Rust panic.
+/// The last poll timeout in milliseconds, or `-1` if `poll` has not been called.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     self_: *const kafka_consumer_MockConsumer_t,
@@ -742,8 +741,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     let handle = unsafe { mock_handle(self_) };
     // Read through the mock's handle, not the single-owner flag, so it answers while another
     // call holds the mock, as Java's unsynchronized `MockConsumer.lastPollTimeout()` does. `-1`
-    // is Java's `null`; `-2` (the panic fallback) is no poll timeout, as `poll` rejects a
-    // negative one.
+    // is Java's `null`.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the outer `None` is unreachable.
     handle
         .mock_last_poll_timeout()

@@ -234,13 +234,12 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_New
 ///
 /// # Returns
 ///
-/// The count, `-1` (`CreateTopicsRequest.NO_NUM_PARTITIONS`) also when the broker default
-/// applies. A caught Rust panic returns 0, which is no valid partition count.
+/// The count, `-1` (`CreateTopicsRequest.NO_NUM_PARTITIONS`) also when the broker default applies.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
-#[ffi_guard(fallback = 0)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka_admin_NewTopic_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
@@ -255,12 +254,12 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka
 /// # Returns
 ///
 /// The factor, `-1` (`CreateTopicsRequest.NO_REPLICATION_FACTOR`) also when the broker default
-/// applies. A caught Rust panic returns 0, which is no valid replication factor.
+/// applies.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
-#[ffi_guard(fallback = 0)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const kafka_admin_NewTopic_t) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for

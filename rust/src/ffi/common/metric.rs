@@ -65,6 +65,14 @@ pub enum kafka_common_MetricValue_e {
     kafka_common_MetricValue_INT,
 }
 
+/// The value an `_err` twin returning [`kafka_common_MetricValue_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_MetricValue_e {
+    fn fail() -> Self {
+        Self::kafka_common_MetricValue_DOUBLE
+    }
+}
+
 /// What a `kafka_common_MetricValue_t` points at: the value plus the
 /// NUL-terminated copy of a string reading that `as_string` hands out.
 struct MetricValueInner {
@@ -200,14 +208,10 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_value(
 
 /// Returns which variant `self_` holds.
 ///
-/// A caught Rust panic returns `kafka_common_MetricValue_DOUBLE`, the first enumerator: the enum
-/// has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a valid metric-value handle.
-#[ffi_guard(fallback = kafka_common_MetricValue_e::kafka_common_MetricValue_DOUBLE)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue__enum(
     self_: *const kafka_common_MetricValue_t,

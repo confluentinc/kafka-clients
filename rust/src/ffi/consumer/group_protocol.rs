@@ -42,6 +42,14 @@ pub enum kafka_consumer_GroupProtocol_e {
     kafka_consumer_GroupProtocol_CONSUMER,
 }
 
+/// The value an `_err` twin returning [`kafka_consumer_GroupProtocol_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_consumer_GroupProtocol_e {
+    fn fail() -> Self {
+        Self::kafka_consumer_GroupProtocol_CLASSIC
+    }
+}
+
 /// One static instance per value, indexed by [`kafka_consumer_GroupProtocol_e`].
 static VARIANTS: [GroupProtocol; 2] = [GroupProtocol::Classic, GroupProtocol::Consumer];
 
@@ -90,14 +98,10 @@ pub extern "C" fn kafka_consumer_GroupProtocol_consumer() -> *const kafka_consum
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_consumer_GroupProtocol_CLASSIC`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CLASSIC)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
     self_: *const kafka_consumer_GroupProtocol_t,

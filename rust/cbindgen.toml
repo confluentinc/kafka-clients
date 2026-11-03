@@ -9,64 +9,29 @@ header = """
  * Panics never cross this API.
  *
  * Every function declared here catches a Rust panic before it can unwind into
- * its caller, which would abort the process, and reports it instead.
+ * its caller. A NULL passed for a mandatory parameter (a handle, a string, a
+ * collection, a function pointer) is reported as such a panic, carrying the
+ * error Java throws there: Java's own error and message where Java checks the
+ * argument, else a kafka_common_Error_LOCAL_NULL_POINTER (Java's
+ * NullPointerException) whose message is "<parameter> must not be null". A
+ * parameter documented as nullable, and the handle a _destroy function frees,
+ * may be NULL. Any other panic is a bug in this library: its error has the
+ * code kafka_common_Error_LOCAL_ILLEGAL_STATE and a message beginning "Rust
+ * panic caught at the FFI boundary in <function>".
  *
- * A fallible function takes a trailing kafka_common_Error_t **out_err. It
- * must not be NULL and *out_err must be NULL on entry; neither is checked. On
- * failure, a caught panic included, the function stores an owned error in
- * *out_err, which the caller frees with kafka_common_Error_destroy, and
- * returns NULL for a pointer, a NULL kafka_Bytes_t, 0 for an int8_t and -1
- * for another integer; on success it leaves *out_err untouched. Test *out_err,
- * not the value: NULL and -1 can be valid answers. The function pointers a
- * caller implements and that can fail (a Serializer's and a Deserializer's
- * methods, Headers' add and remove, KafkaFuture_BaseFunction's apply) take the
- * same trailing out_err: they fail by storing an owned error there, and their
+ * A fallible function takes a trailing kafka_common_Error_t **out_err, and
+ * *out_err must be NULL on entry. On failure, a caught panic included, the
+ * function stores an owned error in *out_err, which the caller frees with
+ * kafka_common_Error_destroy, and returns NULL for a pointer, a NULL
+ * kafka_Bytes_t, 0 for an int8_t, -1 for another integer, NaN for a double
+ * and an enumerator its documentation names for a C enum; on success it
+ * leaves *out_err untouched. Test *out_err, not the value: NULL and -1 can be
+ * valid answers. A NULL out_err leaves nothing to carry an error, so the
+ * process aborts when there is one. The function pointers a caller
+ * implements and that can fail (a Serializer's and a Deserializer's methods,
+ * Headers' add and remove, KafkaFuture_BaseFunction's apply) take the same
+ * trailing out_err: they fail by storing an owned error there, and their
  * return value is then ignored.
- *
- * A caught panic's error has the code kafka_common_Error_LOCAL_ILLEGAL_STATE
- * and a message beginning "Rust panic caught at the FFI boundary in
- * <function>". Any other function has no out_err: it logs a panic and, unless
- * it is a _cb function (below), returns the failure value of its return type:
- *   - a pointer: NULL;
- *   - an int8_t: 0, false for a boolean. An int8_t carrying a Java byte code
- *     whose 0 is a valid constant (kafka_common_IsolationLevel_id, say)
- *     returns -1 instead, as its documentation states;
- *   - another integer: -1, but 0 for a *_count or *_size accessor, a size
- *     that returns -1 for a null key or value
- *     (kafka_consumer_ConsumerRecord_serialized_key_size) included. An
- *     integer whose Java domain holds that value but leaves out another one
- *     returns the other instead, as its documentation states
- *     (kafka_admin_NewTopic_replication_factor returns 0). In particular an
- *     integer accessor that maps Java's empty Optional, or null, to -1
- *     returns -2 when its Java domain is that or a value >= 0
- *     (kafka_consumer_ConsumerRecord_leader_epoch,
- *     kafka_producer_ProducerRecord_partition), and keeps -1 when Java gives
- *     -2 a meaning (kafka_admin_MemberDescription_member_epoch, where -2 is a
- *     static member that left, and the admin options' timeout_ms), or when no
- *     value is outside its domain (kafka_common_Error_throttle_time_ms, which
- *     holds any int Java's constructor was given);
- *   - a double: NaN;
- *   - a kafka_Bytes_t: a NULL one (Java's null array);
- *   - kafka_common_Error_e (kafka_common_Error__enum):
- *     kafka_common_Error_UNKNOWN_SERVER_ERROR; another C enum: the
- *     enumerator its documentation names, its UNKNOWN one when it has one;
- *   - a borrowed const kafka_common_Error_t * (kafka_common_Error_source):
- *     NULL, as for no error.
- * A function returning nothing only logs the panic.
- *
- * The failure value is not always distinct from a real answer: a nullable
- * pointer or kafka_Bytes_t, a boolean, a double that may be NaN, a C enum
- * without an UNKNOWN enumerator, and an integer whose -1 (or, for a count or
- * size, 0) is itself a valid value return a value the function can also
- * return without a panic. The integers include Java's sentinels:
- * NO_TIMESTAMP, an unknown offset or partition, the id of Node.noNode(),
- * kafka_admin_AbortTransactionSpec_producer_epoch, and the empty optional
- * values whose Java domain holds -2 (a member epoch, a consumer's lag, a log
- * dir's byte counts, a node id, an admin option's timeout). Such a panic shows
- * only in the error-level log line every caught panic writes. A language
- * binding that must tell every panic apart includes
- * confluent_kafka_bindings.h instead, whose _err twins report it through
- * out_err.
  *
  * A _cb function reports a caught panic the way it reports every other
  * outcome, exactly once, whether the panic happens on the calling thread or
@@ -81,12 +46,20 @@ header = """
  * kafka_admin_Admin_close_with_timeout_cb,
  * kafka_producer_Callback_on_completion_cb) fires with opaque
  * alone, the panic showing only in the log. That completion is where opaque
- * comes back to be released; there is no other release hook.
+ * comes back to be released; there is no other release hook. A NULL
+ * completion leaves nothing to carry an error, so the process aborts when
+ * there is one.
  *
- * A panic is a bug in this library and may leave the handle it happened on in
- * an inconsistent state: destroy that handle and create a new one. Later calls
- * on it can keep failing, because a poisoned lock is never cleared; its
- * _destroy still frees it and runs its pending callbacks, each exactly once.
+ * Any other function has no error channel: on a caught panic, a NULL
+ * mandatory argument included, it prints the error to stderr, logs it and
+ * aborts the process. A language binding includes confluent_kafka_bindings.h
+ * instead, whose _err twins report it through out_err.
+ *
+ * A panic that is a bug may leave the handle it happened on in an
+ * inconsistent state: destroy that handle and create a new one. Later calls on
+ * it can keep failing, because a poisoned lock is never cleared; its _destroy
+ * still frees it and runs its pending callbacks, each exactly once. A NULL
+ * argument is reported before anything is touched.
  */"""
 include_guard = "CONFLUENT_KAFKA_H"
 no_includes = true

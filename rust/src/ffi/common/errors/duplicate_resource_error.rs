@@ -224,7 +224,7 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
 ///
 /// `self_` must be a valid duplicate-resource handle.
 /// The returned handle is borrowed, valid until `self_` is destroyed.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
     self_: *const kafka_common_DuplicateResourceError_t,

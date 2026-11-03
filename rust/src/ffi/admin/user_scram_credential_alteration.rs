@@ -52,6 +52,14 @@ pub enum kafka_admin_UserScramCredentialAlteration_e {
     kafka_admin_UserScramCredentialAlteration_DELETION,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_UserScramCredentialAlteration_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_UserScramCredentialAlteration_e {
+    fn fail() -> Self {
+        Self::kafka_admin_UserScramCredentialAlteration_UPSERTION
+    }
+}
+
 /// What a [`kafka_admin_UserScramCredentialAlteration_t`] points at: the
 /// value plus the NUL-terminated user its getter borrows out.
 pub(crate) struct UserScramCredentialAlterationInner {
@@ -106,14 +114,10 @@ pub(crate) unsafe fn user_scram_credential_alteration_ref<'a>(
 
 /// Returns which subclass the alteration is, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_UserScramCredentialAlteration_UPSERTION`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
-#[ffi_guard(fallback = kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_UPSERTION)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration__enum(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,

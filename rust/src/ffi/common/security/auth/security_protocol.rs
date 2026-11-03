@@ -43,6 +43,14 @@ pub enum kafka_common_security_auth_SecurityProtocol_e {
     kafka_common_security_auth_SecurityProtocol_SASL_SSL,
 }
 
+/// The value an `_err` twin returning [`kafka_common_security_auth_SecurityProtocol_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_security_auth_SecurityProtocol_e {
+    fn fail() -> Self {
+        Self::kafka_common_security_auth_SecurityProtocol_PLAINTEXT
+    }
+}
+
 static VARIANTS: [SecurityProtocol; 4] = [
     SecurityProtocol::Plaintext,
     SecurityProtocol::Ssl,
@@ -145,14 +153,10 @@ pub extern "C" fn kafka_common_security_auth_SecurityProtocol_sasl_ssl()
 
 /// Returns the C enumerator of the value behind `self_`.
 ///
-/// A caught Rust panic returns `kafka_common_security_auth_SecurityProtocol_PLAINTEXT`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be one of the singletons.
-#[ffi_guard(fallback = kafka_common_security_auth_SecurityProtocol_e::kafka_common_security_auth_SecurityProtocol_PLAINTEXT)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol__enum(
     self_: *const kafka_common_security_auth_SecurityProtocol_t,

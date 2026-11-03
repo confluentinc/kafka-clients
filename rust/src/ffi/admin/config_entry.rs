@@ -61,6 +61,14 @@ pub enum kafka_admin_ConfigEntry_ConfigSource_e {
     kafka_admin_ConfigEntry_ConfigSource_UNKNOWN,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_ConfigEntry_ConfigSource_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_ConfigEntry_ConfigSource_e {
+    fn fail() -> Self {
+        Self::kafka_admin_ConfigEntry_ConfigSource_UNKNOWN
+    }
+}
+
 /// One static instance per value, indexed by
 /// [`kafka_admin_ConfigEntry_ConfigSource_e`].
 static SOURCES: [ConfigSource; 9] = [
@@ -198,12 +206,10 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_unknown() -> *const kafka
 
 /// Returns the C enumerator of a source singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_ConfigEntry_ConfigSource_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_ConfigEntry_ConfigSource_e::kafka_admin_ConfigEntry_ConfigSource_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource__enum(
     self_: *const kafka_admin_ConfigEntry_ConfigSource_t,
@@ -253,6 +259,14 @@ pub enum kafka_admin_ConfigEntry_ConfigType_e {
     kafka_admin_ConfigEntry_ConfigType_LIST,
     kafka_admin_ConfigEntry_ConfigType_CLASS,
     kafka_admin_ConfigEntry_ConfigType_PASSWORD,
+}
+
+/// The value an `_err` twin returning [`kafka_admin_ConfigEntry_ConfigType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_ConfigEntry_ConfigType_e {
+    fn fail() -> Self {
+        Self::kafka_admin_ConfigEntry_ConfigType_UNKNOWN
+    }
 }
 
 /// One static instance per value, indexed by
@@ -377,12 +391,10 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_password() -> *const kafka_
 
 /// Returns the C enumerator of a type singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_ConfigEntry_ConfigType_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_ConfigEntry_ConfigType_e::kafka_admin_ConfigEntry_ConfigType_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType__enum(
     self_: *const kafka_admin_ConfigEntry_ConfigType_t,

@@ -718,8 +718,6 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka
 
 /// `MockProducer.commitCount()`.
 ///
-/// A caught Rust panic returns -1, which no count is.
-///
 /// # Returns
 ///
 /// The commit count
@@ -727,7 +725,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_commit_count(self_: *const kafka_producer_MockProducer_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `mock` requires; the
