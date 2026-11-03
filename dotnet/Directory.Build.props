@@ -27,6 +27,22 @@
     <NeutralLanguage>en-US</NeutralLanguage>
   </PropertyGroup>
 
+  <!-- The version of the Confluent.Kafka package, in NuGet's SemVer 2.0 form: X.Y.Z, or X.Y.Z-alpha.N,
+       -beta.N, -dev.N or -rc.N. MAJOR.MINOR is the Apache Kafka version (rfc/versioning.md). Set it with
+       `make bump-version VERSION=<crate version> PYTHON_VERSION=<Python version> DOTNET_VERSION=<version>`,
+       with the current crate and Python versions to change only this one; it refuses to lower it. A
+       dotnet/v<version> tag releases it (.semaphore/semaphore.yml, the "Release (.NET):" blocks). The one
+       <Version> element in this file: cargo xtask bump-version and the release scripts read and write it. -->
+  <PropertyGroup>
+    <Version>4.4.0-alpha.1</Version>
+  </PropertyGroup>
+
+  <!-- A CI build (Semaphore sets CI=true) maps the source paths in the PDBs to the repository's, so a
+       package built there names no build machine path. -->
+  <PropertyGroup Condition="'$(CI)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
   <!-- Strong-name signing. Applied to EVERY project (library + tests): a
        strong-named library can only grant internals to a strong-named friend
        (InternalsVisibleTo, see the library csproj). One shared key keeps the
