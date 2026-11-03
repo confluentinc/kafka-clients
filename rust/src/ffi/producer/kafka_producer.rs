@@ -108,12 +108,16 @@ impl Serializer<GenericValue> for BytesPassthrough {
         _topic: &'a str,
         data: Option<&'a GenericValue>,
     ) -> Result<Option<Cow<'a, [u8]>>, Error> {
-        Ok(data.filter(|v| !v.is_null()).and_then(|v| {
+        Ok(data.and_then(|v| {
+            let bytes = v.as_ptr() as *const kafka_Bytes_t;
+            if bytes.is_null() {
+                return None;
+            }
             // SAFETY: by contract a `void *` key or value of a producer built without a serializer
             // points at a live `kafka_Bytes_t` whose bytes stay unchanged while the record is
             // borrowed (`kafka_producer_Producer_send_cb`: during the call, or until `cb` fires),
             // which covers `'a`, the borrow of the value itself.
-            unsafe { (*(v.as_ptr() as *const kafka_Bytes_t)).as_slice() }.map(Cow::Borrowed)
+            unsafe { (*bytes).as_slice() }.map(Cow::Borrowed)
         }))
     }
 }
@@ -173,7 +177,7 @@ pub(crate) unsafe fn serializer_from(
         // SAFETY: Per this function's `# Safety`, `serializer` is a live handle (non-null, checked
         // above), as `take_serializer` requires; an owned one is not used again by the caller, as
         // the `# Safety` states.
-        let serializer = unsafe { take_serializer(serializer) };
+        let serializer = unsafe { take_serializer(serializer, "serializer") };
         let is_c = serializer.is_c();
         (Box::new(ArcSerializer(serializer)), is_c)
     }
@@ -932,13 +936,10 @@ mod tests {
         // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
         // producer's `Arc` frees it.
         let asynchronous = unsafe {
-            ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
-                std::ptr::null_mut(),
-                Some(async_fn),
-                None,
-                None,
-                None,
-            )))
+            ArcSerializer(take_serializer(
+                kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), Some(async_fn), None, None, None),
+                "serializer",
+            ))
         };
         let mut headers = RecordHeaders::new();
         for (kind, serializer) in [("built-in", &built_in), ("C", &asynchronous)] {

@@ -47,7 +47,7 @@ use crate::ffi::common::{
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
 use crate::ffi::consumer::{Delivery, error_slot};
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{Required, require_fn};
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
 
 /// Opaque handle to an `OffsetCommitCallback` implementation registered
@@ -167,7 +167,7 @@ pub(crate) unsafe fn commit_callback_registration(
     // `Box<CommitCallbackRegistration>` of `kafka_consumer_OffsetCommitCallback_new`, not yet
     // destroyed; the reference is used only to copy the `Copy` registration out, within this
     // expression.
-    *unsafe { &*(callback as *const CommitCallbackRegistration) }
+    *unsafe { require_ref::<_, CommitCallbackRegistration>(callback, "callback") }
 }
 
 /// The Rust callback a consumer registers for the C implementation behind

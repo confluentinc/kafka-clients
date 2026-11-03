@@ -26,6 +26,7 @@ use crate::consumer::GroupProtocol;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupProtocol`] singleton.
@@ -75,11 +76,11 @@ pub(crate) fn singleton(protocol: GroupProtocol) -> *const kafka_consumer_GroupP
 /// # Safety
 ///
 /// `protocol` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t) -> GroupProtocol {
+pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t, param: &'static str) -> GroupProtocol {
     // SAFETY: Per this function's `# Safety`, `protocol` is a singleton returned by this module,
     // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
     // a live, initialised `GroupProtocol`, which is `Copy` and read out here.
-    unsafe { *(protocol as *const GroupProtocol) }
+    *unsafe { require_ref::<_, GroupProtocol>(protocol, param) }
 }
 
 /// Returns `GroupProtocol.CLASSIC`, a static singleton never freed.
@@ -108,7 +109,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
 ) -> kafka_consumer_GroupProtocol_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// String representation of the group protocol.
@@ -129,7 +130,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the pointer returned is into the `static`
     // `NAMES`, never freed.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Case-insensitive group protocol lookup by string name.
@@ -182,7 +183,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its text copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]

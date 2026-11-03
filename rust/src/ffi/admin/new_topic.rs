@@ -20,7 +20,7 @@
 //! `kafka_Map_t` of `int32_t *` keys to `kafka_List_t *` values holding
 //! `int32_t *` elements.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_element_ref, require_mut, require_ref};
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -89,15 +89,15 @@ pub(crate) fn box_new_topic(topic: NewTopic) -> *mut kafka_admin_NewTopic_t {
 ///
 /// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
-unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
+unsafe fn list_i32(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
     // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list, "list") }
+    unsafe { list_elements(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
-        .map(|&element| unsafe { *(element as *const i32) })
+        .map(|&element| *unsafe { require_element_ref::<i32>(element, param) })
         .collect()
 }
 
@@ -124,10 +124,13 @@ unsafe fn destroy_list_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must each point at an `int32_t`.
+/// `a` and `b` must each be `NULL` or point at an `int32_t`.
 unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    // SAFETY: Per this function's `# Safety`, `a` and `b` each point at a live `int32_t`, read by
-    // copy.
+    if a.is_null() || b.is_null() {
+        return a.is_null() && b.is_null();
+    }
+    // SAFETY: Both are non-null (checked above) and, per this function's `# Safety`, each points
+    // at a live `int32_t`, read by copy.
     unsafe { *(a as *const i32) == *(b as *const i32) }
 }
 
@@ -139,16 +142,20 @@ unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 /// `map` must be `NULL` or a valid map whose keys point at `int32_t`s and whose
 /// values are valid lists whose elements point at `int32_t`s, all kept alive
 /// and not mutated for this call.
-unsafe fn map_replicas_assignments(map: *const kafka_Map_t) -> BTreeMap<i32, Vec<i32>> {
+unsafe fn map_replicas_assignments(map: *const kafka_Map_t, param: &'static str) -> BTreeMap<i32, Vec<i32>> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
     // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { map_entries(map, "map") }
+    unsafe { map_entries(map, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
-        // read by copy, and each value `v` is a valid list whose elements point at `int32_t`s,
-        // alive and not mutated for this call, as `list_i32` requires.
-        .map(|&(k, v)| (unsafe { *(k as *const i32) }, unsafe { list_i32(v as *const kafka_List_t) }))
+        .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
+            // read by copy, and each value `v` is a valid list whose elements point at `int32_t`s,
+            // alive and not mutated for this call, as `list_i32` requires.
+            (*unsafe { require_element_ref::<i32>(k, param) }, unsafe {
+                list_i32(v as *const kafka_List_t, param)
+            })
+        })
         .collect()
 }
 
@@ -210,7 +217,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
     // `c_str_to_string` requires, and `replicas_assignments` null or a valid map of the shape
     // `map_replicas_assignments` requires, kept alive and not mutated for this call.
     box_new_topic(NewTopic::with_replicas_assignments(unsafe { c_str_to_string(name) }, unsafe {
-        map_replicas_assignments(replicas_assignments)
+        map_replicas_assignments(replicas_assignments, "replicas_assignments")
     }))
 }
 
@@ -360,7 +367,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     // call uses at the same time; every handle is the `Box::into_raw` of a `Box<NewTopicInner>`
     // (`box_new_topic`), so the exclusive reference is to a live `NewTopicInner` that nothing else
     // reads or writes until it is dropped at the end of this call.
-    let inner = unsafe { &mut *(self_ as *mut NewTopicInner) };
+    let inner = unsafe { require_mut::<_, NewTopicInner>(self_, "self_") };
     inner.topic = inner.topic.clone().set_configs(configs);
 }
 

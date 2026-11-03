@@ -101,7 +101,9 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
     // `Box<SubscriptionPatternInner>` from `kafka_consumer_SubscriptionPattern_new`, never mutated;
     // the pointer returned borrows its `pattern_c`, valid until the handle is destroyed, as the
     // rustdoc states.
-    unsafe { &*(self_ as *const SubscriptionPatternInner) }.pattern_c.as_ptr()
+    unsafe { require_ref::<_, SubscriptionPatternInner>(self_, "self_") }
+        .pattern_c
+        .as_ptr()
 }
 
 /// Java `toString()`.

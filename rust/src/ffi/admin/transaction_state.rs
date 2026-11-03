@@ -23,6 +23,7 @@ use std::ffi::c_char;
 
 use crate::admin::TransactionState;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{c_str_to_string, into_c_string};
 
 /// Opaque handle to a [`TransactionState`] singleton.
@@ -95,12 +96,15 @@ pub(crate) fn transaction_state_singleton(state: TransactionState) -> *const kaf
 /// # Safety
 ///
 /// `state` must be a singleton returned by this module.
-pub(crate) unsafe fn transaction_state_value_of(state: *const kafka_admin_TransactionState_t) -> TransactionState {
+pub(crate) unsafe fn transaction_state_value_of(
+    state: *const kafka_admin_TransactionState_t,
+    param: &'static str,
+) -> TransactionState {
     // SAFETY: Per this function's `# Safety`, `state` is a singleton returned by this module.
     // `transaction_state_singleton` is the only producer and points it at an element of the static
     // `VARIANTS`, a `TransactionState` that is never freed or mutated, so the read copies a live
     // value.
-    unsafe { *(state as *const TransactionState) }
+    *unsafe { require_ref::<_, TransactionState>(state, param) }
 }
 
 /// Returns `TransactionState.ONGOING`, a static singleton never freed.
@@ -171,7 +175,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
 ) -> kafka_admin_TransactionState_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `transaction_state_value_of` requires.
-    enum_of(unsafe { transaction_state_value_of(self_) })
+    enum_of(unsafe { transaction_state_value_of(self_, "self_") })
 }
 
 /// Returns the state with the given name, `UNKNOWN` for a name Java does not know.
@@ -207,7 +211,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionState_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `transaction_state_value_of` requires.
-    into_c_string(&unsafe { transaction_state_value_of(self_) }.to_string())
+    into_c_string(&unsafe { transaction_state_value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -225,7 +229,7 @@ mod tests {
         unsafe {
             for (index, &state) in VARIANTS.iter().enumerate() {
                 let handle = transaction_state_singleton(state);
-                assert_eq!(transaction_state_value_of(handle), state);
+                assert_eq!(transaction_state_value_of(handle, "value"), state);
                 assert_eq!(kafka_admin_TransactionState__enum(handle) as usize, index);
                 let name = kafka_admin_TransactionState_to_string(handle);
                 assert_eq!(kafka_admin_TransactionState_parse(name), handle);

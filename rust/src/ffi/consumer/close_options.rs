@@ -23,7 +23,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_mut, require_ref};
 use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::time::Duration;
@@ -93,11 +93,12 @@ fn singleton(operation: GroupMembershipOperation) -> *const kafka_consumer_Close
 /// `operation` must be a singleton returned by this module.
 unsafe fn value_of(
     operation: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
+    param: &'static str,
 ) -> GroupMembershipOperation {
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
     // a live, initialised `GroupMembershipOperation`, which is `Copy` and read out here.
-    unsafe { *(operation as *const GroupMembershipOperation) }
+    *unsafe { require_ref::<_, GroupMembershipOperation>(operation, param) }
 }
 
 /// The options behind a handle.
@@ -161,7 +162,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__e
 ) -> kafka_consumer_CloseOptions_GroupMembershipOperation_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// `toString()`, Java's inherited `Enum.toString()`.
@@ -181,7 +182,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_to
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 /// `CloseOptions.timeout(Duration timeout)`, the static factory: a handle
@@ -229,8 +230,9 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
 ) -> *mut kafka_consumer_CloseOptions_t {
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // as `value_of` requires; the value is copied out.
-    Box::into_raw(Box::new(CloseOptions::with_operation(unsafe { value_of(operation) })))
-        as *mut kafka_consumer_CloseOptions_t
+    Box::into_raw(Box::new(CloseOptions::with_operation(unsafe {
+        value_of(operation, "operation")
+    }))) as *mut kafka_consumer_CloseOptions_t
 }
 
 /// `withTimeout(Duration timeout)`, applied in place.
@@ -251,7 +253,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a `Box<CloseOptions>`
     // from one of the two constructors, and no other call uses it at the same time, so the
     // exclusive reference is sound for this call, its only use.
-    let slot = unsafe { &mut *(self_ as *mut CloseOptions) };
+    let slot = unsafe { require_mut::<_, CloseOptions>(self_, "self_") };
     *slot = slot.clone().with_timeout(duration_ms(timeout));
 }
 
@@ -276,10 +278,12 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a `Box<CloseOptions>`
     // from one of the two constructors, and no other call uses it at the same time, so the
     // exclusive reference is sound for this call, its only use.
-    let slot = unsafe { &mut *(self_ as *mut CloseOptions) };
+    let slot = unsafe { require_mut::<_, CloseOptions>(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // as `value_of` requires; the value is copied out.
-    *slot = slot.clone().with_group_membership_operation(unsafe { value_of(operation) });
+    *slot = slot
+        .clone()
+        .with_group_membership_operation(unsafe { value_of(operation, "operation") });
 }
 
 /// `timeout()`: the timeout configured for this close.

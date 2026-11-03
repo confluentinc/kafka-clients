@@ -46,7 +46,7 @@ use crate::ffi::consumer::{
     kafka_consumer_Consumer_t,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_fn;
+use crate::ffi::precondition::{require_fn, require_ref};
 use crate::ffi::util::{GenericValue, c_str_to_string, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`MockConsumer`] over `void *` key and value.
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, i.e. a
     // `Box<ConsumerClassHandle>` from `kafka_consumer_MockConsumer_new` not yet destroyed, alive
     // for this expression, the only use of the reference; `as_consumer` only takes its address.
-    unsafe { &*(self_ as *const ConsumerClassHandle) }.as_consumer()
+    unsafe { require_ref::<_, ConsumerClassHandle>(self_, "self_") }.as_consumer()
 }
 
 /// Frees the handle as `kafka_consumer_KafkaConsumer_destroy` does; null is a

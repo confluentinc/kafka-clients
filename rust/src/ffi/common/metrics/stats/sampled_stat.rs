@@ -30,7 +30,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_fn, require_mut, require_ref};
+use crate::ffi::precondition::{Required, require_element_ref, require_fn, require_mut, require_ref};
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
@@ -479,7 +479,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
         // call uses at the same time and not one of the read-only samples `combine` lends: an owned
         // one, the `Box::into_raw` of a `Sample`, or the one a kind's `update` lends for its call,
         // a `&mut Sample` cast; so the exclusive reference aliases nothing for this call.
-        unsafe { &mut *(sample as *mut Sample) },
+        unsafe { require_mut::<_, Sample>(sample, "sample") },
         // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as
         // `metric_config_ref` requires; the reference is used only within this call.
         unsafe { metric_config_ref(config, "config") },
@@ -521,7 +521,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
         // SAFETY: Per this function's `# Safety`, every element of `samples` is a valid sample
         // handle: an owned one, the `Box::into_raw` of a `Sample`, or one a kind's `update` or
         // `combine` lends for its call; the reference lives only until `clone` copies the sample.
-        .map(|&sample| unsafe { &*(sample as *const Sample) }.clone())
+        .map(|&sample| unsafe { require_element_ref::<Sample>(sample, "samples") }.clone())
         .collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid kind handle, as
     // `sampled_stat_kind_ref` requires, and `config` a valid metric-config handle, as

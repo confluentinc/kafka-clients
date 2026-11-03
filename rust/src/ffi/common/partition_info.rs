@@ -128,10 +128,10 @@ pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t, param: &'st
     // list.
     unsafe { list_elements(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a partition-info
-        // handle, as `partition_info_ref` requires; the value is cloned, so the borrow lasts for
-        // this call only.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a partition-info
+            // handle, as `partition_info_ref` requires; the value is cloned, so the borrow lasts for
+            // this call only.
             unsafe { partition_info_ref(require_element(element, param) as *const kafka_common_PartitionInfo_t, param) }
                 .clone()
         })

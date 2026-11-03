@@ -102,11 +102,11 @@ pub(crate) fn type_singleton(value: Type) -> *const kafka_common_config_ConfigRe
 /// # Safety
 ///
 /// `value` must be a singleton returned by this module.
-pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Type_t) -> Type {
+pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Type_t, param: &'static str) -> Type {
     // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `TYPES` array (`type_singleton`), so it points at a
     // live, initialised `Type`, which is `Copy` and read out here.
-    unsafe { *(value as *const Type) }
+    *unsafe { require_ref::<_, Type>(value, param) }
 }
 
 /// Returns `ConfigResource.Type.GROUP`, a static singleton never freed.
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
 ) -> kafka_common_config_ConfigResource_Type_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `type_of` requires; the value is copied out.
-    type_enum_of(unsafe { type_of(self_) })
+    type_enum_of(unsafe { type_of(self_, "self_") })
 }
 
 /// Returns the constant's name, as Java's inherited `Enum.toString()`.
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `type_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { type_of(self_) }.to_string())
+    into_c_string(&unsafe { type_of(self_, "self_") }.to_string())
 }
 
 /// Returns the type's wire-protocol byte.
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_id(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `type_of` requires; the value is copied out.
-    unsafe { type_of(self_) }.id()
+    unsafe { type_of(self_, "self_") }.id()
 }
 
 /// Returns the type for a wire-protocol byte.
@@ -325,9 +325,10 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
     // requires, and its value is copied out; `name` is a valid NUL-terminated string, as
     // `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows either
     // argument after this call.
-    box_config_resource(ConfigResource::new(unsafe { type_of(resource_type) }, unsafe {
-        c_str_to_string(name)
-    }))
+    box_config_resource(ConfigResource::new(
+        unsafe { type_of(resource_type, "resource_type") },
+        unsafe { c_str_to_string(name) },
+    ))
 }
 
 /// Return the resource type.
@@ -436,7 +437,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `type_singleton`, which
             // points into the static `TYPES` array and is never freed.
             unsafe {
-                assert_eq!(type_of(handle), value);
+                assert_eq!(type_of(handle, "value"), value);
                 assert_eq!(kafka_common_config_ConfigResource_Type__enum(handle) as usize, index);
                 assert_eq!(kafka_common_config_ConfigResource_Type_id(handle), value.id());
                 assert_eq!(kafka_common_config_ConfigResource_Type_for_id(value.id()), handle);

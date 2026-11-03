@@ -350,7 +350,9 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a
     // `Box<OffsetAndMetadataInner>` from `box_offset_and_metadata`, never mutated; the pointer
     // returned borrows its `metadata_c`, valid until the handle is freed, as the rustdoc states.
-    unsafe { &*(self_ as *const OffsetAndMetadataInner) }.metadata_c.as_ptr()
+    unsafe { require_ref::<_, OffsetAndMetadataInner>(self_, "self_") }
+        .metadata_c
+        .as_ptr()
 }
 
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.

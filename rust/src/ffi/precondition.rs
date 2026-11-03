@@ -152,6 +152,19 @@ pub(crate) fn require_element(element: *mut c_void, param: &'static str) -> *mut
     element
 }
 
+/// The value behind the element `element` of the collection parameter
+/// `param`, checked as [`require_element`] checks it.
+///
+/// # Safety
+///
+/// `element` must be `NULL` or point at a valid `T`, alive and not mutated
+/// for `'a`.
+pub(crate) unsafe fn require_element_ref<'a, T>(element: *const c_void, param: &'static str) -> &'a T {
+    // SAFETY: `require_element` returned `element` non-null and, per this function's `# Safety`,
+    // it points at a valid `T` that stays alive and unmutated for `'a`.
+    unsafe { &*(require_element(element.cast_mut(), param) as *const T) }
+}
+
 /// The mandatory function pointer `f`; panics with [`null`] when it is `NULL`.
 pub(crate) fn require_fn<F: Copy>(f: Option<F>, param: &'static str) -> F {
     match f {

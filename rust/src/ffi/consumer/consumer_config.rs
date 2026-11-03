@@ -148,7 +148,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is null or a valid map of `char *` keys and
     // values, as `map_strings` requires; they are copied into owned strings.
-    let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
+    let props: HashMap<String, String> = unsafe { map_strings(props, "props") }.into_iter().collect();
     match ConsumerConfig::new(&props) {
         Ok(config) => Box::into_raw(Box::new(ConsumerConfigHandle { config, strings: LentStrings::default() }))
             as *mut kafka_consumer_ConsumerConfig_t,
@@ -677,7 +677,7 @@ mod tests {
         // SAFETY: Test code: `list` is an owned list of C strings just returned, read once and
         // destroyed once.
         unsafe {
-            let strings = list_strings(list);
+            let strings = list_strings(list, "value");
             kafka_List_destroy(list);
             strings
         }

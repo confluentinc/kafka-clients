@@ -117,10 +117,10 @@ pub(crate) unsafe fn list_topic_partitions(list: *const kafka_List_t, param: &'s
     // list.
     unsafe { list_elements(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a topic-partition
-        // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
-        // this call only.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a topic-partition
+            // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
+            // this call only.
             unsafe {
                 topic_partition_ref(require_element(element, param) as *const kafka_common_TopicPartition_t, param)
             }
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartition_topic(
     // that parent. No call mutates a `TopicPartitionInner`, so the shared reference is sound for
     // this call. The string returned is the inner's own `topic_c`, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle and valid until it is destroyed".
-    unsafe { &*(self_ as *const TopicPartitionInner) }.topic_ptr()
+    unsafe { require_ref::<_, TopicPartitionInner>(self_, "self_") }.topic_ptr()
 }
 
 /// Returns the partition number.

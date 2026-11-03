@@ -28,31 +28,26 @@
 //! - `read`: `p.read()` or `ptr::read(p)`;
 //! - `unwrap`: `p.as_ref()` / `p.as_mut()` followed by `.unwrap()` or
 //!   `.expect(..)`, a NULL check panicking without Java's error;
-//! - `fn-call`: a call through a parameter whose type is a bare `fn`.
+//! - `fn-call`: a call through a C export's parameter whose type is a bare `fn`.
 //!
 //! A pointer the function tests with `p.is_null()` counts as checked, since the
-//! test is how a nullable parameter is read. `Box::from_raw` / `Arc::from_raw`
-//! are not reported: they take back what Rust handed out, as `_destroy` does.
+//! test is how a nullable parameter is read. Outside a C export, a pointer to a
+//! Rust type (`Self`, a `dyn` trait, or a type whose name does not end in `_t`)
+//! is the crate's own, not a C argument, so it is not reported: the export
+//! that turned the C argument into it is where the check belongs.
+//! `Box::from_raw` / `Arc::from_raw` are not reported: they take back what
+//! Rust handed out, as `_destroy` does.
 //!
 //! Second, every fn-pointer typedef must be nullable: `bare-typedef` for a
 //! `pub type X = unsafe extern "C" fn(..)` under `ffi`, `bare-fn-param` for an
 //! export parameter typed as a bare `fn`, `bare-fn-field` for a public field of
 //! one. C can pass `NULL` for any of them, which a bare `fn` cannot hold.
-//!
-//! Findings are keyed `<kind> <crate path of fn>`; the burn-down baseline is
-//! [`NULL_CHECKS_BASELINE`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::Path;
 
 use syn::visit::{self, Visit};
 
-use super::baseline::{Baseline, Waivable};
-use super::{is_cfg_test, Context, Crate, Rule};
-
-/// The burn-down baseline, relative to the `rust/` directory.
-pub(super) const NULL_CHECKS_BASELINE: &str = "xtask/null-checks-baseline.txt";
+use super::{is_cfg_test, Crate, Rule};
 
 /// One unchecked read, or one non-nullable fn-pointer type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,6 +60,7 @@ pub(super) struct Finding {
 }
 
 impl Finding {
+    #[cfg(test)]
     pub(super) fn key(&self) -> String {
         format!("{} {}", self.kind, self.subject)
     }
@@ -74,36 +70,11 @@ impl Finding {
     }
 }
 
-impl Waivable for Finding {
-    fn key(&self) -> String {
-        Finding::key(self)
-    }
-
-    fn subject(&self) -> &str {
-        &self.subject
-    }
-
-    fn baseline_finding(file: &str, line: String, detail: &str) -> Self {
-        Finding {
-            kind: "baseline",
-            subject: line,
-            file: file.to_string(),
-            detail: detail.to_string(),
-        }
-    }
-}
-
 /// The rule.
-pub(super) struct FfiNullChecks {
-    baseline: Option<Baseline>,
-}
+pub(super) struct FfiNullChecks;
 
 impl FfiNullChecks {
-    pub(super) fn new(ctx: &Context) -> Self {
-        FfiNullChecks { baseline: ctx.null_checks_baseline.as_deref().map(Baseline::load) }
-    }
-
-    /// Every finding, before the baseline, and how many functions were inspected.
+    /// Every finding, and how many functions were inspected.
     pub(super) fn findings(&self, krate: &Crate) -> (Vec<Finding>, usize) {
         let mut out = Vec::new();
         let mut checked = 0;
@@ -131,11 +102,7 @@ impl Rule for FfiNullChecks {
     }
 
     fn check(&self, krate: &Crate, findings: &mut Vec<String>) -> usize {
-        let (mut raw, checked) = self.findings(krate);
-        if let Some(baseline) = &self.baseline {
-            raw = baseline.apply(raw);
-            raw.sort();
-        }
+        let (raw, checked) = self.findings(krate);
         findings.extend(raw.iter().map(Finding::message));
         checked
     }
@@ -145,41 +112,8 @@ impl Rule for FfiNullChecks {
    use `ffi::precondition::require_ref` / `require_mut` / `require_str` /
    `require_list` / `require_map` / `require_fn`, which panic with Java's error,
    or test `p.is_null()` where Java gives null a meaning. A fn-pointer typedef
-   is `Option<unsafe extern \"C\" fn(..)>`, unwrapped with `require_fn`. A
-   finding the migration has not reached yet is listed in
-   xtask/null-checks-baseline.txt (`cargo xtask null-checks-baseline` rewrites
-   it); a line matching nothing any more must be deleted."
+   is `Option<unsafe extern \"C\" fn(..)>`, unwrapped with `require_fn`."
     }
-}
-
-/// `cargo xtask null-checks-baseline`: rewrites [`NULL_CHECKS_BASELINE`] with
-/// every current finding.
-pub(crate) fn write_baseline() -> anyhow::Result<()> {
-    println!("🔧 Writing the check-ffi-null-checks baseline...");
-    let krate = Crate::load(Path::new("src/lib.rs"))?;
-    if !krate.parse_errors.is_empty() {
-        anyhow::bail!(
-            "{} file(s) could not be parsed: {}",
-            krate.parse_errors.len(),
-            krate.parse_errors.join("; ")
-        );
-    }
-    let rule = FfiNullChecks { baseline: None };
-    let (findings, _) = rule.findings(&krate);
-    let mut out = String::from(
-        "# check-ffi-null-checks findings the NULL-precondition migration has not reached yet\n\
-         # (CLAUDE.md §4). One `<kind> <crate path>` per line. A line matching no finding any\n\
-         # more is itself a finding: delete it. Rewrite with `cargo xtask null-checks-baseline`;\n\
-         # see everything with `cargo xtask lint-custom check-ffi-null-checks --no-baseline`.\n",
-    );
-    let keys: BTreeSet<String> = findings.iter().map(Finding::key).collect();
-    for key in &keys {
-        out.push_str(key);
-        out.push('\n');
-    }
-    fs::write(NULL_CHECKS_BASELINE, out)?;
-    println!("✅ Wrote {} finding(s) to {NULL_CHECKS_BASELINE}", keys.len());
-    Ok(())
 }
 
 /// Checks one module item, returning how many functions it inspected.
@@ -200,7 +134,7 @@ fn check_item(item: &syn::Item, prefix: &str, file: &str, out: &mut Vec<Finding>
                     }
                 }
             }
-            check_fn(&f.sig, &f.block, &subject, file, out);
+            check_fn(&f.sig, &f.block, is_export(&f.attrs), &subject, file, out);
             1
         },
         syn::Item::Impl(imp) if !is_cfg_test(&imp.attrs) => {
@@ -211,7 +145,8 @@ fn check_item(item: &syn::Item, prefix: &str, file: &str, out: &mut Vec<Finding>
                     if is_cfg_test(&f.attrs) {
                         continue;
                     }
-                    check_fn(&f.sig, &f.block, &format!("{prefix}::{self_ty}::{}", f.sig.ident), file, out);
+                    let subject = format!("{prefix}::{self_ty}::{}", f.sig.ident);
+                    check_fn(&f.sig, &f.block, is_export(&f.attrs), &subject, file, out);
                     n += 1;
                 }
             }
@@ -278,15 +213,35 @@ fn type_name(ty: &syn::Type) -> String {
     }
 }
 
-/// Collects the kinds of unchecked reads in one function body.
-fn check_fn(sig: &syn::Signature, block: &syn::Block, subject: &str, file: &str, out: &mut Vec<Finding>) {
-    let mut v = BodyVisitor::default();
+/// Whether `ty` is a raw pointer to a Rust type: `Self`, a `dyn` trait, or a
+/// named type whose name does not end in `_t` and is not a primitive or a
+/// `std::ffi` C type, as a C argument's pointee always is.
+fn is_rust_pointer(ty: &syn::Type) -> bool {
+    let syn::Type::Ptr(p) = ty else { return false };
+    match &*p.elem {
+        syn::Type::TraitObject(_) => true,
+        syn::Type::Paren(inner) => matches!(&*inner.elem, syn::Type::TraitObject(_)),
+        syn::Type::Path(path) => path.path.segments.last().is_some_and(|seg| {
+            let name = seg.ident.to_string();
+            name == "Self" || (name.starts_with(|c: char| c.is_ascii_uppercase()) && !name.ends_with("_t"))
+        }),
+        _ => false,
+    }
+}
+
+/// Collects the kinds of unchecked reads in one function body; `export` says
+/// whether every pointer parameter is a C argument (see [`is_rust_pointer`]).
+fn check_fn(sig: &syn::Signature, block: &syn::Block, export: bool, subject: &str, file: &str, out: &mut Vec<Finding>) {
+    let mut v = BodyVisitor { export, ..BodyVisitor::default() };
     for (name, ty) in params(sig) {
         match ty {
+            syn::Type::Ptr(_) if !export && is_rust_pointer(ty) => {},
             syn::Type::Ptr(_) => {
                 v.raw.insert(name);
             },
-            syn::Type::BareFn(_) => {
+            // A Rust `fn` value is never NULL: outside an export it is a fn item or
+            // what `require_fn` returned, and an export's own is `bare-fn-param`.
+            syn::Type::BareFn(_) if export => {
                 v.bare_fns.insert(name);
             },
             _ => {},
@@ -320,6 +275,8 @@ fn check_fn(sig: &syn::Signature, block: &syn::Block, subject: &str, file: &str,
 #[derive(Default)]
 struct BodyVisitor {
     learning: bool,
+    /// Whether the function is a C export, where every pointer is a C argument.
+    export: bool,
     /// Names bound to raw pointers: parameters and `let`s.
     raw: BTreeSet<String>,
     /// Names tested with `.is_null()`.
@@ -349,7 +306,8 @@ impl BodyVisitor {
                         return false;
                     }
                 }
-                matches!(&*c.ty, syn::Type::Ptr(_)) || self.unchecked_raw(&c.expr)
+                let c_pointer = matches!(&*c.ty, syn::Type::Ptr(_)) && (self.export || !is_rust_pointer(&c.ty));
+                c_pointer || self.unchecked_raw(&c.expr)
             },
             syn::Expr::MethodCall(m) if is_pointer_arith(&m.method.to_string()) => self.unchecked_raw(&m.receiver),
             syn::Expr::Path(p) => p
@@ -406,9 +364,10 @@ impl<'ast> Visit<'ast> for BodyVisitor {
                 _ => (None, None),
             };
             if let Some(name) = name {
-                let typed_raw = ty.is_some_and(|t| matches!(t, syn::Type::Ptr(_)));
+                let c_pointer = |t: &syn::Type| matches!(t, syn::Type::Ptr(_)) && (self.export || !is_rust_pointer(t));
+                let typed_raw = ty.is_some_and(c_pointer);
                 let cast_raw = local.init.as_ref().is_some_and(|init| match &*init.expr {
-                    syn::Expr::Cast(c) => matches!(&*c.ty, syn::Type::Ptr(_)),
+                    syn::Expr::Cast(c) => c_pointer(&c.ty),
                     syn::Expr::MethodCall(m) => {
                         is_pointer_arith(&m.method.to_string())
                             && root_name(&m.receiver).is_some_and(|r| self.raw.contains(&r))
@@ -474,6 +433,7 @@ impl<'ast> Visit<'ast> for BodyVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     fn run(name: &str, ffi: &str) -> Vec<String> {
@@ -485,7 +445,7 @@ mod tests {
         );
         fs::write(dir.join("lib.rs"), lib).unwrap();
         let krate = Crate::load(&dir.join("lib.rs")).unwrap();
-        let (findings, _) = FfiNullChecks { baseline: None }.findings(&krate);
+        let (findings, _) = FfiNullChecks.findings(&krate);
         fs::remove_dir_all(&dir).unwrap();
         findings.iter().map(Finding::key).collect()
     }
@@ -549,6 +509,33 @@ mod tests {
     }
 
     #[test]
+    fn test_rust_pointers_outside_exports_pass() {
+        let keys = run(
+            "internal",
+            r#"
+            pub struct X;
+            pub struct kafka_y_t;
+            pub trait T {}
+            pub unsafe fn helper(this: *mut X, t: *const dyn T, y: *const kafka_y_t, v: *mut c_void) {
+                let _x = &*this;
+                let _t = &*t;
+                let _z = &*(v as *const X);
+                let _y = &*y;
+            }
+            #[unsafe(no_mangle)]
+            pub unsafe extern "C" fn kafka_a(self_: *const X, v: *mut c_void) {
+                let _x = &*self_;
+                let _z = &*(v as *const X);
+            }
+            pub unsafe fn element(v: usize) -> i32 {
+                *(v as *const i32)
+            }
+            "#,
+        );
+        assert_eq!(keys, ["deref ffi::element", "deref ffi::helper", "deref ffi::kafka_a"]);
+    }
+
+    #[test]
     fn test_bare_fn_types_are_reported() {
         let keys = run(
             "bare",
@@ -571,18 +558,5 @@ mod tests {
                 "fn-call ffi::kafka_c",
             ]
         );
-    }
-
-    #[test]
-    fn test_baseline_waives_and_reports_stale_lines() {
-        let findings = vec![Finding {
-            kind: "deref",
-            subject: "ffi::kafka_a".to_string(),
-            file: "lib.rs".to_string(),
-            detail: String::new(),
-        }];
-        let baseline = Baseline::parse("b.txt", "deref ffi::kafka_a\nderef ffi::gone\n");
-        let kept: Vec<String> = baseline.apply(findings).iter().map(Finding::key).collect();
-        assert_eq!(kept, ["baseline deref ffi::gone"]);
     }
 }

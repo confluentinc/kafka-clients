@@ -83,7 +83,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
     boxed(TopicIdPartition::new(
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires; the `Uuid` is copied out.
-        unsafe { uuid_of(topic_id) },
+        unsafe { uuid_of(topic_id, "topic_id") },
         // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition
         // handle, as `topic_partition_ref` requires; the value is cloned, so the borrow lasts for
         // this call only.
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
     boxed(TopicIdPartition::with_partition_topic(
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires; the `Uuid` is copied out.
-        unsafe { uuid_of(topic_id) },
+        unsafe { uuid_of(topic_id, "topic_id") },
         partition,
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
@@ -262,7 +262,7 @@ mod tests {
 
             for tip in [a, b] {
                 let topic_id = kafka_common_TopicIdPartition_topic_id(tip);
-                assert_eq!(uuid_of(topic_id), id);
+                assert_eq!(uuid_of(topic_id, "topic_id"), id);
                 kafka_common_Uuid_destroy(topic_id);
                 assert_eq!(CStr::from_ptr(kafka_common_TopicIdPartition_topic(tip)).to_str().unwrap(), "t");
                 assert_eq!(kafka_common_TopicIdPartition_partition(tip), 2);

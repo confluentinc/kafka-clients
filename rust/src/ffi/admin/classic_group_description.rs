@@ -129,10 +129,10 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static st
     // call.
     unsafe { list_elements(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
-        // handle alive for this call, as `member_description_ref` requires; the borrow ends with
-        // the clone.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
+            // handle alive for this call, as `member_description_ref` requires; the borrow ends with
+            // the clone.
             unsafe {
                 member_description_ref(require_element(element, param) as *const kafka_admin_MemberDescription_t, param)
             }
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
         unsafe { list_member_descriptions(members, "members") },
         // SAFETY: Per this function's `# Safety`, `state` is a `kafka_common_ClassicGroupState_t`
         // singleton, as `classic_group_state::value_of` requires.
-        unsafe { classic_group_state::value_of(state) },
+        unsafe { classic_group_state::value_of(state, "state") },
         // SAFETY: Per this function's `# Safety`, `coordinator` is null or a valid node handle, as
         // `optional_node` requires.
         unsafe { optional_node(coordinator) },
@@ -240,14 +240,14 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_with_authorized_ope
         unsafe { list_member_descriptions(members, "members") },
         // SAFETY: Per this function's `# Safety`, `state` is a `kafka_common_ClassicGroupState_t`
         // singleton, as `classic_group_state::value_of` requires.
-        unsafe { classic_group_state::value_of(state) },
+        unsafe { classic_group_state::value_of(state, "state") },
         // SAFETY: Per this function's `# Safety`, `coordinator` is null or a valid node handle, as
         // `optional_node` requires.
         unsafe { optional_node(coordinator) },
         // SAFETY: Per this function's `# Safety`, `authorized_operations` is null or a valid list
         // of the documented `const kafka_common_acl_AclOperation_t *` singletons, as
         // `list_acl_operations` requires.
-        unsafe { list_acl_operations(authorized_operations) },
+        unsafe { list_acl_operations(authorized_operations, "authorized_operations") },
     ))
 }
 

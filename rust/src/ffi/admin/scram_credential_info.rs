@@ -98,7 +98,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_new(
         // SAFETY: Per this function's `# Safety`, `mechanism` is a `kafka_admin_ScramMechanism_t`
         // singleton, which only the `scram_mechanism` module hands out, as
         // `scram_mechanism_value_of` requires.
-        unsafe { scram_mechanism_value_of(mechanism) },
+        unsafe { scram_mechanism_value_of(mechanism, "mechanism") },
         iterations,
     ))
 }

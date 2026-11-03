@@ -24,6 +24,7 @@ use std::sync::LazyLock;
 
 use crate::common::ClassicGroupState;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupState`] singleton.
@@ -93,11 +94,14 @@ pub(crate) fn singleton(state: ClassicGroupState) -> *const kafka_common_Classic
 /// # Safety
 ///
 /// `state` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(state: *const kafka_common_ClassicGroupState_t) -> ClassicGroupState {
+pub(crate) unsafe fn value_of(
+    state: *const kafka_common_ClassicGroupState_t,
+    param: &'static str,
+) -> ClassicGroupState {
     // SAFETY: Per this function's `# Safety`, `state` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `ClassicGroupState`, which is `Copy` and read out here.
-    unsafe { *(state as *const ClassicGroupState) }
+    *unsafe { require_ref::<_, ClassicGroupState>(state, param) }
 }
 
 /// Returns `ClassicGroupState.UNKNOWN`, a static singleton never freed.
@@ -154,7 +158,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState__enum(
 ) -> kafka_common_ClassicGroupState_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the name of this enum constant, exactly as declared in Java (`PREPARING_REBALANCE`), Java's
@@ -172,7 +176,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
     // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Case-insensitive classic group state lookup by string name.
@@ -212,7 +216,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its text copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -230,7 +234,7 @@ mod tests {
             // into the static `VARIANTS` array and is never freed, and the names read are owned by
             // the static `NAMES`.
             unsafe {
-                assert_eq!(value_of(handle), state);
+                assert_eq!(value_of(handle, "value"), state);
                 assert_eq!(kafka_common_ClassicGroupState__enum(handle) as usize, index);
                 assert_eq!(
                     CStr::from_ptr(kafka_common_ClassicGroupState_name(handle)).to_str().unwrap(),

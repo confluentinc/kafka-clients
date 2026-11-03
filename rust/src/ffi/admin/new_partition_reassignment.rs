@@ -16,7 +16,7 @@
 //! `org.apache.kafka.clients.admin.NewPartitionReassignment` (CLAUDE.md §4).
 //! A `List<Integer>` crosses as a `kafka_List_t` of `int32_t *`.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_element_ref, require_ref};
 use std::ffi::c_void;
 
 use crate::admin::NewPartitionReassignment;
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `target_replicas` points at a
         // live `int32_t`, read by copy while the list is alive.
-        .map(|&element| unsafe { *(element as *const i32) })
+        .map(|&element| *unsafe { require_element_ref::<i32>(element, "target_replicas") })
         .collect();
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {

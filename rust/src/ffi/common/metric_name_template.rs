@@ -108,7 +108,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
     // SAFETY: Per this function's `# Safety`, `tag_names` is null or a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
-    let tag_names: IndexSet<String> = unsafe { list_strings(tag_names) }.into_iter().collect();
+    let tag_names: IndexSet<String> = unsafe { list_strings(tag_names, "tag_names") }.into_iter().collect();
     Box::into_raw(Box::new(MetricNameTemplateInner::new(MetricNameTemplate::new(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it

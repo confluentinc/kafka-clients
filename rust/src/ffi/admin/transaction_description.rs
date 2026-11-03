@@ -114,7 +114,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
         coordinator_id,
         // SAFETY: Per this function's `# Safety`, `state` is a transaction-state singleton; only
         // the `transaction_state` module hands those out, as `transaction_state_value_of` requires.
-        unsafe { transaction_state_value_of(state) },
+        unsafe { transaction_state_value_of(state, "state") },
         producer_id,
         producer_epoch,
         transaction_timeout_ms,

@@ -112,20 +112,18 @@ pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) ->
     // SAFETY: Per this function's `# Safety`, `entries` is null or a valid list, alive and not
     // mutated for this call, as `list_elements` requires; the borrowed slice is consumed by
     // `Config::new` within this call.
-    let entries = unsafe { list_elements(entries, "entries") }
-        .iter()
+    let entries = unsafe { list_elements(entries, "entries") }.iter().map(|&element| {
         // SAFETY: Per this function's `# Safety`, each element of `entries` is a valid config-entry
         // handle, kept alive for this call, as `config_entry_ref` requires; the entry is cloned at
         // once.
-        .map(|&element| {
-            unsafe {
-                config_entry_ref(
-                    require_element(element, "entries") as *const kafka_admin_ConfigEntry_t,
-                    "entries",
-                )
-            }
-            .clone()
-        });
+        unsafe {
+            config_entry_ref(
+                require_element(element, "entries") as *const kafka_admin_ConfigEntry_t,
+                "entries",
+            )
+        }
+        .clone()
+    });
     box_config(Config::new(entries))
 }
 

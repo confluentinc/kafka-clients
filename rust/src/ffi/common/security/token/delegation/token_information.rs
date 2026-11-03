@@ -16,7 +16,7 @@
 //! `org.apache.kafka.common.security.token.delegation.TokenInformation`
 //! (CLAUDE.md §4).
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::security::token::delegation::TokenInformation;
@@ -365,7 +365,8 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     // for the length of this call. The reference covers only `info`: the principal views and the
     // token-id string earlier getters returned point at the other fields, which this leaves
     // untouched.
-    unsafe { &mut (*(self_ as *mut TokenInformationInner)).info }.set_expiry_timestamp(expiry_timestamp);
+    let self_ = unsafe { require_mut::<_, TokenInformationInner>(self_, "self_") };
+    self_.info.set_expiry_timestamp(expiry_timestamp);
 }
 
 /// Returns the token id.

@@ -50,7 +50,6 @@ fn main() -> anyhow::Result<()> {
         Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
         Some("doc-baseline") => lint_custom::write_doc_baseline()?,
-        Some("null-checks-baseline") => lint_custom::write_null_checks_baseline()?,
         Some("javadoc") => lint_custom::javadoc(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-fill") => lint_custom::doc_fill(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-report") => lint_custom::doc_report()?,
@@ -2663,12 +2662,10 @@ fn print_help() {
                     check-api-docs                        public API docs list parameters, returns and errors
                     check-ffi-null-checks                 no C argument is read before its NULL check
                   With a rule name only that rule runs; `--no-baseline` ignores
-                  xtask/ffi-baseline.txt, xtask/doc-baseline.txt and
-                  xtask/null-checks-baseline.txt so every finding is shown
+                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every
+                  finding is shown
   ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   doc-baseline    Rewrite xtask/doc-baseline.txt with the current check-api-docs findings
-  null-checks-baseline
-                  Rewrite xtask/null-checks-baseline.txt with the current check-ffi-null-checks findings
   javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit
   doc-report      Print the open check-api-docs findings per module and per kind
   doc-fill        Insert the missing # Arguments / # Returns / # Errors entries Java's
@@ -2756,7 +2753,6 @@ Usage:
   cargo xtask lint-custom [rule-name] [--no-baseline]
   cargo xtask ffi-baseline
   cargo xtask doc-baseline
-  cargo xtask null-checks-baseline
   cargo xtask javadoc <marker|rust-path|C symbol>
   cargo xtask doc-report
   cargo xtask doc-fill [--write] <path>...

@@ -40,6 +40,7 @@ use crate::ffi::common::serialization::deserializer::{
 use crate::ffi::consumer::consumer_config::{consumer_config_build, kafka_consumer_ConsumerConfig_t};
 use crate::ffi::consumer::{ConsumerClassHandle, ConsumerKind, Owns, kafka_consumer_Consumer_t};
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{GenericValue, box_bytes};
 
 /// Opaque handle to a [`KafkaConsumer`] over `void *` key and value.
@@ -125,7 +126,10 @@ unsafe fn deserializer_from(
         // SAFETY: Per this function's `# Safety`, `deserializer` is (non-null, checked above) a
         // live handle not used again by the caller, which is stricter than what `take_deserializer`
         // requires.
-        (Box::new(ArcDeserializer(unsafe { take_deserializer(deserializer) })), false)
+        (
+            Box::new(ArcDeserializer(unsafe { take_deserializer(deserializer, "deserializer") })),
+            false,
+        )
     }
 }
 
@@ -222,7 +226,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer__as_Consumer(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, i.e. a
     // `Box<ConsumerClassHandle>` from `kafka_consumer_KafkaConsumer_new` not yet destroyed, alive
     // for this expression, the only use of the reference; `as_consumer` only takes its address.
-    unsafe { &*(self_ as *const ConsumerClassHandle) }.as_consumer()
+    unsafe { require_ref::<_, ConsumerClassHandle>(self_, "self_") }.as_consumer()
 }
 
 /// Frees a handle returned by [`kafka_consumer_KafkaConsumer_new`]: awaits the
@@ -289,14 +293,17 @@ mod tests {
         // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
         // consumer's `Arc` frees it.
         let asynchronous = unsafe {
-            ArcDeserializer(take_deserializer(kafka_common_serialization_Deserializer_new_async(
-                std::ptr::null_mut(),
-                Some(async_fn),
-                None,
-                None,
-                None,
-                None,
-            )))
+            ArcDeserializer(take_deserializer(
+                kafka_common_serialization_Deserializer_new_async(
+                    std::ptr::null_mut(),
+                    Some(async_fn),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                "deserializer",
+            ))
         };
         let mut headers = RecordHeaders::new();
         let data = Bytes::from_static(b"v");
@@ -383,7 +390,7 @@ mod tests {
         // SAFETY: Test code: `handle` comes from its constructor and is consumed once, here; the
         // `Arc` keeps it valid for the reports, and `slot` outlives the deserializer.
         let deserializer: Box<dyn DynDeserializer<GenericValue>> =
-            Box::new(ArcDeserializer(unsafe { take_deserializer(handle) }));
+            Box::new(ArcDeserializer(unsafe { take_deserializer(handle, "handle") }));
         let mut with_k = RecordHeaders::new();
         with_k.add_with_key_value("k", Some(b"v")).unwrap();
         for mut headers in [RecordHeaders::new(), with_k] {
@@ -533,7 +540,11 @@ mod tests {
                 assert!(!class.is_null());
                 classes.push(class);
                 let unused = kafka_consumer_ConsumerConfig_unused(config);
-                assert_eq!(list_string_set(unused), expected_unused, "the consumer marks its own record");
+                assert_eq!(
+                    list_string_set(unused, "unused"),
+                    expected_unused,
+                    "the consumer marks its own record"
+                );
                 kafka_List_destroy(unused);
             }
             kafka_consumer_ConsumerConfig_destroy(config);

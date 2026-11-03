@@ -145,7 +145,10 @@ pub(crate) fn acl_operation_list(operations: Option<&BTreeSet<AclOperation>>) ->
 ///
 /// `list` must be `NULL` or a valid list whose elements are ACL-operation
 /// singletons.
-pub(crate) unsafe fn list_acl_operations(list: *const kafka_List_t) -> Option<BTreeSet<AclOperation>> {
+pub(crate) unsafe fn list_acl_operations(
+    list: *const kafka_List_t,
+    param: &'static str,
+) -> Option<BTreeSet<AclOperation>> {
     if list.is_null() {
         return None;
     }
@@ -153,11 +156,16 @@ pub(crate) unsafe fn list_acl_operations(list: *const kafka_List_t) -> Option<BT
         // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid
         // list, alive and not mutated for this call, as `list_elements` requires; the borrowed
         // slice is consumed before the call returns.
-        unsafe { list_elements(list, "list") }
+        unsafe { list_elements(list, param) }
             .iter()
             // SAFETY: Per this function's `# Safety`, each element of `list` is an ACL-operation
             // singleton, as `acl_operation::value_of` requires.
-            .map(|&element| unsafe { acl_operation::value_of(element as *const kafka_common_acl_AclOperation_t) })
+            .map(|&element| unsafe {
+                acl_operation::value_of(
+                    require_element(element, param) as *const kafka_common_acl_AclOperation_t,
+                    param,
+                )
+            })
             .collect(),
     )
 }
@@ -265,7 +273,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
         unsafe { list_topic_partition_infos(partitions, "partitions") },
         // SAFETY: Per this function's `# Safety`, `authorized_operations` is null or a valid list
         // of ACL-operation singletons, as `list_acl_operations` requires.
-        unsafe { list_acl_operations(authorized_operations) },
+        unsafe { list_acl_operations(authorized_operations, "authorized_operations") },
     ))
 }
 
@@ -314,10 +322,10 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
         // SAFETY: Per this function's `# Safety` (that of
         // `kafka_admin_TopicDescription_with_authorized_operations`), `authorized_operations` is
         // null or a valid list of ACL-operation singletons, as `list_acl_operations` requires.
-        unsafe { list_acl_operations(authorized_operations) },
+        unsafe { list_acl_operations(authorized_operations, "authorized_operations") },
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires.
-        unsafe { uuid_of(topic_id) },
+        unsafe { uuid_of(topic_id, "topic_id") },
     ))
 }
 

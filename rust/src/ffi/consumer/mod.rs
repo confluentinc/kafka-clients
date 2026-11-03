@@ -964,7 +964,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics(
 ) {
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
-    let topics = unsafe { list_strings(topics) };
+    let topics = unsafe { list_strings(topics, "topics") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `run` requires.
     unsafe {
@@ -1021,7 +1021,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
-    let topics = unsafe { list_strings(topics) };
+    let topics = unsafe { list_strings(topics, "topics") };
     let opaque = SendPtr(opaque);
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, as `run_cb`
     // requires; `run_cb` uses it only before it returns, cloning the `Arc` for the task it spawns.
@@ -1078,7 +1078,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
-    let topics = unsafe { list_strings(topics) };
+    let topics = unsafe { list_strings(topics, "topics") };
     // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
     // `listener_adapter` requires; the registration is copied, so the handle is borrowed for this
     // call only. Its `self` stays alive until the registration is released, as
@@ -1148,7 +1148,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
-    let topics = unsafe { list_strings(topics) };
+    let topics = unsafe { list_strings(topics, "topics") };
     // SAFETY: Per this function's `# Safety`, `listener` is a live listener handle, as
     // `listener_adapter` requires; the registration is copied, so the handle is borrowed for this
     // call only. Its `self` stays alive until the registration is released, as

@@ -181,7 +181,7 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_name(
     // `&mut MetricInner` (the name is filled through `OnceLock`), so the shared reference is sound.
     // The name handle returned lives in the view's own `name` cell, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle, valid as long as it is".
-    let inner = unsafe { &*(self_ as *const MetricInner) };
+    let inner = unsafe { require_ref::<_, MetricInner>(self_, "self_") };
     inner
         .name
         .get_or_init(|| MetricNameInner::new(inner.metric().metric_name().clone()))
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_value(
     // (`kafka_common_metrics_KafkaMetric__as_Metric`), alive for this call. Nothing takes a
     // `&mut MetricInner` (the name is filled through `OnceLock`), so the shared reference is sound.
     // The reading is copied into the owned handle returned.
-    box_metric_value(unsafe { &*(self_ as *const MetricInner) }.metric().metric_value())
+    box_metric_value(unsafe { require_ref::<_, MetricInner>(self_, "self_") }.metric().metric_value())
 }
 
 /// Returns which variant `self_` holds.

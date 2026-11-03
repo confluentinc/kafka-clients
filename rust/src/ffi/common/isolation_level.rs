@@ -28,6 +28,7 @@ use crate::common::IsolationLevel;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to an [`IsolationLevel`] singleton.
@@ -74,11 +75,11 @@ pub(crate) fn singleton(level: IsolationLevel) -> *const kafka_common_IsolationL
 /// # Safety
 ///
 /// `level` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(level: *const kafka_common_IsolationLevel_t) -> IsolationLevel {
+pub(crate) unsafe fn value_of(level: *const kafka_common_IsolationLevel_t, param: &'static str) -> IsolationLevel {
     // SAFETY: Per this function's `# Safety`, `level` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `IsolationLevel`, which is `Copy` and read out here.
-    unsafe { *(level as *const IsolationLevel) }
+    *unsafe { require_ref::<_, IsolationLevel>(level, param) }
 }
 
 /// Returns the `IsolationLevel.READ_UNCOMMITTED` singleton.
@@ -115,7 +116,7 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
 ) -> kafka_common_IsolationLevel_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the wire-protocol id of the level (`id()`).
@@ -128,7 +129,7 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
 pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_common_IsolationLevel_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.id() as i8
+    unsafe { value_of(self_, "self_") }.id() as i8
 }
 
 /// Returns the level whose wire-protocol id is `id` (`IsolationLevel.forId(byte id)`).
@@ -172,7 +173,7 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its text copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -192,7 +193,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
             // into the static `VARIANTS` array and is never freed.
             unsafe {
-                assert_eq!(value_of(handle), level);
+                assert_eq!(value_of(handle, "value"), level);
                 assert_eq!(kafka_common_IsolationLevel__enum(handle) as usize, index);
             }
         }

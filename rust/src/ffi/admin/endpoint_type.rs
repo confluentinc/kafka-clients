@@ -22,6 +22,7 @@ use std::ffi::c_char;
 
 use crate::admin::EndpointType;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::into_c_string;
 
 /// Opaque handle to an [`EndpointType`] singleton.
@@ -70,12 +71,15 @@ fn endpoint_type_singleton(endpoint_type: EndpointType) -> *const kafka_admin_En
 /// # Safety
 ///
 /// `endpoint_type` must be a singleton returned by this module.
-unsafe fn endpoint_type_value_of(endpoint_type: *const kafka_admin_EndpointType_t) -> EndpointType {
+unsafe fn endpoint_type_value_of(
+    endpoint_type: *const kafka_admin_EndpointType_t,
+    param: &'static str,
+) -> EndpointType {
     // SAFETY: Per this function's `# Safety`, `endpoint_type` is a singleton returned by this
     // module. `endpoint_type_singleton` is the only producer and points it at an element of the
     // static `VARIANTS`, an `EndpointType` that is never freed or mutated, so the read copies a
     // live value.
-    unsafe { *(endpoint_type as *const EndpointType) }
+    *unsafe { require_ref::<_, EndpointType>(endpoint_type, param) }
 }
 
 /// Returns the `EndpointType.UNKNOWN` singleton.
@@ -123,7 +127,7 @@ pub unsafe extern "C" fn kafka_admin_EndpointType__enum(
 ) -> kafka_admin_EndpointType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `endpoint_type_value_of` requires.
-    enum_of(unsafe { endpoint_type_value_of(self_) })
+    enum_of(unsafe { endpoint_type_value_of(self_, "self_") })
 }
 
 /// Returns the text form of the endpoint type (`toString()`, Java's inherited `Enum.toString()`):
@@ -139,7 +143,7 @@ pub unsafe extern "C" fn kafka_admin_EndpointType_to_string(self_: *const kafka_
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `endpoint_type_value_of` requires; the value is copied out and its name copied into an owned
     // string.
-    into_c_string(&unsafe { endpoint_type_value_of(self_) }.to_string())
+    into_c_string(&unsafe { endpoint_type_value_of(self_, "self_") }.to_string())
 }
 
 /// Returns the wire-protocol byte of the endpoint type (`EndpointType.id()`).
@@ -152,7 +156,7 @@ pub unsafe extern "C" fn kafka_admin_EndpointType_to_string(self_: *const kafka_
 pub unsafe extern "C" fn kafka_admin_EndpointType_id(self_: *const kafka_admin_EndpointType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `endpoint_type_value_of` requires.
-    unsafe { endpoint_type_value_of(self_) }.id()
+    unsafe { endpoint_type_value_of(self_, "self_") }.id()
 }
 
 /// Returns the singleton whose wire-protocol id is `id` (`EndpointType.fromId(byte id)`):
@@ -185,7 +189,7 @@ mod tests {
             for (index, (&endpoint_type, name)) in VARIANTS.iter().zip(["UNKNOWN", "BROKER", "CONTROLLER"]).enumerate()
             {
                 let handle = endpoint_type_singleton(endpoint_type);
-                assert_eq!(endpoint_type_value_of(handle), endpoint_type);
+                assert_eq!(endpoint_type_value_of(handle, "value"), endpoint_type);
                 assert_eq!(kafka_admin_EndpointType__enum(handle) as usize, index);
                 assert_eq!(kafka_admin_EndpointType_from_id(kafka_admin_EndpointType_id(handle)), handle);
                 let text = kafka_admin_EndpointType_to_string(handle);

@@ -52,12 +52,15 @@ pub(crate) struct GenericByteArraySerializer(ByteArraySerializer);
 /// or points at `len` readable bytes that outlive `'a` and are not written
 /// during it.
 unsafe fn bytes<'a>(data: Option<&GenericValue>) -> Option<&'a [u8]> {
-    let data = data.filter(|value| !value.is_null())?;
+    let data = data?.as_ptr() as *const kafka_Bytes_t;
+    if data.is_null() {
+        return None;
+    }
     // SAFETY: Per this function's `# Safety`, `data` is non-null here and points at a
     // `kafka_Bytes_t` whose `data` is null or points at `len` readable bytes that outlive `'a` and
     // are not written during it, so the read of the struct is sound and `kafka_Bytes_t::as_slice`'s
     // contract holds.
-    unsafe { (*(data.as_ptr() as *const kafka_Bytes_t)).as_slice() }
+    unsafe { (*data).as_slice() }
 }
 
 impl Serializer<GenericValue> for GenericByteArraySerializer {

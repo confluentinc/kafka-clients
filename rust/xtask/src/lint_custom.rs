@@ -47,8 +47,6 @@ struct Context {
     ffi_baseline: Option<PathBuf>,
     /// The `check-api-docs` baseline to apply; `None` shows every finding.
     doc_baseline: Option<PathBuf>,
-    /// The `check-ffi-null-checks` baseline to apply; `None` shows every finding.
-    null_checks_baseline: Option<PathBuf>,
     /// The cbindgen configuration whose `[enum] prefix_with_name` decides how
     /// the C enumerators are spelled; `None` skips that check.
     cbindgen_config: Option<PathBuf>,
@@ -94,7 +92,7 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(derive_translation::DeriveTranslation::new(ctx)),
         Box::new(derive_translation::ThreadSafetyProbe::new()),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
-        Box::new(ffi_null_checks::FfiNullChecks::new(ctx)),
+        Box::new(ffi_null_checks::FfiNullChecks),
         Box::new(api_docs::ApiDocs::new(ctx)),
     ]
 }
@@ -120,7 +118,6 @@ pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
         java: Rc::new(JavaIndex::load()),
         ffi_baseline: baseline.then(|| PathBuf::from(ffi_translation::FFI_BASELINE)),
         doc_baseline: baseline.then(|| PathBuf::from(api_docs::DOC_BASELINE)),
-        null_checks_baseline: baseline.then(|| PathBuf::from(ffi_null_checks::NULL_CHECKS_BASELINE)),
         cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
     };
     let rules: Vec<Box<dyn Rule>> = rules(&ctx).into_iter().filter(|r| only.is_none_or(|o| o == r.name())).collect();
@@ -169,12 +166,6 @@ pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `cargo xtask null-checks-baseline`: rewrites the `check-ffi-null-checks`
-/// baseline with every current finding.
-pub fn write_null_checks_baseline() -> anyhow::Result<()> {
-    ffi_null_checks::write_baseline()
-}
-
 /// `cargo xtask ffi-baseline`: rewrites [`ffi_translation::FFI_BASELINE`] with
 /// every current `check-ffi-translation` finding, so the C FFI refactor can
 /// burn it down phase by phase (CLAUDE.md §4).
@@ -184,7 +175,6 @@ pub fn write_ffi_baseline() -> anyhow::Result<()> {
         java: Rc::new(JavaIndex::load()),
         ffi_baseline: None,
         doc_baseline: None,
-        null_checks_baseline: None,
         cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
     };
     let rule = ffi_translation::FfiTranslation::new(&ctx);
@@ -225,7 +215,6 @@ fn doc_rule() -> anyhow::Result<(api_docs::ApiDocs, Crate)> {
         java: Rc::new(JavaIndex::load()),
         ffi_baseline: None,
         doc_baseline: None,
-        null_checks_baseline: None,
         cbindgen_config: Some(PathBuf::from(ffi_translation::CBINDGEN_CONFIG)),
     };
     let rule = api_docs::ApiDocs::new(&ctx);

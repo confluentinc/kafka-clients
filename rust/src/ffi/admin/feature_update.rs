@@ -92,12 +92,13 @@ pub(crate) fn upgrade_type_singleton(upgrade_type: UpgradeType) -> *const kafka_
 /// `upgrade_type` must be a singleton returned by this module.
 pub(crate) unsafe fn upgrade_type_value_of(
     upgrade_type: *const kafka_admin_FeatureUpdate_UpgradeType_t,
+    param: &'static str,
 ) -> UpgradeType {
     // SAFETY: Per this function's `# Safety`, `upgrade_type` is a singleton returned by this
     // module. `upgrade_type_singleton` is the only producer and points it at an element of the
     // static `VARIANTS`, an `UpgradeType` that is never freed or mutated, so the read copies a live
     // value.
-    unsafe { *(upgrade_type as *const UpgradeType) }
+    *unsafe { require_ref::<_, UpgradeType>(upgrade_type, param) }
 }
 
 /// Returns `UpgradeType.UNKNOWN`, a static singleton never freed.
@@ -142,7 +143,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType__enum(
 ) -> kafka_admin_FeatureUpdate_UpgradeType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `upgrade_type_value_of` requires.
-    enum_of(unsafe { upgrade_type_value_of(self_) })
+    enum_of(unsafe { upgrade_type_value_of(self_, "self_") })
 }
 
 /// Returns the constant's name, as Java's inherited `Enum.toString()`.
@@ -158,7 +159,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `upgrade_type_value_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { upgrade_type_value_of(self_) }.to_string())
+    into_c_string(&unsafe { upgrade_type_value_of(self_, "self_") }.to_string())
 }
 
 /// Returns the wire-protocol byte of the upgrade type.
@@ -173,7 +174,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_code(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `upgrade_type_value_of` requires.
-    unsafe { upgrade_type_value_of(self_) }.code()
+    unsafe { upgrade_type_value_of(self_, "self_") }.code()
 }
 
 /// Returns the singleton with the given wire code, `UNKNOWN` for a code Java does not know.
@@ -261,7 +262,9 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
 ) -> *mut kafka_admin_FeatureUpdate_t {
     // SAFETY: Per this function's `# Safety`, `upgrade_type` is an upgrade-type singleton; only
     // this module hands those out, as `upgrade_type_value_of` requires.
-    let result = FeatureUpdate::new(max_version_level, unsafe { upgrade_type_value_of(upgrade_type) });
+    let result = FeatureUpdate::new(max_version_level, unsafe {
+        upgrade_type_value_of(upgrade_type, "upgrade_type")
+    });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe { deliver_value(result, out_err, box_feature_update) }
 }
@@ -343,7 +346,7 @@ mod tests {
             // SAFETY: Test code: every handle is a singleton from `upgrade_type_singleton`, as the
             // reads require.
             unsafe {
-                assert_eq!(upgrade_type_value_of(handle), upgrade_type);
+                assert_eq!(upgrade_type_value_of(handle, "value"), upgrade_type);
                 assert_eq!(kafka_admin_FeatureUpdate_UpgradeType__enum(handle) as usize, index);
                 assert_eq!(
                     kafka_admin_FeatureUpdate_UpgradeType_from_code(i32::from(

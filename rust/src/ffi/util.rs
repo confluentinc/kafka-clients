@@ -35,7 +35,7 @@
 //! [`kafka_string_destroy`]; a borrowed `&str` is a `const char *` valid as
 //! long as its owner.
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::ffi::precondition::{require_element, require_mut, require_ref};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
@@ -395,14 +395,14 @@ pub(crate) unsafe fn list_elements<'a>(list: *const kafka_List_t, param: &'stati
 ///
 /// `list` must be null or a valid list whose elements are NUL-terminated
 /// strings.
-pub(crate) unsafe fn list_strings(list: *const kafka_List_t) -> Vec<String> {
+pub(crate) unsafe fn list_strings(list: *const kafka_List_t, param: &'static str) -> Vec<String> {
     // SAFETY: per this function's `# Safety`, `list` is null or a valid list, kept alive
     // by the caller for this call, which is as long as the borrow of its elements lasts.
-    unsafe { list_elements(list, "list") }
+    unsafe { list_elements(list, param) }
         .iter()
         // SAFETY: per this function's `# Safety`, every element is a NUL-terminated
         // string, which `c_str_to_string` copies into an owned `String`.
-        .map(|&element| unsafe { c_str_to_string(element as *const c_char) })
+        .map(|&element| unsafe { c_str_to_string(require_element(element, param) as *const c_char) })
         .collect()
 }
 
@@ -413,10 +413,10 @@ pub(crate) unsafe fn list_strings(list: *const kafka_List_t) -> Vec<String> {
 ///
 /// `list` must be null or a valid list whose elements are NUL-terminated
 /// strings.
-pub(crate) unsafe fn list_string_set(list: *const kafka_List_t) -> HashSet<String> {
+pub(crate) unsafe fn list_string_set(list: *const kafka_List_t, param: &'static str) -> HashSet<String> {
     // SAFETY: per this function's `# Safety`, `list` is null or a valid list of
     // NUL-terminated strings, which is what `list_strings` requires.
-    unsafe { list_strings(list) }.into_iter().collect()
+    unsafe { list_strings(list, param) }.into_iter().collect()
 }
 
 /// Hands a Java `Set<String>` to C as an owned, sorted list of `char *`, so
@@ -470,7 +470,7 @@ pub unsafe extern "C" fn kafka_List_add(self_: *mut kafka_List_t, element: *mut 
     // SAFETY: per this function's `# Safety`, `self_` is a valid list handle, so it points
     // at the `ListInner` `box_list` allocated, and no other call uses it meanwhile, so the
     // `&mut`, which lives only for this call, is unique.
-    unsafe { &mut *(self_ as *mut ListInner) }.elements.push(element);
+    unsafe { require_mut::<_, ListInner>(self_, "self_") }.elements.push(element);
 }
 
 /// Returns the number of elements.
@@ -669,15 +669,15 @@ where
 ///
 /// `map` must be null or a valid map whose keys and values are
 /// NUL-terminated strings.
-pub(crate) unsafe fn map_strings(map: *const kafka_Map_t) -> Vec<(String, String)> {
+pub(crate) unsafe fn map_strings(map: *const kafka_Map_t, param: &'static str) -> Vec<(String, String)> {
     // SAFETY: per this function's `# Safety`, `map` is null or a valid map, kept alive by
     // the caller for this call, which is as long as the borrow of its entries lasts.
-    unsafe { map_entries(map, "map") }
+    unsafe { map_entries(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: per this function's `# Safety`, every key and value is a
             // NUL-terminated string, which `c_str_to_string` copies into a `String`.
-            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
+            (unsafe { c_str_to_string(require_element(k, param) as *const c_char) }, unsafe {
                 c_str_to_string(v as *const c_char)
             })
         })
@@ -774,7 +774,7 @@ pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void
     // SAFETY: per this function's `# Safety`, `self_` is a valid map handle, so it points
     // at the `MapInner` `box_map` allocated, and no other call uses it meanwhile, so the
     // `&mut`, which lives only for this call, is unique.
-    let inner = unsafe { &mut *(self_ as *mut MapInner) };
+    let inner = unsafe { require_mut::<_, MapInner>(self_, "self_") };
     // SAFETY: per this function's `# Safety`, `key` is null or of the type the map's
     // `key_eq` compares, when it has one.
     match unsafe { inner.position(key) } {
@@ -1284,7 +1284,7 @@ mod tests {
             assert_eq!(kafka_List_get(list, 1), b.as_ptr() as *mut c_void);
             assert!(kafka_List_get(list, 2).is_null());
             assert!(kafka_List_get(list, -1).is_null());
-            assert_eq!(list_strings(list), vec!["a".to_string(), "b".to_string()]);
+            assert_eq!(list_strings(list, "value"), vec!["a".to_string(), "b".to_string()]);
             // Destroying the list leaves `a` and `b` untouched: they are still
             // valid CStrings dropped at the end of the test.
             kafka_List_destroy(list);
@@ -1306,7 +1306,7 @@ mod tests {
             // sanitizers rather than by an assertion: there is nothing to observe).
             kafka_List_destroy(list);
             kafka_List_destroy(ptr::null_mut());
-            assert!(list_strings(ptr::null()).is_empty());
+            assert!(list_strings(ptr::null(), "value").is_empty());
             assert!(list_elements(ptr::null(), "value").is_empty());
         }
     }

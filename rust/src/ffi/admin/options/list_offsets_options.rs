@@ -100,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_with_isolation_level(
     // SAFETY: Per this function's `# Safety`, `isolation_level` is a
     // `kafka_common_IsolationLevel_t` singleton, which `isolation_level_ffi::value_of` requires.
     boxed(ListOffsetsOptions::with_isolation_level(unsafe {
-        isolation_level_ffi::value_of(isolation_level)
+        isolation_level_ffi::value_of(isolation_level, "isolation_level")
     }))
 }
 

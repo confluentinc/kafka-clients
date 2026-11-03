@@ -115,7 +115,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 ) -> *mut kafka_common_TopicCollection_t {
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of uuid handles, as
     // `list_uuids` requires; the uuids are copied out, so nothing borrows the list after this call.
-    boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics) }))
+    boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics, "topics") }))
 }
 
 /// # Parameters
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
-    boxed(TopicCollection::of_topic_names(unsafe { list_strings(topics) }))
+    boxed(TopicCollection::of_topic_names(unsafe { list_strings(topics, "topics") }))
 }
 
 /// Frees an owned topic-collection handle. Null is a no-op.

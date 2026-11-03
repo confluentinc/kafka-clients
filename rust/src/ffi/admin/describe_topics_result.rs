@@ -51,7 +51,7 @@ unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     }
     // SAFETY: `a` and `b` are non-null (checked above) and, per this function's `# Safety`, valid
     // uuid handles, alive for this call, as `uuid_of` requires.
-    unsafe { uuid_of(a as *const kafka_common_Uuid_t) == uuid_of(b as *const kafka_common_Uuid_t) }
+    unsafe { uuid_of(a as *const kafka_common_Uuid_t, "a") == uuid_of(b as *const kafka_common_Uuid_t, "b") }
 }
 
 /// Boxes a topic id as an owned `kafka_common_Uuid_t *` map key.

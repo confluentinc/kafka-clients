@@ -100,9 +100,10 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_new(
     // `resource_type_of` requires, and its value is copied out; `name` is a valid NUL-terminated
     // string, as `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows
     // either argument after this call.
-    box_resource(Resource::new(unsafe { resource_type_of(resource_type) }, unsafe {
-        c_str_to_string(name)
-    }))
+    box_resource(Resource::new(
+        unsafe { resource_type_of(resource_type, "resource_type") },
+        unsafe { c_str_to_string(name) },
+    ))
 }
 
 /// A resource representing the whole cluster.

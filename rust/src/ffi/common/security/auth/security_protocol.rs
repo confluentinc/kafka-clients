@@ -23,6 +23,7 @@ use std::ptr;
 
 use crate::common::security::auth::SecurityProtocol;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{box_string_list, c_str_to_string, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`SecurityProtocol`] value; only the four singletons
@@ -91,11 +92,14 @@ pub(crate) fn singleton(value: SecurityProtocol) -> *const kafka_common_security
 /// # Safety
 ///
 /// `value` must be one of the singletons.
-pub(crate) unsafe fn value_of(value: *const kafka_common_security_auth_SecurityProtocol_t) -> SecurityProtocol {
+pub(crate) unsafe fn value_of(
+    value: *const kafka_common_security_auth_SecurityProtocol_t,
+    param: &'static str,
+) -> SecurityProtocol {
     // SAFETY: Per this function's `# Safety`, `value` is one of the singletons, i.e. a pointer to
     // an element of the `static` `VARIANTS` array (`singleton`), so it points at a live,
     // initialised `SecurityProtocol`, which is `Copy` and read out here.
-    unsafe { *(value as *const SecurityProtocol) }
+    *unsafe { require_ref::<_, SecurityProtocol>(value, param) }
 }
 
 /// The singleton for an optional value, null for `None`.
@@ -163,7 +167,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol__enum(
 ) -> kafka_common_security_auth_SecurityProtocol_e {
     // SAFETY: Per this function's `# Safety`, `self_` is one of the singletons, as `value_of`
     // requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// The permanent and immutable id of a security protocol -- this can't change, and must match
@@ -183,7 +187,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_id(
 ) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is one of the singletons, as `value_of`
     // requires; the value is copied out.
-    unsafe { value_of(self_) }.id()
+    unsafe { value_of(self_, "self_") }.id()
 }
 
 /// Name of the security protocol. This may be used by client configuration.
@@ -203,7 +207,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_name(
     // SAFETY: Per this function's `# Safety`, `self_` is one of the singletons, as `value_of`
     // requires; the value is copied out, and the name returned is an element of the `static`
     // `NAMES` array, so it is never freed, as the rustdoc states.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Returns the protocol with the given id.
@@ -271,7 +275,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is one of the singletons, as `value_of`
     // requires; the value is copied out.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]

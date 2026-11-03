@@ -95,11 +95,14 @@ pub(crate) fn recording_level_singleton(level: RecordingLevel) -> *const kafka_c
 /// # Safety
 ///
 /// `level` must be a singleton returned by this module.
-pub(crate) unsafe fn recording_level_of(level: *const kafka_common_metrics_Sensor_RecordingLevel_t) -> RecordingLevel {
+pub(crate) unsafe fn recording_level_of(
+    level: *const kafka_common_metrics_Sensor_RecordingLevel_t,
+    param: &'static str,
+) -> RecordingLevel {
     // SAFETY: Per this function's `# Safety`, `level` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`recording_level_singleton`), so it
     // points at a live, initialised `RecordingLevel`, which is `Copy` and read out here.
-    unsafe { *(level as *const RecordingLevel) }
+    *unsafe { require_ref::<_, RecordingLevel>(level, param) }
 }
 
 /// Returns `RecordingLevel.INFO`, a static singleton never freed.
@@ -138,7 +141,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel__enum(
 ) -> kafka_common_metrics_Sensor_RecordingLevel_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
-    enum_of(unsafe { recording_level_of(self_) })
+    enum_of(unsafe { recording_level_of(self_, "self_") })
 }
 
 /// Returns the constant's name (Java's inherited `Enum.toString()`).
@@ -154,7 +157,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { recording_level_of(self_) }.to_string())
+    into_c_string(&unsafe { recording_level_of(self_, "self_") }.to_string())
 }
 
 /// Returns the permanent and immutable id of the level: `0` for `INFO`, `1` for `DEBUG`, `2` for
@@ -170,7 +173,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_id(
 ) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
-    unsafe { recording_level_of(self_) }.id()
+    unsafe { recording_level_of(self_, "self_") }.id()
 }
 
 /// Returns an English description of the level.
@@ -187,7 +190,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out. The names returned are C string
     // literals, never freed, as the rustdoc states.
-    match unsafe { recording_level_of(self_) } {
+    match unsafe { recording_level_of(self_, "self_") } {
         RecordingLevel::Info => c"INFO".as_ptr(),
         RecordingLevel::Debug => c"DEBUG".as_ptr(),
         RecordingLevel::Trace => c"TRACE".as_ptr(),
@@ -275,7 +278,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_should_recor
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
-    i8::from(unsafe { recording_level_of(self_) }.should_record(config_id))
+    i8::from(unsafe { recording_level_of(self_, "self_") }.should_record(config_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -341,10 +344,10 @@ pub(crate) unsafe fn list_sensors(sensors: *const kafka_List_t) -> Vec<Arc<Senso
     // call, its sensors being cloned into owned `Arc`s before return.
     unsafe { list_elements(sensors, "sensors") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `sensors` is a valid sensor
-        // handle, as `sensor_ref` requires; the reference lives only until `Arc::clone` copies the
-        // `Arc`.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `sensors` is a valid sensor
+            // handle, as `sensor_ref` requires; the reference lives only until `Arc::clone` copies the
+            // `Arc`.
             Arc::clone(unsafe {
                 sensor_ref(
                     require_element(element, "sensors") as *const kafka_common_metrics_Sensor_t,
@@ -844,7 +847,7 @@ mod tests {
             // never freed; the names read are static; `err` is a valid slot pointing at null
             // before each call, and `name` outlives the call reading it.
             unsafe {
-                assert_eq!(recording_level_of(singleton), level);
+                assert_eq!(recording_level_of(singleton, "singleton"), level);
                 assert_eq!(kafka_common_metrics_Sensor_RecordingLevel__enum(singleton) as usize, index);
                 assert_eq!(kafka_common_metrics_Sensor_RecordingLevel_id(singleton), level.id());
                 assert_eq!(

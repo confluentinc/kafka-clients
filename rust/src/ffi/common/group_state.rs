@@ -24,6 +24,7 @@ use std::sync::LazyLock;
 use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_type::{kafka_common_GroupType_t, value_of as group_type_of};
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`GroupState`] singleton.
@@ -97,11 +98,11 @@ pub(crate) fn singleton(state: GroupState) -> *const kafka_common_GroupState_t {
 /// # Safety
 ///
 /// `state` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(state: *const kafka_common_GroupState_t) -> GroupState {
+pub(crate) unsafe fn value_of(state: *const kafka_common_GroupState_t, param: &'static str) -> GroupState {
     // SAFETY: Per this function's `# Safety`, `state` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `GroupState`, which is `Copy` and read out here.
-    unsafe { *(state as *const GroupState) }
+    *unsafe { require_ref::<_, GroupState>(state, param) }
 }
 
 /// Returns `GroupState.UNKNOWN`, a static singleton never freed.
@@ -179,7 +180,7 @@ pub unsafe extern "C" fn kafka_common_GroupState__enum(
 ) -> kafka_common_GroupState_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the name of this enum constant, exactly as declared in Java (`PREPARING_REBALANCE`), Java's
@@ -195,7 +196,7 @@ pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
     // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Case-insensitive group state lookup by string name.
@@ -238,7 +239,7 @@ pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `group_type` is a `kafka_common_GroupType_t`
     // singleton, as `group_type_of` (`group_type::value_of`) requires; the value is copied out.
-    let group_type = unsafe { group_type_of(group_type) };
+    let group_type = unsafe { group_type_of(group_type, "group_type") };
     if group_type == GroupType::Unknown {
         return std::ptr::null_mut();
     }
@@ -264,7 +265,7 @@ pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
 pub unsafe extern "C" fn kafka_common_GroupState_to_string(self_: *const kafka_common_GroupState_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its text copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -283,7 +284,7 @@ mod tests {
             // into the static `VARIANTS` array and is never freed, and the names read are owned by
             // the static `NAMES`.
             unsafe {
-                assert_eq!(value_of(handle), state);
+                assert_eq!(value_of(handle, "value"), state);
                 assert_eq!(kafka_common_GroupState__enum(handle) as usize, index);
                 assert_eq!(
                     CStr::from_ptr(kafka_common_GroupState_name(handle)).to_str().unwrap(),

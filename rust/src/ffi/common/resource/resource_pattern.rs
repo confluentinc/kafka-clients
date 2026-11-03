@@ -127,7 +127,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
         // SAFETY: Per this function's `# Safety`, `resource_type` is a singleton of its enum, i.e.
         // one returned by the `resource_type` module, as `resource_type_of`
         // (`resource_type::value_of`) requires; the value is copied out.
-        unsafe { resource_type_of(resource_type) },
+        unsafe { resource_type_of(resource_type, "resource_type") },
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
         // SAFETY: Per this function's `# Safety`, `pattern_type` is a singleton of its enum, i.e.
         // one returned by the `pattern_type` module, as `pattern_type_of`
         // (`pattern_type::value_of`) requires; the value is copied out.
-        unsafe { pattern_type_of(pattern_type) },
+        unsafe { pattern_type_of(pattern_type, "pattern_type") },
     );
     match pattern {
         Ok(pattern) => box_resource_pattern(pattern),

@@ -30,7 +30,7 @@
 //! `RecordHeaders`), so the handle passed to a constructor stays the
 //! caller's.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::Error;
@@ -589,7 +589,7 @@ unsafe fn with_builder(
     // of an `Option<GenericBuilder>` in `kafka_producer_ProducerRecordOptionsBuilder_new`, the only
     // constructor, that no other call uses at the same time, so the exclusive reference, used only
     // within this call, aliases nothing.
-    let slot = unsafe { &mut *(builder as *mut Option<GenericBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<GenericBuilder>>(builder, "builder") };
     if let Some(builder) = slot.take() {
         *slot = Some(f(builder));
     }
@@ -780,7 +780,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_build(
     // an `Option<GenericBuilder>` in `kafka_producer_ProducerRecordOptionsBuilder_new`, that no
     // other call uses at the same time, so the exclusive reference, used only within this call,
     // aliases nothing.
-    let slot = unsafe { &mut *(self_ as *mut Option<GenericBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<GenericBuilder>>(self_, "self_") };
     let builder = slot.take().unwrap_or_else(GenericBuilder::new);
     match builder.build() {
         Ok(options) => Box::into_raw(Box::new(options)) as *mut kafka_producer_ProducerRecordOptions_t,

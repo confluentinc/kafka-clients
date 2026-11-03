@@ -17,7 +17,7 @@
 //! plain value class: the handle points at the Rust value. Java's
 //! `List<Integer>` broker-id lists cross as `kafka_List_t`s of `int32_t *`.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_element_ref, require_ref};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::PartitionReassignment;
@@ -83,15 +83,15 @@ fn broker_id_list(ids: &[i32]) -> *mut kafka_List_t {
 ///
 /// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
-unsafe fn list_broker_ids(list: *const kafka_List_t) -> Vec<i32> {
+unsafe fn list_broker_ids(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
     // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list, "list") }
+    unsafe { list_elements(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
-        .map(|&element| unsafe { *(element as *const i32) })
+        .map(|&element| *unsafe { require_element_ref::<i32>(element, param) })
         .collect()
 }
 
@@ -120,15 +120,15 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
         // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list whose elements
         // point at `int32_t`s, kept alive and not mutated for this call, as `list_broker_ids`
         // requires.
-        unsafe { list_broker_ids(replicas) },
+        unsafe { list_broker_ids(replicas, "replicas") },
         // SAFETY: Per this function's `# Safety`, `adding_replicas` is null or a valid list whose
         // elements point at `int32_t`s, kept alive and not mutated for this call, as
         // `list_broker_ids` requires.
-        unsafe { list_broker_ids(adding_replicas) },
+        unsafe { list_broker_ids(adding_replicas, "adding_replicas") },
         // SAFETY: Per this function's `# Safety`, `removing_replicas` is null or a valid list whose
         // elements point at `int32_t`s, kept alive and not mutated for this call, as
         // `list_broker_ids` requires.
-        unsafe { list_broker_ids(removing_replicas) },
+        unsafe { list_broker_ids(removing_replicas, "removing_replicas") },
     ))
 }
 

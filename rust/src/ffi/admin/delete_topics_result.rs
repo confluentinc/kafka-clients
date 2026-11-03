@@ -80,7 +80,7 @@ unsafe fn destroy_uuid_element(element: *mut c_void) {
 unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     // SAFETY: Per this function's `# Safety`, `a` and `b` are valid uuid handles, alive for this
     // call, as `uuid_of` requires.
-    unsafe { uuid_of(a as *const kafka_common_Uuid_t) == uuid_of(b as *const kafka_common_Uuid_t) }
+    unsafe { uuid_of(a as *const kafka_common_Uuid_t, "a") == uuid_of(b as *const kafka_common_Uuid_t, "b") }
 }
 
 /// Use when `kafka_admin_Admin_delete_topics` used a TopicIdCollection

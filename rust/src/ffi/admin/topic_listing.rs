@@ -117,7 +117,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_new(
         unsafe { c_str_to_string(name) },
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires.
-        unsafe { uuid_of(topic_id) },
+        unsafe { uuid_of(topic_id, "topic_id") },
         internal != 0,
     ))
 }

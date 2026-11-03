@@ -481,7 +481,7 @@ mod tests {
             assert_eq!(Arc::strong_count(&h.imp), 2, "handle + view");
             // Taking the view shares it: the handle keeps working and the
             // taken `Arc` is the view itself, holding the same implementation.
-            let shared = take_serializer(h.as_serializer().cast_mut());
+            let shared = take_serializer(h.as_serializer().cast_mut(), "serializer");
             assert_eq!(Arc::strong_count(&h.imp), 2);
             assert!(ptr::addr_eq(Arc::as_ptr(&shared), h.as_serializer()));
             assert!(ptr::addr_eq(shared.get(), Arc::as_ptr(&h.imp)));
@@ -503,7 +503,7 @@ mod tests {
             let h = DeserializerHandle::from_ptr(handle, "handle");
             assert_eq!(h.as_deserializer(), h.as_deserializer());
             assert_eq!(Arc::strong_count(&h.imp), 2, "handle + view");
-            let shared = take_deserializer(h.as_deserializer());
+            let shared = take_deserializer(h.as_deserializer(), "deserializer");
             assert_eq!(Arc::strong_count(&h.imp), 2);
             assert!(ptr::addr_eq(Arc::as_ptr(&shared), h.as_deserializer()));
             assert!(ptr::addr_eq(shared.imp(), Arc::as_ptr(&h.imp)));

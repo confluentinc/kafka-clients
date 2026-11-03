@@ -33,7 +33,7 @@
 //! `kafka_producer_ProducerConfig_get_string` answers, and each keeps its own
 //! record of the keys it used.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::sync::Arc;
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, as `map_strings`
     // requires; its entries are copied into owned `String`s.
-    let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
+    let props: HashMap<String, String> = unsafe { map_strings(props, "props") }.into_iter().collect();
     let config = match ProducerConfig::new(&props) {
         Ok(config) => config,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
     // `ProducerConfigInner` in `kafka_producer_ProducerConfig_new`, that no other call uses at the
     // same time, so the exclusive reference, used only within this call, aliases nothing; no view
     // into the handle is ever handed out.
-    let inner = unsafe { &mut *(self_ as *mut ProducerConfigInner) };
+    let inner = unsafe { require_mut::<_, ProducerConfigInner>(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitioner` is a live handle, as `take_partitioner`
     // requires; an owned one is freed by that call and not used again by the caller, as the rustdoc
     // states.
@@ -600,7 +600,7 @@ mod tests {
         // SAFETY: Test code: `list` is an owned list of C strings just returned, read once and
         // destroyed once.
         unsafe {
-            let strings = list_strings(list);
+            let strings = list_strings(list, "value");
             kafka_List_destroy(list);
             strings
         }

@@ -23,6 +23,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::ptr;
@@ -97,11 +98,12 @@ pub(crate) fn origin_singleton(
 /// `origin` must be a singleton returned by this module.
 pub(crate) unsafe fn origin_value_of(
     origin: *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t,
+    param: &'static str,
 ) -> DeserializationErrorOrigin {
     // SAFETY: Per this function's `# Safety`, `origin` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `ORIGINS` array (`origin_singleton`), so it points at
     // a live, initialised `DeserializationErrorOrigin`, which is `Copy` and read out here.
-    unsafe { *(origin as *const DeserializationErrorOrigin) }
+    *unsafe { require_ref::<_, DeserializationErrorOrigin>(origin, param) }
 }
 
 /// Returns the `DeserializationExceptionOrigin.KEY` singleton.
@@ -140,7 +142,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_Deserialization
 ) -> kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `origin_value_of` requires.
-    origin_enum_of(unsafe { origin_value_of(self_) })
+    origin_enum_of(unsafe { origin_value_of(self_, "self_") })
 }
 
 /// Returns `toString()`, Java's inherited `Enum.toString()`: the constant's name.
@@ -156,7 +158,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_Deserialization
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `origin_value_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { origin_value_of(self_) }.to_string())
+    into_c_string(&unsafe { origin_value_of(self_, "self_") }.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +290,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
     Payload::boxed(RecordDeserializationError::new(
         // SAFETY: Per this function's `# Safety`, `origin` is a singleton returned by this module,
         // as `origin_value_of` requires.
-        unsafe { origin_value_of(origin) },
+        unsafe { origin_value_of(origin, "origin") },
         // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
         // `topic_partition_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { topic_partition_ref(partition, "partition") }.clone(),
@@ -296,7 +298,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
         timestamp,
         // SAFETY: Per this function's `# Safety`, `timestamp_type` is a `TimestampType` singleton,
         // as `timestamp_type::value_of` requires.
-        unsafe { timestamp_type::value_of(timestamp_type) },
+        unsafe { timestamp_type::value_of(timestamp_type, "timestamp_type") },
         // SAFETY: Per this function's `# Safety`, `key_buffer` is null or points to `len` readable
         // bytes, which the C caller keeps alive and unwritten for this call, as `as_slice`
         // requires; they are copied into a `Vec` before return.
@@ -641,7 +643,7 @@ mod tests {
             // SAFETY: Test code: `origin_singleton` returns pointers into the static `ORIGINS`
             // array, the singletons `origin_value_of` and `__enum` require.
             unsafe {
-                assert_eq!(origin_value_of(handle), origin);
+                assert_eq!(origin_value_of(handle, "value"), origin);
                 assert_eq!(
                     kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum(handle) as usize,
                     index

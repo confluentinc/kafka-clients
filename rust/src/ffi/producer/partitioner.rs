@@ -300,7 +300,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
     // SAFETY: Per this function's `# Safety`, `_configs` (the `configs` of the `# Safety`) is a
     // live map of C strings, as `map_strings` requires; its entries are copied into owned
     // `String`s.
-    let configs: HashMap<String, String> = unsafe { map_strings(_configs) }.into_iter().collect();
+    let configs: HashMap<String, String> = unsafe { map_strings(_configs, "_configs") }.into_iter().collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
     unsafe { partitioner_ref(self_, "self_") }

@@ -87,7 +87,9 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_new(
     // SAFETY: Per this function's `# Safety`, `invalid_topics` is null or a valid list of
     // NUL-terminated strings, as `list_string_set` requires; the strings are copied into an owned
     // set, so nothing borrows the list after this call.
-    Payload::boxed(InvalidTopicError::new(unsafe { list_string_set(invalid_topics) }))
+    Payload::boxed(InvalidTopicError::new(unsafe {
+        list_string_set(invalid_topics, "invalid_topics")
+    }))
 }
 
 /// `new InvalidTopicException()` with Java's default message and no topics.
@@ -123,7 +125,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_with_message(
         // SAFETY: Per this function's `# Safety`, `invalid_topics` is null or a valid list of
         // NUL-terminated strings, as `list_string_set` requires; the strings are copied into an
         // owned set, so nothing borrows the list after this call.
-        unsafe { list_string_set(invalid_topics) },
+        unsafe { list_string_set(invalid_topics, "invalid_topics") },
         // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.

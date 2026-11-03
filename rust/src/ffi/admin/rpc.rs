@@ -205,7 +205,7 @@ use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition
 use crate::ffi::common::topic_partition_replica::topic_partition_replica_ref;
 use crate::ffi::consumer::offset_and_metadata::map_offset_and_metadata;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_element;
+use crate::ffi::precondition::{require_element, require_ref};
 use crate::ffi::util::{
     c_str_to_string, kafka_Bytes_t, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries,
 };
@@ -472,7 +472,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice(
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let topics_ = unsafe { list_strings(topics) };
+    let topics_ = unsafe { list_strings(topics, "topics") };
     let result = client.call(|admin| admin.delete_topics_with_string_slice(&topics_));
     box_delete_topics_result(result, &client.future_ctx())
 }
@@ -510,7 +510,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice_optio
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let topics_ = unsafe { list_strings(topics) };
+    let topics_ = unsafe { list_strings(topics, "topics") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DeleteTopicsOptions_t` handle that no other call mutates during this one, so no
     // setter runs on it while it is cloned, as `delete_topics_options_ref` requires.
@@ -704,7 +704,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
     // SAFETY: Per this function's `# Safety`, `topic_names` is null or a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
-    let topic_names_ = unsafe { list_strings(topic_names) };
+    let topic_names_ = unsafe { list_strings(topic_names, "topic_names") };
     let result = client.call(|admin| admin.describe_topics_with_topic_names(&topic_names_));
     box_describe_topics_result(result, &client.future_ctx())
 }
@@ -744,7 +744,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names_opti
     // SAFETY: Per this function's `# Safety`, `topic_names` is null or a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
-    let topic_names_ = unsafe { list_strings(topic_names) };
+    let topic_names_ = unsafe { list_strings(topic_names, "topic_names") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeTopicsOptions_t` handle that no other call mutates during this one, so
     // no setter runs on it while it is cloned, as `describe_topics_options_ref` requires.
@@ -1343,7 +1343,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
     // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
-    let transactional_ids_ = unsafe { list_strings(transactional_ids) };
+    let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
     let result = client.call(|admin| admin.describe_transactions(&transactional_ids_));
     box_describe_transactions_result(result, &client.future_ctx())
 }
@@ -1385,7 +1385,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
     // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
-    let transactional_ids_ = unsafe { list_strings(transactional_ids) };
+    let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeTransactionsOptions_t` handle that no other call mutates during this
     // one, so no setter runs on it while it is cloned, as `describe_transactions_options_ref`
@@ -1432,7 +1432,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
     // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
-    let transactional_ids_ = unsafe { list_strings(transactional_ids) };
+    let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
     let result = client.call(|admin| admin.fence_producers(&transactional_ids_));
     box_fence_producers_result(result, &client.future_ctx())
 }
@@ -1472,7 +1472,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers_with_options(
     // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
-    let transactional_ids_ = unsafe { list_strings(transactional_ids) };
+    let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_FenceProducersOptions_t` handle that no other call mutates during this one, so
     // no setter runs on it while it is cloned, as `fence_producers_options_ref` requires.
@@ -2007,10 +2007,13 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
     // alive and unmutated during this call, as `list_refs` requires, and `list_refs` passes the
     // closure its elements only, each one of the `kafka_common_config_ConfigResource_Type_t`
     // singletons, as `type_of` requires; each value is copied out.
-    let config_resource_types_ =
-        unsafe { list_refs(config_resource_types, "config_resource_types", |p| type_of(p as *const _)) }
-            .into_iter()
-            .collect::<HashSet<_>>();
+    let config_resource_types_ = unsafe {
+        list_refs(config_resource_types, "config_resource_types", |p| {
+            type_of(p as *const _, "config_resource_types")
+        })
+    }
+    .into_iter()
+    .collect::<HashSet<_>>();
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_ListConfigResourcesOptions_t` handle that no other call mutates during this one,
     // so no setter runs on it while it is cloned, as `list_config_resources_options_ref` requires.
@@ -2059,7 +2062,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const int32_t *` pointing at an `int32_t` no other call writes
     // meanwhile, so reading it is sound.
-    let brokers_ = unsafe { list_refs(brokers, "brokers", |p| *(p as *const i32)) };
+    let brokers_ = unsafe { list_refs(brokers, "brokers", |p| *require_ref::<_, i32>(p, "brokers")) };
     let result = client.call(|admin| admin.describe_log_dirs(&brokers_));
     box_describe_log_dirs_result(result, &client.future_ctx())
 }
@@ -2103,7 +2106,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const int32_t *` pointing at an `int32_t` no other call writes
     // meanwhile, so reading it is sound.
-    let brokers_ = unsafe { list_refs(brokers, "brokers", |p| *(p as *const i32)) };
+    let brokers_ = unsafe { list_refs(brokers, "brokers", |p| *require_ref::<_, i32>(p, "brokers")) };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeLogDirsOptions_t` handle that no other call mutates during this one, so
     // no setter runs on it while it is cloned, as `describe_log_dirs_options_ref` requires.
@@ -2379,7 +2382,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders(
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `election_type` is one of the
     // `kafka_common_ElectionType_t` singletons, as `value_of` requires.
-    let election_type_ = unsafe { election_type_value_of(election_type) };
+    let election_type_ = unsafe { election_type_value_of(election_type, "election_type") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null, standing for `None`, or a valid
     // list of `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this
     // call, as `optional_tp_set` requires.
@@ -2451,7 +2454,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders_with_options(
     let client = unsafe { client_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `election_type` is one of the
     // `kafka_common_ElectionType_t` singletons, as `value_of` requires.
-    let election_type_ = unsafe { election_type_value_of(election_type) };
+    let election_type_ = unsafe { election_type_value_of(election_type, "election_type") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null, standing for `None`, or a valid
     // list of `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this
     // call, as `optional_tp_set` requires.
@@ -2969,7 +2972,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
     // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let group_ids_ = unsafe { list_strings(group_ids) };
+    let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
     let result = client.call(|admin| admin.describe_consumer_groups(&group_ids_));
     box_describe_consumer_groups_result(result, &client.future_ctx())
 }
@@ -3010,7 +3013,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options
     // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let group_ids_ = unsafe { list_strings(group_ids) };
+    let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeConsumerGroupsOptions_t` handle that no other call mutates during this
     // one, so no setter runs on it while it is cloned, as `describe_consumer_groups_options_ref`
@@ -3057,7 +3060,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
     // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let group_ids_ = unsafe { list_strings(group_ids) };
+    let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
     let result = client.call(|admin| admin.describe_classic_groups(&group_ids_));
     box_describe_classic_groups_result(result, &client.future_ctx())
 }
@@ -3098,7 +3101,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups_with_options(
     // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let group_ids_ = unsafe { list_strings(group_ids) };
+    let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeClassicGroupsOptions_t` handle that no other call mutates during this
     // one, so no setter runs on it while it is cloned, as `describe_classic_groups_options_ref`
@@ -3533,7 +3536,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
     // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let group_ids_ = unsafe { list_strings(group_ids) };
+    let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
     let result = client.call(|admin| admin.delete_consumer_groups(&group_ids_));
     box_delete_consumer_groups_result(result, &client.future_ctx())
 }
@@ -3574,7 +3577,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups_with_options(
     // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let group_ids_ = unsafe { list_strings(group_ids) };
+    let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DeleteConsumerGroupsOptions_t` handle that no other call mutates during this
     // one, so no setter runs on it while it is cloned, as `delete_consumer_groups_options_ref`
@@ -4168,7 +4171,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
     // SAFETY: Per this function's `# Safety`, `users` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let users_ = unsafe { list_strings(users) };
+    let users_ = unsafe { list_strings(users, "users") };
     let result = client.call(|admin| admin.describe_user_scram_credentials_with_users(&users_));
     box_describe_user_scram_credentials_result(result, &client.future_ctx())
 }
@@ -4224,7 +4227,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
     // SAFETY: Per this function's `# Safety`, `users` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let users_ = unsafe { list_strings(users) };
+    let users_ = unsafe { list_strings(users, "users") };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeUserScramCredentialsOptions_t` handle that no other call mutates during
     // this one, so no setter runs on it while it is cloned, as

@@ -107,7 +107,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_new(
     // `c_str_to_string` requires, and `mechanism` a SCRAM-mechanism singleton, which only the
     // `scram_mechanism` module hands out, as `scram_mechanism_value_of` requires.
     box_user_scram_credential_deletion(UserScramCredentialDeletion::new(unsafe { c_str_to_string(user) }, unsafe {
-        scram_mechanism_value_of(mechanism)
+        scram_mechanism_value_of(mechanism, "mechanism")
     }))
 }
 

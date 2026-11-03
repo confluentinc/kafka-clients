@@ -77,14 +77,13 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_partition_r
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
-    h.ctx
-        // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
-        // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
-        // which the caller keeps the handle alive.
-        .void_future(
-            &h.result
-                .partition_result(unsafe { topic_partition_ref(partition, "partition") }),
-        )
+    h.ctx.void_future(
+        &h.result
+            // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+            // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
+            // which the caller keeps the handle alive.
+            .partition_result(unsafe { topic_partition_ref(partition, "partition") }),
+    )
 }
 
 /// Return a future which succeeds if all the alter offsets succeed.

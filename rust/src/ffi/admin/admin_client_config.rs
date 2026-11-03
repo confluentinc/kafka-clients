@@ -120,7 +120,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientConfig_new(
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, i.e. a valid map
     // whose keys and values are NUL-terminated strings, as `map_strings` requires; they are copied
     // into owned strings.
-    let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
+    let props: HashMap<String, String> = unsafe { map_strings(props, "props") }.into_iter().collect();
     let config = match AdminClientConfig::new(&props) {
         Ok(config) => config,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -519,7 +519,7 @@ mod tests {
         // SAFETY: Test code: `list` is an owned list of C strings just returned, read once and
         // destroyed once.
         unsafe {
-            let strings = list_strings(list);
+            let strings = list_strings(list, "value");
             kafka_List_destroy(list);
             strings
         }

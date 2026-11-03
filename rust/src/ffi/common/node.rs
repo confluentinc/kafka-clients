@@ -127,9 +127,9 @@ pub(crate) unsafe fn list_nodes(list: *const kafka_List_t, param: &'static str) 
     // list.
     unsafe { list_elements(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a node handle, as
-        // `node_ref` requires; the node is cloned, so the borrow lasts for this call only.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a node handle, as
+            // `node_ref` requires; the node is cloned, so the borrow lasts for this call only.
             unsafe { node_ref(require_element(element, param) as *const kafka_common_Node_t, param) }.clone()
         })
         .collect()
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn kafka_common_Node_id_string(self_: *const kafka_common_
     // holder. No call mutates a `NodeInner`, so the shared reference is sound for this call. The
     // string returned is the inner's own `id_string_c`, so it lives as long as the handle; that is
     // the rustdoc's "borrowed from the handle".
-    unsafe { &*(self_ as *const NodeInner) }.id_string_c.as_ptr()
+    unsafe { require_ref::<_, NodeInner>(self_, "self_") }.id_string_c.as_ptr()
 }
 
 /// Returns the host name for this node
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_
     // holder. No call mutates a `NodeInner`, so the shared reference is sound for this call. The
     // string returned is the inner's own `host_c`, so it lives as long as the handle; that is the
     // rustdoc's "borrowed from the handle and valid until it is destroyed".
-    unsafe { &*(self_ as *const NodeInner) }.host_c.as_ptr()
+    unsafe { require_ref::<_, NodeInner>(self_, "self_") }.host_c.as_ptr()
 }
 
 /// Returns the port for this node.
@@ -348,7 +348,7 @@ pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_
     // holder. No call mutates a `NodeInner`, so the shared reference is sound for this call. The
     // string returned is the inner's own `rack_c`, so it lives as long as the handle; that is the
     // rustdoc's "borrowed from the handle".
-    unsafe { &*(self_ as *const NodeInner) }
+    unsafe { require_ref::<_, NodeInner>(self_, "self_") }
         .rack_c
         .as_ref()
         .map_or(ptr::null(), |rack| rack.as_ptr())

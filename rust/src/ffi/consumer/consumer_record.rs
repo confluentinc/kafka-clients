@@ -29,7 +29,7 @@
 //! [`kafka_consumer_ConsumerRecord_new`] or `_with_options` never owns its
 //! key or value.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::{CString, c_char, c_void};
 use std::sync::OnceLock;
 
@@ -579,7 +579,7 @@ unsafe fn with_builder(
     // `kafka_consumer_ConsumerRecordOptionsBuilder_new`, the only constructor, that no other call
     // uses at the same time, so the exclusive reference, used only within this call, aliases
     // nothing.
-    let slot = unsafe { &mut *(builder as *mut Option<GenericBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<GenericBuilder>>(builder, "builder") };
     if let Some(b) = slot.take() {
         *slot = Some(f(b));
     }
@@ -708,7 +708,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
 ) {
     // SAFETY: Per this function's `# Safety`, `timestamp_type` is a singleton of
     // `kafka_common_record_TimestampType_t`, as `value_of` requires.
-    let timestamp_type = unsafe { timestamp_type::value_of(timestamp_type) };
+    let timestamp_type = unsafe { timestamp_type::value_of(timestamp_type, "timestamp_type") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_timestamp_type(timestamp_type)) }
@@ -893,7 +893,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(
     // `Box::into_raw` of an `Option<GenericBuilder>` in
     // `kafka_consumer_ConsumerRecordOptionsBuilder_new`, that no other call uses at the same time,
     // so the exclusive reference, used only within this call, aliases nothing.
-    let slot = unsafe { &mut *(self_ as *mut Option<GenericBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<GenericBuilder>>(self_, "self_") };
     let Some(builder) = slot.take() else {
         let error = crate::common::Error::local_illegal_state("ConsumerRecordOptionsBuilder already built");
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.

@@ -318,16 +318,22 @@ pub(crate) unsafe fn serializer_ref<'a>(
 ///
 /// # Safety
 ///
-/// `serializer` must be a valid serializer handle; when it was owned, the
+/// `serializer` must be null or a valid serializer handle, `param` naming it in
+/// the panic a null one raises; when it was owned, the
 /// caller passes it on to nothing else but `__set_callback_result`.
-pub(crate) unsafe fn take_serializer(serializer: *mut kafka_common_serialization_Serializer_t) -> Arc<SerializerInner> {
+pub(crate) unsafe fn take_serializer(
+    serializer: *mut kafka_common_serialization_Serializer_t,
+    param: &'static str,
+) -> Arc<SerializerInner> {
     let inner = serializer.cast_const().cast::<SerializerInner>();
+    // SAFETY: Per this function's `# Safety`, a non-null `serializer` is a valid serializer handle.
+    let owned = unsafe { require_ref::<_, SerializerInner>(inner, param) }.owned;
     // SAFETY: Per this function's `# Safety`, `serializer` is a valid serializer handle: a pointer
     // into a live `Arc<SerializerInner>`, `Arc::into_raw` (owned) or `Arc::as_ptr` (view). For an
     // owned one the caller's reference is taken over, once, as the caller does not consume it
     // again; a view gains a reference first, so the class handle keeps its own.
     unsafe {
-        if !(*inner).owned {
+        if !owned {
             Arc::increment_strong_count(inner);
         }
         Arc::from_raw(inner)
@@ -869,12 +875,12 @@ pub type kafka_common_serialization_Serializer_serialize_cb_t =
 /// As the blocking form, without `out_err`, with `data` valid until `cb`
 /// fires; `cb` must stay valid until it fires.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
-    // as its last step, to the sink it registers or the completion it fires; nothing after that can
-    // panic, as the C method cannot unwind into Rust. So `cb` has not fired for this `opaque`, as
-    // `fire` requires; it fires on this thread, as every completion of a handle without a callbacks
-    // vector does.
     match cb {
+        // SAFETY: The guard runs this only when the body did not return. The body hands `cb` over only
+        // as its last step, to the sink it registers or the completion it fires; nothing after that can
+        // panic, as the C method cannot unwind into Rust. So `cb` has not fired for this `opaque`, as
+        // `fire` requires; it fires on this thread, as every completion of a handle without a callbacks
+        // vector does.
         Some(cb) => unsafe { fire(cb, opaque, Err(err)) },
         None => crate::ffi::common::abort_without_error_channel("cb", &err, "the completion is NULL"),
     }
@@ -979,9 +985,9 @@ pub type kafka_common_serialization_Serializer_serialize_with_headers_cb_t =
 /// until `cb` fires and `headers` unused otherwise until then; `cb` must
 /// stay valid until it fires.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: As for `kafka_common_serialization_Serializer_serialize_cb`: `cb` has not fired for
-    // this `opaque`, as `fire` requires.
     match cb {
+        // SAFETY: As for `kafka_common_serialization_Serializer_serialize_cb`: `cb` has not fired for
+        // this `opaque`, as `fire` requires.
         Some(cb) => unsafe { fire(cb, opaque, Err(err)) },
         None => crate::ffi::common::abort_without_error_channel("cb", &err, "the completion is NULL"),
     }
@@ -1269,7 +1275,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&imp), 2);
         // SAFETY: Test code: `owned` comes from `SerializerInner::owned` and is consumed once, by
         // this call.
-        let taken = unsafe { take_serializer(owned) };
+        let taken = unsafe { take_serializer(owned, "owned") };
         assert!(ptr::addr_eq(Arc::as_ptr(&taken), owned), "the handle stays where it was");
         assert_eq!(Arc::strong_count(&taken), 1, "the caller's reference was taken over");
         assert_eq!(Arc::strong_count(&imp), 2);
@@ -1279,7 +1285,7 @@ mod tests {
         let view = SerializerInner::view(Arc::clone(&imp));
         // SAFETY: Test code: `view` is a live `SerializerInner` view, not owned, so
         // `take_serializer` only adds a reference to it; `view` is dropped after.
-        let shared = unsafe { take_serializer(view.as_ptr().cast_mut()) };
+        let shared = unsafe { take_serializer(view.as_ptr().cast_mut(), "serializer") };
         assert!(ptr::addr_eq(Arc::as_ptr(&shared), Arc::as_ptr(&view)));
         assert_eq!(Arc::strong_count(&view), 2, "the view keeps its own reference");
         drop(view);
@@ -1768,7 +1774,8 @@ mod tests {
         );
         // SAFETY: Test code: `handle` is the live owned handle above, taken once, not used after but
         // for the report below.
-        let serializer = crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle) });
+        let serializer =
+            crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle, "handle") });
         let alive = Arc::downgrade(&serializer.0);
         let mut close = Box::pin(async move { Serializer::close(&serializer).await });
         assert!(poll_once(close.as_mut()).is_pending(), "the close waits for its report");
@@ -1945,7 +1952,8 @@ mod tests {
 
         // The Rust trait methods of the handle, as a producer calls them.
         // SAFETY: Test code: `handle` is the live owned handle above, taken once, not used after.
-        let mut serializer = crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle) });
+        let mut serializer =
+            crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle, "handle") });
         let configs = HashMap::from([("b".to_string(), "2".to_string()), ("a".to_string(), "1".to_string())]);
         tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
             Serializer::configure(&mut serializer, &configs, false)
@@ -1994,7 +2002,8 @@ mod tests {
         assert_eq!(*errors.lock().unwrap(), ["configure failed", "close failed"]);
 
         // SAFETY: Test code: `handle` is the live owned handle above, taken once, not used after.
-        let mut serializer = crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle) });
+        let mut serializer =
+            crate::ffi::producer::kafka_producer::ArcSerializer(unsafe { take_serializer(handle, "handle") });
         let (configured, closed) = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
             let configured = Serializer::configure(&mut serializer, &HashMap::new(), true).await;
             (configured, Serializer::close(&serializer).await)
@@ -2430,7 +2439,7 @@ mod tests {
         for inline in [true, false] {
             let imp = HeaderAdder::new(inline);
             // SAFETY: Test code: the handle comes from its constructor and is consumed once, here.
-            let serializer = ArcSerializer(unsafe { take_serializer(imp.register()) });
+            let serializer = ArcSerializer(unsafe { take_serializer(imp.register(), "serializer") });
             let producer: MockProducer<GenericValue, GenericValue> = MockProducer::with_options(
                 MockProducerOptionsBuilder::new()
                     .set_cluster(cluster.clone())

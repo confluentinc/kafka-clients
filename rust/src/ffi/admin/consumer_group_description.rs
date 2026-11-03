@@ -129,10 +129,10 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static st
     // call.
     unsafe { list_elements(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
-        // handle alive for this call, as `member_description_ref` requires; the borrow ends with
-        // the clone.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
+            // handle alive for this call, as `member_description_ref` requires; the borrow ends with
+            // the clone.
             unsafe {
                 member_description_ref(require_element(element, param) as *const kafka_admin_MemberDescription_t, param)
             }
@@ -202,17 +202,17 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_new(
         unsafe { c_str_to_string(partition_assignor) },
         // SAFETY: Per this function's `# Safety`, `group_type` is a `kafka_common_GroupType_t`
         // singleton, as `group_type::value_of` requires.
-        unsafe { group_type::value_of(group_type) },
+        unsafe { group_type::value_of(group_type, "group_type") },
         // SAFETY: Per this function's `# Safety`, `group_state` is a `kafka_common_GroupState_t`
         // singleton, as `group_state::value_of` requires.
-        unsafe { group_state::value_of(group_state) },
+        unsafe { group_state::value_of(group_state, "group_state") },
         // SAFETY: Per this function's `# Safety`, `coordinator` is null or a valid node handle, as
         // `optional_node` requires.
         unsafe { optional_node(coordinator) },
         // SAFETY: Per this function's `# Safety`, `authorized_operations` is null or a valid list
         // of the documented `const kafka_common_acl_AclOperation_t *` singletons, as
         // `list_acl_operations` requires.
-        unsafe { list_acl_operations(authorized_operations) },
+        unsafe { list_acl_operations(authorized_operations, "authorized_operations") },
         (group_epoch >= 0).then_some(group_epoch),
         (target_assignment_epoch >= 0).then_some(target_assignment_epoch),
     ))

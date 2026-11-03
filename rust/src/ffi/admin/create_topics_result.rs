@@ -92,7 +92,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     box_topic_metadata_and_config(TopicMetadataAndConfig::new(
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires; the uuid is copied out.
-        unsafe { uuid_of(topic_id) },
+        unsafe { uuid_of(topic_id, "topic_id") },
         num_partitions,
         replication_factor,
         // SAFETY: Per this function's `# Safety`, `config` is a valid config handle, as

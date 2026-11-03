@@ -81,12 +81,15 @@ pub(crate) fn op_type_singleton(op_type: OpType) -> *const kafka_admin_AlterConf
 /// # Safety
 ///
 /// `op_type` must be a singleton returned by this module.
-pub(crate) unsafe fn op_type_value_of(op_type: *const kafka_admin_AlterConfigOp_OpType_t) -> OpType {
+pub(crate) unsafe fn op_type_value_of(
+    op_type: *const kafka_admin_AlterConfigOp_OpType_t,
+    param: &'static str,
+) -> OpType {
     // SAFETY: Per this function's `# Safety`, `op_type` is a singleton returned by this module:
     // `op_type_singleton`, the only producer of `kafka_admin_AlterConfigOp_OpType_t` pointers,
     // casts `&VARIANTS[i]` from `*const OpType`, so it points at a live `OpType` in a `static`,
     // which is `Copy` and immutable.
-    unsafe { *(op_type as *const OpType) }
+    *unsafe { require_ref::<_, OpType>(op_type, param) }
 }
 
 /// Returns `OpType.SET`, a static singleton never freed.
@@ -129,7 +132,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
 ) -> kafka_admin_AlterConfigOp_OpType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `op_type_value_of` requires.
-    enum_of(unsafe { op_type_value_of(self_) })
+    enum_of(unsafe { op_type_value_of(self_, "self_") })
 }
 
 /// Returns the Java constant name, as `OpType.toString()`.
@@ -145,7 +148,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `op_type_value_of` requires.
-    into_c_string(&unsafe { op_type_value_of(self_) }.to_string())
+    into_c_string(&unsafe { op_type_value_of(self_, "self_") }.to_string())
 }
 
 /// Returns the wire-protocol byte of the operation, as `OpType.id()`.
@@ -158,7 +161,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_id(self_: *const kafka_admin_AlterConfigOp_OpType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `op_type_value_of` requires.
-    unsafe { op_type_value_of(self_) }.id()
+    unsafe { op_type_value_of(self_, "self_") }.id()
 }
 
 /// `OpType.forId(byte id)`: the operation type with that wire byte.
@@ -259,7 +262,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
     // `operation_type` an op-type singleton, as `op_type_value_of` requires.
     box_alter_config_op(AlterConfigOp::new(
         unsafe { config_entry_ref(config_entry, "config_entry") }.clone(),
-        unsafe { op_type_value_of(operation_type) },
+        unsafe { op_type_value_of(operation_type, "operation_type") },
     ))
 }
 
@@ -355,7 +358,7 @@ mod tests {
             // `kafka_admin_AlterConfigOp_OpType_id`; each string `_to_string` returns is owned
             // and freed once, after it is read.
             unsafe {
-                assert_eq!(op_type_value_of(handle), op_type);
+                assert_eq!(op_type_value_of(handle, "value"), op_type);
                 assert_eq!(kafka_admin_AlterConfigOp_OpType__enum(handle) as usize, index);
                 let name = kafka_admin_AlterConfigOp_OpType_to_string(handle);
                 assert_eq!(CStr::from_ptr(name).to_str().unwrap(), op_type.to_string());

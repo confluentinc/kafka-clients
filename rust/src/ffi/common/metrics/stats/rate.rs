@@ -88,7 +88,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
 ) -> *mut kafka_common_metrics_stats_Rate_t {
     // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as `time_unit_of`
     // (`time_unit::value_of`) requires; the value is copied out.
-    boxed(Rate::with_unit(unsafe { time_unit_of(unit) }))
+    boxed(Rate::with_unit(unsafe { time_unit_of(unit, "unit") }))
 }
 
 /// `new Rate(SampledStat stat)`.
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat(
     boxed(Rate::with_unit_stat(
         // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as
         // `time_unit_of` (`time_unit::value_of`) requires; the value is copied out.
-        unsafe { time_unit_of(unit) },
+        unsafe { time_unit_of(unit, "unit") },
         // SAFETY: Per this function's `# Safety`, `stat` is a valid sampled-stat handle, as
         // `sampled_stat_ref` requires; the rate takes its own `Arc` of the stat, so nothing borrows
         // the handle after this call and the handle stays valid, as the module docs state.
@@ -170,7 +170,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
     boxed(Rate::with_unit_stat_window(
         // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as
         // `time_unit_of` (`time_unit::value_of`) requires; the value is copied out.
-        unsafe { time_unit_of(unit) },
+        unsafe { time_unit_of(unit, "unit") },
         // SAFETY: Per this function's `# Safety`, `stat` is a valid sampled-stat handle, as
         // `sampled_stat_ref` requires; the rate takes its own `Arc` of the stat, so nothing borrows
         // the handle after this call and the handle stays valid, as the module docs state.

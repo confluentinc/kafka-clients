@@ -218,7 +218,7 @@ pub(crate) mod producer_record;
 pub(crate) mod record_metadata;
 pub(crate) mod round_robin_partitioner;
 
-use crate::ffi::precondition::{Required, require_fn, require_ref};
+use crate::ffi::precondition::{Required, fail, require_fn, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::future::Future;
@@ -255,7 +255,7 @@ use crate::ffi::kafka_future::{
 use crate::ffi::producer::callback::{kafka_producer_Callback_t, take_callback};
 use crate::ffi::producer::producer_record::{GenericRecord, kafka_producer_ProducerRecord_t, producer_record_ref};
 use crate::ffi::producer::record_metadata::{box_record_metadata, kafka_producer_RecordMetadata_destroy};
-use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t, map_entries};
+use crate::ffi::util::{GenericValue, box_list, c_str_to_string, kafka_List_t, kafka_Map_t};
 use crate::producer::{Callback, DynTrySend, RecordMetadata, TrySendOutcome};
 
 /// The `Producer` every C handle drives: `void *` key and value, with the
@@ -1143,7 +1143,7 @@ fn with_drain_cb<F, Fut>(
 unsafe fn offsets_map(offsets: *const kafka_Map_t) -> HashMap<TopicPartition, OffsetAndMetadata> {
     // SAFETY: Per this function's `# Safety`, `offsets` is a live map that no other call mutates
     // during this one, as `map_entries` requires; the entries are read only within this expression.
-    unsafe { map_entries(offsets, "offsets") }
+    unsafe { require_map(offsets, "offsets") }
         .iter()
         .map(|&(tp, oam)| {
             (
@@ -1458,18 +1458,22 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
     group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    // Java's `KafkaProducer.throwIfInvalidGroupMetadata` runs before `offsets` is read.
+    if group_metadata.is_null() {
+        fail(Error::local_illegal_argument("Consumer group metadata could not be null"));
+    }
+    // SAFETY: Per this function's `# Safety`, `group_metadata` is a live handle, as
+    // `group_metadata_ref` requires; the reference is only cloned, within this statement.
+    let metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata, "group_metadata") });
     // SAFETY: Per this function's `# Safety`, `offsets` is a live map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as `offsets_map`
     // requires.
     let offsets = unsafe { offsets_map(offsets) };
-    // SAFETY: Per this function's `# Safety`, `group_metadata` is a live handle, as
-    // `group_metadata_ref` requires; the reference is only cloned, within this statement.
-    let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata, "group_metadata") });
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires; the
     // reference does not outlive the call, and `out_err` is as `with_txn_control` requires.
     unsafe {
         with_txn_control(client_ref(self_, "self_"), ReportWait::No, out_err, |p| async move {
-            p.send_offsets_to_transaction(offsets, &*group_metadata).await
+            p.send_offsets_to_transaction(offsets, &*metadata).await
         })
     }
 }
@@ -1538,13 +1542,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
     opaque: *mut c_void,
 ) {
     let cb = require_fn(cb, "cb");
+    // Java's `KafkaProducer.throwIfInvalidGroupMetadata` runs before `offsets` is read.
+    if group_metadata.is_null() {
+        fail(Error::local_illegal_argument("Consumer group metadata could not be null"));
+    }
+    // SAFETY: Per this function's `# Safety`, `group_metadata` is a live handle, as
+    // `group_metadata_ref` requires; the reference is only cloned, within this statement.
+    let metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata, "group_metadata") });
     // SAFETY: Per this function's `# Safety`, `offsets` is a live map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as `offsets_map`
     // requires.
     let offsets = unsafe { offsets_map(offsets) };
-    // SAFETY: Per this function's `# Safety`, `group_metadata` is a live handle, as
-    // `group_metadata_ref` requires; the reference is only cloned, within this statement.
-    let group_metadata = Arc::clone(unsafe { group_metadata_ref(group_metadata, "group_metadata") });
     with_txn_control_cb(
         "kafka_producer_Producer_send_offsets_to_transaction_cb",
         // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
@@ -1554,7 +1562,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
         ReportWait::No,
         cb,
         opaque,
-        |p| async move { p.send_offsets_to_transaction(offsets, &*group_metadata).await },
+        |p| async move { p.send_offsets_to_transaction(offsets, &*metadata).await },
     );
 }
 

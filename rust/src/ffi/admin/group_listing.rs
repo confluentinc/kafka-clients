@@ -125,7 +125,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
         // SAFETY: Per this function's `# Safety`, `group_type` is null or a
         // `kafka_common_GroupType_t` singleton, and this branch runs only when it is non-null, as
         // `group_type::value_of` requires.
-        Some(unsafe { group_type::value_of(group_type) })
+        Some(unsafe { group_type::value_of(group_type, "group_type") })
     };
     let group_state: Option<GroupState> = if group_state.is_null() {
         None
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
         // SAFETY: Per this function's `# Safety`, `group_state` is null or a
         // `kafka_common_GroupState_t` singleton, and this branch runs only when it is non-null, as
         // `group_state::value_of` requires.
-        Some(unsafe { group_state::value_of(group_state) })
+        Some(unsafe { group_state::value_of(group_state, "group_state") })
     };
     box_group_listing(GroupListing::new(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as

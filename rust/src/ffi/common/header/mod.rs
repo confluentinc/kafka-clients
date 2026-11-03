@@ -127,7 +127,7 @@ pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_comm
     // handle, the only place one is built, which lives as long as that handle. No code mutates a
     // `HeaderInner` once it is built, so the shared reference is sound; the key returned is the
     // view's own C string, so it lives as long as the handle, as the rustdoc states.
-    unsafe { &*(self_ as *const HeaderInner) }.key_c.as_ptr()
+    unsafe { require_ref::<_, HeaderInner>(self_, "self_") }.key_c.as_ptr()
 }
 
 /// Returns the header's value.
@@ -149,7 +149,7 @@ pub unsafe extern "C" fn kafka_common_header_Header_value(self_: *const kafka_co
     // `HeaderInner` once it is built, so the shared reference is sound; the bytes returned are the
     // value of the `RecordHeader` the view points at, so they live as long as the handle, as the
     // rustdoc states.
-    kafka_Bytes_t::from_option(unsafe { &*(self_ as *const HeaderInner) }.header().value())
+    kafka_Bytes_t::from_option(unsafe { require_ref::<_, HeaderInner>(self_, "self_") }.header().value())
 }
 
 // ---------------------------------------------------------------------------

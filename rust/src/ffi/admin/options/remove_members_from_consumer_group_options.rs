@@ -168,10 +168,10 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
     // the call, which is as long as the borrowed elements are used, as `list_elements` requires.
     let members: Vec<MemberToRemove> = unsafe { list_elements(members, "members") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `members` is a live
-        // member-to-remove handle, as `member_to_remove_ref` requires; the borrow ends with the
-        // clone, during this call, while the caller keeps the handle alive.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `members` is a live
+            // member-to-remove handle, as `member_to_remove_ref` requires; the borrow ends with the
+            // clone, during this call, while the caller keeps the handle alive.
             unsafe {
                 member_to_remove_ref(
                     require_element(element, "members") as *const kafka_admin_MemberToRemove_t,

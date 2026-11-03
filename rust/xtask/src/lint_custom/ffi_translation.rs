@@ -3067,7 +3067,6 @@ mod tests {
             java: Rc::new(index()),
             ffi_baseline: None,
             doc_baseline: None,
-            null_checks_baseline: None,
             cbindgen_config: None,
         };
         let rule = FfiTranslation::new(&ctx);
@@ -4665,7 +4664,6 @@ mod tests {
             java: Rc::new(index()),
             ffi_baseline: None,
             doc_baseline: None,
-            null_checks_baseline: None,
             cbindgen_config: None,
         };
         let rule = FfiTranslation::new(&ctx);

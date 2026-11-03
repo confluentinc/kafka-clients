@@ -180,9 +180,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
         // the elements are read only within this statement.
         let records = unsafe { list_elements(list as *const kafka_List_t, "list") }
             .iter()
-            // SAFETY: Per this function's `# Safety`, every element of that list is a valid record
-            // handle, as `consumer_record_ref` requires; it is cloned, so the borrow ends here.
             .map(|&record| {
+                // SAFETY: Per this function's `# Safety`, every element of that list is a valid record
+                // handle, as `consumer_record_ref` requires; it is cloned, so the borrow ends here.
                 unsafe { consumer_record_ref(record as *const kafka_consumer_ConsumerRecord_t, "record") }.clone()
             })
             .collect();

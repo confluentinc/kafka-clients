@@ -2013,7 +2013,6 @@ mod tests {
             java: Rc::new(JavaIndex { classes }),
             ffi_baseline: None,
             doc_baseline: None,
-            null_checks_baseline: None,
             cbindgen_config: None,
         };
         let mut rule = ApiDocs::new(&ctx);

@@ -42,7 +42,7 @@ use crate::ffi::common::topic_partition::{list_topic_partitions, sorted_topic_pa
 use crate::ffi::common::{deliver_panic, kafka_common_Error_t, run_inline};
 use crate::ffi::consumer::{Delivery, error_slot};
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{Required, require_fn};
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use crate::ffi::util::{kafka_List_destroy, kafka_List_t};
 
 /// Opaque handle to a `ConsumerRebalanceListener` implementation registered
@@ -184,7 +184,7 @@ pub(crate) unsafe fn listener_registration(
     // `Box<ListenerRegistration>` of `kafka_consumer_ConsumerRebalanceListener_new`, not yet
     // destroyed; the reference is used only to copy the `Copy` registration out, within this
     // expression.
-    *unsafe { &*(listener as *const ListenerRegistration) }
+    *unsafe { require_ref::<_, ListenerRegistration>(listener, "listener") }
 }
 
 /// The Rust listener a consumer registers for the C implementation behind

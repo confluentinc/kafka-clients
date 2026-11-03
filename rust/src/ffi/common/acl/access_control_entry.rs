@@ -139,11 +139,11 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
         // SAFETY: Per this function's `# Safety`, `operation` is a singleton of its enum, i.e. one
         // returned by the `acl_operation` module, as `operation_of` (`acl_operation::value_of`)
         // requires; the value is copied out.
-        unsafe { operation_of(operation) },
+        unsafe { operation_of(operation, "operation") },
         // SAFETY: Per this function's `# Safety`, `permission_type` is a singleton of its enum,
         // i.e. one returned by the `acl_permission_type` module, as `permission_type_of`
         // (`acl_permission_type::value_of`) requires; the value is copied out.
-        unsafe { permission_type_of(permission_type) },
+        unsafe { permission_type_of(permission_type, "permission_type") },
     );
     match entry {
         Ok(entry) => box_access_control_entry(entry),

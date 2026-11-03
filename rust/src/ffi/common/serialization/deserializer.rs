@@ -311,18 +311,22 @@ pub(crate) unsafe fn deserializer_ref<'a>(
 ///
 /// # Safety
 ///
-/// `deserializer` must be a valid deserializer handle; when it was owned,
+/// `deserializer` must be null or a valid deserializer handle, `param` naming it in
+/// the panic a null one raises; when it was owned,
 /// the caller passes it on to nothing else but `__set_callback_result`.
 pub(crate) unsafe fn take_deserializer(
     deserializer: *mut kafka_common_serialization_Deserializer_t,
+    param: &'static str,
 ) -> Arc<DeserializerInner> {
     let inner = deserializer.cast_const().cast::<DeserializerInner>();
+    // SAFETY: Per this function's `# Safety`, a non-null `deserializer` is a valid deserializer handle.
+    let owned = unsafe { require_ref::<_, DeserializerInner>(inner, param) }.owned;
     // SAFETY: Per this function's `# Safety`, `deserializer` is a valid deserializer handle: a
     // pointer into a live `Arc<DeserializerInner>`, `Arc::into_raw` (owned) or `Arc::as_ptr`
     // (view). For an owned one the caller's reference is taken over, once, as the caller does not
     // consume it again; a view gains a reference first, so the class handle keeps its own.
     unsafe {
-        if !(*inner).owned {
+        if !owned {
             Arc::increment_strong_count(inner);
         }
         Arc::from_raw(inner)
@@ -1554,7 +1558,7 @@ mod tests {
         );
         // SAFETY: Test code: `handle` is the live owned handle above, taken once, not used after but
         // for the report below.
-        let deserializer = unsafe { take_deserializer(handle) };
+        let deserializer = unsafe { take_deserializer(handle, "handle") };
         let alive = Arc::downgrade(&deserializer);
         let mut close = Box::pin(async move { Deserializer::close(&mut *deserializer.imp().lock().await).await });
         assert!(

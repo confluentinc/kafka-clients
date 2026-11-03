@@ -22,6 +22,7 @@ use std::ffi::c_char;
 
 use crate::common::config::SslClientAuth;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{c_str_to_option, into_c_string};
 
 /// Opaque handle to a [`SslClientAuth`] singleton.
@@ -73,11 +74,11 @@ pub(crate) fn singleton(value: SslClientAuth) -> *const kafka_common_config_SslC
 /// # Safety
 ///
 /// `value` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(value: *const kafka_common_config_SslClientAuth_t) -> SslClientAuth {
+pub(crate) unsafe fn value_of(value: *const kafka_common_config_SslClientAuth_t, param: &'static str) -> SslClientAuth {
     // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `SslClientAuth`, which is `Copy` and read out here.
-    unsafe { *(value as *const SslClientAuth) }
+    *unsafe { require_ref::<_, SslClientAuth>(value, param) }
 }
 
 /// Returns `SslClientAuth.REQUIRED`, a static singleton never freed.
@@ -113,7 +114,7 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
 ) -> kafka_common_config_SslClientAuth_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the value for a configuration value, case insensitively.
@@ -155,7 +156,7 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -172,7 +173,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
             // into the static `VARIANTS` array and is never freed.
             unsafe {
-                assert_eq!(value_of(handle), value);
+                assert_eq!(value_of(handle, "value"), value);
                 assert_eq!(kafka_common_config_SslClientAuth__enum(handle) as usize, index);
             }
         }

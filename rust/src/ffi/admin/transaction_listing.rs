@@ -124,7 +124,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
         // SAFETY: Per this function's `# Safety`, `transaction_state` is a transaction-state
         // singleton; only the `transaction_state` module hands those out, as
         // `transaction_state_value_of` requires.
-        unsafe { transaction_state_value_of(transaction_state) },
+        unsafe { transaction_state_value_of(transaction_state, "transaction_state") },
     ))
 }
 

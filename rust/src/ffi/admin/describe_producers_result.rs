@@ -115,9 +115,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     // requires; the borrow ends with the call.
     let active_producers = unsafe { list_elements(active_producers, "active_producers") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element `p` is a live producer-state
-        // handle, as `producer_state_ref` requires; the borrow ends with the `clone`.
         .map(|&p| {
+            // SAFETY: Per this function's `# Safety`, every element `p` is a live producer-state
+            // handle, as `producer_state_ref` requires; the borrow ends with the `clone`.
             unsafe {
                 producer_state_ref(
                     require_element(p, "active_producers") as *const kafka_admin_ProducerState_t,

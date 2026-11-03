@@ -235,7 +235,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(
     // a boxed one, or an element of a `HeadersInner`'s `views`, a vector never pushed to after it
     // is built. The view returned
     // points into the handle, so it lives as long as the handle, as the rustdoc states.
-    unsafe { &*(self_ as *const RecordHeaderInner) }.as_header_ptr()
+    unsafe { require_ref::<_, RecordHeaderInner>(self_, "self_") }.as_header_ptr()
 }
 
 /// Frees an owned record-header handle; null is a no-op. The borrowed

@@ -982,7 +982,7 @@ unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
     // NUL-terminated strings, as `list_strings` requires; the names are copied out, so
     // nothing borrows the list after this call.
-    unsafe { list_strings(topics) }.into_iter().collect()
+    unsafe { list_strings(topics, "topics") }.into_iter().collect()
 }
 
 /// `new KafkaException()`: the bare Kafka error with the default message.

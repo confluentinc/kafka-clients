@@ -244,7 +244,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
     // `Box::into_raw` of an `OptionsInner` in `kafka_producer_MockProducerOptionsBuilder_build`,
     // the only constructor; it is never mutated after that, so the shared reference, used only
     // within this call, is sound.
-    let options = unsafe { &*(options as *const OptionsInner) };
+    let options = unsafe { require_ref::<_, OptionsInner>(options, "options") };
     let has_c_serializer = options.key_serializer.iter().chain(&options.value_serializer).any(|s| s.is_c());
     box_mock(MockProducer::with_options(options.build()), !has_c_serializer)
 }
@@ -1094,7 +1094,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_seria
             // SAFETY: `key_serializer` is non-null (checked just before) and, per this function's
             // `# Safety`, a live handle, as `take_serializer` requires; an owned one is consumed,
             // as the rustdoc states, so the caller does not use it again.
-        (!key_serializer.is_null()).then(|| unsafe { take_serializer(key_serializer) });
+        (!key_serializer.is_null()).then(|| unsafe { take_serializer(key_serializer, "key_serializer") });
 }
 
 /// `set_value_serializer`.
@@ -1121,7 +1121,7 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_ser
             // SAFETY: `value_serializer` is non-null (checked just before) and, per this function's
             // `# Safety`, a live handle, as `take_serializer` requires; an owned one is consumed,
             // as the rustdoc states, so the caller does not use it again.
-        (!value_serializer.is_null()).then(|| unsafe { take_serializer(value_serializer) });
+        (!value_serializer.is_null()).then(|| unsafe { take_serializer(value_serializer, "value_serializer") });
 }
 
 /// `build`: validates the mandatory `auto_complete`. The builder stays usable.

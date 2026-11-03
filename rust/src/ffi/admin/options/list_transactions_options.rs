@@ -23,7 +23,7 @@
 //! deterministic order. The handle keeps a NUL-terminated copy of the
 //! transactional-id pattern so its getter borrows.
 
-use crate::ffi::precondition::{require_mut, require_ref};
+use crate::ffi::precondition::{require_element, require_element_ref, require_mut, require_ref};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -199,7 +199,12 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `states` is a
         // `kafka_admin_TransactionState_t` singleton, as `transaction_state_value_of` requires.
-        .map(|&element| unsafe { transaction_state_value_of(element as *const kafka_admin_TransactionState_t) })
+        .map(|&element| unsafe {
+            transaction_state_value_of(
+                require_element(element, "states") as *const kafka_admin_TransactionState_t,
+                "states",
+            )
+        })
         .collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
@@ -235,7 +240,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `producer_ids` points at a
         // readable, aligned `int64_t`, which is copied out.
-        .map(|&element| unsafe { *(element as *const i64) })
+        .map(|&element| *unsafe { require_element_ref::<i64>(element, "producer_ids") })
         .collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as

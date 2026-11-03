@@ -244,10 +244,10 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
     // only within this call.
     let metrics: Vec<Arc<KafkaMetric>> = unsafe { list_elements(metrics, "metrics") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, each element of `metrics` is a valid metric
-        // handle, as `kafka_metric_ref` requires; the `Arc` is cloned, so the borrow lasts for this
-        // call only.
         .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, each element of `metrics` is a valid metric
+            // handle, as `kafka_metric_ref` requires; the `Arc` is cloned, so the borrow lasts for this
+            // call only.
             Arc::clone(unsafe {
                 kafka_metric_ref(
                     require_element(element, "metrics") as *const kafka_common_metrics_KafkaMetric_t,

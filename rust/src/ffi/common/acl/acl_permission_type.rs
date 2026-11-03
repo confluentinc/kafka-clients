@@ -22,6 +22,7 @@ use std::ffi::{c_char, c_void};
 
 use crate::common::acl::AclPermissionType;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`AclPermissionType`] singleton.
@@ -81,11 +82,14 @@ pub(crate) fn singleton(value: AclPermissionType) -> *const kafka_common_acl_Acl
 /// # Safety
 ///
 /// `value` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclPermissionType_t) -> AclPermissionType {
+pub(crate) unsafe fn value_of(
+    value: *const kafka_common_acl_AclPermissionType_t,
+    param: &'static str,
+) -> AclPermissionType {
     // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `AclPermissionType`, which is `Copy` and read out here.
-    unsafe { *(value as *const AclPermissionType) }
+    *unsafe { require_ref::<_, AclPermissionType>(value, param) }
 }
 
 /// `AclPermissionType.UNKNOWN`.
@@ -144,7 +148,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType__enum(
 ) -> kafka_common_acl_AclPermissionType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the code of this permission type.
@@ -163,7 +167,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_code(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.code()
+    unsafe { value_of(self_, "self_") }.code()
 }
 
 /// Returns all permission types, in declaration order.
@@ -236,7 +240,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_is_unknown(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    i8::from(unsafe { value_of(self_) }.is_unknown())
+    i8::from(unsafe { value_of(self_, "self_") }.is_unknown())
 }
 
 /// Returns the constant's name.
@@ -252,7 +256,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -286,7 +290,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
             // into the static `VARIANTS` array and is never freed.
             unsafe {
-                assert_eq!(value_of(handle), value);
+                assert_eq!(value_of(handle, "value"), value);
                 assert_eq!(kafka_common_acl_AclPermissionType__enum(handle) as usize, index);
             }
         }

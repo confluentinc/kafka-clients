@@ -328,7 +328,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_time_window(
 ) {
     // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as `time_unit_of`
     // (`time_unit::value_of`) requires; the value is copied out.
-    let unit = unsafe { time_unit_of(unit) };
+    let unit = unsafe { time_unit_of(unit, "unit") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(
     // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
     // strings, as `map_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the map after this call.
-    let tags: BTreeMap<String, String> = unsafe { map_strings(tags) }.into_iter().collect();
+    let tags: BTreeMap<String, String> = unsafe { map_strings(tags, "tags") }.into_iter().collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
@@ -449,7 +449,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_record_level(
 ) {
     // SAFETY: Per this function's `# Safety`, `recording_level` is a recording-level singleton, as
     // `recording_level_of` requires; the value is copied out.
-    let recording_level = unsafe { recording_level_of(recording_level) };
+    let recording_level = unsafe { recording_level_of(recording_level, "recording_level") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
@@ -543,7 +543,7 @@ mod tests {
                 kafka_common_metrics_Sensor_RecordingLevel_debug()
             );
             let tags = kafka_common_metrics_MetricConfig_tags(handle);
-            assert_eq!(map_strings(tags), [("k".to_string(), "v".to_string())]);
+            assert_eq!(map_strings(tags, "tags"), [("k".to_string(), "v".to_string())]);
             kafka_Map_destroy(tags);
 
             // The shared config is untouched; the handle has its own copy.

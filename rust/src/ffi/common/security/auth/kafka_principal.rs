@@ -15,7 +15,7 @@
 //! `kafka_common_security_auth_KafkaPrincipal_t`:
 //! `org.apache.kafka.common.security.auth.KafkaPrincipal` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_mut, require_ref};
 use std::ffi::{CString, c_char};
 
 use crate::common::security::auth::KafkaPrincipal;
@@ -239,7 +239,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_set_token_aut
     // at the same time, so the exclusive reference aliases nothing for the length of this call.
     // Only the `principal` field is written; the C strings earlier getters returned point into the
     // `CString` heap buffers, which this does not touch.
-    unsafe { &mut *(self_ as *mut KafkaPrincipalInner) }
+    unsafe { require_mut::<_, KafkaPrincipalInner>(self_, "self_") }
         .principal
         .set_token_authenticated(token_authenticated != 0);
 }

@@ -17,7 +17,7 @@
 //! `List<List<Integer>>` crosses as a `kafka_List_t` of `kafka_List_t *`
 //! holding `int32_t *` elements.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_element, require_element_ref, require_ref};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::NewPartitions;
@@ -63,15 +63,15 @@ pub(crate) fn box_new_partitions(partitions: NewPartitions) -> *mut kafka_admin_
 ///
 /// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
-unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
+unsafe fn list_i32(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
     // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list, "list") }
+    unsafe { list_elements(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
-        .map(|&element| unsafe { *(element as *const i32) })
+        .map(|&element| *unsafe { require_element_ref::<i32>(element, param) })
         .collect()
 }
 
@@ -151,7 +151,12 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignme
         // SAFETY: Per this function's `# Safety`, each element of `new_assignments` is a valid list
         // whose elements point at `int32_t`s, alive and not mutated for this call, as `list_i32`
         // requires.
-        .map(|&element| unsafe { list_i32(element as *const kafka_List_t) })
+        .map(|&element| unsafe {
+            list_i32(
+                require_element(element, "new_assignments") as *const kafka_List_t,
+                "new_assignments",
+            )
+        })
         .collect();
     box_new_partitions(NewPartitions::increase_to_with_new_assignments(total_count, new_assignments))
 }

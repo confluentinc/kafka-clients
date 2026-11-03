@@ -126,12 +126,15 @@ pub(crate) fn config_source_singleton(source: ConfigSource) -> *const kafka_admi
 /// # Safety
 ///
 /// `source` must be a singleton returned by this module.
-pub(crate) unsafe fn config_source_value_of(source: *const kafka_admin_ConfigEntry_ConfigSource_t) -> ConfigSource {
+pub(crate) unsafe fn config_source_value_of(
+    source: *const kafka_admin_ConfigEntry_ConfigSource_t,
+    param: &'static str,
+) -> ConfigSource {
     // SAFETY: Per this function's `# Safety`, `source` is a singleton returned by this module:
     // `config_source_singleton`, the only producer of `kafka_admin_ConfigEntry_ConfigSource_t`
     // pointers, casts `&SOURCES[i]` from `*const ConfigSource`, so it points at a live
     // `ConfigSource` in a `static`, which is `Copy` and immutable.
-    unsafe { *(source as *const ConfigSource) }
+    *unsafe { require_ref::<_, ConfigSource>(source, param) }
 }
 
 /// Returns `ConfigSource.DYNAMIC_TOPIC_CONFIG`, a static singleton never freed.
@@ -217,7 +220,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource__enum(
 ) -> kafka_admin_ConfigEntry_ConfigSource_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `config_source_value_of` requires.
-    source_enum_of(unsafe { config_source_value_of(self_) })
+    source_enum_of(unsafe { config_source_value_of(self_, "self_") })
 }
 
 /// Returns the Java constant name, as `ConfigSource.toString()`.
@@ -233,7 +236,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `config_source_value_of` requires.
-    into_c_string(&unsafe { config_source_value_of(self_) }.to_string())
+    into_c_string(&unsafe { config_source_value_of(self_, "self_") }.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -312,12 +315,15 @@ pub(crate) fn config_type_singleton(config_type: ConfigType) -> *const kafka_adm
 /// # Safety
 ///
 /// `config_type` must be a singleton returned by this module.
-pub(crate) unsafe fn config_type_value_of(config_type: *const kafka_admin_ConfigEntry_ConfigType_t) -> ConfigType {
+pub(crate) unsafe fn config_type_value_of(
+    config_type: *const kafka_admin_ConfigEntry_ConfigType_t,
+    param: &'static str,
+) -> ConfigType {
     // SAFETY: Per this function's `# Safety`, `config_type` is a singleton returned by this module:
     // `config_type_singleton`, the only producer of `kafka_admin_ConfigEntry_ConfigType_t`
     // pointers, casts `&TYPES[i]` from `*const ConfigType`, so it points at a live `ConfigType` in
     // a `static`, which is `Copy` and immutable.
-    unsafe { *(config_type as *const ConfigType) }
+    *unsafe { require_ref::<_, ConfigType>(config_type, param) }
 }
 
 /// Returns `ConfigType.UNKNOWN`, a static singleton never freed.
@@ -402,7 +408,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType__enum(
 ) -> kafka_admin_ConfigEntry_ConfigType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `config_type_value_of` requires.
-    type_enum_of(unsafe { config_type_value_of(self_) })
+    type_enum_of(unsafe { config_type_value_of(self_, "self_") })
 }
 
 /// Returns the Java constant name, as `ConfigType.toString()`.
@@ -418,7 +424,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `config_type_value_of` requires.
-    into_c_string(&unsafe { config_type_value_of(self_) }.to_string())
+    into_c_string(&unsafe { config_type_value_of(self_, "self_") }.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +824,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, kept alive for this call, as `builder_mut` requires, and `source` a
     // source singleton, which only this module returns, as `config_source_value_of` requires.
-    unsafe { builder_mut(self_, "self_") }.source = Some(unsafe { config_source_value_of(source) });
+    unsafe { builder_mut(self_, "self_") }.source = Some(unsafe { config_source_value_of(source, "source") });
 }
 
 /// Sets Java's `isSensitive`.
@@ -909,7 +915,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
     } else {
         // SAFETY: `config_type` is non-null (checked above) and, per this function's `# Safety`, a
         // type singleton, which only this module returns, as `config_type_value_of` requires.
-        Some(unsafe { config_type_value_of(config_type) })
+        Some(unsafe { config_type_value_of(config_type, "config_type") })
     };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, kept alive for this call, as `builder_mut` requires.
@@ -1336,7 +1342,7 @@ mod tests {
         unsafe {
             for (index, &source) in SOURCES.iter().enumerate() {
                 let handle = config_source_singleton(source);
-                assert_eq!(config_source_value_of(handle), source);
+                assert_eq!(config_source_value_of(handle, "value"), source);
                 assert_eq!(kafka_admin_ConfigEntry_ConfigSource__enum(handle) as usize, index);
                 let name = kafka_admin_ConfigEntry_ConfigSource_to_string(handle);
                 assert_eq!(CStr::from_ptr(name).to_str().unwrap(), source.to_string());
@@ -1344,7 +1350,7 @@ mod tests {
             }
             for (index, &config_type) in TYPES.iter().enumerate() {
                 let handle = config_type_singleton(config_type);
-                assert_eq!(config_type_value_of(handle), config_type);
+                assert_eq!(config_type_value_of(handle, "value"), config_type);
                 assert_eq!(kafka_admin_ConfigEntry_ConfigType__enum(handle) as usize, index);
                 let name = kafka_admin_ConfigEntry_ConfigType_to_string(handle);
                 assert_eq!(CStr::from_ptr(name).to_str().unwrap(), config_type.to_string());

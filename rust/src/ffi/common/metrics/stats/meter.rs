@@ -111,7 +111,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit(
     boxed(Meter::with_unit(
         // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as
         // `time_unit_of` (`time_unit::value_of`) requires; the value is copied out.
-        unsafe { time_unit_of(unit) },
+        unsafe { time_unit_of(unit, "unit") },
         // SAFETY: Per this function's `# Safety`, `rate_metric_name` is a valid metric-name handle,
         // as `metric_name_ref` requires; the name is cloned, so nothing borrows the handle after
         // this call.
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit_rate_stat(
     boxed(Meter::with_unit_rate_stat(
         // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as
         // `time_unit_of` (`time_unit::value_of`) requires; the value is copied out.
-        unsafe { time_unit_of(unit) },
+        unsafe { time_unit_of(unit, "unit") },
         // SAFETY: Per this function's `# Safety`, `rate_stat` is a valid sampled-stat handle, as
         // `sampled_stat_ref` requires; the meter takes its own `Arc` of the stat, so nothing
         // borrows the handle after this call and the handle stays valid, as the rustdoc states.

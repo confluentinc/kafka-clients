@@ -32,6 +32,7 @@ use crate::ffi::kafka_future::{
     kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
     kafka_common_KafkaFuture_t,
 };
+use crate::ffi::precondition::{require_element, require_element_ref};
 use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, kafka_Map_t, map_entries};
 
 /// The value of the result's future: `Map<ClientQuotaEntity, Map<String, Double>>`.
@@ -131,11 +132,11 @@ fn box_entities(entities: Entities) -> *mut kafka_Map_t {
 /// call, whose keys are valid client-quota-entity handles and whose values
 /// are `NULL` or valid map handles, likewise alive and not mutated, of valid
 /// NUL-terminated strings to pointers to readable, aligned `double`s.
-unsafe fn entities_of(map: *const kafka_Map_t) -> Entities {
+unsafe fn entities_of(map: *const kafka_Map_t, param: &'static str) -> Entities {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and not
     // mutated for this call, as `map_entries` requires; the borrow of its entries ends with the
     // call.
-    unsafe { map_entries(map, "map") }
+    unsafe { map_entries(map, param) }
         .iter()
         .map(|&(entity, quotas)| {
             // SAFETY: Per this function's `# Safety`, the key `entity` is a valid
@@ -151,9 +152,10 @@ unsafe fn entities_of(map: *const kafka_Map_t) -> Entities {
                     // SAFETY: Per this function's `# Safety`, the inner key `name` is a valid
                     // NUL-terminated string, as `c_str_to_string` requires, and the inner value
                     // `value` points at a readable, aligned `double`, which the read copies.
-                    (unsafe { c_str_to_string(name as *const c_char) }, unsafe {
-                        *(value as *const f64)
-                    })
+                    (
+                        unsafe { c_str_to_string(require_element(name, "quotas") as *const c_char) },
+                        *unsafe { require_element_ref::<f64>(value, "quotas") },
+                    )
                 })
                 .collect();
             (entity.clone(), quotas)
@@ -238,7 +240,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
             // which the caller keeps alive for this call. Per this function's `# Safety` it is null
             // or a valid map of the documented shape, and nothing mutates it during the call, which
             // is what `entities_of` requires.
-            None => Ok(unsafe { entities_of(value as *const kafka_Map_t) }),
+            None => Ok(unsafe { entities_of(value as *const kafka_Map_t, "entities") }),
         }
     };
     box_describe_client_quotas_result(

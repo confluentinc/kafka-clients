@@ -17,7 +17,7 @@
 //! (CLAUDE.md §4). Rust's fluent setter takes `self` by value and returns
 //! it; C mutates the handle in place.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::c_char;
 
 use crate::admin::ListConsumerGroupOffsetsSpec;
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_part
     // `kafka_admin_ListConsumerGroupOffsetsSpec_t` comes from
     // `box_list_consumer_group_offsets_spec`, which boxes a `ListConsumerGroupOffsetsSpecInner`, so
     // the exclusive reference is to a live value.
-    let inner = unsafe { &mut *(self_ as *mut ListConsumerGroupOffsetsSpecInner) };
+    let inner = unsafe { require_mut::<_, ListConsumerGroupOffsetsSpecInner>(self_, "self_") };
     inner.spec = inner.spec.clone().set_topic_partitions(topic_partitions);
 }
 
