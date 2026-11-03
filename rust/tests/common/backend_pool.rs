@@ -254,7 +254,11 @@ impl BackendKind {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("target/grpc-native/javascript/node_modules"));
                 require_native_artifact(self, &node, TARGET);
-                require_native_artifact(self, &javascript.join("build/Release/confluent-kafka-javascript.node"), TARGET);
+                require_native_artifact(
+                    self,
+                    &javascript.join("build/Release/confluent-kafka-javascript.node"),
+                    TARGET,
+                );
                 require_native_artifact(self, &node_modules.join("@grpc/grpc-js"), TARGET);
                 require_native_artifact(self, &node_modules.join("@grpc/proto-loader"), TARGET);
 
