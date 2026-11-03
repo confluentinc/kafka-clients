@@ -18,6 +18,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Text;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
@@ -44,18 +45,29 @@ internal static class Program
 
         Assembly assembly = typeof(KafkaException).Assembly;
         string version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "";
-        Console.WriteLine($"Confluent.Kafka {version} on {RuntimeInformation.FrameworkDescription}, "
-            + $"{RuntimeInformation.RuntimeIdentifier}, {RuntimeInformation.OSDescription}");
+#if NETFRAMEWORK
+        string runtime = $".NET Framework {Environment.Version}, {Environment.OSVersion}";
+#else
+        string runtime = $"{RuntimeInformation.FrameworkDescription}, {RuntimeInformation.RuntimeIdentifier}, {RuntimeInformation.OSDescription}";
+#endif
+        // test-nupkg.ps1 reads the bitness, to check that the program ran in a process of the platform tested.
+        Console.WriteLine($"Confluent.Kafka {version} on {runtime}, {(Environment.Is64BitProcess ? 64 : 32)}-bit process");
         if (version.Split('+')[0] != args[0])
         {
             throw new InvalidOperationException($"loaded Confluent.Kafka {version}, not {args[0]}");
         }
 
-        // The package's assembly for this application's framework, not another framework's.
+        // The package's assembly for this application's framework, not another framework's; .NET
+        // Framework runs its .NET Standard 2.0 assembly.
+#if NETFRAMEWORK
+        string? expected = ".NETStandard,Version=v2.0";
+#else
+        string? expected = AppContext.TargetFrameworkName;
+#endif
         string? built = assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName;
-        if (built != AppContext.TargetFrameworkName)
+        if (built != expected)
         {
-            throw new InvalidOperationException($"loaded the Confluent.Kafka assembly built for {built}, not for {AppContext.TargetFrameworkName}");
+            throw new InvalidOperationException($"loaded the Confluent.Kafka assembly built for {built}, not for {expected}");
         }
 
         // Binds every P/Invoke now, so an entry point the native library lacks fails here.
@@ -63,7 +75,7 @@ internal static class Program
         Marshal.PrelinkAll(nativeMethods);
         string native = LoadedNativeLibrary(assembly);
         Console.WriteLine($"OK: every P/Invoke binds to {native}");
-        if (!native.StartsWith(AppContext.BaseDirectory, StringComparison.Ordinal))
+        if (!native.StartsWith(AppContext.BaseDirectory, IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
         {
             throw new InvalidOperationException($"the native library was loaded from {native}, not from the application in {AppContext.BaseDirectory}");
         }
@@ -103,9 +115,31 @@ internal static class Program
         producer.Close(TimeSpan.FromSeconds(10));
     }
 
-    /// <summary>The path of the native library the assembly's P/Invokes load.</summary>
+    private static bool IsWindows()
+    {
+#if NETFRAMEWORK
+        return true;
+#else
+        return OperatingSystem.IsWindows();
+#endif
+    }
+
+    /// <summary>The path of the native library the assembly's P/Invokes load, which PrelinkAll loaded.</summary>
     private static string LoadedNativeLibrary(Assembly assembly)
     {
+        if (IsWindows())
+        {
+            IntPtr module = GetModuleHandleW("confluent_kafka.dll");
+            var path = new StringBuilder(32768);
+            if (module == IntPtr.Zero || GetModuleFileNameW(module, path, path.Capacity) == 0)
+            {
+                throw new InvalidOperationException("confluent_kafka.dll is not loaded in this process");
+            }
+            return Path.GetFullPath(path.ToString());
+        }
+#if NETFRAMEWORK
+        throw new PlatformNotSupportedException();
+#else
         IntPtr library = NativeLibrary.Load("confluent_kafka", assembly, null);
         IntPtr symbol = NativeLibrary.GetExport(library, "kafka_common_Error_destroy_err");
         DlInfo info;
@@ -115,6 +149,7 @@ internal static class Program
             throw new InvalidOperationException("dladdr found no library for kafka_common_Error_destroy_err");
         }
         return Path.GetFullPath(Marshal.PtrToStringUTF8(info.FileName)!);
+#endif
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -131,4 +166,10 @@ internal static class Program
 
     [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "dladdr")]
     private static extern int DlAddrMacOS(IntPtr address, out DlInfo info);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandleW(string moduleName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetModuleFileNameW(IntPtr module, StringBuilder fileName, int size);
 }
