@@ -16,14 +16,14 @@
 //! `org.apache.kafka.clients.admin.NewPartitionReassignment` (CLAUDE.md §4).
 //! A `List<Integer>` crosses as a `kafka_List_t` of `int32_t *`.
 
-use crate::ffi::precondition::{require_element_ref, require_ref};
+use crate::ffi::precondition::{require_element_ref, require_list, require_ref};
 use std::ffi::c_void;
 
 use crate::admin::NewPartitionReassignment;
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, destroy_boxed, kafka_List_t};
 
 /// Opaque handle to a [`NewPartitionReassignment`].
 #[repr(C)]
@@ -85,15 +85,20 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
     target_replicas: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_NewPartitionReassignment_t {
-    // SAFETY: Per this function's `# Safety`, `target_replicas` is null or a valid list, alive and
-    // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
-    // end of this statement.
-    let target_replicas = unsafe { list_elements(target_replicas, "target_replicas") }
-        .iter()
-        // SAFETY: Per this function's `# Safety`, each element of `target_replicas` points at a
-        // live `int32_t`, read by copy while the list is alive.
-        .map(|&element| *unsafe { require_element_ref::<i32>(element, "target_replicas") })
-        .collect();
+    // Java rejects a null list as it rejects an empty one, with the error below.
+    let target_replicas = if target_replicas.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: `target_replicas` is non-null (checked above) and, per this function's
+        // `# Safety`, a valid list, alive and not mutated for this call, as `require_list`
+        // requires; the borrowed slice is dropped at the end of this statement.
+        unsafe { require_list(target_replicas, "target_replicas") }
+            .iter()
+            // SAFETY: Per this function's `# Safety`, each element of `target_replicas` points at
+            // a live `int32_t`, read by copy while the list is alive.
+            .map(|&element| *unsafe { require_element_ref::<i32>(element, "target_replicas") })
+            .collect()
+    };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver_value` requires.
     unsafe {
         deliver_value(

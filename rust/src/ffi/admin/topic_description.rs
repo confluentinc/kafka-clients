@@ -21,7 +21,7 @@
 //! singletons. This file also hosts the two helpers that convert such a set
 //! for the group descriptions.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::collections::BTreeSet;
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
@@ -36,7 +36,7 @@ use crate::ffi::common::topic_partition_info::{
 };
 use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_of};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`TopicDescription`].
 #[repr(C)]
@@ -154,9 +154,9 @@ pub(crate) unsafe fn list_acl_operations(
     }
     Some(
         // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid
-        // list, alive and not mutated for this call, as `list_elements` requires; the borrowed
+        // list, alive and not mutated for this call, as `require_list` requires; the borrowed
         // slice is consumed before the call returns.
-        unsafe { list_elements(list, param) }
+        unsafe { require_list(list, param) }
             .iter()
             // SAFETY: Per this function's `# Safety`, each element of `list` is an ACL-operation
             // singleton, as `acl_operation::value_of` requires.
@@ -171,7 +171,7 @@ pub(crate) unsafe fn list_acl_operations(
 }
 
 /// Reads a list of `const kafka_common_TopicPartitionInfo_t *` into owned
-/// copies; `NULL` reads as empty.
+/// copies; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -180,9 +180,9 @@ pub(crate) unsafe fn list_acl_operations(
 /// call.
 unsafe fn list_topic_partition_infos(list: *const kafka_List_t, param: &'static str) -> Vec<TopicPartitionInfo> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is consumed before the call
+    // for this call, as `require_list` requires; the borrowed slice is consumed before the call
     // returns.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, each element of `list` is a valid

@@ -264,7 +264,8 @@ mod tests {
     use super::*;
     use crate::ffi::common::topic_partition::topic_partition_ref;
     use crate::ffi::common::{error_ref, kafka_common_Error_destroy};
-    use crate::ffi::util::{kafka_Map_destroy, kafka_string_destroy, map_entries};
+    use crate::ffi::precondition::require_map;
+    use crate::ffi::util::{kafka_Map_destroy, kafka_string_destroy};
 
     #[test]
     fn constructors_and_getters() {
@@ -320,7 +321,7 @@ mod tests {
         // SAFETY: Test code: `c_map` is the live map just built, not mutated while its entries
         // are read; every key is a live topic-partition handle and every non-null value a live
         // offset-and-timestamp handle the map owns.
-        let entries: Vec<_> = unsafe { map_entries(c_map, "c_map") }
+        let entries: Vec<_> = unsafe { require_map(c_map, "c_map") }
             .iter()
             .map(|&(k, v)| unsafe {
                 (

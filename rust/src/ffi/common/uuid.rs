@@ -24,8 +24,8 @@ use crate::common::Uuid;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{require_element, require_ref, require_str};
-use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`Uuid`].
 #[repr(C)]
@@ -57,16 +57,16 @@ pub(crate) fn uuid_list(uuids: impl IntoIterator<Item = Uuid>) -> *mut kafka_Lis
     box_list(elements, Some(destroy_boxed::<Uuid>))
 }
 
-/// Reads a list of `const kafka_common_Uuid_t *`; null reads as empty.
+/// Reads a list of `const kafka_common_Uuid_t *`; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are uuid handles.
 pub(crate) unsafe fn list_uuids(list: *const kafka_List_t, param: &'static str) -> Vec<Uuid> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `list` is a uuid handle, as
         // `uuid_of` requires; the `Uuid` is copied out.

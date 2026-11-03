@@ -32,8 +32,8 @@ use crate::ffi::kafka_future::{
     kafka_common_KafkaFuture_destroy, kafka_common_KafkaFuture_get, kafka_common_KafkaFuture_is_done,
     kafka_common_KafkaFuture_t,
 };
-use crate::ffi::precondition::{require_element, require_element_ref};
-use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, kafka_Map_t, map_entries};
+use crate::ffi::precondition::{require_element, require_element_ref, require_map};
+use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, kafka_Map_t};
 
 /// The value of the result's future: `Map<ClientQuotaEntity, Map<String, Double>>`.
 type Entities = HashMap<ClientQuotaEntity, HashMap<String, f64>>;
@@ -124,7 +124,7 @@ fn box_entities(entities: Entities) -> *mut kafka_Map_t {
     )
 }
 
-/// Reads the C shape built by [`box_entities`] back; `NULL` reads as empty.
+/// Reads the C shape built by [`box_entities`] back; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -134,9 +134,9 @@ fn box_entities(entities: Entities) -> *mut kafka_Map_t {
 /// NUL-terminated strings to pointers to readable, aligned `double`s.
 unsafe fn entities_of(map: *const kafka_Map_t, param: &'static str) -> Entities {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and not
-    // mutated for this call, as `map_entries` requires; the borrow of its entries ends with the
+    // mutated for this call, as `require_map` requires; the borrow of its entries ends with the
     // call.
-    unsafe { map_entries(map, param) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(entity, quotas)| {
             // SAFETY: Per this function's `# Safety`, the key `entity` is a valid
@@ -145,8 +145,8 @@ unsafe fn entities_of(map: *const kafka_Map_t, param: &'static str) -> Entities 
             let entity =
                 unsafe { client_quota_entity_ref(entity as *const kafka_common_quota_ClientQuotaEntity_t, "entity") };
             // SAFETY: Per this function's `# Safety`, the value `quotas` is null or a valid map
-            // handle, alive and not mutated for this call, as `map_entries` requires.
-            let quotas = unsafe { map_entries(quotas as *const kafka_Map_t, "quotas") }
+            // handle, alive and not mutated for this call, as `require_map` requires.
+            let quotas = unsafe { require_map(quotas as *const kafka_Map_t, "quotas") }
                 .iter()
                 .map(|&(name, value)| {
                     // SAFETY: Per this function's `# Safety`, the inner key `name` is a valid

@@ -35,8 +35,8 @@ use crate::ffi::common::metrics::kafka_metric::{
     KafkaMetricInner, kafka_common_metrics_KafkaMetric_t, kafka_metric_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_element;
-use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t, list_elements};
+use crate::ffi::precondition::{require_element, require_list};
+use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t};
 
 /// Opaque handle to a [`MetricsReporter`] implementation.
 #[repr(C)]
@@ -240,9 +240,9 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
     metrics: *const kafka_List_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `metrics` is null or a valid list, which the caller
-    // keeps alive and does not mutate for this call, as `list_elements` requires; the slice is used
+    // keeps alive and does not mutate for this call, as `require_list` requires; the slice is used
     // only within this call.
-    let metrics: Vec<Arc<KafkaMetric>> = unsafe { list_elements(metrics, "metrics") }
+    let metrics: Vec<Arc<KafkaMetric>> = unsafe { require_list(metrics, "metrics") }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, each element of `metrics` is a valid metric
@@ -436,7 +436,6 @@ mod tests {
             // No-ops: nothing to observe, nothing crashes.
             let list = box_list(vec![metric as *mut c_void], None);
             kafka_common_metrics_MetricsReporter_init(silent, list);
-            kafka_common_metrics_MetricsReporter_init(silent, ptr::null());
             kafka_common_metrics_MetricsReporter_metric_change(silent, metric);
             kafka_common_metrics_MetricsReporter_metric_removal(silent, metric);
             kafka_common_metrics_MetricsReporter_close(silent);

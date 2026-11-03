@@ -17,7 +17,7 @@
 //! `Map<TopicPartition, OffsetAndMetadata>` conversions the commit and
 //! `committed` paths share.
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -30,7 +30,7 @@ use crate::ffi::common::topic_partition::{
     topic_partition_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_Map_t, map_entries};
+use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_Map_t};
 
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
@@ -127,7 +127,7 @@ pub(crate) fn nullable_offset_and_metadata_map(
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` keys and
-/// `const kafka_consumer_OffsetAndMetadata_t *` values; null reads as empty.
+/// `const kafka_consumer_OffsetAndMetadata_t *` values; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -139,9 +139,9 @@ pub(crate) unsafe fn map_offset_and_metadata(
     param: &'static str,
 ) -> HashMap<TopicPartition, OffsetAndMetadata> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map that no other call
-    // mutates during this one, as `map_entries` requires; the entries are read only within this
+    // mutates during this one, as `require_map` requires; the entries are read only within this
     // expression.
-    unsafe { map_entries(map, param) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key of `map` is a topic-partition
@@ -469,7 +469,7 @@ mod tests {
         // SAFETY: Test code: `c_map` is the live map `offset_and_metadata_map` just built.
         assert_eq!(unsafe { kafka_Map_size(c_map) }, 3);
         // SAFETY: Test code: `c_map` is live and not mutated while its entries are read.
-        let keys: Vec<_> = unsafe { map_entries(c_map, "c_map") }
+        let keys: Vec<_> = unsafe { require_map(c_map, "c_map") }
             .iter()
             // SAFETY: Test code: every key of `c_map` is a live topic-partition handle the map
             // owns.
@@ -502,7 +502,7 @@ mod tests {
         // SAFETY: Test code: `c_map` is the live map just built, not mutated while its entries
         // are read; every key is a live topic-partition handle and every non-null value a live
         // offset-and-metadata handle the map owns.
-        let entries: Vec<_> = unsafe { map_entries(c_map, "c_map") }
+        let entries: Vec<_> = unsafe { require_map(c_map, "c_map") }
             .iter()
             .map(|&(k, v)| unsafe {
                 (

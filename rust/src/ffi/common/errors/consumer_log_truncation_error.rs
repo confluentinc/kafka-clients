@@ -31,8 +31,8 @@ use crate::ffi::consumer::{
     OffsetAndMetadataInner, box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_t, offset_and_metadata_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::require_element;
-use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, kafka_List_t, kafka_Map_t, map_entries};
+use crate::ffi::precondition::{require_element, require_map};
+use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`ConsumerLogTruncationError`].
 #[repr(C)]
@@ -77,7 +77,7 @@ pub(crate) fn topic_partition_offset_and_metadata_map(
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` keys and
-/// `const kafka_consumer_OffsetAndMetadata_t *` values; `NULL` reads as empty.
+/// `const kafka_consumer_OffsetAndMetadata_t *` values; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -88,8 +88,8 @@ pub(crate) unsafe fn map_topic_partition_offset_and_metadata(
 ) -> HashMap<TopicPartition, OffsetAndMetadata> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive for this call,
     // and `kafka_Map_put` forbids any other call from using it meanwhile, so it is not mutated
-    // while borrowed, as `map_entries` requires. The entries are cloned out before return.
-    unsafe { map_entries(map, param) }
+    // while borrowed, as `require_map` requires. The entries are cloned out before return.
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             (
@@ -173,7 +173,13 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
         // valid map of the stated types, `kafka_common_TopicPartition_t *` keys and `int64_t *`
         // values, as `map_topic_partition_i64` requires; the entries are copied into an owned map,
         // so nothing borrows it after this call.
-        unsafe { map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions") },
+        unsafe {
+            if offset_out_of_range_partitions.is_null() {
+                Default::default()
+            } else {
+                map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
+            }
+        },
         // SAFETY: Per this function's `# Safety`, `divergent_offsets` is null or a valid map of the
         // stated types, `kafka_common_TopicPartition_t *` keys and
         // `kafka_consumer_OffsetAndMetadata_t *` values, as
@@ -217,7 +223,13 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_with_message(
         // valid map of the stated types, `kafka_common_TopicPartition_t *` keys and `int64_t *`
         // values, as `map_topic_partition_i64` requires; the entries are copied into an owned map,
         // so nothing borrows it after this call.
-        unsafe { map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions") },
+        unsafe {
+            if offset_out_of_range_partitions.is_null() {
+                Default::default()
+            } else {
+                map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
+            }
+        },
         // SAFETY: Per this function's `# Safety`, `divergent_offsets` is null or a valid map of the
         // stated types, `kafka_common_TopicPartition_t *` keys and
         // `kafka_consumer_OffsetAndMetadata_t *` values, as
@@ -439,7 +451,9 @@ mod tests {
             assert!(kafka_common_Error_consumer_log_truncation(other).is_null());
             kafka_common_Error_destroy(other);
 
-            let empty = kafka_common_ConsumerLogTruncationError_new(ptr::null(), ptr::null());
+            let no_divergent = crate::ffi::util::kafka_Map_new();
+            let empty = kafka_common_ConsumerLogTruncationError_new(ptr::null(), no_divergent);
+            kafka_Map_destroy(no_divergent);
             assert_eq!(
                 CStr::from_ptr(kafka_common_ConsumerLogTruncationError_message(empty))
                     .to_str()

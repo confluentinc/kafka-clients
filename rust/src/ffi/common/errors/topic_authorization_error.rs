@@ -91,7 +91,11 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_new(
     // NUL-terminated strings, as `list_string_set` requires; the strings are copied into an owned
     // set, so nothing borrows the list after this call.
     Payload::boxed(TopicAuthorizationError::new(unsafe {
-        list_string_set(unauthorized_topics, "unauthorized_topics")
+        if unauthorized_topics.is_null() {
+            Default::default()
+        } else {
+            list_string_set(unauthorized_topics, "unauthorized_topics")
+        }
     }))
 }
 
@@ -132,7 +136,13 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_with_message(
         // SAFETY: Per this function's `# Safety`, `unauthorized_topics` is null or a valid list of
         // NUL-terminated strings, as `list_string_set` requires; the strings are copied into an
         // owned set, so nothing borrows the list after this call.
-        unsafe { list_string_set(unauthorized_topics, "unauthorized_topics") },
+        unsafe {
+            if unauthorized_topics.is_null() {
+                Default::default()
+            } else {
+                list_string_set(unauthorized_topics, "unauthorized_topics")
+            }
+        },
         // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.

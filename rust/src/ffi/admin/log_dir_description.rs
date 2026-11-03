@@ -21,7 +21,7 @@
 //! which is also `DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`, the value the
 //! constructors read as "unknown".
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -37,7 +37,7 @@ use crate::ffi::common::topic_partition::{
 };
 use crate::ffi::common::{ErrorInner, kafka_common_Error_t, take_error};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_map, destroy_boxed, into_c_string, kafka_Map_t, map_entries};
+use crate::ffi::util::{box_map, destroy_boxed, into_c_string, kafka_Map_t};
 
 /// Opaque handle to a [`LogDirDescription`].
 #[repr(C)]
@@ -113,8 +113,7 @@ pub(crate) unsafe fn destroy_log_dir_description_element(element: *mut c_void) {
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` to
-/// `const kafka_admin_ReplicaInfo_t *` into owned copies; `NULL` reads as
-/// empty.
+/// `const kafka_admin_ReplicaInfo_t *` into owned copies; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -123,9 +122,9 @@ pub(crate) unsafe fn destroy_log_dir_description_element(element: *mut c_void) {
 /// and not mutated for this call.
 unsafe fn map_replica_infos(map: *const kafka_Map_t, param: &'static str) -> HashMap<TopicPartition, ReplicaInfo> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
-    // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_map` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { map_entries(map, param) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             (
@@ -153,7 +152,7 @@ unsafe fn map_replica_infos(map: *const kafka_Map_t, param: &'static str) -> Has
 /// - `error` - the error describing the log directory, `NULL` for none; consumed.
 /// - `replica_infos` - the replicas in the log directory, a borrowed map of
 ///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
-///   `NULL` reads as empty.
+///   must not be `NULL`.
 ///
 /// # Safety
 ///
@@ -187,7 +186,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
 /// - `error` - the error describing the log directory, `NULL` for none; consumed.
 /// - `replica_infos` - the replicas in the log directory, a borrowed map of
 ///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
-///   `NULL` reads as empty.
+///   must not be `NULL`.
 /// - `total_bytes` - the total size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 /// - `usable_bytes` - the usable size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 ///
@@ -225,7 +224,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
 /// - `error` - the error describing the log directory, `NULL` for none; consumed.
 /// - `replica_infos` - the replicas in the log directory, a borrowed map of
 ///   `const kafka_common_TopicPartition_t *` to `const kafka_admin_ReplicaInfo_t *`, copied;
-///   `NULL` reads as empty.
+///   must not be `NULL`.
 /// - `total_bytes` - the total size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 /// - `usable_bytes` - the usable size of the volume, `-1` (`UNKNOWN_VOLUME_BYTES`) for none.
 /// - `is_cordoned` - 1 if the log directory is cordoned, else 0.

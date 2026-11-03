@@ -109,7 +109,7 @@ pub(crate) fn box_token_information(
 /// - `token_id` - the token id
 /// - `owner` - the token owner, copied
 /// - `renewers` - the principals allowed to renew the token: a list of borrowed
-///   `kafka_common_security_auth_KafkaPrincipal_t` handles, copied; `NULL` reads as empty
+///   `kafka_common_security_auth_KafkaPrincipal_t` handles, copied; must not be `NULL`
 /// - `issue_timestamp` - the issue time, in milliseconds since the epoch
 /// - `max_timestamp` - the latest expiry the token can be renewed to, in milliseconds since the epoch
 /// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// - `owner` - the token owner, copied
 /// - `token_requester` - the principal that asked for the token, copied
 /// - `renewers` - the principals allowed to renew the token: a list of borrowed
-///   `kafka_common_security_auth_KafkaPrincipal_t` handles, copied; `NULL` reads as empty
+///   `kafka_common_security_auth_KafkaPrincipal_t` handles, copied; must not be `NULL`
 /// - `issue_timestamp` - the issue time, in milliseconds since the epoch
 /// - `max_timestamp` - the latest expiry the token can be renewed to, in milliseconds since the epoch
 /// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch

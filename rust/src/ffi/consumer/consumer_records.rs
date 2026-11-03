@@ -26,7 +26,7 @@
 //! destroying the records handle releases them.
 
 use crate::common::Error;
-use crate::ffi::precondition::{require_ref, require_str_or};
+use crate::ffi::precondition::{require_list, require_map, require_ref, require_str_or};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -40,7 +40,7 @@ use crate::ffi::consumer::consumer_record::{
 };
 use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, kafka_List_t, kafka_Map_t, list_elements, map_entries};
+use crate::ffi::util::{box_list, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`ConsumerRecords`].
 #[repr(C)]
@@ -156,7 +156,7 @@ pub extern "C" fn kafka_consumer_ConsumerRecords_empty() -> *mut kafka_consumer_
 ///
 /// # Safety
 ///
-/// `records` and `next_offsets` must be `NULL` (read as empty) or valid maps of
+/// `records` and `next_offsets` must be valid maps of
 /// the documented element types, which no other call mutates during this one,
 /// nor the lists in `records`. Both maps and everything in them are copied
 /// during the call and stay the caller's; the copied records never own their
@@ -170,16 +170,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
 ) -> *mut kafka_consumer_ConsumerRecords_t {
     let mut by_partition: IndexMap<TopicPartition, Vec<GenericRecord>> = IndexMap::new();
     // SAFETY: Per this function's `# Safety`, `records` is null or a valid map that no other call
-    // mutates during this one, as `map_entries` requires; the entries are read only within this
+    // mutates during this one, as `require_map` requires; the entries are read only within this
     // loop.
-    for &(tp, list) in unsafe { map_entries(records, "records") } {
+    for &(tp, list) in unsafe { require_map(records, "records") } {
         // SAFETY: Per this function's `# Safety`, every key of `records` is a valid topic-partition
         // handle, as `topic_partition_ref` requires; it is cloned, so the borrow ends here.
         let tp = unsafe { topic_partition_ref(tp as *const kafka_common_TopicPartition_t, "tp") }.clone();
         // SAFETY: Per this function's `# Safety`, every value of `records` is a valid list of
-        // record handles that no other call mutates during this one, as `list_elements` requires;
+        // record handles that no other call mutates during this one, as `require_list` requires;
         // the elements are read only within this statement.
-        let records = unsafe { list_elements(list as *const kafka_List_t, "list") }
+        let records = unsafe { require_list(list as *const kafka_List_t, "list") }
             .iter()
             .map(|&record| {
                 // SAFETY: Per this function's `# Safety`, every element of that list is a valid record
@@ -448,8 +448,10 @@ mod tests {
             kafka_List_add(list, record as *mut c_void);
             let map = kafka_Map_new();
             kafka_Map_put(map, tp as *mut c_void, list as *mut c_void);
-            let records = kafka_consumer_ConsumerRecords_with_next_offsets(map, std::ptr::null());
+            let no_offsets = kafka_Map_new();
+            let records = kafka_consumer_ConsumerRecords_with_next_offsets(map, no_offsets);
             // The inputs are the caller's and can go first.
+            kafka_Map_destroy(no_offsets);
             kafka_Map_destroy(map);
             kafka_List_destroy(list);
             kafka_consumer_ConsumerRecord_destroy(record);

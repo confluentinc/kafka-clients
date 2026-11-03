@@ -1142,7 +1142,7 @@ fn with_drain_cb<F, Fut>(
 /// those types, and no other call may mutate it during this one.
 unsafe fn offsets_map(offsets: *const kafka_Map_t) -> HashMap<TopicPartition, OffsetAndMetadata> {
     // SAFETY: Per this function's `# Safety`, `offsets` is a live map that no other call mutates
-    // during this one, as `map_entries` requires; the entries are read only within this expression.
+    // during this one, as `require_map` requires; the entries are read only within this expression.
     unsafe { require_map(offsets, "offsets") }
         .iter()
         .map(|&(tp, oam)| {

@@ -23,7 +23,7 @@
 //! deterministic order. The handle keeps a NUL-terminated copy of the
 //! transactional-id pattern so its getter borrows.
 
-use crate::ffi::precondition::{require_element, require_element_ref, require_mut, require_ref};
+use crate::ffi::precondition::{require_element, require_element_ref, require_list, require_mut, require_ref};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -32,9 +32,7 @@ use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
-};
+use crate::ffi::util::{box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ListTransactionsOptions`], owned by the caller and
 /// freed with [`kafka_admin_ListTransactionsOptions_destroy`].
@@ -176,7 +174,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
 
 /// `ListTransactionsOptions.filterStates(Collection<TransactionState> states)`:
 /// `states` is a borrowed `kafka_List_t` of `kafka_admin_TransactionState_t`
-/// singletons, copied during the call (`NULL` reads as empty: no filter).
+/// singletons, copied during the call.
 ///
 /// # Parameters
 ///
@@ -194,8 +192,8 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
     states: *const kafka_List_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `states` is null or a valid list, not mutated during
-    // the call, which is as long as the borrowed elements are used, as `list_elements` requires.
-    let states: Vec<TransactionState> = unsafe { list_elements(states, "states") }
+    // the call, which is as long as the borrowed elements are used, as `require_list` requires.
+    let states: Vec<TransactionState> = unsafe { require_list(states, "states") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `states` is a
         // `kafka_admin_TransactionState_t` singleton, as `transaction_state_value_of` requires.
@@ -219,7 +217,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
 /// # Parameters
 ///
 /// - `producer_ids` - the set of producerIds to filter by, a `kafka_List_t` of `const int64_t *`;
-///   `NULL` reads as empty.
+///   must not be `NULL`.
 ///
 /// # Safety
 ///
@@ -234,9 +232,9 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids
     producer_ids: *const kafka_List_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `producer_ids` is null or a valid list, not mutated
-    // during the call, which is as long as the borrowed elements are used, as `list_elements`
+    // during the call, which is as long as the borrowed elements are used, as `require_list`
     // requires.
-    let producer_ids: Vec<i64> = unsafe { list_elements(producer_ids, "producer_ids") }
+    let producer_ids: Vec<i64> = unsafe { require_list(producer_ids, "producer_ids") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `producer_ids` points at a
         // readable, aligned `int64_t`, which is copied out.

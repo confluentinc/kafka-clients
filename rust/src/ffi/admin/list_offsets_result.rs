@@ -16,7 +16,7 @@
 //! `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t`:
 //! `org.apache.kafka.clients.admin.ListOffsetsResult` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -33,7 +33,7 @@ use crate::ffi::common::topic_partition::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_map, into_c_string, kafka_Map_t, map_entries};
+use crate::ffi::util::{box_map, into_c_string, kafka_Map_t};
 
 // ---------------------------------------------------------------------------
 // ListOffsetsResult.ListOffsetsResultInfo
@@ -373,8 +373,8 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_new(
     // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
-    // the same time. That is what `map_entries` requires.
-    let futures = unsafe { map_entries(futures, "futures") }
+    // the same time. That is what `require_map` requires.
+    let futures = unsafe { require_map(futures, "futures") }
         .iter()
         .map(|&(k, v)| {
             (

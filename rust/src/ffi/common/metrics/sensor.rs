@@ -24,7 +24,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use crate::ffi::util::into_c_string;
 use std::ffi::{CString, c_char};
 use std::sync::Arc;
@@ -38,7 +38,7 @@ use crate::ffi::common::metrics::compound_stat::{kafka_common_metrics_CompoundSt
 use crate::ffi::common::metrics::measurable_stat::{kafka_common_metrics_MeasurableStat_t, take_measurable_stat};
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_option};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{kafka_List_t, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // Sensor.RecordingLevel
@@ -333,16 +333,20 @@ pub(crate) unsafe fn sensor_ref<'a>(
 }
 
 /// The sensors behind a list of `const kafka_common_metrics_Sensor_t *`
-/// elements; null reads as empty.
+/// elements; `NULL` reads as empty, as Java's `Sensor` reads a null `parents`
+/// array.
 ///
 /// # Safety
 ///
 /// `sensors` must be null or a valid list of sensor handles.
 pub(crate) unsafe fn list_sensors(sensors: *const kafka_List_t) -> Vec<Arc<Sensor>> {
+    if sensors.is_null() {
+        return Vec::new();
+    }
     // SAFETY: Per this function's `# Safety`, `sensors` is null or a valid list handle, alive and
-    // not mutated during this call, as `list_elements` requires; the slice is used only within this
+    // not mutated during this call, as `require_list` requires; the slice is used only within this
     // call, its sensors being cloned into owned `Arc`s before return.
-    unsafe { list_elements(sensors, "sensors") }
+    unsafe { require_list(sensors, "sensors") }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `sensors` is a valid sensor

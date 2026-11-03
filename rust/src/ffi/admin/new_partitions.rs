@@ -17,12 +17,12 @@
 //! `List<List<Integer>>` crosses as a `kafka_List_t` of `kafka_List_t *`
 //! holding `int32_t *` elements.
 
-use crate::ffi::precondition::{require_element, require_element_ref, require_ref};
+use crate::ffi::precondition::{require_element, require_element_ref, require_list, require_ref};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::NewPartitions;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_destroy, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_destroy, kafka_List_t};
 
 /// Opaque handle to a [`NewPartitions`].
 #[repr(C)]
@@ -57,7 +57,7 @@ pub(crate) fn box_new_partitions(partitions: NewPartitions) -> *mut kafka_admin_
     Box::into_raw(Box::new(NewPartitionsInner { partitions })) as *mut kafka_admin_NewPartitions_t
 }
 
-/// Reads a borrowed list of `const int32_t *` into values; `NULL` reads as empty.
+/// Reads a borrowed list of `const int32_t *` into values; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -65,9 +65,9 @@ pub(crate) fn box_new_partitions(partitions: NewPartitions) -> *mut kafka_admin_
 /// kept alive and not mutated for this call.
 unsafe fn list_i32(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_list` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
@@ -132,7 +132,8 @@ pub extern "C" fn kafka_admin_NewPartitions_increase_to(total_count: i32) -> *mu
 ///
 /// # Safety
 ///
-/// `new_assignments` must be `NULL`, read as empty, or a valid borrowed list of
+/// `new_assignments` must be `NULL`, read as no assignments (Java's
+/// `increaseTo(totalCount)`), or a valid borrowed list of
 /// `const kafka_List_t *`, one per new partition, whose elements point at `int32_t` broker ids,
 /// all kept alive and not mutated for this call; it is copied.
 ///
@@ -143,10 +144,14 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_increase_to_with_new_assignme
     total_count: i32,
     new_assignments: *const kafka_List_t,
 ) -> *mut kafka_admin_NewPartitions_t {
-    // SAFETY: Per this function's `# Safety`, `new_assignments` is null or a valid list, alive and
-    // not mutated for this call, as `list_elements` requires; the borrowed slice is dropped at the
+    // Java's `increaseTo(totalCount)` passes a null assignment list.
+    if new_assignments.is_null() {
+        return box_new_partitions(NewPartitions::increase_to(total_count));
+    }
+    // SAFETY: Per this function's `# Safety`, `new_assignments` is a valid list, alive and
+    // not mutated for this call, as `require_list` requires; the borrowed slice is dropped at the
     // end of this statement.
-    let new_assignments = unsafe { list_elements(new_assignments, "new_assignments") }
+    let new_assignments = unsafe { require_list(new_assignments, "new_assignments") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `new_assignments` is a valid list
         // whose elements point at `int32_t`s, alive and not mutated for this call, as `list_i32`

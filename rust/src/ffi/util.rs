@@ -35,7 +35,7 @@
 //! [`kafka_string_destroy`]; a borrowed `&str` is a `const char *` valid as
 //! long as its owner.
 
-use crate::ffi::precondition::{require_element, require_mut, require_ref};
+use crate::ffi::precondition::{require_element, require_list, require_map, require_mut, require_ref};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
@@ -372,24 +372,8 @@ pub(crate) unsafe fn list_ref<'a>(list: *const kafka_List_t, param: &'static str
     unsafe { require_ref::<_, ListInner>(list, param) }
 }
 
-/// The elements of a list handle; null reads as empty.
-///
-/// # Safety
-///
-/// `list` must be null or a valid list handle, alive and not mutated for
-/// `'a`.
-pub(crate) unsafe fn list_elements<'a>(list: *const kafka_List_t, param: &'static str) -> &'a [*mut c_void] {
-    if list.is_null() {
-        &[]
-    } else {
-        // SAFETY: `list` is non-null (checked above) and, per this function's
-        // `# Safety`, a valid list handle alive and unmutated for `'a`, as `list_ref`
-        // requires.
-        unsafe { list_ref(list, param) }.elements()
-    }
-}
-
-/// Reads a list of `const char *` into `String`s; null reads as empty.
+/// Reads the mandatory list `list` of `const char *` into `String`s; panics
+/// with `precondition::null` when the list or an element is `NULL`.
 ///
 /// # Safety
 ///
@@ -398,7 +382,7 @@ pub(crate) unsafe fn list_elements<'a>(list: *const kafka_List_t, param: &'stati
 pub(crate) unsafe fn list_strings(list: *const kafka_List_t, param: &'static str) -> Vec<String> {
     // SAFETY: per this function's `# Safety`, `list` is null or a valid list, kept alive
     // by the caller for this call, which is as long as the borrow of its elements lasts.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: per this function's `# Safety`, every element is a NUL-terminated
         // string, which `c_str_to_string` copies into an owned `String`.
@@ -406,8 +390,8 @@ pub(crate) unsafe fn list_strings(list: *const kafka_List_t, param: &'static str
         .collect()
 }
 
-/// Reads a list of `const char *` into a set, the shape of a Java
-/// `Set<String>` parameter; null reads as empty.
+/// Reads the mandatory list `list` of `const char *` into a set, the shape
+/// of a Java `Set<String>` parameter; panics as [`list_strings`] does.
 ///
 /// # Safety
 ///
@@ -662,8 +646,9 @@ where
     )
 }
 
-/// Reads a map of `const char *` keys and values into owned pairs, in entry
-/// order; null reads as empty.
+/// Reads the mandatory map `map` of `const char *` keys and values into
+/// owned pairs, in entry order; panics with `precondition::null` when the map
+/// or a key is `NULL`, and reads a `NULL` value as empty.
 ///
 /// # Safety
 ///
@@ -672,7 +657,7 @@ where
 pub(crate) unsafe fn map_strings(map: *const kafka_Map_t, param: &'static str) -> Vec<(String, String)> {
     // SAFETY: per this function's `# Safety`, `map` is null or a valid map, kept alive by
     // the caller for this call, which is as long as the borrow of its entries lasts.
-    unsafe { map_entries(map, param) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: per this function's `# Safety`, every key and value is a
@@ -709,21 +694,6 @@ pub(crate) unsafe fn map_ref<'a>(map: *const kafka_Map_t, param: &'static str) -
     // `kafka_Map_new` uses too), whose `Box::into_raw` of a `MapInner` is the allocation
     // behind every map handle, and it stays alive and unmutated for `'a`.
     unsafe { require_ref::<_, MapInner>(map, param) }
-}
-
-/// The entries of a map handle; null reads as empty.
-///
-/// # Safety
-///
-/// `map` must be null or a valid map handle, alive and not mutated for `'a`.
-pub(crate) unsafe fn map_entries<'a>(map: *const kafka_Map_t, param: &'static str) -> &'a [(*mut c_void, *mut c_void)] {
-    if map.is_null() {
-        &[]
-    } else {
-        // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a
-        // valid map handle alive and unmutated for `'a`, as `map_ref` requires.
-        unsafe { map_ref(map, param) }.entries()
-    }
 }
 
 /// Returns a new empty map.
@@ -1297,7 +1267,7 @@ mod tests {
         let list = box_string_list(["x", "y", "z"]);
         // SAFETY: Test code: `list` is the fresh `box_string_list` handle, destroyed once at
         // the end; `second` is one of its owned strings, read before that destroy. Null is
-        // accepted by `kafka_List_destroy`, `list_strings` and `list_elements`.
+        // accepted by `kafka_List_destroy`, `list_strings` and `require_list`.
         unsafe {
             assert_eq!(kafka_List_size(list), 3);
             let second = kafka_List_get(list, 1) as *const c_char;
@@ -1306,8 +1276,20 @@ mod tests {
             // sanitizers rather than by an assertion: there is nothing to observe).
             kafka_List_destroy(list);
             kafka_List_destroy(ptr::null_mut());
-            assert!(list_strings(ptr::null(), "value").is_empty());
-            assert!(list_elements(ptr::null(), "value").is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    list_strings(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    require_list(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
         }
     }
 
@@ -1338,7 +1320,7 @@ mod tests {
         // SAFETY: Test code: `map` is the fresh `kafka_Map_new` handle, used by this thread
         // only and destroyed once at the end; it compares keys by identity, so any key
         // pointer is accepted, and its entries are live CStrings that outlive it. Null is
-        // accepted by `kafka_Map_destroy` and `map_entries`.
+        // accepted by `kafka_Map_destroy` and `require_map`.
         unsafe {
             kafka_Map_put(map, k1.as_ptr() as *mut c_void, v1.as_ptr() as *mut c_void);
             kafka_Map_put(map, k2.as_ptr() as *mut c_void, v2.as_ptr() as *mut c_void);
@@ -1352,10 +1334,16 @@ mod tests {
             assert!(kafka_Map_key(map, 2).is_null());
             assert!(kafka_Map_value(map, -1).is_null());
             assert!(kafka_Map_get(map, v1.as_ptr() as *mut c_void).is_null());
-            assert_eq!(map_entries(map, "map").len(), 2);
+            assert_eq!(require_map(map, "map").len(), 2);
             kafka_Map_destroy(map);
             kafka_Map_destroy(ptr::null_mut());
-            assert!(map_entries(ptr::null(), "value").is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    require_map(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
         }
     }
 

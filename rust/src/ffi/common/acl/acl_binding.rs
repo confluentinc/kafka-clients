@@ -16,7 +16,8 @@
 //! (CLAUDE.md §4). The pattern and entry getters return borrowed handles
 //! valid as long as the binding.
 
-use crate::ffi::precondition::require_ref;
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref};
 use std::ffi::c_char;
 
 use crate::common::acl::AclBinding;
@@ -112,6 +113,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
     pattern: *const kafka_common_resource_ResourcePattern_t,
     entry: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *mut kafka_common_acl_AclBinding_t {
+    if pattern.is_null() {
+        fail(Error::local_null_pointer("pattern"));
+    }
+    if entry.is_null() {
+        fail(Error::local_null_pointer("entry"));
+    }
     box_acl_binding(AclBinding::new(
         // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle, as
         // `resource_pattern_ref` requires; it is cloned, so the borrow lasts for this call only.

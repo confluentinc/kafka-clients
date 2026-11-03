@@ -35,11 +35,6 @@
 //!
 //! No Java counterpart: Java has no C boundary.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the exports adopt the helpers module by module")
-)]
-
 use std::ffi::{CStr, c_char, c_void};
 
 use crate::common::Error;
@@ -202,18 +197,19 @@ impl<F: Copy> NullableFn for Option<F> {
 /// checked it, as a registration stores a mandatory method.
 pub(crate) type Required<T> = <T as NullableFn>::Bare;
 
+/// The error a closure's precondition panic carries, for the tests of `ffi`.
+#[cfg(test)]
+pub(crate) fn caught(body: impl FnOnce() + std::panic::UnwindSafe) -> Error {
+    let payload = std::panic::catch_unwind(body).expect_err("expected a precondition panic");
+    match payload.downcast::<PreconditionPanic>() {
+        Ok(panic) => panic.0,
+        Err(_) => panic!("not a precondition panic"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The error a closure's precondition panic carries.
-    fn caught(body: impl FnOnce() + std::panic::UnwindSafe) -> Error {
-        let payload = std::panic::catch_unwind(body).expect_err("expected a precondition panic");
-        match payload.downcast::<PreconditionPanic>() {
-            Ok(panic) => panic.0,
-            Err(_) => panic!("not a precondition panic"),
-        }
-    }
 
     #[test]
     fn test_null_is_a_null_pointer_error_naming_the_parameter() {

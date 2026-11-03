@@ -19,7 +19,7 @@
 //! description (null for Java's null); `authorizedOperations()` is null when
 //! the broker did not report them.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ClassicGroupDescription, MemberDescription};
@@ -30,7 +30,7 @@ use crate::ffi::admin::topic_description::{acl_operation_list, list_acl_operatio
 use crate::ffi::common::classic_group_state::{self, kafka_common_ClassicGroupState_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupDescription`].
 #[repr(C)]
@@ -117,7 +117,7 @@ pub(crate) unsafe fn destroy_classic_group_description_element(element: *mut c_v
 }
 
 /// Reads a list of `const kafka_admin_MemberDescription_t *` into owned
-/// copies; `NULL` reads as empty.
+/// copies; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -125,9 +125,9 @@ pub(crate) unsafe fn destroy_classic_group_description_element(element: *mut c_v
 /// handles, alive and not mutated for this call.
 unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static str) -> Vec<MemberDescription> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
-    // mutated for this call, as `list_elements` requires; the borrowed slice does not outlive the
+    // mutated for this call, as `require_list` requires; the borrowed slice does not outlive the
     // call.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
@@ -150,7 +150,7 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static st
 /// - `protocol` - the group protocol type.
 /// - `protocol_data` - the group protocol data, such as the partition assignor name.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
-///   copied; `NULL` reads as empty.
+///   copied; must not be `NULL`.
 /// - `state` - the classic group state, a singleton.
 /// - `coordinator` - the group coordinator, copied; `NULL` if not known.
 ///
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
 /// - `protocol` - the group protocol type.
 /// - `protocol_data` - the group protocol data, such as the partition assignor name.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
-///   copied; `NULL` reads as empty.
+///   copied; must not be `NULL`.
 /// - `state` - the classic group state, a singleton.
 /// - `coordinator` - the group coordinator, copied; `NULL` if not known.
 /// - `authorized_operations` - the authorized operations for this group, a list of

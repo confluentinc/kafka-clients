@@ -81,9 +81,15 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
 ) -> *mut kafka_admin_MemberAssignment_t {
     // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
     // topic-partition handles, as `list_topic_partitions` requires.
-    let partitions: HashSet<TopicPartition> = unsafe { list_topic_partitions(topic_partitions, "topic_partitions") }
-        .into_iter()
-        .collect();
+    let partitions: HashSet<TopicPartition> = unsafe {
+        if topic_partitions.is_null() {
+            Default::default()
+        } else {
+            list_topic_partitions(topic_partitions, "topic_partitions")
+        }
+    }
+    .into_iter()
+    .collect();
     box_member_assignment(MemberAssignment::new(partitions))
 }
 

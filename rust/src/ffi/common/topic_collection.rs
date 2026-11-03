@@ -98,7 +98,7 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 
 /// # Parameters
 ///
-/// - `topics` - the topic ids, a list of `const kafka_common_Uuid_t *`, copied; `NULL` reads as empty
+/// - `topics` - the topic ids, a list of `const kafka_common_Uuid_t *`, copied; must not be `NULL`
 ///
 /// # Returns
 ///
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 
 /// # Parameters
 ///
-/// - `topics` - the topic names, a list of `const char *`, copied; `NULL` reads as empty
+/// - `topics` - the topic names, a list of `const char *`, copied; must not be `NULL`
 ///
 /// # Returns
 ///

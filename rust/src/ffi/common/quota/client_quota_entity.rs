@@ -23,7 +23,7 @@
 //! absence is the key not being present, the default entity is a `NULL` value,
 //! and `""` is a pointer to an empty string.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_map, require_ref};
 use std::ffi::{c_char, c_void};
 use std::ptr;
 
@@ -31,7 +31,6 @@ use crate::common::quota::ClientQuotaEntity;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_string_keyed_map, c_str_to_option, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_t,
-    map_entries,
 };
 
 /// Opaque handle to a [`ClientQuotaEntity`].
@@ -103,9 +102,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
     entries: *const kafka_Map_t,
 ) -> *mut kafka_common_quota_ClientQuotaEntity_t {
     // SAFETY: Per this function's `# Safety`, `entries` is a valid map, which the caller keeps
-    // alive and does not mutate for this call, as `map_entries` requires; the borrow of its entries
+    // alive and does not mutate for this call, as `require_map` requires; the borrow of its entries
     // ends when they are collected.
-    let entries = unsafe { map_entries(entries, "entries") }
+    let entries = unsafe { require_map(entries, "entries") }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key of `entries` is a valid

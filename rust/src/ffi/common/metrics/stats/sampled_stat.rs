@@ -30,7 +30,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_element_ref, require_fn, require_mut, require_ref};
+use crate::ffi::precondition::{Required, require_element_ref, require_fn, require_list, require_mut, require_ref};
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ use crate::ffi::common::metrics::metric_value_provider::kafka_common_metrics_Met
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_destroy, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_destroy, kafka_List_t};
 
 // ---------------------------------------------------------------------------
 // SampledStat
@@ -493,7 +493,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
 /// # Parameters
 ///
 /// - `samples` - The samples, `const kafka_common_metrics_stats_SampledStat_Sample_t *`
-///   elements read during the call; `NULL` reads as empty.
+///   elements read during the call; must not be `NULL`.
 /// - `config` - The metric configuration.
 /// - `now` - The current time in milliseconds.
 ///
@@ -514,9 +514,9 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
     now: i64,
 ) -> f64 {
     // SAFETY: Per this function's `# Safety`, `samples` is null or a valid list handle, alive and
-    // not mutated during this call, as `list_elements` requires; the slice is used only within this
+    // not mutated during this call, as `require_list` requires; the slice is used only within this
     // call, its samples being cloned before return.
-    let samples: Vec<Sample> = unsafe { list_elements(samples, "samples") }
+    let samples: Vec<Sample> = unsafe { require_list(samples, "samples") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `samples` is a valid sample
         // handle: an owned one, the `Box::into_raw` of a `Sample`, or one a kind's `update` or

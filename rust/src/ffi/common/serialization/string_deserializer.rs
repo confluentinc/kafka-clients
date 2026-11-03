@@ -166,6 +166,12 @@ mod tests {
     use std::ffi::{CStr, CString, c_char};
     use std::ptr;
 
+    /// An empty configuration map, shared by the tests of this module and never freed.
+    fn no_configs() -> *const crate::ffi::util::kafka_Map_t {
+        static MAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *MAP.get_or_init(|| crate::ffi::util::kafka_Map_new() as usize) as *const crate::ffi::util::kafka_Map_t
+    }
+
     use super::*;
     use crate::ffi::common::header::internals::record_headers::{
         box_record_headers, kafka_common_header_internals_RecordHeaders_destroy,
@@ -246,7 +252,7 @@ mod tests {
             assert_eq!(take_string(out), "a\u{FFFD}b");
 
             // The Java defaults: nothing to observe, nothing crashes.
-            kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1, &raw mut err);
+            kafka_common_serialization_Deserializer_configure(view, no_configs(), 1, &raw mut err);
             assert!(err.is_null());
             kafka_common_serialization_Deserializer_close(view, &raw mut err);
             assert!(err.is_null());

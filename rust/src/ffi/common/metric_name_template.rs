@@ -90,7 +90,7 @@ pub(crate) unsafe fn metric_name_template_ref<'a>(
 /// - `group` - the name of the group; may not be `NULL`
 /// - `description` - the description of the metric; may not be `NULL`
 /// - `tag_names` - the set of metric tag names, a list of `const char *` whose order is kept;
-///   `NULL` reads as empty
+///   must not be `NULL`
 ///
 /// # Safety
 ///
@@ -317,8 +317,10 @@ mod tests {
             kafka_string_destroy(s);
             kafka_common_MetricNameTemplate_destroy(handle);
 
+            let no_tags = kafka_List_new();
             let bare =
-                kafka_common_MetricNameTemplate_new(name.as_ptr(), group.as_ptr(), description.as_ptr(), ptr::null());
+                kafka_common_MetricNameTemplate_new(name.as_ptr(), group.as_ptr(), description.as_ptr(), no_tags);
+            kafka_List_destroy(no_tags);
             assert!(metric_name_template_ref(bare, "bare").tags().is_empty());
             kafka_common_MetricNameTemplate_destroy(bare);
             kafka_common_MetricNameTemplate_destroy(ptr::null_mut());

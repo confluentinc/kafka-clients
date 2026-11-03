@@ -56,7 +56,7 @@
 //! the calling thread, parking it while a report is awaited
 //! ([`block_on_thread`]), and [`ready`] drives the built-ins.
 
-use crate::ffi::precondition::require_ref;
+use crate::ffi::precondition::{require_map, require_ref};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_void};
 use std::pin::pin;
@@ -83,7 +83,6 @@ use crate::ffi::common::serialization::serializer::{
 use crate::ffi::common::{ErrorCompletion, box_error};
 use crate::ffi::util::{
     box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_destroy, kafka_Map_t,
-    map_entries,
 };
 
 pub(crate) mod byte_array_deserializer;
@@ -427,9 +426,9 @@ pub(crate) fn build_configs(configs: &HashMap<String, String>) -> *mut kafka_Map
 ///
 /// `configs` must be null or a valid map of NUL-terminated strings.
 pub(crate) unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String, String> {
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `map_entries`
+    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `require_map`
     // requires (null reads as empty); the borrow of its entries ends when they are collected.
-    unsafe { map_entries(configs, "configs") }
+    unsafe { require_map(configs, "configs") }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key and value of `configs` is a valid

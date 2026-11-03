@@ -21,14 +21,14 @@
 //! it after the view exists.
 
 use crate::common::Error;
-use crate::ffi::precondition::{require_element, require_ref, require_str_or};
+use crate::ffi::precondition::{fail, require_list, require_ref, require_str_or};
 use std::ffi::c_char;
 use std::sync::OnceLock;
 
 use crate::common::header::{Header, RecordHeader};
 use crate::ffi::common::header::{HeaderInner, kafka_common_header_Header_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{into_c_string, kafka_Bytes_t, kafka_List_t, list_elements};
+use crate::ffi::util::{into_c_string, kafka_Bytes_t, kafka_List_t};
 
 /// Opaque handle to a [`RecordHeader`]. Public although Java keeps the
 /// class in `internals`: it is the type the `Headers` getters return, and the
@@ -142,7 +142,7 @@ pub(crate) unsafe fn record_header_ref<'a>(
 }
 
 /// Reads a list of `const kafka_common_header_internals_RecordHeader_t *`
-/// into owned headers, in order; null reads as empty.
+/// into owned headers, in order; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -150,9 +150,9 @@ pub(crate) unsafe fn record_header_ref<'a>(
 /// handles.
 pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t, param: &'static str) -> Vec<RecordHeader> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, which does not mutate the
+    // `require_list` requires; the slice is used only within this call, which does not mutate the
     // list.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a record-header
@@ -160,7 +160,13 @@ pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t, param: &'sta
             // for this call only.
             unsafe {
                 record_header_ref(
-                    require_element(element, param) as *const kafka_common_header_internals_RecordHeader_t,
+                    {
+                        // Java's `RecordHeaders(Header[])` checks each header.
+                        if element.is_null() {
+                            fail(Error::local_null_pointer("Header cannot be null."));
+                        }
+                        element
+                    } as *const kafka_common_header_internals_RecordHeader_t,
                     param,
                 )
             }
@@ -323,7 +329,13 @@ mod tests {
             kafka_List_add(list, second as *mut c_void);
             let headers = list_record_headers(list, "value");
             assert_eq!(headers.iter().map(|h| h.key()).collect::<Vec<_>>(), ["a", "b"]);
-            assert!(list_record_headers(ptr::null(), "value").is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    list_record_headers(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
             kafka_List_destroy(list);
             kafka_common_header_internals_RecordHeader_destroy(first);
             kafka_common_header_internals_RecordHeader_destroy(second);

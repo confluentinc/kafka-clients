@@ -25,7 +25,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_fn, require_ref};
+use crate::ffi::precondition::{Required, require_fn, require_list, require_ref};
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -37,7 +37,7 @@ use crate::ffi::common::metrics::metric_config::{
     MetricConfigInner, kafka_common_metrics_MetricConfig_t, metric_config_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, kafka_List_destroy, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, destroy_boxed, kafka_List_destroy, kafka_List_t};
 
 /// Opaque handle to a [`CompoundStat`] implementation.
 #[repr(C)]
@@ -121,7 +121,7 @@ impl CompoundStat for CCompoundStat {
         // `kafka_common_metrics_CompoundStat_stats_fn_t`'s rustdoc, a list from `kafka_List_new`
         // that Rust now owns, so it stays alive and unmutated until it is destroyed below, after
         // the last use of the slice.
-        let stats = unsafe { list_elements(list, "list") }
+        let stats = unsafe { require_list(list, "list") }
             .iter()
             // SAFETY: Per `kafka_common_metrics_CompoundStat_stats_fn_t`'s rustdoc, each element is
             // an owned named-measurable handle from

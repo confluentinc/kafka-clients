@@ -1440,6 +1440,12 @@ mod tests {
     use std::ffi::{CStr, CString};
     use std::sync::Mutex;
 
+    /// An empty configuration map, shared by the tests of this module and never freed.
+    fn no_configs() -> *const crate::ffi::util::kafka_Map_t {
+        static MAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *MAP.get_or_init(|| crate::ffi::util::kafka_Map_new() as usize) as *const crate::ffi::util::kafka_Map_t
+    }
+
     use super::*;
     use crate::common::header::{Header, Headers};
     use crate::ffi::common::header::internals::record_headers::{
@@ -2106,7 +2112,7 @@ mod tests {
             assert!(err.is_null());
             assert_eq!(take_string(out), "TWO");
             // No-ops: nothing to observe, nothing crashes.
-            kafka_common_serialization_Deserializer_configure(handle, ptr::null(), 0, &raw mut err);
+            kafka_common_serialization_Deserializer_configure(handle, no_configs(), 0, &raw mut err);
             assert!(err.is_null());
             kafka_common_serialization_Deserializer_close(handle, &raw mut err);
             assert!(err.is_null());
@@ -2185,14 +2191,14 @@ mod tests {
         // is a valid slot pointing at null before each call, the error stored freed once.
         unsafe {
             let mut err = ptr::null_mut();
-            kafka_common_serialization_Deserializer_configure(handle, ptr::null(), 1, &raw mut err);
+            kafka_common_serialization_Deserializer_configure(handle, no_configs(), 1, &raw mut err);
             assert_eq!(message_of(err), "configure failed");
             err = ptr::null_mut();
             kafka_common_serialization_Deserializer_close(handle, &raw mut err);
             assert_eq!(message_of(err), "close failed");
 
             let opaque = &completions as *const Mutex<Vec<String>> as *mut c_void;
-            kafka_common_serialization_Deserializer_configure_cb(handle, ptr::null(), 0, Some(record_error), opaque);
+            kafka_common_serialization_Deserializer_configure_cb(handle, no_configs(), 0, Some(record_error), opaque);
             kafka_common_serialization_Deserializer_close_cb(handle, Some(record_error), opaque);
             assert_eq!(*completions.lock().unwrap(), ["configure failed", "close failed"]);
 

@@ -1246,6 +1246,12 @@ mod tests {
     use std::ffi::{CStr, CString};
     use std::sync::Mutex;
 
+    /// An empty configuration map, shared by the tests of this module and never freed.
+    fn no_configs() -> *const crate::ffi::util::kafka_Map_t {
+        static MAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *MAP.get_or_init(|| crate::ffi::util::kafka_Map_new() as usize) as *const crate::ffi::util::kafka_Map_t
+    }
+
     use super::*;
     use crate::common::header::{Header, Headers};
     use crate::ffi::common::header::internals::record_headers::{
@@ -1991,12 +1997,12 @@ mod tests {
         // slot pointing at null before each call, the error stored freed once.
         unsafe {
             let mut err = ptr::null_mut();
-            kafka_common_serialization_Serializer_configure(handle, ptr::null(), 1, &raw mut err);
+            kafka_common_serialization_Serializer_configure(handle, no_configs(), 1, &raw mut err);
             assert_eq!(message_of(err), "configure failed");
             err = ptr::null_mut();
             kafka_common_serialization_Serializer_close(handle, &raw mut err);
             assert_eq!(message_of(err), "close failed");
-            kafka_common_serialization_Serializer_configure_cb(handle, ptr::null(), 0, Some(record_error), opaque);
+            kafka_common_serialization_Serializer_configure_cb(handle, no_configs(), 0, Some(record_error), opaque);
             kafka_common_serialization_Serializer_close_cb(handle, Some(record_error), opaque);
         }
         assert_eq!(*errors.lock().unwrap(), ["configure failed", "close failed"]);
@@ -2035,11 +2041,11 @@ mod tests {
             let view = kafka_common_serialization_StringSerializer__as_Serializer(built_in);
             for handle in [handle.cast_const(), view] {
                 let mut err = ptr::null_mut();
-                kafka_common_serialization_Serializer_configure(handle.cast_mut(), ptr::null(), 1, &raw mut err);
+                kafka_common_serialization_Serializer_configure(handle.cast_mut(), no_configs(), 1, &raw mut err);
                 assert!(err.is_null());
                 kafka_common_serialization_Serializer_configure_cb(
                     handle.cast_mut(),
-                    ptr::null(),
+                    no_configs(),
                     1,
                     Some(count_completion),
                     opaque,

@@ -52,7 +52,7 @@
 
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{require_fn, require_ref, require_str};
+use crate::ffi::precondition::{fail, require_fn, require_ref, require_str};
 use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::{Arc, Weak};
@@ -494,6 +494,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -554,6 +557,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -603,6 +609,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -663,6 +672,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_end_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -712,6 +724,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to pause must be nonnull"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -770,6 +785,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     cb: kafka_consumer_ConsumerHandle_pause_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to pause must be nonnull"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -819,6 +837,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to resume must be nonnull"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -880,6 +901,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     cb: kafka_consumer_ConsumerHandle_resume_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to resume must be nonnull"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -1863,6 +1887,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -1923,6 +1950,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -1984,6 +2014,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2046,6 +2079,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -2104,6 +2140,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2164,6 +2203,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_end_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -2225,6 +2267,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout(
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2287,6 +2332,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
     cb: kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -2348,6 +2396,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
     timestamps_to_search: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2409,6 +2460,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_cb_t,
     opaque: *mut c_void,
 ) {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
@@ -2472,6 +2526,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
@@ -2535,6 +2592,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.

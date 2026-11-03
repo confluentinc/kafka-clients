@@ -146,7 +146,7 @@ pub extern "C" fn kafka_admin_CreateDelegationTokenOptions_new() -> *mut kafka_a
 /// # Parameters
 ///
 /// - `renewers` - the principals allowed to renew the token, a `kafka_List_t` of
-///   `kafka_common_security_auth_KafkaPrincipal_t *`; `NULL` reads as an empty list.
+///   `kafka_common_security_auth_KafkaPrincipal_t *`; must not be `NULL`.
 ///
 /// # Safety
 ///

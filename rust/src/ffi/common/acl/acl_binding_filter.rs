@@ -16,7 +16,8 @@
 //! `org.apache.kafka.common.acl.AclBindingFilter` (CLAUDE.md §4). The two
 //! filter getters return borrowed handles valid as long as this filter.
 
-use crate::ffi::precondition::require_ref;
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref};
 use std::ffi::c_char;
 use std::ptr;
 
@@ -117,6 +118,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_new(
     pattern_filter: *const kafka_common_resource_ResourcePatternFilter_t,
     entry_filter: *const kafka_common_acl_AccessControlEntryFilter_t,
 ) -> *mut kafka_common_acl_AclBindingFilter_t {
+    if pattern_filter.is_null() {
+        fail(Error::local_null_pointer("patternFilter"));
+    }
+    if entry_filter.is_null() {
+        fail(Error::local_null_pointer("entryFilter"));
+    }
     box_acl_binding_filter(AclBindingFilter::new(
         // SAFETY: Per this function's `# Safety`, `pattern_filter` is a valid
         // resource-pattern-filter handle, as `resource_pattern_filter_ref` requires; it is cloned,

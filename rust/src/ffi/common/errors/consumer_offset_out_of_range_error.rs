@@ -98,7 +98,11 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_new(
     // `map_topic_partition_i64` requires; the entries are copied into an owned map, so nothing
     // borrows it after this call.
     Payload::boxed(ConsumerOffsetOutOfRangeError::new(unsafe {
-        map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
+        if offset_out_of_range_partitions.is_null() {
+            Default::default()
+        } else {
+            map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
+        }
     }))
 }
 
@@ -132,7 +136,13 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_with_message
         // valid map of the stated types, `kafka_common_TopicPartition_t *` keys and `int64_t *`
         // values, as `map_topic_partition_i64` requires; the entries are copied into an owned map,
         // so nothing borrows it after this call.
-        unsafe { map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions") },
+        unsafe {
+            if offset_out_of_range_partitions.is_null() {
+                Default::default()
+            } else {
+                map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
+            }
+        },
     ))
 }
 

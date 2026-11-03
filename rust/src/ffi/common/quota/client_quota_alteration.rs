@@ -17,7 +17,7 @@
 //! `org.apache.kafka.common.quota.ClientQuotaAlteration` and
 //! `ClientQuotaAlteration.Op` (CLAUDE.md §4 rule 7).
 
-use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::precondition::{require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::quota::{ClientQuotaAlteration, Op};
@@ -25,7 +25,7 @@ use crate::ffi::common::quota::client_quota_entity::{
     client_quota_entity_ptr, client_quota_entity_ref, kafka_common_quota_ClientQuotaEntity_t,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ClientQuotaAlteration`].
 ///
@@ -238,9 +238,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
     ops: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaAlteration_t {
     // SAFETY: Per this function's `# Safety`, `ops` is null or a valid list, which the caller keeps
-    // alive and does not mutate for this call, as `list_elements` requires; the borrow of its
+    // alive and does not mutate for this call, as `require_list` requires; the borrow of its
     // elements ends when the ops are collected.
-    let ops = unsafe { list_elements(ops, "ops") }
+    let ops = unsafe { require_list(ops, "ops") }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `ops` is a valid op handle, as
         // `op_ref` requires; the op is cloned, so the borrow lasts for this call only.

@@ -37,7 +37,9 @@
 //! out-of-range controller index). `_build` leaves the builder usable, as
 //! Java's `build()` does, so one builder can build several mocks.
 
-use crate::ffi::precondition::{require_element, require_element_ref, require_mut, require_ref, require_str};
+use crate::ffi::precondition::{
+    require_element, require_element_ref, require_list, require_map, require_mut, require_ref, require_str,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_char;
 
@@ -51,7 +53,7 @@ use crate::ffi::common::topic_partition::map_topic_partition_i64;
 use crate::ffi::common::topic_partition_info::topic_partition_info_ref;
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries, map_strings};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t, list_strings, map_strings};
 
 /// Opaque handle to a [`MockAdminClient`].
 #[repr(C)]
@@ -88,8 +90,8 @@ unsafe fn map_string_i16(map: *const kafka_Map_t, param: &'static str) -> HashMa
     }
     // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a live map,
     // unmutated during the call since `kafka_Map_put`'s `# Safety` excludes another call using the
-    // map at the same time, as `map_entries` requires; the slice is dropped before the call returns.
-    unsafe { map_entries(map, param) }
+    // map at the same time, as `require_map` requires; the slice is dropped before the call returns.
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             (
@@ -301,23 +303,18 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     // SAFETY: Per this function's `# Safety`, `name` is a C string, as `require_str` requires;
     // it is copied.
     let name = unsafe { require_str(name, "name") };
-    let partitions = if partitions.is_null() {
-        Vec::new()
-    } else {
-        // SAFETY: `partitions` is non-null (checked above) and, per this function's `# Safety`, a
-        // live list, unmutated during the call since `kafka_List_add`'s `# Safety` excludes another
-        // call using the list at the same time, as `list_elements` requires; the slice is dropped
-        // before the call returns.
-        unsafe { list_elements(partitions, "partitions") }
-            .iter()
-            .map(|&p| {
-                // SAFETY: Per this function's `# Safety`, each element is a live
-                // `const kafka_common_TopicPartitionInfo_t *` handle, alive while it is cloned, as
-                // `topic_partition_info_ref` requires.
-                unsafe { topic_partition_info_ref(require_element(p, "partitions") as *const _, "partitions") }.clone()
-            })
-            .collect()
-    };
+    // SAFETY: Per this function's `# Safety`, `partitions` is `NULL` or a live list, unmutated
+    // during the call since `kafka_List_add`'s `# Safety` excludes another call using the list at
+    // the same time, as `require_list` requires; the slice is dropped before the call returns.
+    let partitions = unsafe { require_list(partitions, "partitions") }
+        .iter()
+        .map(|&p| {
+            // SAFETY: Per this function's `# Safety`, each element is a live
+            // `const kafka_common_TopicPartitionInfo_t *` handle, alive while it is cloned, as
+            // `topic_partition_info_ref` requires.
+            unsafe { topic_partition_info_ref(require_element(p, "partitions") as *const _, "partitions") }.clone()
+        })
+        .collect();
     let configs: Option<BTreeMap<String, String>> = if configs.is_null() {
         None
     } else {
@@ -710,9 +707,9 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs
 ) {
     // SAFETY: Per this function's `# Safety`, `broker_log_dirs` is null or a valid list,
     // unmutated during the call since `kafka_List_add`'s `# Safety` excludes another call using the
-    // list at the same time, as `list_elements` requires; the slice is dropped before the call
+    // list at the same time, as `require_list` requires; the slice is dropped before the call
     // returns.
-    let broker_log_dirs: Vec<Vec<String>> = unsafe { list_elements(broker_log_dirs, "broker_log_dirs") }
+    let broker_log_dirs: Vec<Vec<String>> = unsafe { require_list(broker_log_dirs, "broker_log_dirs") }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element is null or a valid list of C
         // strings, as `list_strings` requires; the strings are copied.
@@ -790,7 +787,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_partiti
 /// # Parameters
 ///
 /// - `feature_levels` - a `kafka_Map_t` of `const char *` to `const int16_t *`, copied during the
-///   call; `NULL` reads as empty
+///   call; must not be `NULL`
 ///
 /// # Safety
 ///
@@ -868,7 +865,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_max_supported_f
 /// # Parameters
 ///
 /// - `default_group_configs` - a `kafka_Map_t` of `const char *` to `const char *`, copied during
-///   the call; `NULL` reads as empty
+///   the call; must not be `NULL`
 ///
 /// # Safety
 ///

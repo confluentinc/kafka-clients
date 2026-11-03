@@ -979,6 +979,10 @@ unsafe fn owned_source(source: *mut kafka_common_Error_t) -> Error {
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
 unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
+    // Java's error stores a null set, which reads here as an empty one.
+    if topics.is_null() {
+        return HashSet::new();
+    }
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
     // NUL-terminated strings, as `list_strings` requires; the names are copied out, so
     // nothing borrows the list after this call.

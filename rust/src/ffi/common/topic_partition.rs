@@ -21,16 +21,13 @@
 //! across the boundary: single handles, `kafka_List_t`s of them and the
 //! `kafka_Map_t` shape of Java's `Map<TopicPartition, Long>`.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_map, require_ref, require_str};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::TopicPartition;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, box_map, destroy_boxed, into_c_string, kafka_List_t, kafka_Map_t, list_elements, map_entries,
-    owned_c_string,
-};
+use crate::ffi::util::{box_list, box_map, destroy_boxed, into_c_string, kafka_List_t, kafka_Map_t, owned_c_string};
 
 /// Opaque handle to a [`TopicPartition`].
 #[repr(C)]
@@ -105,7 +102,7 @@ pub(crate) fn sorted_topic_partition_list<'a>(tps: impl IntoIterator<Item = &'a 
 }
 
 /// Reads a list of `const kafka_common_TopicPartition_t *` into owned
-/// values; null reads as empty.
+/// values; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -113,9 +110,9 @@ pub(crate) fn sorted_topic_partition_list<'a>(tps: impl IntoIterator<Item = &'a 
 /// handles.
 pub(crate) unsafe fn list_topic_partitions(list: *const kafka_List_t, param: &'static str) -> Vec<TopicPartition> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a topic-partition
@@ -172,7 +169,7 @@ pub(crate) fn topic_partition_i64_map(map: &HashMap<TopicPartition, i64>) -> *mu
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` keys and
-/// `const int64_t *` values; null reads as empty.
+/// `const int64_t *` values; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -182,9 +179,9 @@ pub(crate) unsafe fn map_topic_partition_i64(
     map: *const kafka_Map_t,
     param: &'static str,
 ) -> HashMap<TopicPartition, i64> {
-    // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, as `map_entries`
+    // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, as `require_map`
     // requires; the slice is used only within this call, while nothing mutates the map.
-    unsafe { map_entries(map, param) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key of `map` is a topic-partition
@@ -368,7 +365,13 @@ mod tests {
             let value = kafka_Map_get(c_map, probe as *mut c_void) as *const i64;
             assert_eq!(*value, 10);
             assert_eq!(map_topic_partition_i64(c_map, "c_map"), map);
-            assert!(map_topic_partition_i64(ptr::null(), "value").is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    map_topic_partition_i64(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
             kafka_common_TopicPartition_destroy(probe);
             kafka_Map_destroy(c_map);
         }

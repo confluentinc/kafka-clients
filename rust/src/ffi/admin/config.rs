@@ -16,7 +16,7 @@
 //! (CLAUDE.md §4). `get` returns a borrowed entry handle valid as long as
 //! the config; `entries` returns owned copies.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 
@@ -25,7 +25,7 @@ use crate::ffi::admin::config_entry::{
     ConfigEntryInner, box_config_entry, config_entry_ref, destroy_config_entry_element, kafka_admin_ConfigEntry_t,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`Config`].
 #[repr(C)]
@@ -110,9 +110,9 @@ pub(crate) unsafe fn destroy_config_element(element: *mut c_void) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) -> *mut kafka_admin_Config_t {
     // SAFETY: Per this function's `# Safety`, `entries` is null or a valid list, alive and not
-    // mutated for this call, as `list_elements` requires; the borrowed slice is consumed by
+    // mutated for this call, as `require_list` requires; the borrowed slice is consumed by
     // `Config::new` within this call.
-    let entries = unsafe { list_elements(entries, "entries") }.iter().map(|&element| {
+    let entries = unsafe { require_list(entries, "entries") }.iter().map(|&element| {
         // SAFETY: Per this function's `# Safety`, each element of `entries` is a valid config-entry
         // handle, kept alive for this call, as `config_entry_ref` requires; the entry is cloned at
         // once.

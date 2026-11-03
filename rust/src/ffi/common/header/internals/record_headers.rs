@@ -304,7 +304,11 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
     // handles, as `list_record_headers` requires; the headers are cloned into owned values, so
     // nothing borrows the list after this call.
     box_record_headers(RecordHeaders::with_header_slice(&unsafe {
-        list_record_headers(headers, "headers")
+        if headers.is_null() {
+            Default::default()
+        } else {
+            list_record_headers(headers, "headers")
+        }
     }))
 }
 
@@ -330,7 +334,11 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
     // handles, as `list_record_headers` requires; the headers are cloned into owned values, so
     // nothing borrows the list after this call.
     box_record_headers(RecordHeaders::with_header_iter(unsafe {
-        list_record_headers(headers, "headers")
+        if headers.is_null() {
+            Default::default()
+        } else {
+            list_record_headers(headers, "headers")
+        }
     }))
 }
 

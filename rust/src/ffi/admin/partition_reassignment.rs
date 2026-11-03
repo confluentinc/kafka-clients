@@ -17,12 +17,12 @@
 //! plain value class: the handle points at the Rust value. Java's
 //! `List<Integer>` broker-id lists cross as `kafka_List_t`s of `int32_t *`.
 
-use crate::ffi::precondition::{require_element_ref, require_ref};
+use crate::ffi::precondition::{require_element_ref, require_list, require_ref};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::PartitionReassignment;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`PartitionReassignment`].
 #[repr(C)]
@@ -77,7 +77,7 @@ fn broker_id_list(ids: &[i32]) -> *mut kafka_List_t {
     box_list(elements, Some(destroy_boxed::<i32>))
 }
 
-/// Reads a list of `const int32_t *`; `NULL` reads as empty.
+/// Reads a list of `const int32_t *`; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -85,9 +85,9 @@ fn broker_id_list(ids: &[i32]) -> *mut kafka_List_t {
 /// kept alive and not mutated for this call.
 unsafe fn list_broker_ids(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_list` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
@@ -106,7 +106,7 @@ unsafe fn list_broker_ids(list: *const kafka_List_t, param: &'static str) -> Vec
 ///
 /// # Safety
 ///
-/// Each list must be `NULL`, read as empty, or a valid borrowed list whose elements point at
+/// Each list must be a valid borrowed list whose elements point at
 /// `int32_t`s; it is copied. The returned handle is owned, freed with
 /// [`kafka_admin_PartitionReassignment_destroy`].
 #[ffi_guard]

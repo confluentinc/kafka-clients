@@ -16,7 +16,7 @@
 //! `org.apache.kafka.clients.admin.UserScramCredentialsDescription`
 //! (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ScramCredentialInfo, UserScramCredentialsDescription};
@@ -25,7 +25,7 @@ use crate::ffi::admin::scram_credential_info::{
     scram_credential_info_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`UserScramCredentialsDescription`].
 #[repr(C)]
@@ -119,7 +119,7 @@ pub(crate) unsafe fn destroy_user_scram_credentials_description_element(element:
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `credential_infos` `NULL`, read as empty, or
+/// `name` must be a valid NUL-terminated string and `credential_infos`
 /// a valid borrowed list of `const kafka_admin_ScramCredentialInfo_t *`, copied. The returned
 /// handle is owned, freed with [`kafka_admin_UserScramCredentialsDescription_destroy`].
 #[ffi_guard]
@@ -129,9 +129,9 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
     credential_infos: *const kafka_List_t,
 ) -> *mut kafka_admin_UserScramCredentialsDescription_t {
     // SAFETY: Per this function's `# Safety`, `credential_infos` is null or a valid list, alive and
-    // not mutated for this call, as `list_elements` requires; the borrowed slice does not outlive
+    // not mutated for this call, as `require_list` requires; the borrowed slice does not outlive
     // the call.
-    let infos: Vec<ScramCredentialInfo> = unsafe { list_elements(credential_infos, "credential_infos") }
+    let infos: Vec<ScramCredentialInfo> = unsafe { require_list(credential_infos, "credential_infos") }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `credential_infos` is a

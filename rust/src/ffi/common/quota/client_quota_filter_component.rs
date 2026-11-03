@@ -15,13 +15,13 @@
 //! `kafka_common_quota_ClientQuotaFilterComponent_t`:
 //! `org.apache.kafka.common.quota.ClientQuotaFilterComponent` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::quota::ClientQuotaFilterComponent;
 use crate::ffi::common::quota::client_quota_match::{client_quota_match_ptr, kafka_common_quota_ClientQuotaMatch_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ClientQuotaFilterComponent`].
 #[repr(C)]
@@ -95,8 +95,8 @@ pub(crate) unsafe fn list_client_quota_filter_components(
 ) -> Vec<ClientQuotaFilterComponent> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, kept alive and
     // unmutated by the caller for this call, which is as long as the borrow of its elements lasts,
-    // as `list_elements` requires.
-    unsafe { list_elements(list, param) }
+    // as `require_list` requires.
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a filter-component

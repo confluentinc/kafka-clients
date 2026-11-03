@@ -415,23 +415,19 @@ mod tests {
 
     #[test]
     fn constructors_build_owned_handles() {
-        // SAFETY: Test code: the null lists and leader are accepted by the constructors; each
-        // handle comes from a constructor and is destroyed once, after the calls reading it, and
-        // the `elr` list is destroyed once, after it is read.
+        // SAFETY: Test code: the null leader is accepted by the constructors; each handle comes
+        // from a constructor and is destroyed once, after the calls reading it, and the `empty` and
+        // `elr` lists are destroyed once, after they are read.
         unsafe {
-            let plain = kafka_common_TopicPartitionInfo_new(4, ptr::null(), ptr::null(), ptr::null());
+            let empty = crate::ffi::util::kafka_List_new();
+            let plain = kafka_common_TopicPartitionInfo_new(4, ptr::null(), empty, empty);
             assert_eq!(kafka_common_TopicPartitionInfo_partition(plain), 4);
             assert!(kafka_common_TopicPartitionInfo_elr(plain).is_null());
             kafka_common_TopicPartitionInfo_destroy(plain);
 
-            let with_elr = kafka_common_TopicPartitionInfo_with_elr_last_known_elr(
-                4,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-            );
+            let with_elr =
+                kafka_common_TopicPartitionInfo_with_elr_last_known_elr(4, ptr::null(), empty, empty, empty, empty);
+            kafka_List_destroy(empty);
             let elr = kafka_common_TopicPartitionInfo_elr(with_elr);
             assert!(!elr.is_null());
             kafka_List_destroy(elr);

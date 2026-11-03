@@ -22,7 +22,7 @@
 //! so it follows the error-slot shape. The handle keeps a NUL-terminated copy
 //! of the reason so its getter borrows.
 
-use crate::ffi::precondition::{require_element, require_mut, require_ref};
+use crate::ffi::precondition::{require_element, require_list, require_mut, require_ref};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -33,7 +33,7 @@ use crate::ffi::admin::member_to_remove::{
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_option, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_option, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`RemoveMembersFromConsumerGroupOptions`], owned by
 /// the caller and freed with
@@ -140,7 +140,7 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
 /// # Parameters
 ///
 /// - `members` - the members to remove, a `kafka_List_t` of `kafka_admin_MemberToRemove_t *`;
-///   `NULL` reads as empty.
+///   must not be `NULL`.
 ///
 /// # Returns
 ///
@@ -165,8 +165,8 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t {
     // SAFETY: Per this function's `# Safety`, `members` is null or a valid list, not mutated during
-    // the call, which is as long as the borrowed elements are used, as `list_elements` requires.
-    let members: Vec<MemberToRemove> = unsafe { list_elements(members, "members") }
+    // the call, which is as long as the borrowed elements are used, as `require_list` requires.
+    let members: Vec<MemberToRemove> = unsafe { require_list(members, "members") }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `members` is a live

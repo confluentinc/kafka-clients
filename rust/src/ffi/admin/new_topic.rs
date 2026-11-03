@@ -20,7 +20,7 @@
 //! `kafka_Map_t` of `int32_t *` keys to `kafka_List_t *` values holding
 //! `int32_t *` elements.
 
-use crate::ffi::precondition::{require_element_ref, require_mut, require_ref, require_str};
+use crate::ffi::precondition::{require_element_ref, require_list, require_map, require_mut, require_ref, require_str};
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -28,7 +28,7 @@ use crate::admin::NewTopic;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, destroy_string_element, into_c_string,
-    kafka_List_destroy, kafka_List_t, kafka_Map_t, list_elements, map_entries, owned_c_string,
+    kafka_List_destroy, kafka_List_t, kafka_Map_t, owned_c_string,
 };
 
 /// Opaque handle to a [`NewTopic`].
@@ -83,7 +83,7 @@ pub(crate) fn box_new_topic(topic: NewTopic) -> *mut kafka_admin_NewTopic_t {
     Box::into_raw(Box::new(NewTopicInner::new(topic))) as *mut kafka_admin_NewTopic_t
 }
 
-/// Reads a borrowed list of `const int32_t *` into values; `NULL` reads as empty.
+/// Reads a borrowed list of `const int32_t *` into values; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -91,9 +91,9 @@ pub(crate) fn box_new_topic(topic: NewTopic) -> *mut kafka_admin_NewTopic_t {
 /// kept alive and not mutated for this call.
 unsafe fn list_i32(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_list` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
@@ -135,7 +135,7 @@ unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 }
 
 /// Reads a borrowed map of `const int32_t *` to `const kafka_List_t *` of
-/// `const int32_t *`; `NULL` reads as empty.
+/// `const int32_t *`; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -144,9 +144,9 @@ unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 /// and not mutated for this call.
 unsafe fn map_replicas_assignments(map: *const kafka_Map_t, param: &'static str) -> BTreeMap<i32, Vec<i32>> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
-    // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_map` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { map_entries(map, param) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 
 /// `new NewTopic(String name, Map<Integer, List<Integer>> replicasAssignments)`: a borrowed map of
 /// `const int32_t *` partition ids to `const kafka_List_t *` of `const int32_t *` broker ids,
-/// copied (`NULL` reads as empty).
+/// copied.
 ///
 /// # Parameters
 ///
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
     replicas_assignments: *const kafka_Map_t,
 ) -> *mut kafka_admin_NewTopic_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `require_str` requires, and `replicas_assignments` null or a valid map of the shape
+    // `require_str` requires, and `replicas_assignments` a valid map of the shape
     // `map_replicas_assignments` requires, kept alive and not mutated for this call.
     box_new_topic(NewTopic::with_replicas_assignments(
         unsafe { require_str(name, "name") },
@@ -348,8 +348,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     } else {
         // SAFETY: `configs` is non-null (checked above) and, per this function's `# Safety`, a
         // valid map, kept alive by the caller for this call, which is as long as the borrow of its
-        // entries lasts, as `map_entries` requires.
-        let entries = unsafe { map_entries(configs, "configs") };
+        // entries lasts, as `require_map` requires.
+        let entries = unsafe { require_map(configs, "configs") };
         let mut copied = BTreeMap::new();
         for &(name, value) in entries.iter() {
             // SAFETY: Per this function's `# Safety`, every key is a NUL-terminated string, as

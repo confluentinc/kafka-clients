@@ -322,7 +322,9 @@ mod tests {
             kafka_string_destroy(s);
             kafka_common_MetricName_destroy(handle);
 
-            let bare = kafka_common_MetricName_new(name.as_ptr(), group.as_ptr(), description.as_ptr(), ptr::null());
+            let no_tags = kafka_Map_new();
+            let bare = kafka_common_MetricName_new(name.as_ptr(), group.as_ptr(), description.as_ptr(), no_tags);
+            kafka_Map_destroy(no_tags);
             assert!(metric_name_ref(bare, "bare").tags().is_empty());
             kafka_common_MetricName_destroy(bare);
             kafka_common_MetricName_destroy(ptr::null_mut());

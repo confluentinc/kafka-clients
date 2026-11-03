@@ -20,7 +20,7 @@
 //! the broker did not report them; `Optional<Integer> groupEpoch()` and
 //! `targetAssignmentEpoch()` cross as `-1` when empty.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ConsumerGroupDescription, MemberDescription};
@@ -32,7 +32,7 @@ use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ConsumerGroupDescription`].
 #[repr(C)]
@@ -117,7 +117,7 @@ pub(crate) unsafe fn destroy_consumer_group_description_element(element: *mut c_
 }
 
 /// Reads a list of `const kafka_admin_MemberDescription_t *` into owned
-/// copies; `NULL` reads as empty.
+/// copies; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -125,9 +125,9 @@ pub(crate) unsafe fn destroy_consumer_group_description_element(element: *mut c_
 /// handles, alive and not mutated for this call.
 unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static str) -> Vec<MemberDescription> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
-    // mutated for this call, as `list_elements` requires; the borrowed slice does not outlive the
+    // mutated for this call, as `require_list` requires; the borrowed slice does not outlive the
     // call.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
@@ -158,7 +158,7 @@ fn member_description_list(members: &[MemberDescription]) -> *mut kafka_List_t {
 /// - `group_id` - the id of the consumer group.
 /// - `is_simple_consumer_group` - 1 if the group is simple, else 0.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
-///   copied; `NULL` reads as empty.
+///   copied; must not be `NULL`.
 /// - `partition_assignor` - the consumer group partition assignor.
 /// - `group_type` - the group type, a singleton.
 /// - `group_state` - the group state, a singleton.

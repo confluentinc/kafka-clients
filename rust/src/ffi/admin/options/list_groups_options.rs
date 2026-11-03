@@ -22,7 +22,7 @@
 //! `kafka_common_GroupType_t` singletons both ways; the Java `Set`s come
 //! back as lists sorted by name so a C caller sees a deterministic order.
 
-use crate::ffi::precondition::{require_element, require_mut, require_ref};
+use crate::ffi::precondition::{require_element, require_list, require_mut, require_ref};
 use std::collections::HashSet;
 use std::ffi::c_void;
 
@@ -31,7 +31,7 @@ use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_state::{self as group_state_ffi, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self as group_type_ffi, kafka_common_GroupType_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, kafka_List_t, list_elements, list_string_set, sorted_string_list};
+use crate::ffi::util::{box_list, kafka_List_t, list_string_set, sorted_string_list};
 
 /// Opaque handle to a [`ListGroupsOptions`], owned by the caller and freed
 /// with [`kafka_admin_ListGroupsOptions_destroy`].
@@ -86,9 +86,9 @@ fn boxed(options: ListGroupsOptions) -> *mut kafka_admin_ListGroupsOptions_t {
 /// elements are `kafka_common_GroupState_t` singletons.
 unsafe fn list_group_states(list: *const kafka_List_t, param: &'static str) -> HashSet<GroupState> {
     // SAFETY: Per this function's `# Safety`, `list` is `NULL` or a valid list, which the caller
-    // keeps alive for this call and nothing mutates meanwhile, as `list_elements` requires; the
+    // keeps alive for this call and nothing mutates meanwhile, as `require_list` requires; the
     // borrow ends with the call.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, every `element` is a `kafka_common_GroupState_t`
         // singleton, which `group_state_ffi::value_of` requires.
@@ -106,9 +106,9 @@ unsafe fn list_group_states(list: *const kafka_List_t, param: &'static str) -> H
 /// elements are `kafka_common_GroupType_t` singletons.
 unsafe fn list_group_types(list: *const kafka_List_t, param: &'static str) -> HashSet<GroupType> {
     // SAFETY: Per this function's `# Safety`, `list` is `NULL` or a valid list, which the caller
-    // keeps alive for this call and nothing mutates meanwhile, as `list_elements` requires; the
+    // keeps alive for this call and nothing mutates meanwhile, as `require_list` requires; the
     // borrow ends with the call.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, every `element` is a `kafka_common_GroupType_t`
         // singleton, which `group_type_ffi::value_of` requires.
@@ -227,7 +227,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_in_group_states(
 ) {
     // SAFETY: Per this function's `# Safety`, `group_states` is `NULL` or a valid list, not mutated
     // during the call, whose elements are group-state singletons, as `list_group_states` requires.
-    let group_states = unsafe { list_group_states(group_states, "group_states") };
+    let group_states = unsafe {
+        if group_states.is_null() {
+            Default::default()
+        } else {
+            list_group_states(group_states, "group_states")
+        }
+    };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
@@ -256,7 +262,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_protocol_types(
     // SAFETY: Per this function's `# Safety`, `protocol_types` is `NULL` or a valid list whose
     // elements are NUL-terminated strings, as `list_string_set` requires; they are copied during
     // the call.
-    let protocol_types = unsafe { list_string_set(protocol_types, "protocol_types") };
+    let protocol_types = unsafe {
+        if protocol_types.is_null() {
+            Default::default()
+        } else {
+            list_string_set(protocol_types, "protocol_types")
+        }
+    };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
@@ -284,7 +296,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_types(
 ) {
     // SAFETY: Per this function's `# Safety`, `types` is `NULL` or a valid list, not mutated during
     // the call, whose elements are group-type singletons, as `list_group_types` requires.
-    let types = unsafe { list_group_types(types, "types") };
+    let types = unsafe {
+        if types.is_null() {
+            Default::default()
+        } else {
+            list_group_types(types, "types")
+        }
+    };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.

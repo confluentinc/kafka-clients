@@ -205,37 +205,34 @@ use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition
 use crate::ffi::common::topic_partition_replica::topic_partition_replica_ref;
 use crate::ffi::consumer::offset_and_metadata::map_offset_and_metadata;
 use crate::ffi::ffi_guard;
-use crate::ffi::precondition::{require_element, require_ref, require_str};
-use crate::ffi::util::{
-    c_str_to_string, kafka_Bytes_t, kafka_List_t, kafka_Map_t, list_elements, list_strings, map_entries,
-};
+use crate::ffi::precondition::{require_element, require_list, require_map, require_ref, require_str};
+use crate::ffi::util::{c_str_to_string, kafka_Bytes_t, kafka_List_t, kafka_Map_t, list_strings};
 
 // ---------------------------------------------------------------------------
 // Input readers
 // ---------------------------------------------------------------------------
 
-/// The elements of a borrowed list, each converted by `read`; `NULL` reads as
-/// empty. `read` is called on the list's elements only, once each.
+/// The elements of the mandatory borrowed list `list`, each converted by
+/// `read`; panics with `precondition::null` when the list or an element is
+/// `NULL`. `read` is called on the list's elements only, once each.
 ///
 /// # Safety
 ///
 /// `list` must be `NULL` or a valid list handle, alive and not mutated during
 /// the call.
 unsafe fn list_refs<T>(list: *const kafka_List_t, param: &'static str, read: impl Fn(*mut c_void) -> T) -> Vec<T> {
-    if list.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid
-    // list handle, alive and unmutated during the call, as `list_elements` requires; the slice is
-    // dropped before the call returns.
-    unsafe { list_elements(list, param) }
+    // SAFETY: Per this function's `# Safety`, `list` is `NULL` or a valid list handle, alive and
+    // unmutated during the call, as `require_list` requires; the slice is dropped before the call
+    // returns.
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&p| read(require_element(p, param)))
         .collect()
 }
 
-/// The entries of a borrowed map, keys and values converted; `NULL` reads as
-/// empty. `read_key` is called on the map's keys only and `read_value` on
+/// The entries of the mandatory borrowed map `map`, keys and values
+/// converted; panics with `precondition::null` when the map or a key is
+/// `NULL`. `read_key` is called on the map's keys only and `read_value` on
 /// its values only, once each.
 ///
 /// # Safety
@@ -251,13 +248,10 @@ unsafe fn keyed<K, V>(
 where
     K: std::hash::Hash + Eq,
 {
-    if map.is_null() {
-        return HashMap::new();
-    }
-    // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a valid map
-    // handle, alive and unmutated during the call, as `map_entries` requires; the slice is
-    // dropped before the call returns.
-    unsafe { map_entries(map, param) }
+    // SAFETY: Per this function's `# Safety`, `map` is `NULL` or a valid map handle, alive and
+    // unmutated during the call, as `require_map` requires; the slice is dropped before the call
+    // returns.
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| (read_key(require_element(k, param)), read_value(v)))
         .collect()
@@ -362,8 +356,8 @@ unsafe fn bytes_of(bytes: &kafka_Bytes_t) -> &[u8] {
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `new_topics` is a `kafka_List_t` of `const kafka_admin_NewTopic_t *`, each live; `NULL` reads
-///   as an empty list.
+/// - `new_topics` is a `kafka_List_t` of `const kafka_admin_NewTopic_t *`, each live; must not be
+///   `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_CreateTopicsResult_destroy`.
 #[ffi_guard]
@@ -413,8 +407,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `new_topics` is a `kafka_List_t` of `const kafka_admin_NewTopic_t *`, each live; `NULL` reads
-///   as an empty list.
+/// - `new_topics` is a `kafka_List_t` of `const kafka_admin_NewTopic_t *`, each live; must not be
+///   `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_CreateTopicsResult_destroy`.
 #[ffi_guard]
@@ -688,8 +682,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_topics_with_options(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `topic_names` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `topic_names` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_DescribeTopicsResult_destroy`.
 #[ffi_guard]
@@ -727,8 +721,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `topic_names` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `topic_names` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_DescribeTopicsResult_destroy`.
 #[ffi_guard]
@@ -853,8 +847,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics_options(
 /// borrowed and copied during the call:
 ///
 /// - `new_partitions` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
-///   kafka_admin_NewPartitions_t *` values, each live; `NULL` reads as an empty map and a `NULL`
-///   key as an empty string.
+///   kafka_admin_NewPartitions_t *` values, each live; neither it nor a
+///   key may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_CreatePartitionsResult_destroy`.
@@ -930,8 +924,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions(
 /// borrowed and copied during the call:
 ///
 /// - `new_partitions` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
-///   kafka_admin_NewPartitions_t *` values, each live; `NULL` reads as an empty map and a `NULL`
-///   key as an empty string.
+///   kafka_admin_NewPartitions_t *` values, each live; neither it nor a
+///   key may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_CreatePartitionsResult_destroy`.
@@ -987,7 +981,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions_with_options(
 /// borrowed and copied during the call:
 ///
 /// - `records_to_delete` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to
-///   `const kafka_admin_RecordsToDelete_t *` values, each live; `NULL` reads as an empty map.
+///   `const kafka_admin_RecordsToDelete_t *` values, each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_DeleteRecordsResult_destroy`.
 #[ffi_guard]
@@ -1035,7 +1029,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
 /// borrowed and copied during the call:
 ///
 /// - `records_to_delete` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to
-///   `const kafka_admin_RecordsToDelete_t *` values, each live; `NULL` reads as an empty map.
+///   `const kafka_admin_RecordsToDelete_t *` values, each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_DeleteRecordsResult_destroy`.
 #[ffi_guard]
@@ -1084,8 +1078,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
-///   reads as an empty list.
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; must
+///   not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeProducersResult_destroy`.
@@ -1126,8 +1120,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
-///   reads as an empty list.
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; must
+///   not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeProducersResult_destroy`.
@@ -1326,8 +1320,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller_with_options(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
-///   empty list and a `NULL` element as an empty string.
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeTransactionsResult_destroy`.
@@ -1367,8 +1361,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
-///   empty list and a `NULL` element as an empty string.
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeTransactionsResult_destroy`.
@@ -1416,8 +1410,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
-///   empty list and a `NULL` element as an empty string.
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_FenceProducersResult_destroy`.
 #[ffi_guard]
@@ -1455,8 +1449,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
-///   empty list and a `NULL` element as an empty string.
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_FenceProducersResult_destroy`.
 #[ffi_guard]
@@ -1704,7 +1698,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster_with_options(
 /// borrowed and copied during the call:
 ///
 /// - `config_resources` is a `kafka_List_t` of `const kafka_common_config_ConfigResource_t *`, each
-///   live; `NULL` reads as an empty list.
+///   live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeConfigsResult_destroy`.
@@ -1775,7 +1769,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs(
 /// borrowed and copied during the call:
 ///
 /// - `config_resources` is a `kafka_List_t` of `const kafka_common_config_ConfigResource_t *`, each
-///   live; `NULL` reads as an empty list.
+///   live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeConfigsResult_destroy`.
@@ -1989,7 +1983,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources(
 /// borrowed and copied during the call:
 ///
 /// - `config_resource_types` is a `kafka_List_t` of `const
-///   kafka_common_config_ConfigResource_Type_t *` singletons; `NULL` reads as an empty list.
+///   kafka_common_config_ConfigResource_Type_t *` singletons; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_ListConfigResourcesResult_destroy`.
@@ -2044,8 +2038,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `brokers` is a `kafka_List_t` of `const int32_t *`, each pointing at a live value; `NULL`
-///   reads as an empty list.
+/// - `brokers` is a `kafka_List_t` of `const int32_t *`, each pointing at a live value; must not be
+///   `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeLogDirsResult_destroy`.
@@ -2087,8 +2081,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `brokers` is a `kafka_List_t` of `const int32_t *`, each pointing at a live value; `NULL`
-///   reads as an empty list.
+/// - `brokers` is a `kafka_List_t` of `const int32_t *`, each pointing at a live value; must not be
+///   `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeLogDirsResult_destroy`.
@@ -2144,8 +2138,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
 /// borrowed and copied during the call:
 ///
 /// - `replica_assignment` is a `kafka_Map_t` of `const kafka_common_TopicPartitionReplica_t *`
-///   keys, each live, to NUL-terminated `const char *` log directory values; `NULL` reads as an
-///   empty map and a `NULL` value as an empty string.
+///   keys, each live, to NUL-terminated `const char *` log directory values; must not be `NULL`,
+///   and a `NULL` value reads as an empty string.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterReplicaLogDirsResult_destroy`.
@@ -2203,8 +2197,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs(
 /// borrowed and copied during the call:
 ///
 /// - `replica_assignment` is a `kafka_Map_t` of `const kafka_common_TopicPartitionReplica_t *`
-///   keys, each live, to NUL-terminated `const char *` log directory values; `NULL` reads as an
-///   empty map and a `NULL` value as an empty string.
+///   keys, each live, to NUL-terminated `const char *` log directory values; must not be `NULL`,
+///   and a `NULL` value reads as an empty string.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterReplicaLogDirsResult_destroy`.
@@ -2263,7 +2257,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs_with_options(
 /// borrowed and copied during the call:
 ///
 /// - `replicas` is a `kafka_List_t` of `const kafka_common_TopicPartitionReplica_t *`, each live;
-///   `NULL` reads as an empty list.
+///   must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeReplicaLogDirsResult_destroy`.
@@ -2311,7 +2305,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs(
 /// borrowed and copied during the call:
 ///
 /// - `replicas` is a `kafka_List_t` of `const kafka_common_TopicPartitionReplica_t *`, each live;
-///   `NULL` reads as an empty list.
+///   must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeReplicaLogDirsResult_destroy`.
@@ -2642,8 +2636,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
-///   reads as an empty list.
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; must
+///   not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_ListPartitionReassignmentsResult_destroy`.
@@ -2790,7 +2784,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_par
 /// borrowed and copied during the call:
 ///
 /// - `topic_partition_offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys
-///   to `const kafka_admin_OffsetSpec_t *` values, each live; `NULL` reads as an empty map.
+///   to `const kafka_admin_OffsetSpec_t *` values, each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_ListOffsetsResult_destroy`.
 #[ffi_guard]
@@ -2841,7 +2835,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
 /// borrowed and copied during the call:
 ///
 /// - `topic_partition_offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys
-///   to `const kafka_admin_OffsetSpec_t *` values, each live; `NULL` reads as an empty map.
+///   to `const kafka_admin_OffsetSpec_t *` values, each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_ListOffsetsResult_destroy`.
 #[ffi_guard]
@@ -2955,8 +2949,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_groups_with_options(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeConsumerGroupsResult_destroy`.
@@ -2995,8 +2989,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeConsumerGroupsResult_destroy`.
@@ -3043,8 +3037,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeClassicGroupsResult_destroy`.
@@ -3083,8 +3077,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeClassicGroupsResult_destroy`.
@@ -3211,8 +3205,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 /// borrowed and copied during the call:
 ///
 /// - `group_specs` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
-///   kafka_admin_ListConsumerGroupOffsetsSpec_t *` values, each live; `NULL` reads as an empty map
-///   and a `NULL` key as an empty string.
+///   kafka_admin_ListConsumerGroupOffsetsSpec_t *` values, each live; neither it nor a
+///   key may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
@@ -3260,8 +3254,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 /// borrowed and copied during the call:
 ///
 /// - `group_specs` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
-///   kafka_admin_ListConsumerGroupOffsetsSpec_t *` values, each live; `NULL` reads as an empty map
-///   and a `NULL` key as an empty string.
+///   kafka_admin_ListConsumerGroupOffsetsSpec_t *` values, each live; neither it nor a
+///   key may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
@@ -3318,7 +3312,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
 /// borrowed and copied during the call:
 ///
 /// - `offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
-///   kafka_consumer_OffsetAndMetadata_t *` values, each live; `NULL` reads as an empty map.
+///   kafka_consumer_OffsetAndMetadata_t *` values, each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`.
@@ -3367,7 +3361,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
 /// borrowed and copied during the call:
 ///
 /// - `offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
-///   kafka_consumer_OffsetAndMetadata_t *` values, each live; `NULL` reads as an empty map.
+///   kafka_consumer_OffsetAndMetadata_t *` values, each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`.
@@ -3419,8 +3413,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_opt
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
-///   reads as an empty list.
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; must
+///   not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`.
@@ -3467,8 +3461,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
-///   reads as an empty list.
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; must
+///   not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`.
@@ -3519,8 +3513,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_op
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DeleteConsumerGroupsResult_destroy`.
@@ -3559,8 +3553,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
-///   list and a `NULL` element as an empty string.
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; neither it nor an
+///   element may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DeleteConsumerGroupsResult_destroy`.
@@ -3649,8 +3643,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_remove_members_from_consumer_group_wi
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `acls` is a `kafka_List_t` of `const kafka_common_acl_AclBinding_t *`, each live; `NULL` reads
-///   as an empty list.
+/// - `acls` is a `kafka_List_t` of `const kafka_common_acl_AclBinding_t *`, each live; must not be
+///   `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_CreateAclsResult_destroy`.
 #[ffi_guard]
@@ -3696,8 +3690,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `acls` is a `kafka_List_t` of `const kafka_common_acl_AclBinding_t *`, each live; `NULL` reads
-///   as an empty list.
+/// - `acls` is a `kafka_List_t` of `const kafka_common_acl_AclBinding_t *`, each live; must not be
+///   `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_CreateAclsResult_destroy`.
 #[ffi_guard]
@@ -3824,7 +3818,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_acls_with_options(
 /// borrowed and copied during the call:
 ///
 /// - `filters` is a `kafka_List_t` of `const kafka_common_acl_AclBindingFilter_t *`, each live;
-///   `NULL` reads as an empty list.
+///   must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_DeleteAclsResult_destroy`.
 #[ffi_guard]
@@ -3870,7 +3864,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls(
 /// borrowed and copied during the call:
 ///
 /// - `filters` is a `kafka_List_t` of `const kafka_common_acl_AclBindingFilter_t *`, each live;
-///   `NULL` reads as an empty list.
+///   must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_DeleteAclsResult_destroy`.
 #[ffi_guard]
@@ -4015,7 +4009,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas_with_options(
 /// borrowed and copied during the call:
 ///
 /// - `entries` is a `kafka_List_t` of `const kafka_common_quota_ClientQuotaAlteration_t *`, each
-///   live; `NULL` reads as an empty list.
+///   live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterClientQuotasResult_destroy`.
@@ -4076,7 +4070,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas(
 /// borrowed and copied during the call:
 ///
 /// - `entries` is a `kafka_List_t` of `const kafka_common_quota_ClientQuotaAlteration_t *`, each
-///   live; `NULL` reads as an empty list.
+///   live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterClientQuotasResult_destroy`.
@@ -4154,8 +4148,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials(
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `users` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty list
-///   and a `NULL` element as an empty string.
+/// - `users` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL`, as an empty list,
+///   describes every user; an element must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
@@ -4171,7 +4165,13 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
     // SAFETY: Per this function's `# Safety`, `users` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let users_ = unsafe { list_strings(users, "users") };
+    let users_ = unsafe {
+        if users.is_null() {
+            Default::default()
+        } else {
+            list_strings(users, "users")
+        }
+    };
     let result = client.call(|admin| admin.describe_user_scram_credentials_with_users(&users_));
     box_describe_user_scram_credentials_result(result, &client.future_ctx())
 }
@@ -4209,8 +4209,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
 /// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
 /// borrowed and copied during the call:
 ///
-/// - `users` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty list
-///   and a `NULL` element as an empty string.
+/// - `users` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL`, as an empty list,
+///   describes every user; an element must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
@@ -4227,7 +4227,13 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
     // SAFETY: Per this function's `# Safety`, `users` is null or a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
-    let users_ = unsafe { list_strings(users, "users") };
+    let users_ = unsafe {
+        if users.is_null() {
+            Default::default()
+        } else {
+            list_strings(users, "users")
+        }
+    };
     // SAFETY: Per this function's `# Safety`, `options` is a live
     // `kafka_admin_DescribeUserScramCredentialsOptions_t` handle that no other call mutates during
     // this one, so no setter runs on it while it is cloned, as
@@ -4257,7 +4263,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
 /// borrowed and copied during the call:
 ///
 /// - `alterations` is a `kafka_List_t` of `const kafka_admin_UserScramCredentialAlteration_t *`,
-///   each live; `NULL` reads as an empty list.
+///   each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterUserScramCredentialsResult_destroy`.
@@ -4321,7 +4327,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials(
 /// borrowed and copied during the call:
 ///
 /// - `alterations` is a `kafka_List_t` of `const kafka_admin_UserScramCredentialAlteration_t *`,
-///   each live; `NULL` reads as an empty list.
+///   each live; must not be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterUserScramCredentialsResult_destroy`.
@@ -4802,8 +4808,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_features_with_options(
 /// valid slot pointing at `NULL`. The inputs are borrowed and copied during the call:
 ///
 /// - `feature_updates` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
-///   kafka_admin_FeatureUpdate_t *` values, each live; `NULL` reads as an empty map and a `NULL`
-///   key as an empty string.
+///   kafka_admin_FeatureUpdate_t *` values, each live; neither it nor a
+///   key may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_UpdateFeaturesResult_destroy`.
 #[ffi_guard]
@@ -4901,8 +4907,8 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
 /// valid slot pointing at `NULL`. The inputs are borrowed and copied during the call:
 ///
 /// - `feature_updates` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
-///   kafka_admin_FeatureUpdate_t *` values, each live; `NULL` reads as an empty map and a `NULL`
-///   key as an empty string.
+///   kafka_admin_FeatureUpdate_t *` values, each live; neither it nor a
+///   key may be `NULL`.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_UpdateFeaturesResult_destroy`.
 #[ffi_guard]

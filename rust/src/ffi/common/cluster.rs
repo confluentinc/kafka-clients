@@ -21,7 +21,7 @@
 //! NUL-terminated topic name of each topic id and the cluster resource. The
 //! getters returning Java collections build owned `kafka_List_t`s of copies.
 
-use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::precondition::{require_map, require_ref, require_str};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -41,7 +41,7 @@ use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_t, uuid_list, uuid_of
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     c_str_to_option, c_str_to_string, into_c_string, kafka_List_t, kafka_Map_t, list_string_set, list_strings,
-    map_entries, owned_c_string, sorted_string_list,
+    owned_c_string, sorted_string_list,
 };
 
 /// Opaque handle to a [`Cluster`].
@@ -315,9 +315,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller_top
     topic_ids: *const kafka_Map_t,
 ) -> *mut kafka_common_Cluster_t {
     // SAFETY: Per this function's `# Safety`, `topic_ids` is null or a valid map, which the caller
-    // keeps alive and does not mutate for this call, as `map_entries` requires; the borrow of its
+    // keeps alive and does not mutate for this call, as `require_map` requires; the borrow of its
     // entries ends when they are collected.
-    let topic_ids = unsafe { map_entries(topic_ids, "topic_ids") }
+    let topic_ids = unsafe { require_map(topic_ids, "topic_ids") }
         .iter()
         .map(|&(name, id)| {
             // SAFETY: Per this function's `# Safety`, every key of `topic_ids` is a valid
@@ -442,9 +442,9 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_partitions(
     partitions: *const kafka_Map_t,
 ) -> *mut kafka_common_Cluster_t {
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid map, which the caller
-    // keeps alive and does not mutate for this call, as `map_entries` requires; the borrow of its
+    // keeps alive and does not mutate for this call, as `require_map` requires; the borrow of its
     // entries ends when they are collected.
-    let partitions: HashMap<TopicPartition, PartitionInfo> = unsafe { map_entries(partitions, "partitions") }
+    let partitions: HashMap<TopicPartition, PartitionInfo> = unsafe { require_map(partitions, "partitions") }
         .iter()
         .map(|&(tp, info)| {
             (
@@ -1141,19 +1141,21 @@ mod tests {
             let topic_ids = kafka_Map_new();
             kafka_Map_put(topic_ids, t.as_ptr() as *mut c_void, uuid as *mut c_void);
 
-            let plain = kafka_common_Cluster_new(cid.as_ptr(), nodes, partitions, unauthorized, ptr::null());
+            let empty = kafka_List_new();
+            let plain = kafka_common_Cluster_new(cid.as_ptr(), nodes, partitions, unauthorized, empty);
             let with_controller =
-                kafka_common_Cluster_with_controller(cid.as_ptr(), nodes, partitions, unauthorized, ptr::null(), node);
+                kafka_common_Cluster_with_controller(cid.as_ptr(), nodes, partitions, unauthorized, empty, node);
             let with_ids = kafka_common_Cluster_with_invalid_topics_controller_topic_ids(
                 ptr::null(),
                 nodes,
                 partitions,
                 unauthorized,
-                ptr::null(),
-                ptr::null(),
+                empty,
+                empty,
                 ptr::null(),
                 topic_ids,
             );
+            kafka_List_destroy(empty);
             kafka_List_destroy(nodes);
             kafka_List_destroy(partitions);
             kafka_List_destroy(unauthorized);

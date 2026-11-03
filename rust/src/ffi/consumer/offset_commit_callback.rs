@@ -262,7 +262,13 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete(
     // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as
     // `map_offset_and_metadata` requires.
-    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
+    let offsets = unsafe {
+        if offsets.is_null() {
+            Default::default()
+        } else {
+            map_offset_and_metadata(offsets, "offsets")
+        }
+    };
     // SAFETY: `error` is non-null (checked in this expression) and, per this function's `# Safety`,
     // a live error handle, as `error_ref` requires; the reference is used only to clone the error,
     // within this expression.
@@ -349,7 +355,13 @@ pub unsafe extern "C" fn kafka_consumer_OffsetCommitCallback_on_complete_cb(
     // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of topic-partition to
     // offset-and-metadata handles that no other call mutates during this one, as
     // `map_offset_and_metadata` requires.
-    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
+    let offsets = unsafe {
+        if offsets.is_null() {
+            Default::default()
+        } else {
+            map_offset_and_metadata(offsets, "offsets")
+        }
+    };
     // SAFETY: `error` is non-null (checked in this expression) and, per this function's `# Safety`,
     // a live error handle, as `error_ref` requires; the reference is used only to clone the error,
     // within this expression.

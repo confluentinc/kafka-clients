@@ -67,7 +67,7 @@
 // type names, which intentionally differs from Rust's snake_case convention.
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_fn, require_ref};
+use crate::ffi::precondition::{Required, require_fn, require_list, require_ref};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -85,7 +85,7 @@ use crate::ffi::common::{
     take_error,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{destroy_boxed, kafka_List_t, list_elements};
+use crate::ffi::util::{destroy_boxed, kafka_List_t};
 
 // ---------------------------------------------------------------------------
 // The value behind the `void *`
@@ -945,7 +945,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: per this function's `# Safety`, `futures` is null or a valid list, which the
     // caller keeps alive for this call; the borrow ends before return.
-    let inners: Vec<Arc<FutureInner>> = unsafe { list_elements(futures, "futures") }
+    let inners: Vec<Arc<FutureInner>> = unsafe { require_list(futures, "futures") }
         .iter()
         // SAFETY: per this function's `# Safety`, every element is a valid future handle,
         // alive for this call; each `future_arc` takes a reference of its own, which the
@@ -1352,7 +1352,9 @@ mod tests {
             kafka_common_KafkaFuture_destroy(failed);
             kafka_common_KafkaFuture_destroy(all);
 
-            let empty = kafka_common_KafkaFuture_all_of(std::ptr::null());
+            let none = kafka_List_new();
+            let empty = kafka_common_KafkaFuture_all_of(none);
+            kafka_List_destroy(none);
             assert!(get(empty).unwrap().is_null());
             kafka_common_KafkaFuture_destroy(empty);
         }

@@ -160,7 +160,13 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_record_too_large_
         // map of the stated types, `kafka_common_TopicPartition_t *` keys and `int64_t *` values,
         // as `map_topic_partition_i64` requires; the entries are copied into an owned map, so
         // nothing borrows it after this call.
-        unsafe { map_topic_partition_i64(record_too_large_partitions, "record_too_large_partitions") },
+        unsafe {
+            if record_too_large_partitions.is_null() {
+                Default::default()
+            } else {
+                map_topic_partition_i64(record_too_large_partitions, "record_too_large_partitions")
+            }
+        },
     ))
 }
 

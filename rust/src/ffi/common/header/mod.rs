@@ -38,7 +38,7 @@
 
 pub(crate) mod internals;
 
-use crate::ffi::precondition::{require_mut, require_ref, require_str_or};
+use crate::ffi::precondition::{fail, require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 use std::sync::OnceLock;
@@ -314,6 +314,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
     header: *const kafka_common_header_internals_RecordHeader_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if header.is_null() {
+        fail(Error::local_null_pointer("Header cannot be null."));
+    }
     // SAFETY: Per this function's `# Safety`, `header` is a valid record-header handle, as
     // `record_header_ref` requires. It is cloned before `headers_mut` below drops this handle's
     // cached views, so the borrow ends before a `header` taken from those views is freed.

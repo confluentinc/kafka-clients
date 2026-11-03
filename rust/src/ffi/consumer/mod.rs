@@ -85,7 +85,7 @@ pub(crate) mod offset_and_timestamp;
 pub(crate) mod offset_commit_callback;
 pub(crate) mod subscription_pattern;
 
-use crate::ffi::precondition::{require_fn, require_ref, require_str};
+use crate::ffi::precondition::{fail, require_fn, require_ref, require_str};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
@@ -855,6 +855,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument(
+            "Topic partitions collection to assign to cannot be null",
+        ));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -910,6 +915,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
     cb: kafka_consumer_Consumer_assign_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument(
+            "Topic partitions collection to assign to cannot be null",
+        ));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -962,6 +972,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics(
     topics: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if topics.is_null() {
+        fail(Error::local_illegal_argument("Topic collection to subscribe to cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
     let topics = unsafe { list_strings(topics, "topics") };
@@ -1018,6 +1031,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
     cb: kafka_consumer_Consumer_subscribe_with_topics_cb_t,
     opaque: *mut c_void,
 ) {
+    if topics.is_null() {
+        fail(Error::local_illegal_argument("Topic collection to subscribe to cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated `char *`,
     // as `list_strings` requires; the strings are copied, so the borrow lasts for this call only.
@@ -1073,6 +1089,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if listener.is_null() {
+        fail(Error::local_illegal_argument("RebalanceListener cannot be null"));
+    }
+    if topics.is_null() {
+        fail(Error::local_illegal_argument("Topic collection to subscribe to cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
@@ -1142,6 +1164,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
     cb: kafka_consumer_Consumer_subscribe_with_topics_listener_cb_t,
     opaque: *mut c_void,
 ) {
+    if listener.is_null() {
+        fail(Error::local_illegal_argument("RebalanceListener cannot be null"));
+    }
+    if topics.is_null() {
+        fail(Error::local_illegal_argument("Topic collection to subscribe to cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
@@ -1198,6 +1226,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern(
     pattern: *const kafka_consumer_SubscriptionPattern_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if pattern.is_null() {
+        fail(Error::local_illegal_argument("Topic pattern to subscribe to cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
     // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
     // requires; the value is cloned.
@@ -1254,6 +1285,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
     cb: kafka_consumer_Consumer_subscribe_with_pattern_cb_t,
     opaque: *mut c_void,
 ) {
+    if pattern.is_null() {
+        fail(Error::local_illegal_argument("Topic pattern to subscribe to cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid subscription-pattern handle,
     // alive for this expression, the only use of the reference, as `subscription_pattern_ref`
@@ -1306,6 +1340,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
     listener: *mut kafka_consumer_ConsumerRebalanceListener_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if listener.is_null() {
+        fail(Error::local_illegal_argument("RebalanceListener cannot be null"));
+    }
+    if pattern.is_null() {
+        fail(Error::local_illegal_argument("Topic pattern to subscribe to cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
@@ -1375,6 +1415,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
     cb: kafka_consumer_Consumer_subscribe_with_pattern_listener_cb_t,
     opaque: *mut c_void,
 ) {
+    if listener.is_null() {
+        fail(Error::local_illegal_argument("RebalanceListener cannot be null"));
+    }
+    if pattern.is_null() {
+        fail(Error::local_illegal_argument("Topic pattern to subscribe to cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer handle, kept alive for
     // this call, as `client_ref` requires.
@@ -2838,6 +2884,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -2892,6 +2941,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
     cb: kafka_consumer_Consumer_seek_to_beginning_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -2940,6 +2992,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -2994,6 +3049,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
     cb: kafka_consumer_Consumer_seek_to_end_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -4094,6 +4152,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     timestamps_to_search: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
@@ -4162,6 +4223,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
     cb: kafka_consumer_Consumer_offsets_for_times_cb_t,
     opaque: *mut c_void,
 ) {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
@@ -4227,6 +4291,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
@@ -4295,6 +4362,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
     cb: kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
@@ -4355,6 +4425,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -4413,6 +4486,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
     cb: kafka_consumer_Consumer_beginning_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -4473,6 +4549,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -4537,6 +4616,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
     cb: kafka_consumer_Consumer_beginning_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -4595,6 +4677,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -4653,6 +4738,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
     cb: kafka_consumer_Consumer_end_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -4713,6 +4801,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -4777,6 +4868,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
     cb: kafka_consumer_Consumer_end_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -4830,6 +4924,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to pause must be nonnull"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -4883,6 +4980,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
     cb: kafka_consumer_Consumer_pause_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to pause must be nonnull"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
@@ -4930,6 +5030,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to resume must be nonnull"));
+    }
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
@@ -4983,6 +5086,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
     cb: kafka_consumer_Consumer_resume_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to resume must be nonnull"));
+    }
     let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are

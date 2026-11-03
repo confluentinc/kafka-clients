@@ -937,7 +937,9 @@ mod tests {
             );
             kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(sub);
 
-            let assignment = kafka_consumer_ConsumerPartitionAssignor_Assignment_new(std::ptr::null());
+            let no_partitions = crate::ffi::util::kafka_List_new();
+            let assignment = kafka_consumer_ConsumerPartitionAssignor_Assignment_new(no_partitions);
+            kafka_List_destroy(no_partitions);
             let parts = kafka_consumer_ConsumerPartitionAssignor_Assignment_partitions(assignment);
             assert_eq!(kafka_List_size(parts), 0);
             kafka_List_destroy(parts);

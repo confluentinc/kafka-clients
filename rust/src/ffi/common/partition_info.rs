@@ -21,7 +21,7 @@
 //! handle. The replica lists are `java.util.List<Node>`s and cross as owned
 //! `kafka_List_t`s of node copies.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::PartitionInfo;
@@ -29,7 +29,7 @@ use crate::ffi::common::node::{
     NodeInner, kafka_common_Node_t, list_nodes, node_list, optional_node, optional_node_ptr,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`PartitionInfo`].
 #[repr(C)]
@@ -114,7 +114,7 @@ pub(crate) fn partition_info_list(infos: &[PartitionInfo]) -> *mut kafka_List_t 
 }
 
 /// Reads a list of `const kafka_common_PartitionInfo_t *` into owned copies;
-/// null reads as empty.
+/// `NULL` panics.
 ///
 /// # Safety
 ///
@@ -122,9 +122,9 @@ pub(crate) fn partition_info_list(infos: &[PartitionInfo]) -> *mut kafka_List_t 
 /// handles.
 pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t, param: &'static str) -> Vec<PartitionInfo> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a partition-info

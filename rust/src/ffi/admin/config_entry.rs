@@ -26,7 +26,7 @@
 #![expect(non_camel_case_types)]
 
 use crate::common::Error;
-use crate::ffi::precondition::{require_element, require_mut, require_ref, require_str_or};
+use crate::ffi::precondition::{require_element, require_list, require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -34,7 +34,7 @@ use crate::admin::{ConfigEntry, ConfigEntryOptions, ConfigEntryOptionsBuilder};
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_option, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_option, into_c_string, kafka_List_t, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // ConfigEntry.ConfigSource
@@ -503,7 +503,7 @@ pub(crate) unsafe fn destroy_config_synonym_element(element: *mut c_void) {
 }
 
 /// Reads a borrowed list of `const kafka_admin_ConfigEntry_ConfigSynonym_t *`
-/// into clones; `NULL` reads as empty.
+/// into clones; `NULL` panics.
 ///
 /// # Safety
 ///
@@ -511,9 +511,9 @@ pub(crate) unsafe fn destroy_config_synonym_element(element: *mut c_void) {
 /// config-synonym handles, all kept alive and not mutated for this call.
 unsafe fn list_config_synonyms(list: *const kafka_List_t, param: &'static str) -> Vec<ConfigSynonym> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is consumed before the call
+    // for this call, as `require_list` requires; the borrowed slice is consumed before the call
     // returns.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, each element of `list` is a valid
@@ -872,7 +872,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
 /// # Parameters
 ///
 /// - `synonyms` - a borrowed list of `const kafka_admin_ConfigEntry_ConfigSynonym_t *`, copied;
-///   `NULL` reads as an empty list
+///   must not be `NULL`
 ///
 /// # Safety
 ///

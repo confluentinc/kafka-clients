@@ -16,7 +16,7 @@
 //! `kafka_admin_DescribeProducersResult_PartitionProducerState_t`:
 //! `org.apache.kafka.clients.admin.DescribeProducersResult` (CLAUDE.md §4).
 
-use crate::ffi::precondition::{require_element, require_ref};
+use crate::ffi::precondition::{require_element, require_list, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -34,7 +34,7 @@ use crate::ffi::common::topic_partition::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_list, box_map, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, box_map, into_c_string, kafka_List_t};
 
 // ---------------------------------------------------------------------------
 // DescribeProducersResult.PartitionProducerState
@@ -97,7 +97,7 @@ pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_vo
 /// # Parameters
 ///
 /// - `active_producers` - a list of `const kafka_admin_ProducerState_t *`, copied during the call;
-///   `NULL` reads as empty
+///   must not be `NULL`
 ///
 /// # Safety
 ///
@@ -111,9 +111,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     active_producers: *const kafka_List_t,
 ) -> *mut kafka_admin_DescribeProducersResult_PartitionProducerState_t {
     // SAFETY: Per this function's `# Safety`, `active_producers` is null or a valid list handle,
-    // which the caller keeps alive for this call and nothing mutates meanwhile, as `list_elements`
+    // which the caller keeps alive for this call and nothing mutates meanwhile, as `require_list`
     // requires; the borrow ends with the call.
-    let active_producers = unsafe { list_elements(active_producers, "active_producers") }
+    let active_producers = unsafe { require_list(active_producers, "active_producers") }
         .iter()
         .map(|&p| {
             // SAFETY: Per this function's `# Safety`, every element `p` is a live producer-state

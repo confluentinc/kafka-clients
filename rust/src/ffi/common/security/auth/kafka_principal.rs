@@ -16,12 +16,12 @@
 //! `org.apache.kafka.common.security.auth.KafkaPrincipal` (CLAUDE.md §4).
 
 use crate::common::Error;
-use crate::ffi::precondition::{require_element, require_mut, require_ref, require_str_or};
+use crate::ffi::precondition::{require_element, require_list, require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char};
 
 use crate::common::security::auth::KafkaPrincipal;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`KafkaPrincipal`].
 #[repr(C)]
@@ -97,9 +97,9 @@ pub(crate) fn box_kafka_principal(principal: KafkaPrincipal) -> *mut kafka_commo
 /// `list` must be null or a valid list whose elements are principal handles.
 pub(crate) unsafe fn list_kafka_principals(list: *const kafka_List_t, param: &'static str) -> Vec<KafkaPrincipal> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, which the caller
-    // keeps alive and does not mutate for this call, as `list_elements` requires; the borrow of its
+    // keeps alive and does not mutate for this call, as `require_list` requires; the borrow of its
     // elements ends when the principals are collected.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a principal

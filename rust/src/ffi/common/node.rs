@@ -20,16 +20,14 @@
 //! `Cluster`, the admin descriptions) stores [`NodeInner`]s so the pointers
 //! it hands out stay valid for its own lifetime.
 
-use crate::ffi::precondition::{require_element, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 use std::sync::LazyLock;
 
 use crate::common::Node;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
-};
+use crate::ffi::util::{box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`Node`] (broker).
 #[repr(C)]
@@ -122,9 +120,9 @@ pub(crate) fn node_list(nodes: &[Node]) -> *mut kafka_List_t {
 /// `list` must be null or a valid list whose elements are node handles.
 pub(crate) unsafe fn list_nodes(list: *const kafka_List_t, param: &'static str) -> Vec<Node> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list, param) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a node handle, as
@@ -470,7 +468,13 @@ mod tests {
         unsafe {
             assert_eq!(kafka_List_size(list), 2);
             assert_eq!(list_nodes(list, "value"), nodes.to_vec());
-            assert!(list_nodes(ptr::null(), "value").is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    list_nodes(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
             kafka_List_destroy(list);
         }
     }
