@@ -104,7 +104,7 @@ function int64(value) {
  * tombstone). Headers are forwarded as the C++ server does: the proto's header
  * value is plain `bytes`, so a null header value arrives as an empty one.
  *
- * @throws {KafkaError | TypeError | RangeError} what ProducerRecord's own checks throw
+ * @throws {import('./lib/illegal_argument_error').IllegalArgumentError | TypeError | RangeError} what ProducerRecord's own checks throw
  */
 function protoToProducerRecord(proto) {
   const record = proto || {};

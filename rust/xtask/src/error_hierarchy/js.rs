@@ -20,10 +20,13 @@
 //!
 //! A class keeps Java's name with the `Exception` suffix as `Error`, its
 //! Javadoc, and its FFI id (`_throwable.setFfiId`). *(Deviation from the Python
-//! classes, recorded in each class's doc:)* Java's constructors are not
-//! translated: every class takes JavaScript's `(message?, {cause}?)`, and the
-//! fields of the classes that carry a payload (`TopicAuthorizationError`'s
-//! topics, ...) are not read across the FFI by the addon.
+//! classes, recorded in `javascript/CLAUDE.md` ("Java shape, JS idiom") and the
+//! CHANGELOG's known limitations, not in each class's doc:)* Java's
+//! constructors are not translated: every class takes JavaScript's
+//! `(message?, {cause}?)`; the payload getters (`TopicAuthorizationError`'s
+//! topics, ...), the `INSTANCE` singletons and
+//! `RecordDeserializationError.DeserializationExceptionOrigin` are not
+//! generated, and the addon reads no payload across the FFI.
 
 use std::path::Path;
 

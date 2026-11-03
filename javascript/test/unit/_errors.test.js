@@ -274,3 +274,18 @@ test('fromNative chains the core cause and keeps what the core reported', () => 
   assert.equal(fromNative(already), already);
   assert.equal(fromNative(null), null);
 });
+
+test("the gRPC server maps the client's errors by code, the Java built-ins included", () => {
+  // grpc_translate.js (the multilanguage harness's JS server) tells the client's
+  // errors from its own by errorClasses(): a binding-thrown IllegalArgumentError
+  // crosses with its code -3 and the client's message unprefixed, as
+  // python/grpc_translate.py does. Here, not in test/static: it loads the
+  // addon through lib/producer.
+  const { kafkaErrorToProto } = require('../../grpc_translate');
+  const message = 'Invalid timestamp: -5. Timestamp should always be non-negative or null.';
+  assert.deepEqual(kafkaErrorToProto(new IllegalArgumentError(message)), { code: -3, message });
+  assert.deepEqual(kafkaErrorToProto(new IllegalStateError('closed')), { code: -4, message: 'closed' });
+  assert.deepEqual(kafkaErrorToProto(new SaslAuthenticationError('auth')), { code: 58, message: 'auth' });
+  // Anything else is the server's own failure.
+  assert.deepEqual(kafkaErrorToProto(new TypeError('bad')), { code: -4, message: 'js server: TypeError: bad' });
+});
