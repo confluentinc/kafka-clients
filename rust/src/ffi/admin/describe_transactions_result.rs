@@ -19,16 +19,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::{DescribeTransactionsResult, TransactionDescription};
+use crate::common::Error;
 use crate::ffi::admin::transaction_description::{
     box_transaction_description, destroy_transaction_description_element,
 };
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
-use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::common::{deliver_value, fail_with};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::precondition::require_str;
-use crate::ffi::util::box_string_keyed_map;
+use crate::ffi::util::{box_string_keyed_map, c_str_to_option};
 
 /// Opaque handle to a [`DescribeTransactionsResult`], owned and freed with
 /// [`kafka_admin_DescribeTransactionsResult_destroy`].
@@ -91,7 +91,7 @@ unsafe fn handle<'a>(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle, `transactional_id` a valid
+/// `self_` must be a live result handle, `transactional_id` `NULL` or a valid
 /// NUL-terminated string and `out_err` a valid slot pointing at `NULL`.
 ///
 /// The returned future is owned and freed with `kafka_common_KafkaFuture_destroy`; its `get` yields
@@ -106,9 +106,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
-    // as `require_str` requires; it is copied into a `String` during the call.
-    let transactional_id = unsafe { require_str(transactional_id, "transactional_id") };
+    // SAFETY: Per this function's `# Safety`, `transactional_id` is NULL or a valid NUL-terminated
+    // string, as `c_str_to_option` requires; it is copied into a `String` during the call.
+    let Some(transactional_id) = (unsafe { c_str_to_option(transactional_id) }) else {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, null_transactional_id()) };
+    };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. For `handle_future`, `destroy_transaction_description_element` frees exactly the
     // handle `box_transaction_description` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
@@ -168,4 +171,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_destroy(
     // `kafka_admin_DescribeTransactionsResult_t` is built by
     // `box_result::<DescribeTransactionsResult, _>`, as `destroy_result` requires.
     unsafe { destroy_result::<DescribeTransactionsResult, _>(self_) }
+}
+
+/// Java's `futures.get(CoordinatorKey.byTransactionalId(null))` misses, so it throws its
+/// `IllegalArgumentException`, printing `null`.
+fn null_transactional_id() -> Error {
+    Error::local_illegal_argument("TransactionalId `null` was not included in the request")
 }

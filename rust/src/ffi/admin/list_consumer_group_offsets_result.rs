@@ -20,21 +20,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::{GroupOffsets, ListConsumerGroupOffsetsResult};
-use crate::common::TopicPartition;
+use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_map_element, destroy_result, result_ref};
-use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{
     box_topic_partition, kafka_common_TopicPartition_destroy, kafka_common_TopicPartition_t, topic_partition_key_eq,
 };
+use crate::ffi::common::{deliver_value, fail_with};
 use crate::ffi::consumer::offset_and_metadata::{
     box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_destroy, kafka_consumer_OffsetAndMetadata_t,
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::precondition::require_str;
-use crate::ffi::util::{box_map, box_string_keyed_map};
+use crate::ffi::util::{box_map, box_string_keyed_map, c_str_to_option};
 
 /// Opaque handle to a [`ListConsumerGroupOffsetsResult`], owned and freed
 /// with [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`].
@@ -185,7 +184,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle, `group_id` a valid NUL-terminated
+/// `self_` must be a live result handle, `group_id` `NULL` or a valid NUL-terminated
 /// string and `out_err` a valid slot pointing at `NULL`. The returned future is
 /// owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
@@ -198,9 +197,14 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
     let h = unsafe { handle(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-    // `require_str` requires; it is copied into a `String` during the call.
-    let group_id = unsafe { require_str(group_id, "group_id") };
+    // SAFETY: Per this function's `# Safety`, `group_id` is NULL or a valid NUL-terminated string,
+    // as `c_str_to_option` requires; it is copied into a `String` during the call.
+    let Some(group_id) = (unsafe { c_str_to_option(group_id) }) else {
+        // Java's `futures.get(null)` misses, so it throws its `IllegalArgumentException`.
+        let error = Error::local_illegal_argument("Offsets for consumer group 'null' were not requested.");
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, error) };
+    };
     // SAFETY: Per this function's `# Safety`, `out_err`
     // is a valid slot, as `deliver_value` requires. For `handle_future`, `destroy_map_element` frees
     // exactly the map `group_offsets_map` makes through `box_map`, and the handle holds only owned
