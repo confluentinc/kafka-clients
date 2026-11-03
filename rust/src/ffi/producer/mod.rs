@@ -961,16 +961,21 @@ unsafe fn client_ref<'a>(producer: *const kafka_producer_Producer_t, param: &'st
 }
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
-/// producer's callbacks vector (see [`deliver_panic`]).
+/// producer's callbacks vector, or the calling thread when `producer` is NULL,
+/// so a NULL handle still reaches `cb` once, with Java's error (see
+/// [`deliver_panic`]).
 ///
 /// # Safety
 ///
-/// `producer` must be a live view from an `__as_Producer` function.
+/// `producer` must be NULL or a live view from an `__as_Producer` function.
 pub(crate) unsafe fn completion_sink(producer: *const kafka_producer_Producer_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: Per this function's `# Safety`, `producer` is a live view, as `client_ref` requires;
-    // the reference is used only to clone the `Arc`, within this statement.
-    let client = Arc::clone(unsafe { client_ref(producer, "producer") });
-    move |job| client.queue.push(job)
+    // SAFETY: Per this function's `# Safety`, a non-NULL `producer` is a live view, as
+    // `client_ref` requires; the reference is used only to clone the `Arc`, within this statement.
+    let client = (!producer.is_null()).then(|| Arc::clone(unsafe { client_ref(producer, "producer") }));
+    move |job| match client {
+        Some(client) => client.queue.push(job),
+        None => job(),
+    }
 }
 
 /// Runs a transaction-control operation on the calling thread: takes the
@@ -2908,6 +2913,23 @@ mod tests {
         };
         // SAFETY: `opaque` is the test's slot, alive until the callbacks ran.
         *unsafe { &*(opaque as *const Mutex<Vec<Option<String>>>) }.lock().unwrap() = vec![outcome];
+    }
+
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error (see
+    /// `completion_sink`).
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_producer_Producer_flush_cb(
+                std::ptr::null(),
+                Some(record_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
     }
 
     /// Java's `MockProducer.close(Duration)` never reads the timeout

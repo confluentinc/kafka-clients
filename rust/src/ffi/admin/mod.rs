@@ -466,18 +466,23 @@ impl AdminClassHandle {
 }
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
-/// client's callbacks vector (see [`deliver_panic_opaque`]).
+/// client's callbacks vector, or the calling thread when `admin` is NULL, so a
+/// NULL handle still reaches `cb` once, with Java's error (see
+/// [`deliver_panic_opaque`]).
 ///
 /// # Safety
 ///
-/// `admin` must be a live handle or view, as [`client_ref`] describes; the
-/// sink holds its own `Arc` to the client, so it may outlive the call.
+/// `admin` must be NULL or a live handle or view, as [`client_ref`] describes;
+/// the sink holds its own `Arc` to the client, so it may outlive the call.
 unsafe fn completion_sink(admin: *const kafka_admin_Admin_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: Per this function's `# Safety`, `admin` is a live handle or view, as `client_ref`
-    // requires; the reference is used only to clone the `Arc`, so the sink does not borrow the
-    // handle.
-    let client = Arc::clone(unsafe { client_ref(admin, "admin") });
-    move |job| client.queue.push(job)
+    // SAFETY: Per this function's `# Safety`, a non-NULL `admin` is a live handle or view, as
+    // `client_ref` requires; the reference is used only to clone the `Arc`, so the sink does not
+    // borrow the handle.
+    let client = (!admin.is_null()).then(|| Arc::clone(unsafe { client_ref(admin, "admin") }));
+    move |job| match client {
+        Some(client) => client.queue.push(job),
+        None => job(),
+    }
 }
 
 /// The client behind an interface handle.
@@ -976,6 +981,23 @@ pub unsafe extern "C" fn kafka_admin_Admin_destroy(self_: *mut kafka_admin_Admin
 
 #[cfg(test)]
 mod tests {
+    /// A NULL `self_` still fires `cb` once, on the calling thread: Java's `close()` throws
+    /// nothing, so `cb` gets only `opaque` back (see `completion_sink`).
+    #[test]
+    fn test_null_self_fires_close_cb_once() {
+        use crate::ffi::precondition::{Delivered, record_opaque_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_admin_Admin_close_cb(
+                std::ptr::null(),
+                Some(record_opaque_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_eq!(*delivered.lock().unwrap(), vec![None]);
+    }
+
     use super::*;
     use crate::ffi::admin::admin_client::kafka_admin_AdminClient_create;
     use crate::ffi::admin::admin_client_config::{

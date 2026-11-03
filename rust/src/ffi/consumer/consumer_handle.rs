@@ -220,17 +220,21 @@ enum Wait<T> {
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
 /// consumer's callbacks vector, or the calling thread once the consumer is
-/// destroyed, as [`HandleInner::run_cb`] delivers every completion (see
-/// [`deliver_panic`]).
+/// destroyed or `self_` is NULL, as [`HandleInner::run_cb`] delivers every
+/// completion (see [`deliver_panic`]).
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be NULL or a live handle.
 unsafe fn completion_sink(self_: *const kafka_consumer_ConsumerHandle_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
-    // the only use of the reference, as `inner` requires; the sink keeps the upgraded `Arc`, if
-    // any, not the reference.
-    let client = unsafe { inner(self_, "self_") }.client.upgrade();
+    let client = if self_.is_null() {
+        None
+    } else {
+        // SAFETY: Per this function's `# Safety`, a non-NULL `self_` is a live handle, alive for
+        // this expression, the only use of the reference, as `inner` requires; the sink keeps the
+        // upgraded `Arc`, if any, not the reference.
+        unsafe { inner(self_, "self_") }.client.upgrade()
+    };
     move |job| match client {
         Some(client) => client.delivery.queue.push(job),
         None => job(),
@@ -3669,5 +3673,27 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_destroy(self_: *mut kafka
         // other call uses at the same time, so taking it back and dropping it frees it exactly
         // once. It holds the client weakly, so the consumer is unaffected.
         drop(unsafe { Box::from_raw(self_ as *mut HandleInner) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error (see
+    /// `completion_sink`).
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_consumer_ConsumerHandle_commit_sync_cb(
+                std::ptr::null(),
+                Some(record_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
     }
 }

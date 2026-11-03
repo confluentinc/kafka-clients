@@ -224,6 +224,79 @@ pub(crate) fn caught(body: impl FnOnce() + std::panic::UnwindSafe) -> Error {
     }
 }
 
+/// What the completions of the `ffi` tests' `_cb` calls received, one entry per
+/// call: `Some((is a LocalNullPointerError, message))` for an error, `None`
+/// otherwise.
+#[cfg(test)]
+pub(crate) type Delivered = std::sync::Mutex<Vec<Option<(bool, String)>>>;
+
+/// A `void` completion recording into the [`Delivered`] behind `opaque`; it
+/// owns `error` and destroys it.
+///
+/// # Safety
+///
+/// `opaque` must point at a live [`Delivered`]; `error` is NULL or an owned handle.
+#[cfg(test)]
+pub(crate) unsafe extern "C" fn record_delivery(
+    error: *mut crate::ffi::common::kafka_common_Error_t,
+    opaque: *mut c_void,
+) {
+    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
+    use crate::ffi::error_predicates::kafka_common_Error_is_local_null_pointer_error;
+    let outcome = (!error.is_null()).then(|| {
+        // SAFETY: Per this function's `# Safety`, a non-NULL `error` is owned here: read, then
+        // destroyed once.
+        unsafe {
+            let outcome = (
+                kafka_common_Error_is_local_null_pointer_error(error) == 1,
+                CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap().to_string(),
+            );
+            kafka_common_Error_destroy(error);
+            outcome
+        }
+    });
+    // SAFETY: Per this function's `# Safety`, `opaque` points at a live `Delivered`.
+    unsafe { &*(opaque as *const Delivered) }.lock().unwrap().push(outcome);
+}
+
+/// [`record_delivery`] for a completion that also reports a pointer value,
+/// which must be NULL.
+///
+/// # Safety
+///
+/// As [`record_delivery`].
+#[cfg(test)]
+pub(crate) unsafe extern "C" fn record_value_delivery(
+    value: *mut c_void,
+    error: *mut crate::ffi::common::kafka_common_Error_t,
+    opaque: *mut c_void,
+) {
+    assert!(value.is_null());
+    // SAFETY: Per this function's `# Safety`, as `record_delivery` requires.
+    unsafe { record_delivery(error, opaque) }
+}
+
+/// [`record_delivery`] for a completion that reports only `opaque`.
+///
+/// # Safety
+///
+/// `opaque` must point at a live [`Delivered`].
+#[cfg(test)]
+pub(crate) unsafe extern "C" fn record_opaque_delivery(opaque: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, as `record_delivery` requires.
+    unsafe { record_delivery(std::ptr::null_mut(), opaque) }
+}
+
+/// The one error a `_cb` call with a NULL `self_` delivered: Java's
+/// `NullPointerException` text, on the calling thread.
+#[cfg(test)]
+pub(crate) fn assert_null_self_delivered(delivered: &Delivered) {
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![Some((true, "self_ must not be null".to_string()))]
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

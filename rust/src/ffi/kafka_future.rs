@@ -67,7 +67,7 @@
 // type names, which intentionally differs from Rust's snake_case convention.
 #![expect(non_camel_case_types)]
 
-use crate::ffi::precondition::{Required, require_fn, require_list, require_ref};
+use crate::ffi::precondition::{Required, require_element, require_fn, require_list, require_ref};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
@@ -550,9 +550,12 @@ unsafe fn future_ref<'a>(future: *const kafka_common_KafkaFuture_t, param: &'sta
 ///
 /// # Safety
 ///
-/// `future` must be a valid handle from [`box_future`].
-unsafe fn future_arc(future: *const kafka_common_KafkaFuture_t) -> Arc<FutureInner> {
-    let raw = future as *const FutureInner;
+/// `future` must be NULL or a valid handle from [`box_future`]; a NULL one
+/// panics with Java's `NullPointerException` text naming `param`.
+unsafe fn future_arc(future: *const kafka_common_KafkaFuture_t, param: &'static str) -> Arc<FutureInner> {
+    // SAFETY: per this function's `# Safety`, a non-NULL `future` is a valid handle, as
+    // `future_ref` requires; only its address is kept.
+    let raw = unsafe { future_ref(future, param) } as *const FutureInner;
     // SAFETY: per this function's `# Safety`, `future` is a live handle from
     // `box_future`, so `raw` is the `Arc::into_raw` of a `FutureInner` whose strong count
     // is at least 1. Incrementing it first makes the `from_raw` a new reference that
@@ -669,7 +672,7 @@ unsafe fn get_cb(
 ) {
     // SAFETY: per this function's `# Safety`, `future` is a valid handle from
     // `box_future`, which is what `future_arc` requires.
-    let inner = unsafe { future_arc(future) };
+    let inner = unsafe { future_arc(future, "self_") };
     let opaque = SendPtr(opaque);
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
@@ -692,18 +695,18 @@ unsafe fn get_cb(
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
 /// owning client's callbacks vector, or the calling thread for a future with
-/// no client, as [`get_cb`] delivers every completion (see
+/// no client or a NULL `future`, as [`get_cb`] delivers every completion (see
 /// [`deliver_panic_value`](crate::ffi::common::deliver_panic_value)).
 ///
 /// # Safety
 ///
-/// `future` must be a valid handle.
+/// `future` must be NULL or a valid handle.
 unsafe fn completion_sink(future: *const kafka_common_KafkaFuture_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: per this function's `# Safety`, `future` is a valid handle, which is what
+    // SAFETY: per this function's `# Safety`, a non-NULL `future` is a valid handle, which is what
     // `future_arc` requires; the sink holds its own reference.
-    let inner = unsafe { future_arc(future) };
-    move |job| match (&inner.runtime, &inner.queue) {
-        (Some(_), Some(queue)) => queue.push(job),
+    let inner = (!future.is_null()).then(|| unsafe { future_arc(future, "self_") });
+    move |job| match inner.as_ref().map(|inner| (&inner.runtime, &inner.queue)) {
+        Some((Some(_), Some(queue))) => queue.push(job),
         _ => job(),
     }
 }
@@ -950,7 +953,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
         // SAFETY: per this function's `# Safety`, every element is a valid future handle,
         // alive for this call; each `future_arc` takes a reference of its own, which the
         // returned future keeps (`FutureInner::sources`).
-        .map(|&f| unsafe { future_arc(f as *const _) })
+        .map(|&f| unsafe { future_arc(require_element(f, "futures") as *const _, "futures") })
         .collect();
     // A future waiting for a report drains its own client's queue, so the result takes that
     // client when one of the futures is such a future.
@@ -1147,7 +1150,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_then_apply(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: per this function's `# Safety`, `self_` is a valid future handle; this takes a
     // reference of its own, which the derived future keeps (`FutureInner::sources`).
-    let inner = unsafe { future_arc(self_) };
+    let inner = unsafe { future_arc(self_, "self_") };
     let gate = Arc::new(ApplyGate::new());
     let apply_gate = Arc::clone(&gate);
     // SAFETY: per this function's `# Safety`, `function` is a valid function handle, i.e. the
@@ -1225,6 +1228,23 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_destroy(self_: *mut kafka_comm
 
 #[cfg(test)]
 mod tests {
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error (see
+    /// `completion_sink`).
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_value_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_common_KafkaFuture_get_cb(
+                std::ptr::null(),
+                Some(record_value_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
+    }
+
     use super::*;
     use crate::common::internals::KafkaFutureImpl;
     use crate::ffi::common::fail_point;

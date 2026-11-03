@@ -234,6 +234,20 @@ static void test_null_list_reports_java_s_error(void) {
     assert_ok(err);
 }
 
+/* A NULL handle given to a _cb twin has no callback queue to use: its
+ * completion runs on the calling thread, before the call returns, and
+ * receives Java's NullPointerException, once. */
+static void test_null_handle_in_a_cb_twin_completes_inline(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_List_t *partitions = kafka_List_new_err(&err);
+    assert_ok(err);
+    kafka_common_Error_t *delivered = NULL;
+    kafka_consumer_Consumer_assign_cb(NULL, partitions, on_assigned, &delivered);
+    assert_null_pointer(delivered, "self_ must not be null");
+    kafka_List_destroy_err(partitions, &err);
+    assert_ok(err);
+}
+
 static void on_closed(void *opaque) {
     atomic_fetch_add((atomic_int *)opaque, 1);
 }
@@ -288,5 +302,6 @@ int main(void) {
     RUN_TEST(test_null_string_is_a_null_pointer_error);
     RUN_TEST(test_null_handle_is_a_null_pointer_error);
     RUN_TEST(test_null_list_reports_java_s_error);
+    RUN_TEST(test_null_handle_in_a_cb_twin_completes_inline);
     return UNITY_END();
 }

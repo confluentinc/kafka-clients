@@ -3638,6 +3638,48 @@ mod tests {
         );
     }
 
+    /// `kafka_common_KafkaFuture_then_apply` on a NULL future aborts with Java's text,
+    /// never reading through it.
+    #[test]
+    fn then_apply_aborts_on_a_null_self() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: the NULL `self_` is the case under test; the precondition
+            // check aborts before anything reads through either pointer.
+            unsafe {
+                crate::ffi::kafka_future::kafka_common_KafkaFuture_then_apply(std::ptr::null(), std::ptr::null_mut())
+            };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::then_apply_aborts_on_a_null_self",
+            "kafka_common_KafkaFuture_then_apply",
+            "self_ must not be null",
+        );
+    }
+
+    /// `kafka_common_KafkaFuture_all_of` over a list holding NULL aborts with Java's
+    /// element text, never reading through it.
+    #[test]
+    fn all_of_aborts_on_a_null_element() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            let futures = crate::ffi::util::kafka_List_new();
+            // SAFETY: Test code: `futures` is the live list just created; the NULL element is
+            // the case under test, and the precondition check aborts before reading it.
+            unsafe {
+                crate::ffi::util::kafka_List_add(futures, std::ptr::null_mut());
+                crate::ffi::kafka_future::kafka_common_KafkaFuture_all_of(futures);
+            }
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::all_of_aborts_on_a_null_element",
+            "kafka_common_KafkaFuture_all_of",
+            "futures must not contain null",
+        );
+    }
+
     /// A real fallible export given a NULL argument and a NULL `out_err` aborts: the
     /// error it would store has nowhere to go.
     #[test]

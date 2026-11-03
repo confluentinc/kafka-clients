@@ -577,18 +577,23 @@ pub(crate) unsafe fn client_ref<'a>(
 }
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
-/// consumer's callbacks vector (see [`deliver_panic`]).
+/// consumer's callbacks vector, or the calling thread when `consumer` is NULL,
+/// so a NULL handle still reaches `cb` once, with Java's error (see
+/// [`deliver_panic`]).
 ///
 /// # Safety
 ///
-/// `consumer` must be a live handle, as [`client_ref`] describes; the sink
-/// holds its own `Arc` to the client, so it may outlive the call.
+/// `consumer` must be NULL or a live handle, as [`client_ref`] describes; the
+/// sink holds its own `Arc` to the client, so it may outlive the call.
 pub(crate) unsafe fn completion_sink(consumer: *const kafka_consumer_Consumer_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: Per this function's `# Safety`, `consumer` is a live handle, as `client_ref`
-    // requires; the reference is used only to clone the `Arc`, so the sink does not borrow the
-    // handle.
-    let client = Arc::clone(unsafe { client_ref(consumer, "consumer") });
-    move |job| client.delivery.queue.push(job)
+    // SAFETY: Per this function's `# Safety`, a non-NULL `consumer` is a live handle, as
+    // `client_ref` requires; the reference is used only to clone the `Arc`, so the sink does not
+    // borrow the handle.
+    let client = (!consumer.is_null()).then(|| Arc::clone(unsafe { client_ref(consumer, "consumer") }));
+    move |job| match client {
+        Some(client) => client.delivery.queue.push(job),
+        None => job(),
+    }
 }
 
 pub(crate) fn error_slot(result: Result<(), Error>) -> *mut kafka_common_Error_t {
@@ -5964,6 +5969,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(
 #[cfg(test)]
 mod tests {
     use std::ptr;
+
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error (see
+    /// `completion_sink`).
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_consumer_Consumer_unsubscribe_cb(
+                std::ptr::null_mut(),
+                Some(record_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
+    }
 
     use super::*;
     use crate::ffi::callback_result::{ResultSink, void_sink};
