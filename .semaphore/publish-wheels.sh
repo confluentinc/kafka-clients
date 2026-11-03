@@ -107,8 +107,8 @@ for file in page["files"]:
 # blocks' `run` conditions already limit them to Python release tags; the
 # check is repeated here, before the token is loaded, so that the publish does
 # not depend on those conditions alone. A build whose jobs were redirected to
-# another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the global prologue of
-# semaphore.yml) did not test the tagged commit.
+# another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see .semaphore/job-start.sh)
+# did not test the tagged commit.
 release_version() {
     local release_tag_pattern='^python/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?$'
     if [ "${SEMAPHORE_GIT_REF_TYPE:-}" != "tag" ]; then
