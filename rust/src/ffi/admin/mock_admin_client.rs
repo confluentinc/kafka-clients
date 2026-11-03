@@ -53,7 +53,7 @@ use crate::ffi::common::topic_partition::map_topic_partition_i64;
 use crate::ffi::common::topic_partition_info::topic_partition_info_ref;
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{kafka_List_t, kafka_Map_t, list_strings, map_strings};
+use crate::ffi::util::{c_str_to_option, kafka_List_t, kafka_Map_t, list_strings, map_strings};
 
 /// Opaque handle to a [`MockAdminClient`].
 #[repr(C)]
@@ -343,8 +343,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `name` a C string. `out_err` must be a valid slot pointing at
-/// `NULL`.
+/// `self_` must be a live handle and `name` `NULL` or a C string. `out_err` must be a valid slot
+/// pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
@@ -352,12 +352,15 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
     name: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `name` is a C string, as `require_str` requires;
-    // it is copied.
-    let name = unsafe { require_str(name, "name") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
     // constructor, kept alive for this call, as `mock_ref` requires.
-    let result = unsafe { mock_ref(self_, "self_") }.mark_topic_for_deletion(&name);
+    let mock = unsafe { mock_ref(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `name` is NULL or a C string, as `c_str_to_option`
+    // requires; it is copied. Java's `allTopics.get(null)` misses, so it throws for `null`.
+    let result = match unsafe { c_str_to_option(name) } {
+        Some(name) => mock.mark_topic_for_deletion(&name),
+        None => Err(Error::local_illegal_argument("Topic null did not exist.")),
+    };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe { deliver_unit(result, out_err) }
 }
@@ -432,8 +435,8 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_controller(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `topic_name` a C string, and `out_err` a valid slot pointing at
-/// `NULL`.
+/// `self_` must be a live handle, `topic_name` `NULL` or a C string, and `out_err` a valid slot
+/// pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_fetches_remaining_until_visible(
@@ -442,13 +445,16 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_fetches_remaining_until
     fetches_remaining_until_visible: i32,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `topic_name` is a C string, as `require_str`
-    // requires; it is copied.
-    let topic_name = unsafe { require_str(topic_name, "topic_name") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock constructor,
     // kept alive for this call, as `mock_ref` requires.
-    let result = unsafe { mock_ref(self_, "self_") }
-        .set_fetches_remaining_until_visible(&topic_name, fetches_remaining_until_visible);
+    let mock = unsafe { mock_ref(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `topic_name` is NULL or a C string, as
+    // `c_str_to_option` requires; it is copied. Java's `allTopics.get(null)` misses, so it throws
+    // for `null`.
+    let result = match unsafe { c_str_to_option(topic_name) } {
+        Some(topic_name) => mock.set_fetches_remaining_until_visible(&topic_name, fetches_remaining_until_visible),
+        None => Err(Error::local_illegal_argument("No such topic as null")),
+    };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe { deliver_unit(result, out_err) }
 }
