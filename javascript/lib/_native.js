@@ -25,7 +25,7 @@
 
 const path = require('node:path');
 
-const { KafkaError } = require('./common/kafka_error');
+const { fromNative } = require('./_errors');
 const { RecordMetadata } = require('./producer/record_metadata');
 
 const ADDON = path.join(__dirname, '..', 'build', 'Release', 'confluent-kafka-javascript.node');
@@ -42,7 +42,7 @@ try {
 }
 
 native.setFactories(
-  (fields) => KafkaError._from(fields),
+  (fields) => fromNative(fields),
   (fields) => new RecordMetadata(fields),
 );
 

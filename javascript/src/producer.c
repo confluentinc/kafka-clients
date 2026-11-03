@@ -288,7 +288,7 @@ static int is_function(napi_env env, napi_value v) {
 // producerSend(handle, topic, partition, timestamp, key, value, headers,
 // onHandover, onComplete): partition and timestamp -1 for Java's null; key and
 // value a Uint8Array or null; headers null or an array of [key, Uint8Array |
-// null]. Throws a KafkaError when the record cannot be built (nothing is sent
+// null]. Throws the core's error when the record cannot be built (nothing is sent
 // then).
 napi_value js_producer_send(napi_env env, napi_callback_info info) {
     size_t argc = 9;

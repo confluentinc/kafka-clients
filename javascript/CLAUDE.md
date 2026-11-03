@@ -106,7 +106,7 @@ These decide every question, in this order:
    the equivalent of Java's `StringSerializer`, so it is unaffected. Header
    values are copied by the core during the call.
 9. **Ownership follows the signature.** Errors from `out_err` and from `_cb`
-   completions are owned: copied into a JS `KafkaError`, then destroyed. The
+   completions are owned: copied into a JS error (`lib/_errors.js`), then destroyed. The
    error and metadata a delivery callback receives are borrowed: copied, never
    destroyed. If a send fails at hand-over, its per-record context stays on the
    producer's orphan list until after destroy (the delivery callback may still
@@ -170,14 +170,29 @@ These decide every question, in this order:
   future completes, as Java fires the callback before completing the future.
 - Java `null` is `null` (`undefined` accepted on input). A Java `long` crosses
   as a JS `number` (offsets and timestamps stay below 2^53).
-- Errors: every `kafka_common_Error_t` becomes a `KafkaError extends Error`
-  with `code` (the `kafka_common_Error_e` value), `name` (its enumerator name,
-  e.g. `TOPIC_AUTHORIZATION_FAILED`), `message` (the core's text, unchanged),
-  `retriable`, `apiError` and `cause` (the `Error_source` chain). A check the
-  binding makes where Java throws `IllegalArgumentException` /
-  `IllegalStateException` throws a `KafkaError` with the core's own code for
-  that class (`LOCAL_ILLEGAL_ARGUMENT`, `LOCAL_ILLEGAL_STATE`) and Java's
-  message; a value of the wrong JS type throws `TypeError`.
+- Errors: the generated error hierarchy (below) is the Python client's:
+  one class per Java exception class, Java's name with its `Exception` suffix
+  as `Error`, Java's `extends` chain (`SaslAuthenticationError extends
+  AuthenticationError extends ApiError extends KafkaError`), in the folder of
+  its Java package (`common/errors/`, `java.*` at the root). Every
+  `kafka_common_Error_t` becomes an instance of the class of its FFI id
+  (`lib/_errors.js` `fromNative`, Python's `_errors.py` `_build`: an unknown
+  id is the base `KafkaError`, and `UNKNOWN_SERVER_ERROR` without
+  `is_api_error` is the bare `KafkaError`, not `UnknownServerError`). `name` is
+  the class name (JavaScript's convention); `code` (the `kafka_common_Error_e`
+  value), `errorName` (its enumerator name, e.g. `TOPIC_AUTHORIZATION_FAILED`),
+  `retriable`, `apiError`, `message` (the core's text, unchanged) and `cause`
+  (the `Error_source` chain) are kept on every class, the Java built-ins
+  included. The Java built-ins (`IllegalStateError`, `IllegalArgumentError`,
+  ...) extend `Error`, not `KafkaError`, as Java's do not extend
+  `KafkaException`; a check the binding makes where Java throws
+  `IllegalArgumentException` / `IllegalStateException` throws them with Java's
+  message. A value of the wrong JS type throws `TypeError`. Java's abstract
+  bases (`RetriableError`, ...) are catch-only: constructing one throws
+  `TypeError`. *(Deviation from the Python classes:)* every class takes
+  JavaScript's `(message?, {cause}?)`, not Java's constructor forms, and the
+  payload fields (`TopicAuthorizationError`'s topics, ...) are not read across
+  the FFI.
 - After a completed `close()`, `send` throws `LOCAL_ILLEGAL_STATE` with Java's
   `throwIfProducerClosed` message, and `flush()` resolves at once: Java's
   `flush()` has no closed check and returns immediately on the empty
@@ -187,9 +202,16 @@ These decide every question, in this order:
   negative.", as Java's `close(Duration)` throws `IllegalArgumentException`
   before anything else: such a close changes nothing, and an open producer
   stays usable.
-- Configuration is a plain object (or a `Map`) of Java's config keys; values
-  are stringified (`true` → `"true"`, numbers and bigints by `String`, arrays
-  joined with `,`), `null` / `undefined` dropped. The core validates them.
+- Configuration is a plain object (or a `Map`) of Java's config keys, checked
+  as Python's `_config.py` checks it (`lib/_config.js`): a value of a key
+  Java's `ProducerConfig` defines must have a JS type its `ConfigDef` type
+  takes (the generated `lib/_config_types.js`; a string is always accepted
+  but for `STRING` / `PASSWORD`, which must be strings), else `ConfigError`
+  with Java's `parseType` message, a `PASSWORD` value shown as `[hidden]`; a
+  `null` for a key whose validator rejects `null` throws that validator's
+  `ConfigError`; other `null`s and every `undefined` are dropped. Values are
+  then stringified (`true` → `"true"`, numbers and bigints by `String`, arrays
+  joined with `,`). The core validates them.
 
 ## Files and layout
 
@@ -204,9 +226,12 @@ These decide every question, in this order:
   headers), `producer.c` (the `KafkaProducer` handle).
 - `lib/`: one public Java type per file, snake_case names, `_` prefix for
   private files (never exported, never declared). Every folder is a module:
-  its `index.js` only requires its public modules and has one
-  `module.exports` literal (re-exported types are JSDoc `@typedef`s there);
-  the root `index.js` exports the namespaces `{ producer, common }` only. The
+  its `index.js` only requires its public modules and its child folders (as
+  namespaces, `common.errors`) and has one `module.exports` literal
+  (re-exported types are JSDoc `@typedef`s there); the root `index.js`
+  exports the namespaces (`producer`, `common`, `consumer`) and the root's
+  own modules, the Java built-in errors (Java's `java.*` packages map to the
+  root, as in the Python client). The
   addon is loaded, and its one-time setup done, in `lib/_native.js`, never in
   an `index.js`. Java getters stay properties.
 - Types are JSDoc in the `.js`; the `.d.ts` beside every public `.js` is
@@ -227,6 +252,20 @@ These decide every question, in this order:
   its own name (`require('@confluentinc/kafka-javascript/producer')`, Node's
   self-reference), so no install is needed; tests of private helpers require
   `lib/_*.js` directly.
+
+## Generated files
+
+`cargo xtask generate-error-codes` generates, from the Java sources and the
+FFI enum (the Python client's generators, `rust/xtask/src/javascript_gen.rs`):
+the error classes and `lib/_error_registry.js`, the config classes'
+constants (`ProducerConfig`, `SslConfigs`, `SaslConfigs`, `SecurityConfig`)
+and `lib/_config_types.js`; `make types` then their `.d.ts`. A generated file
+carries `GENERATED, DO NOT EDIT` naming its generator, and is never edited by
+hand; `cargo xtask check-generated` fails on a stale, missing or orphaned one.
+A folder holding only generated modules has a generated `index.js`; in a
+hand-written one (`lib/`, `common/`, `common/config/`, `producer/`) the
+generator owns the `BEGIN GENERATED REQUIRES` / `BEGIN GENERATED EXPORTS`
+blocks.
 
 ## Files and process
 

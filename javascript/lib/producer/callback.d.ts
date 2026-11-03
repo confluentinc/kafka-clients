@@ -24,4 +24,4 @@
  * contain the special -1 value for all fields. If topicPartition cannot be
  * chosen, a -1 value will be assigned. (The topic is the record's.)
  */
-export type Callback = (metadata: import("./record_metadata").RecordMetadata, error: import("../common/kafka_error").KafkaError | null) => void;
+export type Callback = (metadata: import("./record_metadata").RecordMetadata, error: Error | null) => void;

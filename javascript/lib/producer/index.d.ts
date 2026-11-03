@@ -23,4 +23,6 @@ export type ProducerRecordOptions = import("./producer_record").ProducerRecordOp
 import { KafkaProducer } from "./kafka_producer";
 import { ProducerRecord } from "./producer_record";
 import { RecordMetadata } from "./record_metadata";
-export { KafkaProducer, ProducerRecord, RecordMetadata };
+import { BufferExhaustedError } from "./buffer_exhausted_error";
+import { ProducerConfig } from "./producer_config";
+export { KafkaProducer, ProducerRecord, RecordMetadata, BufferExhaustedError, ProducerConfig };

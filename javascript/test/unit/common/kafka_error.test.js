@@ -25,7 +25,8 @@ test('an invalid config is a KafkaError with the core message', () => {
     assert.ok(e instanceof KafkaError);
     assert.ok(e instanceof Error);
     assert.equal(e.code, -10);
-    assert.equal(e.name, 'CONFIG');
+    assert.equal(e.name, 'ConfigError');
+    assert.equal(e.errorName, 'CONFIG');
     assert.equal(e.message, 'Invalid value bogus for configuration acks: String must be one of: all, -1, 0, 1');
     assert.equal(e.retriable, false);
     assert.equal(e.apiError, false);
@@ -33,7 +34,8 @@ test('an invalid config is a KafkaError with the core message', () => {
     return true;
   });
   assert.throws(() => new KafkaProducer({}), {
-    name: 'CONFIG',
+    name: 'ConfigError',
+    errorName: 'CONFIG',
     message: 'Missing required configuration "bootstrap.servers" which has no default value.',
   });
 });
@@ -47,12 +49,17 @@ test('the cause chain follows Error_source', () => {
         'ssl.truststore.location': '/nonexistent/truststore.jks',
       }),
     (e) => {
-      assert.ok(e instanceof KafkaError);
-      assert.equal(e.name, 'UNKNOWN_SERVER_ERROR');
+      // A bare KafkaException: reported as UNKNOWN_SERVER_ERROR, but not an
+      // ApiException, so not UnknownServerError.
+      assert.equal(e.constructor, KafkaError);
+      assert.equal(e.name, 'KafkaError');
+      assert.equal(e.errorName, 'UNKNOWN_SERVER_ERROR');
+      assert.equal(e.apiError, false);
       assert.equal(e.code, -1);
       assert.equal(e.message, 'Failed to construct kafka producer');
       assert.ok(e.cause instanceof KafkaError);
-      assert.equal(e.cause.name, 'CONFIG');
+      assert.equal(e.cause.name, 'ConfigError');
+      assert.equal(e.cause.errorName, 'CONFIG');
       assert.equal(
         e.cause.message,
         "Failed to create channel builder: Failed to open truststore file '/nonexistent/truststore.jks': " +

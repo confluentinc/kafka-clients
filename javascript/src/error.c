@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// kafka_common_Error_t -> KafkaError. The C layer reads the error through its
+// kafka_common_Error_t -> a JS error. The C layer reads the error through its
 // accessors into a plain object {code, name, message, retriable, apiError,
-// cause} and hands it to the factory lib/common/kafka_error.js registered, so
-// the JS class is the only place a KafkaError is built. An OWNED error is
+// cause} and hands it to the factory lib/_native.js registered:
+// lib/_errors.js `fromNative` constructs the class of its code (KafkaError or a
+// subclass, or a Java built-in such as IllegalStateError). An OWNED error is
 // destroyed once read; a BORROWED one (a delivery callback's, a cause) never.
 
 #include <stdlib.h>
@@ -73,7 +74,7 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
 }
 
 // Wraps a plain error object through the registered factory, which also turns
-// its `cause` into a KafkaError.
+// its `cause` into an error too.
 static napi_value through_factory(napi_env env, napi_value obj) {
     AddonData* data = addon_data(env);
     if (data == NULL || data->error_factory == NULL) return obj;

@@ -1,4 +1,4 @@
-// Copyright 2025 Confluent Inc.
+// Copyright 2026 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,29 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// GENERATED, DO NOT EDIT. Produced by `cargo xtask generate-error-codes` from
+// the Java source of `org.apache.kafka.common.KafkaException`;
+// `cargo xtask check-generated` checks it is up to date.
+
 'use strict';
 
-// KafkaError: every kafka_common_Error_t the C FFI hands out (Java's
-// KafkaException family and the java.lang runtime exceptions the core
-// reports beside it, flattened into one class as the core's Error enum is).
+const _throwable = require('../_throwable');
 
 /**
- * An error from the Kafka client: every error the C FFI reports.
+ * The base class of all other Kafka exceptions
  *
- * `code` is the `kafka_common_Error_e` value identifying the error's class,
- * `name` its enumerator name (`TOPIC_AUTHORIZATION_FAILED`,
- * `LOCAL_ILLEGAL_STATE`, ...), `message` the client's text. `retriable` and
- * `apiError` answer Java's `instanceof RetriableException` /
- * `instanceof ApiException`; `cause` is the error's cause, Java's
- * `getCause()`. KafkaErrors are made by the client.
+ * Java: `org.apache.kafka.common.KafkaException`.
  */
 class KafkaError extends Error {
   /**
-   * The `kafka_common_Error_e` value identifying the error's class.
+   * The `kafka_common_Error_e` value of the error: for an error the client
+   * reports, the core's; for one constructed here, its class's (`-1`,
+   * `UNKNOWN_SERVER_ERROR`, for a class without one).
    * @readonly
    * @type {number}
    */
   code;
+
+  /**
+   * The `kafka_common_Error_e` enumerator name of `code`
+   * (`SASL_AUTHENTICATION_FAILED`, `LOCAL_ILLEGAL_STATE`, ...); `null` for a
+   * class the core has no value for.
+   * @readonly
+   * @type {string | null}
+   */
+  errorName;
 
   /**
    * Java's `instanceof RetriableException`.
@@ -51,19 +59,17 @@ class KafkaError extends Error {
   apiError;
 
   /**
-   * Made by the client, through `_from` (private).
+   * Java's constructors as JavaScript's `Error`'s: `message` is Java's
+   * message (`null` reads as `''`), `options.cause` its cause. Given a cause
+   * and no message, the message is the cause's `String()`, as Java's
+   * `(Throwable cause)` constructor takes `cause.toString()`.
    *
-   * @private
-   * @param {{code: number, name: string | null, message: string, retriable?: boolean,
-   *          apiError?: boolean, cause?: unknown}} fields
+   * @param {string | null} [message]
+   * @param {{cause?: unknown}} [options]
    */
-  constructor({ code, name, message, retriable = false, apiError = false, cause }) {
-    super(message, cause === undefined ? undefined : { cause: KafkaError._from(cause) });
-    // The enumerator name of `code` (`TOPIC_AUTHORIZATION_FAILED`, `LOCAL_ILLEGAL_STATE`, ...).
-    Object.defineProperty(this, 'name', { value: name || 'KafkaError', enumerable: false, configurable: true, writable: true });
-    this.code = code;
-    this.retriable = retriable;
-    this.apiError = apiError;
+  constructor(message, options) {
+    super(_throwable.messageOf(message, options), _throwable.optionsOf(options));
+    _throwable.init(this, new.target);
     /**
      * The error's cause, Java's `getCause()`: set by `super()` (`Error`'s
      * `options.cause`), declared here for the targets whose `lib` predates
@@ -73,18 +79,10 @@ class KafkaError extends Error {
      */
     this.cause;
   }
-
-  /**
-   * A KafkaError from the plain object the native layer builds (private).
-   *
-   * @private
-   * @param {any} fields
-   * @returns {any}
-   */
-  static _from(fields) {
-    if (fields instanceof Error || fields === null || typeof fields !== 'object') return fields;
-    return new KafkaError(fields);
-  }
 }
+
+// A bare KafkaException is reported as UNKNOWN_SERVER_ERROR; UnknownServerError
+// owns that id in the id -> class table.
+_throwable.setFfiId(KafkaError, -1); // kafka_common_Error_UNKNOWN_SERVER_ERROR
 
 module.exports = { KafkaError };

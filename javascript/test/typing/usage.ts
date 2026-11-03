@@ -30,6 +30,10 @@ import {
   RecordMetadata,
 } from '@confluentinc/kafka-javascript/producer';
 import { KafkaError, KafkaFuture } from '@confluentinc/kafka-javascript/common';
+import { IllegalStateError } from '@confluentinc/kafka-javascript';
+import { AuthenticationError, RetriableError, SaslAuthenticationError } from '@confluentinc/kafka-javascript/common/errors';
+import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
+import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
 
 // The root exports the namespaces, the same classes as the entry points.
 const SameProducer: typeof KafkaProducer = producer.KafkaProducer;
@@ -59,12 +63,14 @@ const partition: number | null = record.partition;
 const recordHeaders: ReadonlyArray<Readonly<Header>> = record.headers;
 void [topic, partition, recordHeaders];
 
-const callback: Callback = (metadata: RecordMetadata, error: KafkaError | null) => {
+const callback: Callback = (metadata: RecordMetadata, error: Error | null) => {
   const offset: number = metadata.offset;
   const hasOffset: boolean = metadata.hasOffset;
-  if (error !== null) {
+  if (error instanceof KafkaError) {
     const code: number = error.code;
     const name: string = error.name;
+    const errorName: string | null = error.errorName;
+    void errorName;
     const retriable: boolean = error.retriable;
     const apiError: boolean = error.apiError;
     const cause: unknown = error.cause;
@@ -92,15 +98,37 @@ async function produce(): Promise<void> {
 }
 void produce;
 
+// The errors: Java's extends chain, Java's (message, cause) constructors.
+const sasl: AuthenticationError = new SaslAuthenticationError('bad credentials');
+const base: KafkaError = new KafkaError(null, { cause: sasl });
+const state: IllegalStateError = new IllegalStateError('closed');
+const stateCode: number = state.code;
+const retriable: boolean = base.retriable;
+const config: ConfigError = new ConfigError('Invalid value');
+void [sasl, base, stateCode, retriable, config];
+class MyRetriable extends RetriableError {}
+void new MyRetriable('m');
+// @ts-expect-error code is read-only
+base.code = 1;
+
+// The config classes' constants and the security enums.
+const mechanism: string = SaslConfigs.SASL_MECHANISM;
+const truststore: string = SslConfigs.SSL_TRUSTSTORE_CERTIFICATES_CONFIG;
+const reconfigurable: ReadonlyArray<string> = SslConfigs.RECONFIGURABLE_CONFIGS;
+const auth: SslClientAuth | null = SslClientAuth.forConfig('required');
+const protocol: SecurityProtocol = SecurityProtocol.forName('sasl_ssl');
+const protocolId: number = protocol.id;
+void [mechanism, truststore, reconfigurable, auth, protocolId];
+// @ts-expect-error a constant is read-only
+SslConfigs.SSL_PROTOCOL_CONFIG = 'x';
+
 // Made by the client only.
 // @ts-expect-error RecordMetadata's constructor is private
 new RecordMetadata();
 // @ts-expect-error KafkaFuture's constructor is private
 new KafkaFuture();
-// @ts-expect-error KafkaError's constructor is private
-new KafkaError();
-// @ts-expect-error the client's own members are private
-KafkaError._from({});
+// @ts-expect-error SecurityProtocol's constructor is private
+new SecurityProtocol();
 // @ts-expect-error the client's own members are private
 record._toNative();
 
@@ -119,3 +147,5 @@ void badCallback;
 // The private files are not entry points.
 // @ts-expect-error lib/_config.js is not exported
 import('@confluentinc/kafka-javascript/lib/_config');
+// @ts-expect-error lib/_errors.js is not exported
+import('@confluentinc/kafka-javascript/lib/_errors');

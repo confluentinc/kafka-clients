@@ -31,8 +31,9 @@
  * @param {import('./record_metadata').RecordMetadata} metadata The metadata for the record that was
  *   sent (i.e. the partition and offset). An empty metadata with -1 value for all fields will be
  *   returned if an error occurred.
- * @param {import('../common/kafka_error').KafkaError | null} error The error thrown during
- *   processing of this record. Null if no error occurred.
+ * @param {Error | null} error The error thrown during processing of this record (Java's
+ *   `Exception`): a `KafkaError`, or one of the Java built-in errors at the package root
+ *   (`IllegalStateError`, ...). Null if no error occurred.
  * @returns {void}
  */
 

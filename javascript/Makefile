@@ -43,8 +43,9 @@ TSC ?= node_modules/.bin/tsc
 TS_TYPE_ROOTS ?= node_modules/@types
 export TSC TS_TYPE_ROOTS
 
-# node --test takes files: the test directories one and two levels deep.
-UNIT_TESTS = test/unit/*.test.js test/unit/*/*.test.js
+# node --test takes files: the unit test directories up to four levels deep
+# (test/unit/common/security/auth/), as lib/'s folders are.
+UNIT_TESTS = $(wildcard test/unit/*.test.js test/unit/*/*.test.js test/unit/*/*/*.test.js test/unit/*/*/*/*.test.js)
 STATIC_TESTS = test/static/*.test.js
 TYPING_TESTS = test/typing/*.test.js
 INTEGRATION_TESTS = test/integration/*.test.js

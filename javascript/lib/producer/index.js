@@ -27,5 +27,17 @@
 const { KafkaProducer } = require('./kafka_producer');
 const { ProducerRecord } = require('./producer_record');
 const { RecordMetadata } = require('./record_metadata');
+// BEGIN GENERATED REQUIRES (cargo xtask generate-error-codes; do not edit)
+const { BufferExhaustedError } = require('./buffer_exhausted_error');
+const { ProducerConfig } = require('./producer_config');
+// END GENERATED REQUIRES
 
-module.exports = { KafkaProducer, ProducerRecord, RecordMetadata };
+module.exports = {
+  KafkaProducer,
+  ProducerRecord,
+  RecordMetadata,
+  // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
+  BufferExhaustedError,
+  ProducerConfig,
+  // END GENERATED EXPORTS
+};

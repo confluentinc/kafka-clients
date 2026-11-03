@@ -15,9 +15,33 @@
 'use strict';
 
 // The common namespace: the public classes of Java's org.apache.kafka.common
-// this client has.
+// this client has, and its subpackages' namespaces (`common.errors` is
+// org.apache.kafka.common.errors, `common.config` org.apache.kafka.common.config).
 
-const { KafkaError } = require('./kafka_error');
 const { KafkaFuture } = require('./kafka_future');
+const config = require('./config');
+const security = require('./security');
+// BEGIN GENERATED REQUIRES (cargo xtask generate-error-codes; do not edit)
+const { InvalidRecordError } = require('./invalid_record_error');
+const { KafkaError } = require('./kafka_error');
+const errors = require('./errors');
+const metrics = require('./metrics');
+const network = require('./network');
+const protocol = require('./protocol');
+const requests = require('./requests');
+// END GENERATED REQUIRES
 
-module.exports = { KafkaError, KafkaFuture };
+module.exports = {
+  KafkaFuture,
+  config,
+  security,
+  // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
+  InvalidRecordError,
+  KafkaError,
+  errors,
+  metrics,
+  network,
+  protocol,
+  requests,
+  // END GENERATED EXPORTS
+};
