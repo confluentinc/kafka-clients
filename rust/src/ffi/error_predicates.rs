@@ -565,6 +565,32 @@ pub unsafe extern "C" fn kafka_common_Error_is_local_unsupported_operation_error
     i8::from(unsafe { error_ref(error) }.error.is_local_unsupported_operation_error())
 }
 
+/// Returns whether this error's Java class is, or extends, `java.lang.NullPointerException`.
+///
+/// # Parameters
+///
+/// - `error`: The error handle, or `NULL`.
+///
+/// # Returns
+///
+/// `1` if the predicate holds, `0` if not or if the handle is `NULL`.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or `NULL`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_local_null_pointer_error(error: *const kafka_common_Error_t) -> i8 {
+    if error.is_null() {
+        return 0;
+    }
+    // SAFETY: `error` is non-null (checked above) and, per this function's `# Safety`, a
+    // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
+    // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
+    // The borrow lasts only for this call, while the caller keeps the handle alive.
+    i8::from(unsafe { error_ref(error) }.error.is_local_null_pointer_error())
+}
+
 /// Returns whether this is an error raised by a callback written in another language
 /// (`Error::LocalCallback`; no Java class).
 ///
@@ -4837,6 +4863,7 @@ pub(crate) const PREDICATES: &[(&str, unsafe extern "C" fn(*const kafka_common_E
         "is_local_unsupported_operation_error",
         kafka_common_Error_is_local_unsupported_operation_error,
     ),
+    ("is_local_null_pointer_error", kafka_common_Error_is_local_null_pointer_error),
     ("is_local_callback_error", kafka_common_Error_is_local_callback_error),
     (
         "is_authorizer_not_ready_error",

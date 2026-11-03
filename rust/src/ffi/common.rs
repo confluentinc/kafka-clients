@@ -88,7 +88,7 @@ use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{c_str_to_option, c_str_to_string, kafka_List_t, list_strings};
-// The 168 enumerators are spelled out in full (see
+// The 169 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
 use kafka_common_Error_e::*;
@@ -1433,6 +1433,31 @@ pub unsafe extern "C" fn kafka_common_Error_local_unsupported_operation(
     box_error(Error::local_unsupported_operation(unsafe { c_str_to_string(message) }))
 }
 
+/// `new NullPointerException(String message)` — the JDK
+/// `java.lang.NullPointerException`, the error a `NULL` mandatory argument reports.
+///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_null_pointer(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::local_null_pointer(unsafe { c_str_to_string(message) }))
+}
+
 /// `new TimeoutException(String message)` — the retriable
 /// `org.apache.kafka.common.errors.TimeoutException`.
 ///
@@ -1918,11 +1943,11 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 ///
 /// # Injectivity and ABI
 ///
-/// The 168 values are pairwise distinct — the code alone identifies the class,
+/// The 169 values are pairwise distinct — the code alone identifies the class,
 /// which is what lets a C caller use it as its sole discriminator. The
 /// negatives are ABI once published: a new class **appends at the most-negative
 /// end**, because inserting one mid-list would silently renumber every class
-/// after it. A table test pins all 30 literally so a renumbering cannot pass.
+/// after it. A table test pins all 31 literally so a renumbering cannot pass.
 // Implementation notes for Rust readers, kept out of the generated header.
 //
 // **Why the negatives live here and not in `common::protocol::Errors`.**
@@ -1962,7 +1987,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // typedef, so `config.style` is not respected" (`ir/enumeration.rs`). The ABI
 // is identical: a fieldless `#[repr(C)]` enum takes the target C ABI's default
 // enum size, which is `int` on every target Rust supports, and a C enum
-// spanning -31..=136 is `int` too. Naming the enum in the typedef is what lets
+// spanning -32..=136 is `int` too. Naming the enum in the typedef is what lets
 // a C or C++ caller switch on the real type and get the compiler's
 // exhaustiveness warning.
 #[repr(C)]
@@ -2151,6 +2176,9 @@ pub enum kafka_common_Error_e {
     // JDK-derived (`java.lang.UnsupportedOperationException`), appended after
     // publication because the negatives are ABI.
     kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION = -31,
+    // JDK-derived (`java.lang.NullPointerException`): a `NULL` mandatory argument at the C
+    // boundary. Appended after publication because the negatives are ABI.
+    kafka_common_Error_LOCAL_NULL_POINTER = -32,
 }
 
 /// The `kafka_common_Error_e` of the class that owns a protocol code.
@@ -2210,6 +2238,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::LocalTimeout(_) => kafka_common_Error_LOCAL_TIMEOUT,
         Error::LocalCallback(_) => kafka_common_Error_LOCAL_CALLBACK,
         Error::LocalUnsupportedOperation(_) => kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION,
+        Error::LocalNullPointer(_) => kafka_common_Error_LOCAL_NULL_POINTER,
         Error::Api(_) => kafka_common_Error_API,
         Error::Authentication(_) => kafka_common_Error_AUTHENTICATION,
         Error::Authorization(_) => kafka_common_Error_AUTHORIZATION,
@@ -2573,7 +2602,7 @@ mod tests {
     const FIRST_CODE: i16 = -1;
     const LAST_CODE: i16 = Errors::MAX_CODE;
 
-    /// The 30 classes that own no Java code, each paired with the enumerator it
+    /// The 31 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
@@ -2702,6 +2731,8 @@ mod tests {
                 kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION,
                 -31,
             ),
+            // -32: JDK-derived class appended after publication.
+            (Error::local_null_pointer("m"), kafka_common_Error_LOCAL_NULL_POINTER, -32),
         ]
     }
 
@@ -2796,7 +2827,7 @@ mod tests {
         );
     }
 
-    /// The 168 values are pairwise distinct, so the code alone identifies the
+    /// The 169 values are pairwise distinct, so the code alone identifies the
     /// class. A C caller has no other discriminator, and the gRPC test harness
     /// derives the error type from this value — a collision would silently
     /// misclassify one of the two classes involved.
@@ -2825,10 +2856,10 @@ mod tests {
             }
         }
 
-        assert_eq!(seen.len(), 168, "expected 168 distinct error codes");
+        assert_eq!(seen.len(), 169, "expected 169 distinct error codes");
     }
 
-    /// One instance of each of the 168 error classes: the owner of every Java code,
+    /// One instance of each of the 169 error classes: the owner of every Java code,
     /// the client-side classes, and the bare `KafkaException`, which reports
     /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
     /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
@@ -2897,7 +2928,7 @@ mod tests {
             .into_iter()
             .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
             .collect();
-        assert_eq!(errors.len(), 168, "expected one error per class");
+        assert_eq!(errors.len(), 169, "expected one error per class");
 
         let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
         assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
@@ -2948,7 +2979,7 @@ mod tests {
         }
     }
 
-    /// The 30 Rust-local negatives keep the values they were published with, and
+    /// The 31 Rust-local negatives keep the values they were published with, and
     /// each client-side class maps to the enumerator named after it.
     ///
     /// These values are ABI (see `kafka_common_Error_e`): a new class
@@ -2957,7 +2988,7 @@ mod tests {
     #[test]
     fn ffi_error_code_client_side_negatives_are_stable() {
         let classes = client_side_classes();
-        assert_eq!(classes.len(), 30, "expected 30 classes with no Java code");
+        assert_eq!(classes.len(), 31, "expected 31 classes with no Java code");
 
         for (error, expected, value) in classes {
             assert_eq!(expected as i32, value, "{expected:?} moved off its published value");
