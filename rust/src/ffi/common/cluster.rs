@@ -920,12 +920,13 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
     topic: *const c_char,
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
-    // requires; the reference is used only within this call, and `topic` is NULL or a valid
-    // NUL-terminated string, as `c_str_to_option` requires; both are read only within this call,
-    // and the id is copied into the owned handle returned. No topic is named `null`, so Java's
-    // lookup misses and answers `Uuid.ZERO_UUID`.
+    // requires; the reference is used only within this call.
     let cluster = &unsafe { inner_ref(self_, "self_") }.cluster;
-    box_uuid(unsafe { c_str_to_option(topic) }.map_or(Uuid::ZERO_UUID, |topic| cluster.topic_id(&topic)))
+    // SAFETY: Per this function's `# Safety`, `topic` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`. No topic is named `null`, so
+    // Java's lookup misses and answers `Uuid.ZERO_UUID`; the id is copied into the handle returned.
+    let topic = unsafe { c_str_to_option(topic) };
+    box_uuid(topic.map_or(Uuid::ZERO_UUID, |topic| cluster.topic_id(&topic)))
 }
 
 /// Returns the name of the topic with id `topic_id`, or `NULL` for an unknown id.
