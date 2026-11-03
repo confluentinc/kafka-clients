@@ -2338,15 +2338,36 @@ static kafka_producer_ProducerRecord_t* producer_record_to_c(ProducerRecordObjec
 // a producer's callbacks (a delivery callback, or a record future's
 // dependant), which the handover of a record that Producer_send_cb could not
 // hand over at once may need.
+// The record argument of a send: a ProducerRecord, or None, which reaches the
+// C API as a NULL record (Java's send(null)). 0 with TypeError set otherwise.
+static int producer_record_arg(PyObject* rec_obj) {
+    if (rec_obj == Py_None || PyObject_TypeCheck(rec_obj, &ProducerRecordType)) return 1;
+    PyErr_Format(PyExc_TypeError, "record must be a _confluentkafka.ProducerRecord or None, not %.200s",
+                 Py_TYPE(rec_obj)->tp_name);
+    return 0;
+}
+
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long ptr;
     PyObject* rec_obj;
     PyObject* callable;
-    if (!PyArg_ParseTuple(args, "KO!O", &ptr, &ProducerRecordType, &rec_obj, &callable)) return NULL;
+    if (!PyArg_ParseTuple(args, "KOO", &ptr, &rec_obj, &callable)) return NULL;
+    if (!producer_record_arg(rec_obj)) return NULL;
     Producer* p = producer_from_handle(ptr);
 
     kafka_common_Error_t* err = NULL;
+    if (rec_obj == Py_None) {
+        // Java's send(null): the C API reports the NULL record as its
+        // LocalNullPointerError, which send() raises.
+        kafka_common_KafkaFuture_t* none_fut = NULL;
+        Py_BEGIN_ALLOW_THREADS
+        err = (none_fut = kafka_producer_Producer_send_with_callback(p->producer, NULL, NULL, &ffi_err),
+               ffi_take(&ffi_err));
+        Py_END_ALLOW_THREADS
+        if (none_fut != NULL) ffi_unraisable((kafka_common_KafkaFuture_destroy_err(none_fut, &ffi_err), ffi_take(&ffi_err)));
+        return error_handle_to_py(err);
+    }
     kafka_producer_ProducerRecord_t* rec =
         producer_record_to_c((ProducerRecordObject*)rec_obj, &err);
     if (rec == NULL) return error_handle_to_py(err);
@@ -2401,8 +2422,13 @@ static void producer_send_cb(kafka_common_KafkaFuture_t* value, kafka_common_Err
     // The record's outcome reaches Python through the delivery callback; the
     // future is not needed.
     if (value != NULL) ffi_unraisable((kafka_common_KafkaFuture_destroy_err(value, &ffi_err), ffi_take(&ffi_err)));
-    if (error != NULL) producer_orphan_delivery(ctx->producer, ctx->delivery);
-    else delivery_ctx_release(ctx->delivery);
+    if (ctx->delivery == NULL) {
+        // A NULL record: no delivery callback was registered.
+    } else if (error != NULL) {
+        producer_orphan_delivery(ctx->producer, ctx->delivery);
+    } else {
+        delivery_ctx_release(ctx->delivery);
+    }
     PyObject* py_err = error_handle_to_py(error);
     if (py_err != NULL) {
         PyObject* r = PyObject_CallFunctionObjArgs(ctx->resolve, py_err, NULL);
@@ -2442,10 +2468,26 @@ static PyObject* py_Producer_send_cb(PyObject* self, PyObject* args) {
     PyObject* rec_obj;
     PyObject* callable;
     PyObject* resolve;
-    if (!PyArg_ParseTuple(args, "KO!OO", &ptr, &ProducerRecordType, &rec_obj, &callable, &resolve)) return NULL;
+    if (!PyArg_ParseTuple(args, "KOOO", &ptr, &rec_obj, &callable, &resolve)) return NULL;
+    if (!producer_record_arg(rec_obj)) return NULL;
     Producer* p = producer_from_handle(ptr);
 
     kafka_common_Error_t* err = NULL;
+    if (rec_obj == Py_None) {
+        // Java's send(null): the C API reports the NULL record to `resolve`
+        // as its LocalNullPointerError, inside this call, with no delivery
+        // callback registered.
+        SendCtx* none_ctx = (SendCtx*)PyMem_Malloc(sizeof(SendCtx));
+        if (none_ctx == NULL) return PyErr_NoMemory();
+        Py_INCREF(resolve);
+        Py_INCREF(rec_obj);
+        none_ctx->resolve = resolve;
+        none_ctx->record = rec_obj;
+        none_ctx->delivery = NULL;
+        none_ctx->producer = p;
+        kafka_producer_Producer_send_with_callback_cb(p->producer, NULL, NULL, producer_send_cb, none_ctx);
+        return PyLong_FromLong(0);
+    }
     kafka_producer_ProducerRecord_t* rec =
         producer_record_to_c((ProducerRecordObject*)rec_obj, &err);
     if (rec == NULL) return error_handle_to_py(err);
@@ -2705,10 +2747,12 @@ static void offsets_map_free(offsets_map_t* m) {
     if (m->map) ffi_unraisable((kafka_Map_destroy_err(m->map, &ffi_err), ffi_take(&ffi_err)));
 }
 
-// Returns 0 on success (exception set otherwise).
+// Returns 0 on success (exception set otherwise). A None spec is a NULL map
+// (Java's null offsets), which the C API reports as its own error.
 static int offsets_map_build(PyObject* spec, offsets_map_t* m) {
     kafka_common_Error_t *ffi_err = NULL;
     memset(m, 0, sizeof(*m));
+    if (spec == Py_None) return 0;
     offset_arrays_t a;
     Py_ssize_t n = offsets_to_arrays(spec, &a);
     if (n < 0) return -1;
@@ -2755,6 +2799,16 @@ static int offsets_map_build(PyObject* spec, offsets_map_t* m) {
     return 0;
 }
 
+// The group metadata argument of send_offsets_to_transaction: a
+// ConsumerGroupMetadata, or None, which reaches the C API as NULL (Java's
+// null, its IllegalArgumentException). 0 with TypeError set otherwise.
+static int group_metadata_arg(PyObject* gm_obj) {
+    if (gm_obj == Py_None || PyObject_TypeCheck(gm_obj, &ConsumerGroupMetadataType)) return 1;
+    PyErr_Format(PyExc_TypeError, "group_metadata must be a _confluentkafka.ConsumerGroupMetadata or None, not %.200s",
+                 Py_TYPE(gm_obj)->tp_name);
+    return 0;
+}
+
 // Producer_send_offsets_to_transaction(handle, spec, group_metadata)
 //   -> owned_error_int (0 = success; blocking, the Python clients use _cb)
 static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObject* args) {
@@ -2762,9 +2816,11 @@ static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObjec
     unsigned long long ptr;
     PyObject* spec;
     PyObject* gm_obj;
-    if (!PyArg_ParseTuple(args, "KOO!", &ptr, &spec, &ConsumerGroupMetadataType, &gm_obj)) return NULL;
+    if (!PyArg_ParseTuple(args, "KOO", &ptr, &spec, &gm_obj)) return NULL;
+    if (!group_metadata_arg(gm_obj)) return NULL;
     Producer* p = producer_from_handle(ptr);
-    const kafka_consumer_ConsumerGroupMetadata_t* gm = ((ConsumerGroupMetadataObject*)gm_obj)->handle;
+    const kafka_consumer_ConsumerGroupMetadata_t* gm =
+        gm_obj == Py_None ? NULL : ((ConsumerGroupMetadataObject*)gm_obj)->handle;
     offsets_map_t m;
     if (offsets_map_build(spec, &m) < 0) return NULL;
     kafka_common_Error_t* err;
@@ -2784,9 +2840,11 @@ static PyObject* py_Producer_send_offsets_to_transaction_cb(PyObject* self, PyOb
     PyObject* spec;
     PyObject* gm_obj;
     PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KOO!O", &ptr, &spec, &ConsumerGroupMetadataType, &gm_obj, &cb)) return NULL;
+    if (!PyArg_ParseTuple(args, "KOOO", &ptr, &spec, &gm_obj, &cb)) return NULL;
+    if (!group_metadata_arg(gm_obj)) return NULL;
     Producer* p = producer_from_handle(ptr);
-    const kafka_consumer_ConsumerGroupMetadata_t* gm = ((ConsumerGroupMetadataObject*)gm_obj)->handle;
+    const kafka_consumer_ConsumerGroupMetadata_t* gm =
+        gm_obj == Py_None ? NULL : ((ConsumerGroupMetadataObject*)gm_obj)->handle;
     offsets_map_t m;
     if (offsets_map_build(spec, &m) < 0) return NULL;
     VoidCbCtx* ctx = void_cb_ctx_new(cb);
@@ -2827,7 +2885,7 @@ static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long ptr;
     const char* topic;
-    if (!PyArg_ParseTuple(args, "Ks", &ptr, &topic)) return NULL;
+    if (!PyArg_ParseTuple(args, "Kz", &ptr, &topic)) return NULL;
     Producer* p = producer_from_handle(ptr);
     kafka_List_t* infos = NULL;
     kafka_common_Error_t* err;
@@ -2875,7 +2933,7 @@ static PyObject* py_Producer_partitions_for_cb(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     const char* topic;
     PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KsO", &ptr, &topic, &cb)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzO", &ptr, &topic, &cb)) return NULL;
     Producer* p = producer_from_handle(ptr);
     VoidCbCtx* ctx = void_cb_ctx_new(cb);
     if (ctx == NULL) return NULL;
@@ -4030,10 +4088,12 @@ static void tp_list_free(tp_list_t* l) {
     memset(l, 0, sizeof(*l));
 }
 
-// Returns 0 on success (exception set otherwise).
+// Returns 0 on success (exception set otherwise). A None seq is a NULL list
+// (Java's null collection), which the C API reports as its own error.
 static int tp_list_build(PyObject* seq, tp_list_t* l) {
     kafka_common_Error_t *ffi_err = NULL;
     memset(l, 0, sizeof(*l));
+    if (seq == Py_None) return 0;
     PyObject* fast = PySequence_Fast(seq, "partitions must be a sequence of (topic, partition)");
     if (fast == NULL) return -1;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -4068,9 +4128,12 @@ static void str_list_free(str_list_t* l) {
     memset(l, 0, sizeof(*l));
 }
 
+// A None seq is a NULL list (Java's null collection), which the C API reports
+// as its own error.
 static int str_list_build(PyObject* seq, str_list_t* l) {
     kafka_common_Error_t *ffi_err = NULL;
     memset(l, 0, sizeof(*l));
+    if (seq == Py_None) return 0;
     PyObject* fast = PySequence_Fast(seq, "topics must be a sequence of str");
     if (fast == NULL) return -1;
     l->seq = fast;
@@ -4108,9 +4171,12 @@ static void tp_i64_map_free(tp_i64_map_t* m) {
     memset(m, 0, sizeof(*m));
 }
 
+// A None seq is a NULL map (Java's null map), which the C API reports as its
+// own error.
 static int tp_i64_map_build(PyObject* seq, tp_i64_map_t* m) {
     kafka_common_Error_t *ffi_err = NULL;
     memset(m, 0, sizeof(*m));
+    if (seq == Py_None) return 0;
     PyObject* fast = PySequence_Fast(seq, "expected a sequence of (topic, partition, value)");
     if (fast == NULL) return -1;
     Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
@@ -5825,9 +5891,9 @@ DEF_POSITION_OPS(Consumer_position, kafka_consumer_Consumer_t*, consumer_self,
 static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
     kafka_common_Error_t *ffi_err = NULL;                                               \
     unsigned long long h; const char* topic; int partition;                             \
-    if (!PyArg_ParseTuple(args, "Ksi", &h, &topic, &partition)) return NULL;            \
-    kafka_common_TopicPartition_t* tp = NULL;                                           \
-    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
+    if (!PyArg_ParseTuple(args, "Kzi", &h, &topic, &partition)) return NULL;            \
+    kafka_common_TopicPartition_t* tp = NULL;  /* a None topic: a null partition */     \
+    if (topic != NULL && ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
     SELF_T s = SELF_FN(h);                                                              \
     int64_t lag = 0;                                                                    \
     int8_t present = 0;                                                                 \
@@ -5835,7 +5901,7 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     Py_BEGIN_ALLOW_THREADS                                                              \
     present = OP(s, tp, &lag, &err);                                                    \
     Py_END_ALLOW_THREADS                                                                \
-    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
+    if (tp) ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
     if (err || !present) { present = 0; lag = 0; }                                      \
     PyObject* value = Py_BuildValue("(iL)", (int)present, (long long)lag);              \
     if (value == NULL) { if (err) ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
@@ -5848,16 +5914,16 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
 static PyObject* py_##pyname(PyObject* self, PyObject* args) {                          \
     kafka_common_Error_t *ffi_err = NULL;                                               \
     unsigned long long h; const char* topic; int partition; PyObject* cb;               \
-    if (!PyArg_ParseTuple(args, "KsiO", &h, &topic, &partition, &cb)) return NULL;      \
-    kafka_common_TopicPartition_t* tp = NULL;                                           \
-    if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
+    if (!PyArg_ParseTuple(args, "KziO", &h, &topic, &partition, &cb)) return NULL;      \
+    kafka_common_TopicPartition_t* tp = NULL;  /* a None topic: a null partition */     \
+    if (topic != NULL && ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
     VoidCbCtx* ctx = void_cb_ctx_new(cb);                                               \
-    if (ctx == NULL) { ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
+    if (ctx == NULL) { if (tp) ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
     SELF_T s = SELF_FN(h);                                                              \
     Py_BEGIN_ALLOW_THREADS                                                              \
     OP_CB(s, tp, consumer_optional_i64_cb, ctx);                                        \
     Py_END_ALLOW_THREADS                                                                \
-    ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
+    if (tp) ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
     Py_RETURN_NONE;                                                                     \
 }
 
@@ -6040,11 +6106,15 @@ static SubscribeCbCtx* subscribe_cb_ctx_new(PyObject* cb, Consumer* c, ListenerC
     return ctx;
 }
 
-// Consumer_subscribe(h, topics: list[str], adapter | None) -> err | None
+// Consumer_subscribe(h, topics: list[str] | None, adapter | None, has_listener) -> err | None
+//
+// has_listener selects the overload taking a listener, whose adapter None is
+// Java's null listener (NULL, which the FFI answers with Java's error); a None
+// topics is Java's null collection, crossing as NULL too.
 static PyObject* py_Consumer_subscribe(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* topics; PyObject* adapter;
-    if (!PyArg_ParseTuple(args, "KOO", &h, &topics, &adapter)) return NULL;
+    unsigned long long h; PyObject* topics; PyObject* adapter; int has_listener;
+    if (!PyArg_ParseTuple(args, "KOOp", &h, &topics, &adapter, &has_listener)) return NULL;
     Consumer* c = consumer_from_handle(h);
     str_list_t tl;
     if (str_list_build(topics, &tl) < 0) return NULL;
@@ -6053,7 +6123,7 @@ static PyObject* py_Consumer_subscribe(PyObject* self, PyObject* args) {
     kafka_consumer_Consumer_t* s = c->consumer;
     kafka_common_Error_t* err;
     Py_BEGIN_ALLOW_THREADS
-    err = listener ? (kafka_consumer_Consumer_subscribe_with_topics_listener(s, tl.list, listener, &ffi_err), ffi_take(&ffi_err))
+    err = has_listener ? (kafka_consumer_Consumer_subscribe_with_topics_listener(s, tl.list, listener, &ffi_err), ffi_take(&ffi_err))
                    : (kafka_consumer_Consumer_subscribe_with_topics(s, tl.list, &ffi_err), ffi_take(&ffi_err));
     Py_END_ALLOW_THREADS
     if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));  // registration copied
@@ -6064,8 +6134,8 @@ static PyObject* py_Consumer_subscribe(PyObject* self, PyObject* args) {
 
 static PyObject* py_Consumer_subscribe_cb(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* topics; PyObject* adapter; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KOOO", &h, &topics, &adapter, &cb)) return NULL;
+    unsigned long long h; PyObject* topics; PyObject* adapter; int has_listener; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KOOpO", &h, &topics, &adapter, &has_listener, &cb)) return NULL;
     Consumer* c = consumer_from_handle(h);
     str_list_t tl;
     if (str_list_build(topics, &tl) < 0) return NULL;
@@ -6079,7 +6149,7 @@ static PyObject* py_Consumer_subscribe_cb(PyObject* self, PyObject* args) {
     }
     kafka_consumer_Consumer_t* s = c->consumer;
     Py_BEGIN_ALLOW_THREADS
-    if (listener) kafka_consumer_Consumer_subscribe_with_topics_listener_cb(s, tl.list, listener, consumer_subscribe_cb, ctx);
+    if (has_listener) kafka_consumer_Consumer_subscribe_with_topics_listener_cb(s, tl.list, listener, consumer_subscribe_cb, ctx);
     else kafka_consumer_Consumer_subscribe_with_topics_cb(s, tl.list, consumer_subscribe_cb, ctx);
     Py_END_ALLOW_THREADS
     if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));  // registration copied
@@ -6087,17 +6157,18 @@ static PyObject* py_Consumer_subscribe_cb(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Consumer_subscribe_pattern(h, pattern: str, adapter | None) -> err | None
+// Consumer_subscribe_pattern(h, pattern: str | None, adapter | None, has_listener) -> err | None
 // (Java's subscribe(SubscriptionPattern[, listener]), evaluated broker-side).
 static PyObject* py_Consumer_subscribe_pattern(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; const char* pattern; PyObject* adapter;
-    if (!PyArg_ParseTuple(args, "KsO", &h, &pattern, &adapter)) return NULL;
+    unsigned long long h; const char* pattern; PyObject* adapter; int has_listener;
+    if (!PyArg_ParseTuple(args, "KzOp", &h, &pattern, &adapter, &has_listener)) return NULL;
     Consumer* c = consumer_from_handle(h);
     ListenerCtx* lctx; kafka_consumer_ConsumerRebalanceListener_t* listener;
     if (listener_build(c, adapter, &lctx, &listener) < 0) return NULL;
     kafka_consumer_SubscriptionPattern_t* sp = NULL;
-    if (ffi_raise((sp = kafka_consumer_SubscriptionPattern_new_err(pattern, &ffi_err), ffi_take(&ffi_err)))) {
+    if (pattern != NULL
+        && ffi_raise((sp = kafka_consumer_SubscriptionPattern_new_err(pattern, &ffi_err), ffi_take(&ffi_err)))) {
         if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));
         listener_ctx_free(lctx);
         return NULL;
@@ -6105,10 +6176,10 @@ static PyObject* py_Consumer_subscribe_pattern(PyObject* self, PyObject* args) {
     kafka_consumer_Consumer_t* s = c->consumer;
     kafka_common_Error_t* err;
     Py_BEGIN_ALLOW_THREADS
-    err = listener ? (kafka_consumer_Consumer_subscribe_with_pattern_listener(s, sp, listener, &ffi_err), ffi_take(&ffi_err))
+    err = has_listener ? (kafka_consumer_Consumer_subscribe_with_pattern_listener(s, sp, listener, &ffi_err), ffi_take(&ffi_err))
                    : (kafka_consumer_Consumer_subscribe_with_pattern(s, sp, &ffi_err), ffi_take(&ffi_err));
     Py_END_ALLOW_THREADS
-    ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
+    if (sp) ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
     if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));
     consumer_listener_commit(c, lctx, err != NULL);
     return err_result(err);
@@ -6116,13 +6187,14 @@ static PyObject* py_Consumer_subscribe_pattern(PyObject* self, PyObject* args) {
 
 static PyObject* py_Consumer_subscribe_pattern_cb(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; const char* pattern; PyObject* adapter; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KsOO", &h, &pattern, &adapter, &cb)) return NULL;
+    unsigned long long h; const char* pattern; PyObject* adapter; int has_listener; PyObject* cb;
+    if (!PyArg_ParseTuple(args, "KzOpO", &h, &pattern, &adapter, &has_listener, &cb)) return NULL;
     Consumer* c = consumer_from_handle(h);
     ListenerCtx* lctx; kafka_consumer_ConsumerRebalanceListener_t* listener;
     if (listener_build(c, adapter, &lctx, &listener) < 0) return NULL;
     kafka_consumer_SubscriptionPattern_t* sp = NULL;
-    SubscribeCbCtx* ctx = ffi_raise((sp = kafka_consumer_SubscriptionPattern_new_err(pattern, &ffi_err), ffi_take(&ffi_err)))
+    SubscribeCbCtx* ctx = pattern != NULL
+        && ffi_raise((sp = kafka_consumer_SubscriptionPattern_new_err(pattern, &ffi_err), ffi_take(&ffi_err)))
         ? NULL : subscribe_cb_ctx_new(cb, c, lctx);
     if (ctx == NULL) {
         if (sp) ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
@@ -6132,10 +6204,10 @@ static PyObject* py_Consumer_subscribe_pattern_cb(PyObject* self, PyObject* args
     }
     kafka_consumer_Consumer_t* s = c->consumer;
     Py_BEGIN_ALLOW_THREADS
-    if (listener) kafka_consumer_Consumer_subscribe_with_pattern_listener_cb(s, sp, listener, consumer_subscribe_cb, ctx);
+    if (has_listener) kafka_consumer_Consumer_subscribe_with_pattern_listener_cb(s, sp, listener, consumer_subscribe_cb, ctx);
     else kafka_consumer_Consumer_subscribe_with_pattern_cb(s, sp, consumer_subscribe_cb, ctx);
     Py_END_ALLOW_THREADS
-    ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
+    if (sp) ffi_unraisable((kafka_consumer_SubscriptionPattern_destroy_err(sp, &ffi_err), ffi_take(&ffi_err)));
     if (listener) ffi_unraisable((kafka_consumer_ConsumerRebalanceListener_destroy_err(listener, &ffi_err), ffi_take(&ffi_err)));
     Py_RETURN_NONE;
 }
@@ -6257,7 +6329,7 @@ static PyObject* py_Consumer_commit_async_cb(PyObject* self, PyObject* args) {
 static PyObject* py_Consumer_partitions_for(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h; const char* topic; long long ms;
-    if (!PyArg_ParseTuple(args, "KsL", &h, &topic, &ms)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzL", &h, &topic, &ms)) return NULL;
     kafka_consumer_Consumer_t* s = consumer_self(h);
     kafka_List_t* infos = NULL;
     kafka_common_Error_t* err;
@@ -6278,7 +6350,7 @@ static PyObject* py_Consumer_partitions_for(PyObject* self, PyObject* args) {
 
 static PyObject* py_Consumer_partitions_for_cb(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; long long ms; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KsLO", &h, &topic, &ms, &cb)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzLO", &h, &topic, &ms, &cb)) return NULL;
     ValueCbCtx* ctx = value_cb_ctx_new(cb, NULL, partition_info_list_to_py);
     if (ctx == NULL) return NULL;
     kafka_consumer_Consumer_t* s = consumer_self(h);
@@ -6431,7 +6503,7 @@ DEF_COMMIT_SYNC_OPS(ConsumerHandle_commit_sync, HANDLE_T, handle_self,
 static PyObject* py_ConsumerHandle_partitions_for(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h; const char* topic; long long ms;
-    if (!PyArg_ParseTuple(args, "KsL", &h, &topic, &ms)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzL", &h, &topic, &ms)) return NULL;
     const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
     kafka_List_t* infos = NULL;
     kafka_common_Error_t* err;
@@ -6452,7 +6524,7 @@ static PyObject* py_ConsumerHandle_partitions_for(PyObject* self, PyObject* args
 
 static PyObject* py_ConsumerHandle_partitions_for_cb(PyObject* self, PyObject* args) {
     unsigned long long h; const char* topic; long long ms; PyObject* cb;
-    if (!PyArg_ParseTuple(args, "KsLO", &h, &topic, &ms, &cb)) return NULL;
+    if (!PyArg_ParseTuple(args, "KzLO", &h, &topic, &ms, &cb)) return NULL;
     ValueCbCtx* ctx = value_cb_ctx_new(cb, NULL, partition_info_list_to_py);
     if (ctx == NULL) return NULL;
     const kafka_consumer_ConsumerHandle_t* s = handle_self(h);
