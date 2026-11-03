@@ -21,7 +21,7 @@
 //! NUL-terminated topic name of each topic id and the cluster resource. The
 //! getters returning Java collections build owned `kafka_List_t`s of copies.
 
-use crate::ffi::precondition::{require_map, require_ref, require_str};
+use crate::ffi::precondition::{require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -618,7 +618,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition(
 ///
 /// # Parameters
 ///
-/// - `topic` - The topic name
+/// - `topic` - The topic name, or `NULL`, which names no topic
 ///
 /// # Returns
 ///
@@ -626,8 +626,8 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid cluster handle and `topic` `NULL` or a valid
+/// NUL-terminated string.
 /// The returned list of `kafka_common_PartitionInfo_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -635,35 +635,33 @@ pub unsafe extern "C" fn kafka_common_Cluster_partitions_for_topic(
     self_: *const kafka_common_Cluster_t,
     topic: *const c_char,
 ) -> *mut kafka_List_t {
-    partition_info_list(
-        // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
-        // requires; the reference is used only within this call, and what it reads is copied into
-        // the owned list returned.
-        unsafe { inner_ref(self_, "self_") }
-            .cluster
-            // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
-            // it after this call.
-            .partitions_for_topic(&unsafe { require_str(topic, "topic") }),
-    )
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
+    let cluster = &unsafe { inner_ref(self_, "self_") }.cluster;
+    // SAFETY: Per this function's `# Safety`, `topic` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call. No topic is named `null`, so Java's lookup misses and answers an empty list.
+    partition_info_list(match unsafe { c_str_to_option(topic) } {
+        Some(topic) => cluster.partitions_for_topic(&topic),
+        None => &[],
+    })
 }
 
 /// Get the number of partitions for the given topic.
 ///
 /// # Parameters
 ///
-/// - `topic` - The topic to get the number of partitions for
+/// - `topic` - The topic to get the number of partitions for, or `NULL`, which names no topic
 ///
 /// # Returns
 ///
 /// The number of partitions or -1 if there is no corresponding metadata
 ///
-/// # Translation notes
-///
 /// # Safety
 ///
-/// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid cluster handle and `topic` `NULL` or a valid
+/// NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
@@ -672,12 +670,12 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
     // requires; the reference is used only within this call, and only a count is read.
-    unsafe { inner_ref(self_, "self_") }
-        .cluster
-        // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
-        // after this call.
-        .partition_count_for_topic(&unsafe { require_str(topic, "topic") })
+    let cluster = &unsafe { inner_ref(self_, "self_") }.cluster;
+    // SAFETY: Per this function's `# Safety`, `topic` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call. No topic is named `null`, so Java's lookup misses.
+    unsafe { c_str_to_option(topic) }
+        .and_then(|topic| cluster.partition_count_for_topic(&topic))
         .map_or(-1, |count| count as i32)
 }
 
@@ -685,7 +683,7 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
 ///
 /// # Parameters
 ///
-/// - `topic` - The topic name
+/// - `topic` - The topic name, or `NULL`, which names no topic
 ///
 /// # Returns
 ///
@@ -693,8 +691,8 @@ pub unsafe extern "C" fn kafka_common_Cluster_partition_count_for_topic(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid cluster handle and `topic` `NULL` or a valid
+/// NUL-terminated string.
 /// The returned list of `kafka_common_PartitionInfo_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -702,17 +700,17 @@ pub unsafe extern "C" fn kafka_common_Cluster_available_partitions_for_topic(
     self_: *const kafka_common_Cluster_t,
     topic: *const c_char,
 ) -> *mut kafka_List_t {
-    partition_info_list(
-        // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
-        // requires; the reference is used only within this call, and what it reads is copied into
-        // the owned list returned.
-        unsafe { inner_ref(self_, "self_") }
-            .cluster
-            // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
-            // it after this call.
-            .available_partitions_for_topic(&unsafe { require_str(topic, "topic") }),
-    )
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
+    // requires; the reference is used only within this call, and what it reads is copied into the
+    // owned list returned.
+    let cluster = &unsafe { inner_ref(self_, "self_") }.cluster;
+    // SAFETY: Per this function's `# Safety`, `topic` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call. No topic is named `null`, so Java's lookup misses and answers an empty list.
+    partition_info_list(match unsafe { c_str_to_option(topic) } {
+        Some(topic) => cluster.available_partitions_for_topic(&topic),
+        None => &[],
+    })
 }
 
 /// Get the list of partitions whose leader is this node
@@ -898,12 +896,12 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_ids(self_: *const kafka_comm
 ///
 /// # Parameters
 ///
-/// - `topic` - the topic name
+/// - `topic` - the topic name, or `NULL`, which names no topic
 ///
 /// # Safety
 ///
-/// `self_` must be a valid cluster handle and `topic` a valid NUL-terminated
-/// string. The returned handle is owned, freed with `kafka_common_Uuid_destroy`.
+/// `self_` must be a valid cluster handle and `topic` `NULL` or a valid
+/// NUL-terminated string. The returned handle is owned, freed with `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
@@ -911,14 +909,12 @@ pub unsafe extern "C" fn kafka_common_Cluster_topic_id(
     topic: *const c_char,
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster handle, as `inner_ref`
-    // requires; the reference is used only within this call, and `topic` is a valid NUL-terminated
-    // string, as `require_str` requires; both are read only within this call, and the id is
-    // copied into the owned handle returned.
-    box_uuid(
-        unsafe { inner_ref(self_, "self_") }
-            .cluster
-            .topic_id(&unsafe { require_str(topic, "topic") }),
-    )
+    // requires; the reference is used only within this call, and `topic` is NULL or a valid
+    // NUL-terminated string, as `c_str_to_option` requires; both are read only within this call,
+    // and the id is copied into the owned handle returned. No topic is named `null`, so Java's
+    // lookup misses and answers `Uuid.ZERO_UUID`.
+    let cluster = &unsafe { inner_ref(self_, "self_") }.cluster;
+    box_uuid(unsafe { c_str_to_option(topic) }.map_or(Uuid::ZERO_UUID, |topic| cluster.topic_id(&topic)))
 }
 
 /// Returns the name of the topic with id `topic_id`, or `NULL` for an unknown id.
@@ -1053,6 +1049,19 @@ mod tests {
 
             assert_eq!(kafka_common_Cluster_partition_count_for_topic(cluster, topic.as_ptr()), 2);
             assert_eq!(kafka_common_Cluster_partition_count_for_topic(cluster, missing.as_ptr()), -1);
+            // Java's lookups of a null topic miss: `List.of()`, `null` (-1) and `Uuid.ZERO_UUID`.
+            assert_eq!(kafka_common_Cluster_partition_count_for_topic(cluster, ptr::null()), -1);
+            for lookup in [
+                kafka_common_Cluster_partitions_for_topic as unsafe extern "C" fn(_, _) -> _,
+                kafka_common_Cluster_available_partitions_for_topic,
+            ] {
+                let none = lookup(cluster, ptr::null());
+                assert_eq!(kafka_List_size(none), 0);
+                kafka_List_destroy(none);
+            }
+            let null_id = kafka_common_Cluster_topic_id(cluster, ptr::null());
+            assert_eq!(uuid_of(null_id, "id"), Uuid::ZERO_UUID);
+            kafka_common_Uuid_destroy(null_id);
             let available = kafka_common_Cluster_available_partitions_for_topic(cluster, topic.as_ptr());
             assert_eq!(kafka_List_size(available), 1);
             kafka_List_destroy(available);
