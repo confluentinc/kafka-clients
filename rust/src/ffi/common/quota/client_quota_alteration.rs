@@ -125,6 +125,14 @@ pub(crate) fn box_client_quota_alteration(
 /// - `value` - if set then the existing value is updated, otherwise if `NAN` (Java's `null`),
 ///   the existing value is cleared
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `key` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `key` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `key` must be a valid NUL-terminated string; it is copied.

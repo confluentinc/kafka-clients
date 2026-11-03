@@ -205,10 +205,16 @@ pub(crate) unsafe fn map_topic_partition_i64(
 
 /// Creates a topic partition.
 ///
+/// WARNING: `NULL` `topic` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `topic` - the topic name
 /// - `partition` - the partition number
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
 ///
 /// # Safety
 ///

@@ -50,7 +50,7 @@ pub(crate) unsafe fn subscription_pattern_ref<'a>(
     &unsafe { require_ref::<_, SubscriptionPatternInner>(pattern, param) }.pattern
 }
 
-/// Create a subscription pattern, which the group coordinator validates.
+/// Constructs a new subscription pattern.
 ///
 /// # Parameters
 ///
@@ -59,6 +59,14 @@ pub(crate) unsafe fn subscription_pattern_ref<'a>(
 /// # Returns
 ///
 /// The handle.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `pattern` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `pattern` panics; Java stores `null`.
 ///
 /// # Safety
 ///

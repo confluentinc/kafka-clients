@@ -211,6 +211,15 @@ unsafe fn list_topic_partition_infos(list: *const kafka_List_t, param: &'static 
 /// - `partitions` - A list of partitions where the index represents the partition id and the
 ///   element contains leadership and replica information for that partition.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name`, `partitions` panic; Java stores `null`.
+///
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `partitions` `NULL` or a
@@ -250,6 +259,15 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
 ///   element contains leadership and replica information for that partition.
 /// - `authorized_operations` - authorized operations for this topic, or empty set if this is not
 ///   known.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name`, `partitions` panic; Java stores `null`.
 ///
 /// # Safety
 ///
@@ -294,6 +312,16 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
 /// - `authorized_operations` - authorized operations for this topic, or empty set if this is not
 ///   known.
 /// - `topic_id` - the topic id
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+/// - `LocalNullPointerError` if `topic_id` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name`, `partitions`, `topic_id` panic; Java stores `null`.
 ///
 /// # Safety
 ///

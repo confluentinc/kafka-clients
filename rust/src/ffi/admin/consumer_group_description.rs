@@ -20,7 +20,7 @@
 //! the broker did not report them; `Optional<Integer> groupEpoch()` and
 //! `targetAssignmentEpoch()` cross as `-1` when empty.
 
-use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
+use crate::ffi::precondition::{require_element, require_list, require_ref};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ConsumerGroupDescription, MemberDescription};
@@ -32,7 +32,7 @@ use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ConsumerGroupDescription`].
 #[repr(C)]
@@ -117,16 +117,19 @@ pub(crate) unsafe fn destroy_consumer_group_description_element(element: *mut c_
 }
 
 /// Reads a list of `const kafka_admin_MemberDescription_t *` into owned
-/// copies; `NULL` panics.
+/// copies; `NULL` reads as empty, as Java's constructors read a null `members`.
 ///
 /// # Safety
 ///
 /// `list` must be `NULL` or a valid list whose elements are member-description
 /// handles, alive and not mutated for this call.
 unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static str) -> Vec<MemberDescription> {
-    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
-    // mutated for this call, as `require_list` requires; the borrowed slice does not outlive the
-    // call.
+    if list.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid list
+    // handle, alive and not mutated for this call, as `require_list` requires; the borrowed slice
+    // does not outlive the call.
     unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
@@ -153,13 +156,15 @@ fn member_description_list(members: &[MemberDescription]) -> *mut kafka_List_t {
 
 /// Creates the description of a consumer group.
 ///
+/// WARNING: `NULL` `group_type`, `group_state` panic; Java stores `null`.
+///
 /// # Parameters
 ///
-/// - `group_id` - the id of the consumer group.
+/// - `group_id` - the id of the consumer group; `NULL` reads as empty.
 /// - `is_simple_consumer_group` - 1 if the group is simple, else 0.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
-///   copied; must not be `NULL`.
-/// - `partition_assignor` - the consumer group partition assignor.
+///   copied; `NULL` reads as empty.
+/// - `partition_assignor` - the consumer group partition assignor; `NULL` reads as empty.
 /// - `group_type` - the group type, a singleton.
 /// - `group_state` - the group state, a singleton.
 /// - `coordinator` - the group coordinator, copied; `NULL` if not known.
@@ -168,11 +173,16 @@ fn member_description_list(members: &[MemberDescription]) -> *mut kafka_List_t {
 /// - `group_epoch` - the epoch of the group, `-1` for none.
 /// - `target_assignment_epoch` - the epoch of the target assignment, `-1` for none.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `group_type` is `NULL`
+/// - `LocalNullPointerError` if `group_state` is `NULL`
+///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings, the lists `NULL` or valid borrowed
-/// lists of the documented handles, the enums singletons of their types and
-/// `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
+/// The strings must be valid NUL-terminated strings (`NULL` where it reads as empty), the lists
+/// `NULL` or valid borrowed lists of the documented handles, the enums singletons of their types
+/// and `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
 /// [`kafka_admin_ConsumerGroupDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -189,17 +199,17 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_new(
     target_assignment_epoch: i32,
 ) -> *mut kafka_admin_ConsumerGroupDescription_t {
     box_consumer_group_description(ConsumerGroupDescription::new(
-        // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-        // `require_str` requires.
-        unsafe { require_str(group_id, "group_id") },
+        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
+        unsafe { c_str_to_string(group_id) },
         is_simple_consumer_group != 0,
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
         unsafe { list_member_descriptions(members, "members") },
-        // SAFETY: Per this function's `# Safety`, `partition_assignor` is a valid NUL-terminated
-        // string, as `require_str` requires.
-        unsafe { require_str(partition_assignor, "partition_assignor") },
+        // SAFETY: Per this function's `# Safety`, `partition_assignor` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
+        unsafe { c_str_to_string(partition_assignor) },
         // SAFETY: Per this function's `# Safety`, `group_type` is a `kafka_common_GroupType_t`
         // singleton, as `group_type::value_of` requires.
         unsafe { group_type::value_of(group_type, "group_type") },

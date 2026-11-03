@@ -90,9 +90,15 @@ pub(crate) unsafe fn destroy_member_to_remove_element(element: *mut c_void) {
 
 /// Creates the member to remove from a group, by its group instance id.
 ///
+/// WARNING: `NULL` `group_instance_id` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `group_instance_id` - the group instance id of the static member; copied.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `group_instance_id` is `NULL`
 ///
 /// # Safety
 ///

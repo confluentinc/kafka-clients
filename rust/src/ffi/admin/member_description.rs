@@ -20,16 +20,17 @@
 //! (`upgraded`). The two assignment getters return borrowed handles valid as
 //! long as the description.
 
-use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::precondition::require_ref;
+use std::collections::HashSet;
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
-use crate::admin::MemberDescription;
+use crate::admin::{MemberAssignment, MemberDescription};
 use crate::ffi::admin::member_assignment::{
     kafka_admin_MemberAssignment_t, member_assignment_ptr, member_assignment_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
+use crate::ffi::util::{c_str_to_option, c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`MemberDescription`].
 #[repr(C)]
@@ -119,12 +120,13 @@ fn optional_c_str(s: Option<&CString>) -> *const c_char {
 ///
 /// # Parameters
 ///
-/// - `member_id` - the consumer id of the group member.
+/// - `member_id` - the consumer id of the group member; `NULL` reads as empty.
 /// - `group_instance_id` - the instance id of the group member, `NULL` for none.
 /// - `rack_id` - the rack id of the group member, `NULL` for none.
-/// - `client_id` - the client id of the group member.
-/// - `host` - the host where the group member is running.
-/// - `assignment` - the assignment of the group member; copied, the caller keeps its handle.
+/// - `client_id` - the client id of the group member; `NULL` reads as empty.
+/// - `host` - the host where the group member is running; `NULL` reads as empty.
+/// - `assignment` - the assignment of the group member; copied, the caller keeps its handle;
+///   `NULL` reads as an empty assignment.
 /// - `target_assignment` - the target assignment of the member, `NULL` for none; copied, the
 ///   caller keeps its handle.
 /// - `member_epoch` - the epoch of the group member, `-1` for none.
@@ -133,9 +135,8 @@ fn optional_c_str(s: Option<&CString>) -> *const c_char {
 ///
 /// # Safety
 ///
-/// The strings must be `NULL` (where nullable) or valid NUL-terminated
-/// strings; `assignment` must be a valid member-assignment handle and
-/// `target_assignment` `NULL` or a valid one. The returned handle is owned, freed with
+/// The strings must be `NULL` or valid NUL-terminated strings, and
+/// `assignment` and `target_assignment` `NULL` or valid member-assignment handles. The returned handle is owned, freed with
 /// [`kafka_admin_MemberDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -158,26 +159,34 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
         // for this call, as `member_assignment_ref` requires, and the borrow ends with the clone.
         Some(unsafe { member_assignment_ref(target_assignment, "target_assignment") }.clone())
     };
+    // Java's constructor reads a null `assignment` as an empty one.
+    let assignment = if assignment.is_null() {
+        MemberAssignment::new(HashSet::new())
+    } else {
+        // SAFETY: Per this function's `# Safety`, `assignment` is null or a valid member-assignment
+        // handle, and this branch runs only when it is non-null; it is kept alive for this call, as
+        // `member_assignment_ref` requires, and the borrow ends with the clone.
+        unsafe { member_assignment_ref(assignment, "assignment") }.clone()
+    };
+    // Java's constructor reads a null `memberId`, `clientId` or `host` as an empty string, which
+    // is what `c_str_to_string` reads `NULL` as.
     box_member_description(MemberDescription::new(
-        // SAFETY: Per this function's `# Safety`, `member_id` is a valid NUL-terminated string, as
-        // `require_str` requires.
-        unsafe { require_str(member_id, "member_id") },
+        // SAFETY: Per this function's `# Safety`, `member_id` is null or a valid NUL-terminated
+        // string, as `c_str_to_string` requires.
+        unsafe { c_str_to_string(member_id) },
         // SAFETY: Per this function's `# Safety`, `group_instance_id` is null or a valid
         // NUL-terminated string, as `c_str_to_option` requires.
         unsafe { c_str_to_option(group_instance_id) },
         // SAFETY: Per this function's `# Safety`, `rack_id` is null or a valid NUL-terminated
         // string, as `c_str_to_option` requires.
         unsafe { c_str_to_option(rack_id) },
-        // SAFETY: Per this function's `# Safety`, `client_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { require_str(client_id, "client_id") },
-        // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-        // `require_str` requires.
-        unsafe { require_str(host, "host") },
-        // SAFETY: Per this function's `# Safety`, `assignment` is a valid member-assignment handle,
-        // kept alive for this call, as `member_assignment_ref` requires; the borrow ends with the
-        // clone.
-        unsafe { member_assignment_ref(assignment, "assignment") }.clone(),
+        // SAFETY: Per this function's `# Safety`, `client_id` is null or a valid NUL-terminated
+        // string, as `c_str_to_string` requires.
+        unsafe { c_str_to_string(client_id) },
+        // SAFETY: Per this function's `# Safety`, `host` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires.
+        unsafe { c_str_to_string(host) },
+        assignment,
         target_assignment,
         (member_epoch >= 0).then_some(member_epoch),
         (upgraded >= 0).then_some(upgraded != 0),
@@ -395,5 +404,78 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_destroy(self_: *mut kafka
         // afterwards. Every member-description handle comes from `box_member_description`, which
         // boxes a `MemberDescriptionInner`, so `Box::from_raw` reclaims that box.
         drop(unsafe { Box::from_raw(self_ as *mut MemberDescriptionInner) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::admin::classic_group_description::{
+        classic_group_description_ref, kafka_admin_ClassicGroupDescription_destroy,
+        kafka_admin_ClassicGroupDescription_new,
+    };
+    use crate::ffi::admin::consumer_group_description::{
+        consumer_group_description_ref, kafka_admin_ConsumerGroupDescription_destroy,
+        kafka_admin_ConsumerGroupDescription_new,
+    };
+    use crate::ffi::common::classic_group_state::kafka_common_ClassicGroupState_stable;
+    use crate::ffi::common::group_state::kafka_common_GroupState_stable;
+    use crate::ffi::common::group_type::kafka_common_GroupType_consumer;
+
+    #[test]
+    fn null_ids_members_and_assignment_read_as_empty_as_in_java() {
+        // SAFETY: Test code: every pointer is `NULL` where each constructor's `# Safety` allows it,
+        // or a singleton / a NUL-terminated literal; each handle is destroyed once.
+        unsafe {
+            let member = kafka_admin_MemberDescription_new(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                -1,
+                -1,
+            );
+            let description = member_description_ref(member, "member");
+            assert_eq!(description.consumer_id(), "");
+            assert_eq!(description.client_id(), "");
+            assert_eq!(description.host(), "");
+            assert!(description.assignment().topic_partitions().is_empty());
+            kafka_admin_MemberDescription_destroy(member);
+
+            let group = kafka_admin_ConsumerGroupDescription_new(
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null(),
+                kafka_common_GroupType_consumer(),
+                kafka_common_GroupState_stable(),
+                ptr::null(),
+                ptr::null(),
+                -1,
+                -1,
+            );
+            let description = consumer_group_description_ref(group, "group");
+            assert_eq!(description.group_id(), "");
+            assert!(description.members().is_empty());
+            assert_eq!(description.partition_assignor(), "");
+            kafka_admin_ConsumerGroupDescription_destroy(group);
+
+            let group = kafka_admin_ClassicGroupDescription_new(
+                ptr::null(),
+                c"consumer".as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                kafka_common_ClassicGroupState_stable(),
+                ptr::null(),
+            );
+            let description = classic_group_description_ref(group, "group");
+            assert_eq!(description.group_id(), "");
+            assert_eq!(description.protocol_data(), "");
+            assert!(description.members().is_empty());
+            kafka_admin_ClassicGroupDescription_destroy(group);
+        }
     }
 }

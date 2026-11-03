@@ -30,7 +30,7 @@ use crate::ffi::admin::topic_description::{acl_operation_list, list_acl_operatio
 use crate::ffi::common::classic_group_state::{self, kafka_common_ClassicGroupState_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, into_c_string, kafka_List_t, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ClassicGroupDescription`].
 #[repr(C)]
@@ -117,16 +117,19 @@ pub(crate) unsafe fn destroy_classic_group_description_element(element: *mut c_v
 }
 
 /// Reads a list of `const kafka_admin_MemberDescription_t *` into owned
-/// copies; `NULL` panics.
+/// copies; `NULL` reads as empty, as Java's constructors read a null `members`.
 ///
 /// # Safety
 ///
 /// `list` must be `NULL` or a valid list whose elements are member-description
 /// handles, alive and not mutated for this call.
 unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static str) -> Vec<MemberDescription> {
-    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
-    // mutated for this call, as `require_list` requires; the borrowed slice does not outlive the
-    // call.
+    if list.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid list
+    // handle, alive and not mutated for this call, as `require_list` requires; the borrowed slice
+    // does not outlive the call.
     unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
@@ -144,21 +147,29 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static st
 /// Creates the description of a classic group with no authorized operations: an empty set, as
 /// Java's six-argument constructor passes `Set.of()`.
 ///
+/// WARNING: `NULL` `protocol`, `state` panic; Java stores `null`.
+///
 /// # Parameters
 ///
-/// - `group_id` - the id of the classic group.
+/// - `group_id` - the id of the classic group; `NULL` reads as empty.
 /// - `protocol` - the group protocol type.
-/// - `protocol_data` - the group protocol data, such as the partition assignor name.
+/// - `protocol_data` - the group protocol data, such as the partition assignor name; `NULL`
+///   reads as empty.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
-///   copied; must not be `NULL`.
+///   copied; `NULL` reads as empty.
 /// - `state` - the classic group state, a singleton.
 /// - `coordinator` - the group coordinator, copied; `NULL` if not known.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `protocol` is `NULL`
+/// - `LocalNullPointerError` if `state` is `NULL`
+///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings, `members` `NULL` or a valid list of the
-/// documented handles, `state` a classic-group-state singleton and `coordinator` `NULL` or a
-/// valid node handle. The returned handle is owned, freed with
+/// The strings must be valid NUL-terminated strings (`NULL` where it reads as empty), `members`
+/// `NULL` or a valid list of the documented handles, `state` a classic-group-state singleton and
+/// `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
 /// [`kafka_admin_ClassicGroupDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -171,15 +182,15 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
     coordinator: *const kafka_common_Node_t,
 ) -> *mut kafka_admin_ClassicGroupDescription_t {
     box_classic_group_description(ClassicGroupDescription::new(
-        // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { require_str(group_id, "group_id") },
+        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
+        unsafe { c_str_to_string(group_id) },
         // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
         unsafe { require_str(protocol, "protocol") },
-        // SAFETY: Per this function's `# Safety`, `protocol_data` is a valid NUL-terminated string,
-        // as `require_str` requires.
-        unsafe { require_str(protocol_data, "protocol_data") },
+        // SAFETY: Per this function's `# Safety`, `protocol_data` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
+        unsafe { c_str_to_string(protocol_data) },
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
@@ -195,24 +206,32 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
 
 /// Creates the description of a classic group.
 ///
+/// WARNING: `NULL` `protocol`, `state` panic; Java stores `null`.
+///
 /// # Parameters
 ///
-/// - `group_id` - the id of the classic group.
+/// - `group_id` - the id of the classic group; `NULL` reads as empty.
 /// - `protocol` - the group protocol type.
-/// - `protocol_data` - the group protocol data, such as the partition assignor name.
+/// - `protocol_data` - the group protocol data, such as the partition assignor name; `NULL`
+///   reads as empty.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
-///   copied; must not be `NULL`.
+///   copied; `NULL` reads as empty.
 /// - `state` - the classic group state, a singleton.
 /// - `coordinator` - the group coordinator, copied; `NULL` if not known.
 /// - `authorized_operations` - the authorized operations for this group, a list of
 ///   `const kafka_common_acl_AclOperation_t *` singletons, copied; `NULL` if not known.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `protocol` is `NULL`
+/// - `LocalNullPointerError` if `state` is `NULL`
+///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings, the lists `NULL` or valid borrowed
-/// lists of the documented handles, `state` a classic-group-state singleton
-/// and `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
-/// [`kafka_admin_ClassicGroupDescription_destroy`].
+/// The strings must be valid NUL-terminated strings (`NULL` where it reads as empty), the lists
+/// `NULL` or valid borrowed lists of the documented handles, `state` a classic-group-state
+/// singleton and `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed
+/// with [`kafka_admin_ClassicGroupDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_with_authorized_operations(
@@ -225,15 +244,15 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_with_authorized_ope
     authorized_operations: *const kafka_List_t,
 ) -> *mut kafka_admin_ClassicGroupDescription_t {
     box_classic_group_description(ClassicGroupDescription::with_authorized_operations(
-        // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { require_str(group_id, "group_id") },
+        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
+        unsafe { c_str_to_string(group_id) },
         // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
         unsafe { require_str(protocol, "protocol") },
-        // SAFETY: Per this function's `# Safety`, `protocol_data` is a valid NUL-terminated string,
-        // as `require_str` requires.
-        unsafe { require_str(protocol_data, "protocol_data") },
+        // SAFETY: Per this function's `# Safety`, `protocol_data` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
+        unsafe { c_str_to_string(protocol_data) },
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.

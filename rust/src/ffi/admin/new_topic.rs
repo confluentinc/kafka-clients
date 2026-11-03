@@ -171,6 +171,14 @@ unsafe fn map_replicas_assignments(map: *const kafka_Map_t, param: &'static str)
 /// - `num_partitions` - the number of partitions, `-1` for the broker default.
 /// - `replication_factor` - the replication factor, `-1` for the broker default.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string. The returned handle is owned, freed with
@@ -201,6 +209,14 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 /// - `replicas_assignments` - a map from partition id to replica ids (i.e. broker ids). Although
 ///   not enforced, it is generally a good idea for all partitions to have the same number of
 ///   replicas. The first replica will be treated as the preferred leader.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name` panics; Java stores `null`.
 ///
 /// # Safety
 ///

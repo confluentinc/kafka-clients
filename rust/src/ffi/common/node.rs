@@ -134,11 +134,17 @@ pub(crate) unsafe fn list_nodes(list: *const kafka_List_t, param: &'static str) 
 
 /// Creates a node with no rack, not fenced.
 ///
+/// WARNING: `NULL` `host` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `id` - the node id
 /// - `host` - the host name
 /// - `port` - the port
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `host` is `NULL`
 ///
 /// # Safety
 ///
@@ -155,12 +161,18 @@ pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, por
 
 /// Creates a node that is not fenced.
 ///
+/// WARNING: `NULL` `host` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `id` - the node id
 /// - `host` - the host name
 /// - `port` - the port
 /// - `rack` - the rack, or `NULL` for none
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `host` is `NULL`
 ///
 /// # Safety
 ///
@@ -184,6 +196,8 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
 
 /// Creates a node.
 ///
+/// WARNING: `NULL` `host` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `id` - the node id
@@ -191,6 +205,10 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
 /// - `port` - the port
 /// - `rack` - the rack, or `NULL` for none
 /// - `is_fenced` - 1 if the node is fenced, else 0
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `host` is `NULL`
 ///
 /// # Safety
 ///

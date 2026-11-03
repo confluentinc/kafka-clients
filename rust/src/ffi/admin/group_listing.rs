@@ -105,6 +105,15 @@ pub(crate) unsafe fn destroy_group_listing_element(element: *mut c_void) {
 /// - `protocol` - Protocol
 /// - `group_state` - Group state
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `group_id` is `NULL`
+/// - `LocalNullPointerError` if `protocol` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `group_id`, `protocol` panic; Java stores `null`.
+///
 /// # Safety
 ///
 /// `group_id` and `protocol` must be valid NUL-terminated strings;

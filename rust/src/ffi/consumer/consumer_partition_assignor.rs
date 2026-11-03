@@ -484,6 +484,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 ///
 /// - `partitions` - The list of partitions assigned to the consumer
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `partitions` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `partitions` must be null or a valid list of topic-partition handles.
@@ -509,6 +517,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new
 ///
 /// - `partitions` - The list of partitions assigned to the consumer
 /// - `user_data` - Nullable user data to include in the assignment
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `partitions` panics; Java stores `null`.
 ///
 /// # Safety
 ///

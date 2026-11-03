@@ -98,6 +98,15 @@ pub(crate) unsafe fn destroy_topic_listing_element(element: *mut c_void) {
 /// - `topic_id` - The topic id.
 /// - `internal` - Whether the topic is internal to Kafka
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+/// - `LocalNullPointerError` if `topic_id` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name`, `topic_id` panic; Java stores `null`.
+///
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `topic_id` a valid uuid

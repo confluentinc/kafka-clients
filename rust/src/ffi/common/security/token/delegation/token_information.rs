@@ -104,6 +104,8 @@ pub(crate) fn box_token_information(
 
 /// Creates token details whose requester is the owner.
 ///
+/// WARNING: `NULL` `token_id`, `owner`, `renewers` panic; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `token_id` - the token id
@@ -113,6 +115,12 @@ pub(crate) fn box_token_information(
 /// - `issue_timestamp` - the issue time, in milliseconds since the epoch
 /// - `max_timestamp` - the latest expiry the token can be renewed to, in milliseconds since the epoch
 /// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `token_id` is `NULL`
+/// - `LocalNullPointerError` if `owner` is `NULL`
+/// - `LocalNullPointerError` if `renewers` is `NULL`
 ///
 /// # Safety
 ///
@@ -151,6 +159,8 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// Creates token details whose requester may differ from the owner, when a superuser creates a
 /// token on another principal's behalf (KIP-373).
 ///
+/// WARNING: `NULL` `token_id`, `owner`, `token_requester`, `renewers` panic; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `token_id` - the token id
@@ -161,6 +171,13 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
 /// - `issue_timestamp` - the issue time, in milliseconds since the epoch
 /// - `max_timestamp` - the latest expiry the token can be renewed to, in milliseconds since the epoch
 /// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `token_id` is `NULL`
+/// - `LocalNullPointerError` if `owner` is `NULL`
+/// - `LocalNullPointerError` if `token_requester` is `NULL`
+/// - `LocalNullPointerError` if `renewers` is `NULL`
 ///
 /// # Safety
 ///

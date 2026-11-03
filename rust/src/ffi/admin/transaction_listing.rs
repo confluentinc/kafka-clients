@@ -97,12 +97,19 @@ pub(crate) unsafe fn destroy_transaction_listing_element(element: *mut c_void) {
 
 /// Creates the listing of a transaction.
 ///
+/// WARNING: `NULL` `transactional_id`, `transaction_state` panic; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `transactional_id` - the transactional id.
 /// - `producer_id` - the producer id of the transaction.
 /// - `transaction_state` - the state of the transaction, a `kafka_admin_TransactionState_t`
 ///   singleton.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `transactional_id` is `NULL`
+/// - `LocalNullPointerError` if `transaction_state` is `NULL`
 ///
 /// # Safety
 ///

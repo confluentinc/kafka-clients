@@ -138,6 +138,8 @@ pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t, param: &'st
 
 /// Creates a partition info with no offline replicas.
 ///
+/// WARNING: `NULL` `topic`, `replicas`, `in_sync_replicas` panic; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `topic` - the topic name
@@ -145,6 +147,12 @@ pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t, param: &'st
 /// - `leader` - the leader node, or `NULL` if there is none
 /// - `replicas` - the replicas, preferred replica first
 /// - `in_sync_replicas` - the in-sync replicas
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
+/// - `LocalNullPointerError` if `replicas` is `NULL`
+/// - `LocalNullPointerError` if `in_sync_replicas` is `NULL`
 ///
 /// # Safety
 ///
@@ -182,6 +190,8 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
 
 /// Creates a partition info.
 ///
+/// WARNING: `NULL` `topic`, `replicas`, `in_sync_replicas`, `offline_replicas` panic; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `topic` - the topic name
@@ -190,6 +200,13 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
 /// - `replicas` - the replicas, preferred replica first
 /// - `in_sync_replicas` - the in-sync replicas
 /// - `offline_replicas` - the offline replicas
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
+/// - `LocalNullPointerError` if `replicas` is `NULL`
+/// - `LocalNullPointerError` if `in_sync_replicas` is `NULL`
+/// - `LocalNullPointerError` if `offline_replicas` is `NULL`
 ///
 /// # Safety
 ///
