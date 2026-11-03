@@ -704,7 +704,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_controller(
 /// # Safety
 ///
 /// `self_` must be a live builder handle that no other call uses at the same time, and
-/// `broker_log_dirs` `NULL` or a valid list whose elements are `NULL` or valid lists of C strings.
+/// `broker_log_dirs` `NULL` or a valid list whose elements are valid lists of C strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs(
@@ -717,9 +717,14 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs
     // returns.
     let broker_log_dirs: Vec<Vec<String>> = unsafe { require_list(broker_log_dirs, "broker_log_dirs") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, each element is null or a valid list of C
-        // strings, as `list_strings` requires; the strings are copied.
-        .map(|&dirs| unsafe { list_strings(dirs as *const kafka_List_t, "dirs") })
+        // SAFETY: Per this function's `# Safety`, each element is a valid list of C strings once
+        // `require_element` has rejected a NULL, as `list_strings` requires; the strings are copied.
+        .map(|&dirs| unsafe {
+            list_strings(
+                require_element(dirs, "broker_log_dirs") as *const kafka_List_t,
+                "broker_log_dirs",
+            )
+        })
         .collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a live builder handle no other call uses
     // at the same time, as `update` requires.
