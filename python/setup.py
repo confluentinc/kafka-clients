@@ -24,6 +24,16 @@ include_dir = os.path.join(project_root, 'target', 'include')
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
                          os.path.join(project_root, 'target', 'release-cdylib'))
 
+# The x86_64 CPU level the library is built for: rust/Makefile builds it with
+# `-C target-cpu=x86-64-v3` on x86_64, so the import checks for that level and
+# raises ImportError on an older CPU instead of the library crashing on it.
+# Set it empty for a library built for the x86-64 baseline. It has no effect on
+# other architectures.
+target_cpu = os.environ.get('CONFLUENT_KAFKA_TARGET_CPU', 'x86-64-v3')
+if target_cpu not in ('', 'x86-64-v3'):
+    sys.exit(f"CONFLUENT_KAFKA_TARGET_CPU must be 'x86-64-v3' or empty, not {target_cpu!r}")
+define_macros = [('CONFLUENT_KAFKA_REQUIRE_X86_64_V3', '1')] if target_cpu else []
+
 sources = ['_confluentkafka.c']
 include_dirs = [include_dir]
 if sys.platform == 'darwin':
@@ -34,6 +44,7 @@ ext = Extension(
     '_confluentkafka',
     sources=sources,
     include_dirs=include_dirs,
+    define_macros=define_macros,
     library_dirs=[lib_dir],
     libraries=['confluent_kafka'],
     extra_compile_args=['-std=c99'],

@@ -12010,9 +12010,78 @@ static struct PyModuleDef kafkanativemodule = {
     ProducerNativeMethods
 };
 
+#if defined(CONFLUENT_KAFKA_REQUIRE_X86_64_V3) && defined(__x86_64__) && defined(__GNUC__)
+#include <cpuid.h>
+
+// The library is built for x86-64-v3 (rust/Makefile's RUSTFLAGS_NATIVE), which
+// the wheel's platform tag cannot state: on an older CPU its first AVX2 or BMI2
+// instruction would kill the process with SIGILL. The import checks the CPU
+// first and fails with an ImportError instead. Compiled for the x86-64
+// baseline, whatever -march the rest of the file has, so the check itself runs
+// on any x86-64 CPU. Returns the comma-separated list of the x86-64-v2 and v3
+// features the CPU lacks, or NULL when it has them all.
+__attribute__((target("arch=x86-64"), noinline))
+static const char *missing_x86_64_v3_features(void) {
+    enum { ECX1, EBX7, ECX81 };
+    static const struct { int reg; unsigned int bit; const char *name; } features[] = {
+        {ECX1, 1u << 0, "SSE3"}, {ECX1, 1u << 9, "SSSE3"}, {ECX1, 1u << 12, "FMA"},
+        {ECX1, 1u << 13, "CMPXCHG16B"}, {ECX1, 1u << 19, "SSE4.1"}, {ECX1, 1u << 20, "SSE4.2"},
+        {ECX1, 1u << 22, "MOVBE"}, {ECX1, 1u << 23, "POPCNT"}, {ECX1, 1u << 27, "OSXSAVE"},
+        {ECX1, 1u << 28, "AVX"}, {ECX1, 1u << 29, "F16C"},
+        {EBX7, 1u << 3, "BMI1"}, {EBX7, 1u << 5, "AVX2"}, {EBX7, 1u << 8, "BMI2"},
+        {ECX81, 1u << 0, "LAHF-SAHF"}, {ECX81, 1u << 5, "LZCNT"},
+    };
+    static char missing[256];
+    unsigned int eax, ebx, ecx, edx, regs[3] = {0, 0, 0};
+    size_t i;
+
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+        regs[ECX1] = ecx;
+    }
+    if (__get_cpuid_max(0, NULL) >= 7) {
+        __cpuid_count(7, 0, eax, ebx, ecx, edx);
+        regs[EBX7] = ebx;
+    }
+    if (__get_cpuid(0x80000001, &eax, &ebx, &ecx, &edx)) {
+        regs[ECX81] = ecx;
+    }
+    missing[0] = '\0';
+    for (i = 0; i < sizeof(features) / sizeof(features[0]); i++) {
+        if (!(regs[features[i].reg] & features[i].bit)) {
+            if (missing[0] != '\0') {
+                strcat(missing, ", ");
+            }
+            strcat(missing, features[i].name);
+        }
+    }
+    // AVX needs the OS to save the YMM registers too (XCR0 bits 1 and 2).
+    if (regs[ECX1] & (1u << 27)) {
+        unsigned int xcr0_lo, xcr0_hi;
+        __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+        if ((xcr0_lo & 0x6) != 0x6) {
+            strcat(missing, missing[0] != '\0' ? ", AVX state saving by the OS" : "AVX state saving by the OS");
+        }
+    }
+    return missing[0] != '\0' ? missing : NULL;
+}
+#endif
+
 // Module initialization
 PyMODINIT_FUNC PyInit__confluentkafka(void) {
     PyObject* m;
+
+#if defined(CONFLUENT_KAFKA_REQUIRE_X86_64_V3) && defined(__x86_64__) && defined(__GNUC__)
+    {
+        const char *missing = missing_x86_64_v3_features();
+        if (missing != NULL) {
+            PyErr_Format(PyExc_ImportError,
+                         "confluent_kafka requires an x86-64-v3 CPU (Intel Haswell, AMD "
+                         "Excavator or later); this CPU lacks %s",
+                         missing);
+            return NULL;
+        }
+    }
+#endif
 
     if (PyType_Ready(&ProducerRecordType) < 0) {
         return NULL;

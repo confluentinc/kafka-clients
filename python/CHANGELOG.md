@@ -16,6 +16,14 @@ Before GA the public API is not stable, and an interface may change even in a mi
   ships Mozilla's root bundle. On Linux a host without a CA bundle must set
   one of the truststore keys or `SSL_CERT_FILE`.
 
+### Changed
+
+- On x86_64 the native library needs an x86-64-v3 CPU (AVX2, BMI2, FMA:
+  Intel Haswell, AMD Excavator or later), which the wheel's platform tag
+  cannot state. Importing `confluent_kafka` on an older CPU now raises an
+  `ImportError` naming the missing features, instead of the process dying
+  on an illegal instruction.
+
 ## [4.4.0b1] - 2026-10-30
 
 First preview release of the 4.4.0 Python client built on a new Rust core. Its

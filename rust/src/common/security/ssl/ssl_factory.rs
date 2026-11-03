@@ -1784,6 +1784,69 @@ Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
             .unwrap()
     }
 
+    /// Without a truststore, a CA the platform trusts is trusted with the
+    /// `platform-verifier` feature, with hostname verification on (the platform
+    /// verifier) and off (`NoHostnameVerifier` over [`default_roots`]), and not
+    /// trusted by Mozilla's bundle without the feature. The platform's store is
+    /// `SSL_CERT_FILE` holding the test CA and an empty `SSL_CERT_DIR`, set only
+    /// in a child process so that no other test sees them; the test runs itself
+    /// again there, taking the `CHILD` branch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_default_trust_store_follows_the_platform_store() {
+        const CHILD: &str = "CONFLUENT_KAFKA_PLATFORM_CA_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let trusted = cfg!(feature = "platform-verifier");
+            let certs = parse_certs(TEST_SERVER_CERT);
+            let now = rustls::pki_types::UnixTime::now();
+
+            let factory = SslFactory::new(&SslConfigs::default());
+            assert!(factory.is_ok(), "hostname verification on: {:?}", factory.err());
+            let verifier = default_verifier(test_provider()).unwrap();
+            let server_name = ServerName::try_from("server.example.com").unwrap();
+            let result = verifier.verify_server_cert(&certs[0], &[], &server_name, &[], now);
+            assert_eq!(result.is_ok(), trusted, "hostname verification on: {result:?}");
+
+            let config = SslConfigs { endpoint_identification_algorithm: String::new(), ..SslConfigs::default() };
+            let factory = SslFactory::new(&config);
+            assert!(factory.is_ok(), "hostname verification off: {:?}", factory.err());
+            let verifier = NoHostnameVerifier::new(webpki_verifier(default_roots().unwrap(), test_provider()).unwrap());
+            let mismatched_name = ServerName::try_from("kafka.example.com").unwrap();
+            let result = verifier.verify_server_cert(&certs[0], &[], &mismatched_name, &[], now);
+            assert_eq!(result.is_ok(), trusted, "hostname verification off: {result:?}");
+            println!("child checked");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kafka_ssl_platform_ca_{}", std::process::id()));
+        let cert_dir = dir.join("certs");
+        std::fs::create_dir_all(&cert_dir).unwrap();
+        let cert_file = dir.join("ca.pem");
+        std::fs::write(&cert_file, TEST_SERVER_CA_CERT).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+            .args([
+                "--exact",
+                "common::security::ssl::ssl_factory::tests::test_default_trust_store_follows_the_platform_store",
+            ])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("SSL_CERT_FILE", &cert_file)
+            .env("SSL_CERT_DIR", &cert_dir)
+            .output()
+            .expect("run the child");
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "child exited with {}:\n{stdout}\n{stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains("child checked"),
+            "the child did not run the checks:\n{stdout}\n{stderr}"
+        );
+    }
+
     #[test]
     fn test_no_hostname_verifier_accepts_mismatched_hostname() {
         // Ensure the crypto provider is installed.
