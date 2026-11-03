@@ -1,0 +1,57 @@
+{
+  "name": "confluent-kafka-javascript-rust",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
+  "license": "Apache-2.0",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./producer": {
+      "types": "./lib/producer/index.d.ts",
+      "default": "./lib/producer/index.js"
+    },
+    "./common": {
+      "types": "./lib/common/index.d.ts",
+      "default": "./lib/common/index.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "producer": [
+        "lib/producer/index.d.ts"
+      ],
+      "common": [
+        "lib/common/index.d.ts"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "gypfile": false,
+  "scripts": {
+    "build": "make build",
+    "types": "make types",
+    "test": "make test",
+    "test:static": "make test-static",
+    "test:unit": "make test-unit",
+    "test:typing": "make test-typing",
+    "test:integration": "make test-integration"
+  },
+  "files": [
+    "lib/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "devDependencies": {
+    "@grpc/grpc-js": "1.14.4",
+    "@grpc/proto-loader": "0.8.1",
+    "@types/node": "20.19.41",
+    "typescript": "5.9.3"
+  }
+}
