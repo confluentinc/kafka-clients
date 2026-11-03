@@ -158,6 +158,9 @@ foreach ($tfm in $tfms) {
         if ($exe.Count -ne 1) {
             throw "found $($exe.Count) PackageSmoke.exe under $bin, not 1"
         }
+        if (-not (Test-Path (Join-Path $exe[0].DirectoryName 'confluent_kafka.dll'))) {
+            throw "the net462 smoke program has no confluent_kafka.dll beside it: NuGet did not copy the package's $rid library"
+        }
         Invoke-Smoke $exe[0].FullName @($version)
     } else {
         Invoke-Smoke $dotnet @((Join-Path $bin 'PackageSmoke.dll'), $version)

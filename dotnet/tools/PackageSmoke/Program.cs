@@ -70,7 +70,15 @@ internal static class Program
             throw new InvalidOperationException($"loaded the Confluent.Kafka assembly built for {built}, not for {expected}");
         }
 
-        // Binds every P/Invoke now, so an entry point the native library lacks fails here.
+        using (var mock = new MockProducer<string, string>(Serdes.String, Serdes.String))
+        {
+            RecordMetadata metadata = mock.Send(new ProducerRecord<string, string>("smoke", "value", "key")).Get();
+            Console.WriteLine($"OK: MockProducer sent to {metadata.Topic}-{metadata.Partition}@{metadata.Offset}");
+            mock.Close();
+        }
+
+        // Binds every P/Invoke now, so an entry point the native library lacks fails here. The
+        // library is read after a call into it: .NET Framework's PrelinkAll does not load it.
         Type nativeMethods = assembly.GetType("Confluent.Kafka.Internal.Interop.NativeMethods", throwOnError: true)!;
         Marshal.PrelinkAll(nativeMethods);
         string native = LoadedNativeLibrary(assembly);
@@ -78,13 +86,6 @@ internal static class Program
         if (!native.StartsWith(AppContext.BaseDirectory, IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
         {
             throw new InvalidOperationException($"the native library was loaded from {native}, not from the application in {AppContext.BaseDirectory}");
-        }
-
-        using (var mock = new MockProducer<string, string>(Serdes.String, Serdes.String))
-        {
-            RecordMetadata metadata = mock.Send(new ProducerRecord<string, string>("smoke", "value", "key")).Get();
-            Console.WriteLine($"OK: MockProducer sent to {metadata.Topic}-{metadata.Partition}@{metadata.Offset}");
-            mock.Close();
         }
 
         foreach (string codec in new[] { "gzip", "snappy", "lz4", "zstd" })
@@ -124,7 +125,7 @@ internal static class Program
 #endif
     }
 
-    /// <summary>The path of the native library the assembly's P/Invokes load, which PrelinkAll loaded.</summary>
+    /// <summary>The path of the native library the assembly's P/Invokes loaded.</summary>
     private static string LoadedNativeLibrary(Assembly assembly)
     {
         if (IsWindows())
