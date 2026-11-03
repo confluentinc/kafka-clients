@@ -38,6 +38,8 @@ public sealed class TfmSentinelTests
             "net10.0";
 #elif NET8_0
             "net8.0";
+#elif NET462
+            "net462";
 #else
             "unknown";
 #endif
