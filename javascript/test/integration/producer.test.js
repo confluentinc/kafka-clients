@@ -20,8 +20,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { KafkaFuture } = require('confluent-kafka-javascript-rust/common');
-const { KafkaProducer, ProducerRecord, RecordMetadata } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 
 const BOOTSTRAP = process.env.KAFKA_BOOTSTRAP_SERVERS;

@@ -12,6 +12,12 @@ The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
 blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). This first
 slice covers the producer only; the package is private and not published.
 
+The package is `@confluentinc/kafka-javascript`, the npm name of the
+librdkafka-based client, at version `4.4.0-beta.1`: like the Rust-based Python
+client, which reuses PyPI's `confluent-kafka` at `4.4.0b1`, it is told apart
+from the earlier client (0.x and 1.x releases) by version. It stays `private`:
+publishing under the shared name needs the agreement of the team that owns it.
+
 ## Requirements
 
 - Node.js 18 or newer, with its headers (official tarballs, Homebrew and Nix
@@ -75,9 +81,9 @@ The package root exports the module namespaces, one per Java package, and each
 namespace is also an entry point of its own:
 
 ```js
-const { producer, common } = require('confluent-kafka-javascript-rust');
-const { KafkaProducer, ProducerRecord, RecordMetadata } = require('confluent-kafka-javascript-rust/producer');
-const { KafkaError, KafkaFuture } = require('confluent-kafka-javascript-rust/common');
+const { producer, common } = require('@confluentinc/kafka-javascript');
+const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
+const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 ```
 
 ```
@@ -89,13 +95,13 @@ src/                   the addon: util.h, addon.c, callback_queue.c, error.c, re
 test/static|unit|typing|integration
 ```
 
-The addon builds as `build/Release/confluent_kafka_js.node`; installing the
+The addon builds as `build/Release/confluent-kafka-javascript.node`; installing the
 package runs no build (`"gypfile": false`, no install scripts).
 
 ## Example
 
 ```js
-const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 const producer = new KafkaProducer({ 'bootstrap.servers': 'localhost:9092' });
 const future = await producer.send(                    // resolves at hand-over

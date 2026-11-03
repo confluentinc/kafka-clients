@@ -17,8 +17,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { KafkaError } = require('confluent-kafka-javascript-rust/common');
-const { ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 test('the fields Java leaves out default to null and no headers', () => {
   const r = new ProducerRecord({ topic: 't', value: 'v' });

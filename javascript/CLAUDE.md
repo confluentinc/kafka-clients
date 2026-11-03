@@ -224,7 +224,7 @@ These decide every question, in this order:
   `test/static/layout.test.js` checks it), other unit tests
   named after what they test, `test/typing`,
   `test/integration` (broker-backed). Tests and examples import the package by
-  its own name (`require('confluent-kafka-javascript-rust/producer')`, Node's
+  its own name (`require('@confluentinc/kafka-javascript/producer')`, Node's
   self-reference), so no install is needed; tests of private helpers require
   `lib/_*.js` directly.
 

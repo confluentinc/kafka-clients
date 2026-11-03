@@ -1,6 +1,6 @@
 {
-  "name": "confluent-kafka-javascript-rust",
-  "version": "0.0.0",
+  "name": "@confluentinc/kafka-javascript",
+  "version": "4.4.0-beta.1",
   "private": true,
   "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
   "license": "Apache-2.0",

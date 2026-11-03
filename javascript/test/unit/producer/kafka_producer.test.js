@@ -22,8 +22,8 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { KafkaError, KafkaFuture } = require('confluent-kafka-javascript-rust/common');
-const { KafkaProducer, ProducerRecord, RecordMetadata } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 
 const MAX_BLOCK_MS = 300;
 const UNREACHABLE = {
@@ -263,7 +263,7 @@ function runNode(script, timeout = 30000) {
 
 test('an idle producer lets the process exit', () => {
   const r = runNode(`
-    const { KafkaProducer } = require('confluent-kafka-javascript-rust/producer');
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
     new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1' });
     console.log('created');
   `);
@@ -274,7 +274,7 @@ test('an idle producer lets the process exit', () => {
 
 test('a pending send keeps the process alive until it completes', () => {
   const r = runNode(`
-    const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 1500 });
     p.send(new ProducerRecord({ topic: 'alive', value: 'v' }), (m, e) => console.log('callback:', e.message));
   `);
@@ -290,7 +290,7 @@ test('terminating a worker with records in flight tears its producer down cleanl
     const { Worker } = require('node:worker_threads');
     const body = \`
       const { parentPort } = require('node:worker_threads');
-      const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
       const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 50, 'linger.ms': 0 });
       for (let i = 0; i < 200; i++) {
         p.send(new ProducerRecord({ topic: 'teardown', value: String(i) }), () => {});
@@ -323,7 +323,7 @@ test('terminating a worker whose unclosed producer holds an unsent record is pro
     const { Worker } = require('node:worker_threads');
     const body = \`
       const { parentPort } = require('node:worker_threads');
-      const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
       const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1' });
       p.send(new ProducerRecord({ topic: 'unclosed', value: 'v' }), () => {}).catch(() => {});
       parentPort.postMessage('sent');
@@ -346,7 +346,7 @@ test('terminating a worker whose unclosed producer holds an unsent record is pro
 
 test('an un-awaited send whose hand-over fails surfaces as an unhandled rejection', () => {
   const r = runNode(`
-    const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     process.on('unhandledRejection', (e) => {
       console.log('unhandled:', e.name, e.message);
       p.close();
@@ -360,7 +360,7 @@ test('an un-awaited send whose hand-over fails surfaces as an unhandled rejectio
 
 test('a failed future whose get() is never called raises no unhandled rejection', () => {
   const r = runNode(`
-    const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
     process.on('unhandledRejection', (e) => console.log('unhandled:', e.message));
     (async () => {
       const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 });

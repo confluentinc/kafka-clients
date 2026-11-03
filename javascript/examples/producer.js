@@ -21,7 +21,7 @@
 
 // The package's own name resolves inside the package (Node's self-reference
 // through package.json `exports`), so this runs without an npm install.
-const { KafkaProducer, ProducerRecord } = require('confluent-kafka-javascript-rust/producer');
+const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 async function main(argv) {
   const [bootstrap, topic, key = null, value = 'hello from Node.js'] = argv;

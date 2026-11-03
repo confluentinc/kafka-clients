@@ -19,7 +19,7 @@
 // here, so every module that needs the addon requires this one, and no
 // index.js does any setup.
 //
-// The addon is `confluent_kafka_js.node`. Until prebuilt per-platform
+// The addon is `confluent-kafka-javascript.node`. Until prebuilt per-platform
 // packages exist, the only place it is looked for is the development build,
 // build/Release/ (`make -C javascript build`).
 
@@ -28,7 +28,7 @@ const path = require('node:path');
 const { KafkaError } = require('./common/kafka_error');
 const { RecordMetadata } = require('./producer/record_metadata');
 
-const ADDON = path.join(__dirname, '..', 'build', 'Release', 'confluent_kafka_js.node');
+const ADDON = path.join(__dirname, '..', 'build', 'Release', 'confluent-kafka-javascript.node');
 
 let native;
 try {
