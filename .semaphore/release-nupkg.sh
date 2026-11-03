@@ -42,7 +42,7 @@
 set -uo pipefail
 
 work=/tmp/nuget-release
-ALL_RIDS="linux-x64 linux-arm64 osx-arm64"
+ALL_RIDS="linux-x64 linux-arm64 osx-arm64 win-x64 win-x86"
 
 # Fails with a message stating why nothing was recorded.
 refuse() {
