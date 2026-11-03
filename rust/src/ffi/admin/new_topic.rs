@@ -20,7 +20,10 @@
 //! `kafka_Map_t` of `int32_t *` keys to `kafka_List_t *` values holding
 //! `int32_t *` elements.
 
-use crate::ffi::precondition::{require_element_ref, require_list, require_map, require_mut, require_ref, require_str};
+use crate::common::Error;
+use crate::ffi::precondition::{
+    fail, require_element_ref, require_list, require_map, require_mut, require_ref, require_str,
+};
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -329,8 +332,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
 ///
 /// # Panics
 ///
-/// - if a value is `NULL`, a value the broker rejects with `INVALID_CONFIG`; the configs are
-///   then left unchanged, and the `_err` twin reports it as an `IllegalStateError`
+/// - `LocalNullPointerError` if a value is `NULL`, a value the broker rejects with `INVALID_CONFIG`;
+///   the configs are then left unchanged
 ///
 /// # Safety
 ///
@@ -355,10 +358,14 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
             // SAFETY: Per this function's `# Safety`, every key is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied.
             let name = unsafe { c_str_to_string(name as *const c_char) };
-            // A `NULL` value breaks this function's `# Safety`; it is checked anyway, since
-            // reading it would be undefined behaviour, and refused before `self_` is touched.
-            assert!(!value.is_null(), "The value of config {name} must not be NULL");
-            // SAFETY: `value` is non-null (asserted above) and, per this function's `# Safety`, a
+            // A `NULL` value is refused before `self_` is touched, since reading it would be
+            // undefined behaviour.
+            if value.is_null() {
+                fail(Error::local_null_pointer(format!(
+                    "The value of config {name} must not be null"
+                )));
+            }
+            // SAFETY: `value` is non-null (checked above) and, per this function's `# Safety`, a
             // NUL-terminated string, as `c_str_to_string` requires; it is copied.
             copied.insert(name, unsafe { c_str_to_string(value as *const c_char) });
         }
@@ -440,7 +447,7 @@ mod tests {
 
     use super::*;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_state_error;
+    use crate::ffi::error_predicates::kafka_common_Error_is_local_null_pointer_error;
     use crate::ffi::util::{
         kafka_List_add, kafka_List_get, kafka_List_new, kafka_List_size, kafka_Map_destroy, kafka_Map_get,
         kafka_Map_key, kafka_Map_new, kafka_Map_put, kafka_Map_size, kafka_Map_value, kafka_string_destroy,
@@ -550,11 +557,10 @@ mod tests {
             kafka_admin_NewTopic_set_configs_err(topic, configs, &mut err);
             kafka_Map_destroy(configs);
             assert!(!err.is_null());
-            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
+            assert_eq!(kafka_common_Error_is_local_null_pointer_error(err), 1);
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
-                "Rust panic caught at the FFI boundary in kafka_admin_NewTopic_set_configs_err: \
-                 The value of config retention.ms must not be NULL"
+                "The value of config retention.ms must not be null"
             );
             kafka_common_Error_destroy(err);
             assert_eq!(

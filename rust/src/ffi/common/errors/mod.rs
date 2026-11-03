@@ -18,7 +18,7 @@
 //! Each such Java class gets an opaque `kafka_common_<Class>_t`. A handle is
 //! either a **view** borrowed from a `kafka_common_Error_t` through
 //! `kafka_common_Error_<snake(class)>` (null when the error is not that
-//! class), valid until the error is destroyed and never passed to
+//! class or is null), valid until the error is destroyed and never passed to
 //! `_destroy`, or an **owned** value built by the class's own constructors
 //! and freed with `kafka_common_<Class>_destroy`. Both point at the same
 //! [`Payload<T>`], so the getters do not care which they were given.
@@ -220,4 +220,57 @@ pub(crate) unsafe fn take_source(source: *mut kafka_common_Error_t) -> Error {
     // yet destroyed, as `take_error` requires; the caller hands it over, so consuming it here
     // is its final use.
     unsafe { take_error(source) }.unwrap_or_else(|| Error::kafka_message(""))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr;
+
+    #[test]
+    fn every_view_reads_a_null_error_as_another_class() {
+        // SAFETY: Test code: every view accepts `NULL` for `error`, per its `# Safety`.
+        unsafe {
+            assert!(
+                super::consumer_commit_failed_error::kafka_common_Error_consumer_commit_failed(ptr::null()).is_null()
+            );
+            assert!(
+                super::consumer_log_truncation_error::kafka_common_Error_consumer_log_truncation(ptr::null()).is_null()
+            );
+            assert!(
+                super::consumer_no_offset_for_partition_error::kafka_common_Error_consumer_no_offset_for_partition(
+                    ptr::null()
+                )
+                .is_null()
+            );
+            assert!(
+                super::consumer_offset_out_of_range_error::kafka_common_Error_consumer_offset_out_of_range(ptr::null())
+                    .is_null()
+            );
+            assert!(
+                super::consumer_retriable_commit_failed_error::kafka_common_Error_consumer_retriable_commit_failed(
+                    ptr::null()
+                )
+                .is_null()
+            );
+            assert!(super::duplicate_resource_error::kafka_common_Error_duplicate_resource(ptr::null()).is_null());
+            assert!(
+                super::group_authorization_error::kafka_common_Error_group_authorization_error(ptr::null()).is_null()
+            );
+            assert!(super::invalid_topic_error::kafka_common_Error_invalid_topic(ptr::null()).is_null());
+            assert!(super::local_callback_error::kafka_common_Error_local_callback_error(ptr::null()).is_null());
+            assert!(super::quota_violation_error::kafka_common_Error_quota_violation(ptr::null()).is_null());
+            assert!(
+                super::record_deserialization_error::kafka_common_Error_record_deserialization(ptr::null()).is_null()
+            );
+            assert!(super::record_too_large_error::kafka_common_Error_record_too_large_error(ptr::null()).is_null());
+            assert!(super::resource_not_found_error::kafka_common_Error_resource_not_found(ptr::null()).is_null());
+            assert!(
+                super::throttling_quota_exceeded_error::kafka_common_Error_throttling_quota_exceeded_error(ptr::null())
+                    .is_null()
+            );
+            assert!(
+                super::topic_authorization_error::kafka_common_Error_topic_authorization_error(ptr::null()).is_null()
+            );
+        }
+    }
 }

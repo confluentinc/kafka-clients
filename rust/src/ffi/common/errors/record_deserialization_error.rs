@@ -213,24 +213,27 @@ unsafe fn payload<'a>(
 }
 
 /// Returns the payload of a `RecordDeserializationException` error, or `NULL` when the error is
-/// another class.
+/// another class or `NULL`.
 ///
 /// # Parameters
 ///
-/// - `error` - The error handle.
+/// - `error` - The error handle, or `NULL`.
 ///
 /// # Safety
 ///
-/// `error` must be a valid error handle.
+/// `error` must be a valid error handle, or `NULL`.
 /// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_RecordDeserializationError_t {
-    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
-    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
-    // reference is used only within this call. The view returned is a
+    if error.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: Per this function's `# Safety`, `error` is non-null (checked above) and a valid, live
+    // error handle, an owned one from `box_error` or one borrowed from a live owner, as `error_ref`
+    // requires. The reference is used only within this call. The view returned is a
     // `Payload<RecordDeserializationError>` cloned from the variant's payload into the
     // `ErrorInner`'s payload slot, so it lives as long as the error handle: until the error, or the
     // owner it is borrowed from, is destroyed.
