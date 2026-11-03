@@ -72,7 +72,13 @@ build:
 types:
 	$(NODE) scripts/gen_types.js --write
 
+# Then the container gRPC arm of the Rust multilanguage suite, as python/'s and
+# c/'s `test` end with theirs: a recipe line, so it runs after the broker-backed
+# test and the two never hold a broker at once. It self-skips off Linux (see
+# test-integration-grpc); the root `verify-javascript-macos-docker` runs the
+# native arm there instead.
 test: test-static test-unit test-typing test-integration
+	$(MAKE) test-integration-grpc
 
 # Header conformance and the package layout: no build needed.
 test-static:

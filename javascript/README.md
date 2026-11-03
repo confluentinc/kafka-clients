@@ -37,8 +37,10 @@ make -C javascript test-integration  # starts a scratch broker with docker, or u
 make -C javascript types             # regenerate lib/**/*.d.ts from the JSDoc (needs tsc)
 ```
 
-`make test` runs all four. TypeScript and `@types/node` are devDependencies
-(`npm install`, no lockfile yet); `TSC` (default `node_modules/.bin/tsc`) and
+`make test` runs all four, then, on Linux, the container arm of the Rust
+multilanguage suite (below; it is skipped with a message elsewhere). TypeScript
+and `@types/node` are devDependencies (`npm ci` installs them from
+`package-lock.json`); `TSC` (default `node_modules/.bin/tsc`) and
 `TS_TYPE_ROOTS` (default `node_modules/@types`) point at other copies, e.g.
 `make -C javascript types TSC="node /path/to/typescript/bin/tsc" TS_TYPE_ROOTS=/path/to/@types`.
 Without a runnable `tsc`, `test-typing` is skipped with a message.

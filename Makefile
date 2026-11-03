@@ -32,6 +32,7 @@ VENV = . venv/bin/activate
 	consumer-perf-test-python producer-perf-test-python \
 	transactional-producer-perf-test-python \
 	build-javascript test-javascript verify-javascript \
+	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
 	build-grpc-native-javascript test-integration-javascript-native \
@@ -84,7 +85,8 @@ build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
 # The Node.js client (javascript/): standalone for now, not part of `build`,
-# `test` or `verify`, so those need no Node.js.
+# `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
+# (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
 build-javascript: build-rust-all-features
 	$(MAKE) -C javascript $(ROOTS) build
 
@@ -180,7 +182,8 @@ test-integration-c: build-rust-all-features
 
 # The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
 # arms (the image copies the host-built Linux libconfluent_kafka.so); use
-# `test-integration-javascript-native` there. Not part of `verify`.
+# `test-integration-javascript-native` there. Part of `verify-javascript`
+# (through javascript/'s `test`), not of `verify`.
 test-integration-javascript: build-rust-all-features
 	$(MAKE) -C javascript $(ROOTS) test-integration-grpc
 
@@ -297,12 +300,27 @@ test-python-macos-docker: build-python
 
 verify: build format-check check-generated lint test check-bindings
 
-# The Node.js client's unit tests, then its broker-backed test against a
-# scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS when set).
+# The Node.js client's static, unit and typing tests, its broker-backed test
+# against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
+# when set), then the container gRPC multilanguage arm (Linux only; see
+# test-integration-javascript), as test-python and test-c end with theirs. The
+# typing tests need the devDependencies (`npm ci` in javascript/) and skip, with
+# a message, without them.
 test-javascript: build-javascript
 	$(MAKE) -C javascript $(ROOTS) test
 
+# macOS variant of test-javascript: the unit tests only, as
+# test-python-macos-docker runs pytest test/unit only. On macOS the gRPC
+# multilanguage arm runs natively instead (see verify-javascript-macos-docker).
+test-javascript-macos-docker: build-javascript
+	$(MAKE) -C javascript $(ROOTS) test-unit
+
 verify-javascript: test-javascript
+
+# macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
+# the gRPC server as a native host process, as verify-python-macos-docker does.
+verify-javascript-macos-docker: test-javascript-macos-docker
+	$(MAKE) test-integration-javascript-native
 
 verify-c: test-c
 
