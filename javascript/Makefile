@@ -22,9 +22,14 @@ export CONFLUENT_KAFKA_LIB_DIR CONFLUENT_KAFKA_INCLUDE_DIR
 NODE ?= node
 NPM ?= npm
 # node-gyp: the one on PATH, else the copy bundled with npm (npm puts the same
-# one on PATH for `npm run build`), so a build needs no registry access.
-NODE_GYP ?= $(shell command -v node-gyp 2>/dev/null || \
-	echo "$(NODE) $(dir $(realpath $(shell command -v $(NPM))))../node_modules/node-gyp/bin/node-gyp.js")
+# one on PATH for `npm run build`), so a build needs no registry access. npm's
+# own directory depends on how Node was installed: the official tarball (and
+# mise, nvm, Homebrew) keeps it at <node prefix>/lib/node_modules/npm, while Nix
+# links bin/npm into a separate package's lib/node_modules/npm/bin.
+NPM_NODE_GYP_CANDIDATES = $(NODE_PREFIX)/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js \
+	$(dir $(realpath $(shell command -v $(NPM))))../node_modules/node-gyp/bin/node-gyp.js
+NPM_NODE_GYP = $(firstword $(wildcard $(NPM_NODE_GYP_CANDIDATES)))
+NODE_GYP ?= $(or $(shell command -v node-gyp 2>/dev/null),$(if $(NPM_NODE_GYP),$(NODE) $(NPM_NODE_GYP)),$(error node-gyp not found: put it on PATH or set NODE_GYP; npm's bundled copy is not at $(NPM_NODE_GYP_CANDIDATES)))
 # The headers of the running Node: an install that ships them (official
 # tarballs, Nix, Homebrew) has include/node/node_api.h under its prefix, and
 # node-gyp then needs no header download.
