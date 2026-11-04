@@ -98,6 +98,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
+    /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
@@ -130,6 +132,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
+    /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
@@ -156,6 +160,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>The first stage, which hands back the record's future.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> or <paramref name="callback"/> is
     /// <c>null</c>.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
+    /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
+    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IAsyncDeliveryCallback callback,

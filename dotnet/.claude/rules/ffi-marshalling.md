@@ -74,7 +74,7 @@ only if that friction bites — cheap and non-breaking.
 | `const char *` out (callee-owned) | `IntPtr` → `Utf8Marshal.PtrToString` (§A3/§B3) | Never a `string` return — the marshaller would free it. |
 | `const uint8_t *` + `int32_t len` | `IntPtr` (pinned `byte[]`) + `int` (§A4/§B4) | Zero-copy, call-scoped pin (send) or borrow (receive). |
 | `T **` out-param / array | `ref IntPtr` set to `IntPtr.Zero` / `IntPtr[]` | e.g. `out_err`; `get_all` arrays. |
-| `ProducerRecord_t` | `[StructLayout(LayoutKind.Sequential)] struct`, array `[]` | Fixed-width ⇒ identical layout. |
+| `kafka_Bytes_t` (`const uint8_t *data`, `int32_t len`) | `[StructLayout(LayoutKind.Sequential)] struct` (`KafkaBytes`) | Fixed-width ⇒ identical layout. A record (`ProducerRecord_t`) and its builder are opaque `*_t *` handles, not mirrored (§A2). |
 | `void (*cb)(...)` / `void *` | Cdecl delegate, kept alive (§A6/§B6) / `IntPtr` (`GCHandle`) | |
 
 **Rule:**
@@ -455,7 +455,9 @@ awaits it (decision 9).
    finalizable object per record is hot-path waste): the owned `KafkaFuture_t *` a send
    delivers, freed at once and never read (§A7; BH:3807-3811, BH:38166-38170;
    `KafkaFuture_destroy_err`, BH:37992-38005); the per-send `ProducerRecord_t`, freed right after
-   the send call (`ProducerRecord_destroy_err`, BH:39731); the per-send `Callback_t`, which the
+   the send call (`ProducerRecord_destroy_err`, BH:39731); the per-send
+   `ProducerRecordOptionsBuilder_t`, `ProducerRecordOptions_t` and, for a record with headers,
+   `RecordHeaders_t` that build it, each freed in a `finally` once the record is built; the per-send `Callback_t`, which the
    send consumes on every path, its error and a closed producer included, so the binding never
    destroys it (`rust/src/ffi/producer/callback.rs:185-202` at `3f8a5bc6`; §A6); an owned error,
    freed once the error table has read it (`Error_destroy_err`, BH:17957; §A5).
@@ -476,6 +478,9 @@ awaits it (decision 9).
 | `KafkaProducer_t` / `MockProducer_t`, held as its `Producer` view | 1 | `KafkaProducer_new`; the `MockProducer_with_*_err` constructors (BH:38809-38840) | `ReleaseHandle` → `KafkaProducer_destroy_err` (BH:38787-38800) / `MockProducer_destroy_err` (BH:38855-38867), only after `CloseExplicitly` |
 | the config `kafka_Map_t`, `ProducerConfig_t` | 1, short-lived | the binding | the binding, after `KafkaProducer_new` |
 | `ProducerRecord_t` | 2 | the binding, per send | the binding, right after the send call |
+| `ProducerRecordOptionsBuilder_t` | 2 | the binding, per send (`ProducerRecordOptionsBuilder_new_err`, BH:52764) | the binding, after `build` (`ProducerRecordOptionsBuilder_destroy_err`, BH:52912) |
+| `RecordHeaders_t`, for a record with headers | 2 | the binding, per send (`RecordHeaders_new_err`, BH:27699) | the binding, after `set_headers_err` copied it (`RecordHeaders_destroy_err`, BH:27840) |
+| `ProducerRecordOptions_t` | 2 | `ProducerRecordOptionsBuilder_build` (BH:52899) | the binding, after `ProducerRecord_with_options` copied it (`ProducerRecordOptions_destroy_err`, BH:52925) |
 | `Callback_t` | 2 | the binding, per send, after the record is built | the send, which consumes it on every path |
 | `KafkaFuture_t` from a send | 2 | the blocking send's return; the handover `cb` | the binding, at once, unread |
 | an owned `kafka_common_Error_t` | 2 | an `out_err` slot; a `_cb` completion | the error-table read, then `Error_destroy_err` |
@@ -644,8 +649,10 @@ hazard, fixed by pinning.)
     may be an array, a string, native memory or a custom `MemoryManager`; `Pin()`
     handles all of them and exists on all three TFMs (`netstandard2.0` gets it from the
     already-referenced `System.Memory`). `GCHandle.Alloc(Pinned)` remains correct for
-    buffers the binding *owns* and pins itself — the interned topic buffers and the
-    empty-sentinel byte below.
+    buffers the binding *owns* and pins itself — the UTF-8 buffer `Utf8Marshal.Pin` encodes
+    for a topic or header key too long for the stack. The async empty sentinel below needs no
+    pin: it is one process-wide byte of native memory (`Marshal.AllocHGlobal(1)`), never moved
+    or freed.
   - **Async send: the pin spans `Send` → the handover `cb`.** The `cb` fires on the
     `CompletionThread` or inside the call (§A1). Release the pins in the `cb`, before the first
     stage completes, and on every path that ends without a `cb` (the P/Invoke throwing). The sync
@@ -675,14 +682,27 @@ hazard, fixed by pinning.)
     ⚠ **A STACK sentinel is correct only for a call-scoped send.** On the async send the core
     reads the address until the handover `cb`, after `Send`'s frame may be gone — a
     use-after-free that "works" almost always and corrupts rarely, which is the worst
-    failure mode. The async path must use **one process-wide, permanently pinned
-    1-byte static** instead (M11/P3.1 §4.2). Test it as a *stability* property — the same
+    failure mode. The async path must use **one process-wide byte of native memory, never moved
+    or freed** (`Marshal.AllocHGlobal(1)`, `SendPins`) instead (M11/P3.1 §4.2). Test it as a *stability* property — the same
     address for a record's key and value, and across separate calls at different stack
     depths — because that is exactly what a stack sentinel cannot satisfy and an
     "it sent successfully" assertion cannot detect.
-  - **The topic is read when the record is built.** `ProducerRecord_new*` takes a NUL-terminated
-    `topic` and returns an owned record (BH:39527-39539), so the topic needs only a call-scoped
-    `Utf8Marshal.Pin` around that call, on both paths. No interned topic cache.
+  - **The topic is read when the record is built.** `ProducerRecordOptionsBuilder_set_topic_err`
+    copies its NUL-terminated `topic` (`rust/src/ffi/producer/producer_record.rs:626-628` at `916ffb4e`), so the topic needs only a call-scoped buffer (on the
+    stack up to a bound, else `Utf8Marshal.Pin`) around that call, on both paths. No interned topic cache.
+  - **Every record is built through the OptionsBuilder** (ledger 300), as Python's binding builds it:
+    `ProducerRecordOptionsBuilder_new_err`, `set_topic` / `set_partition` / `set_timestamp` (-1 is Java's
+    `null`) / `set_key` / `set_value` (`NULL` is absent), then, only when the record's sealed headers are
+    non-empty, `RecordHeaders_new_err`, `__as_Headers_err`, `Headers_add_with_key_value` per header and
+    `set_headers_err`; then `build` and `ProducerRecord_with_options`. The builder and the record hold
+    the key's and value's `kafka_Bytes_t *`, never their bytes, so the pins above are unchanged.
+  - **Header bytes are copied during the build.** `Headers_add_with_key_value` copies the key and the
+    value (BH:27497), so each needs only a call-scoped pin (`fixed`; the key's UTF-8 on the stack up to
+    a bound), on both sends: nothing of a header outlives the record build, and the managed send
+    allocates nothing per header. A `null` value crosses as `NULL` data; an empty value as a non-null
+    pointer with length 0 (the sentinel byte above: `fixed` over an empty array yields `NULL`, which the
+    ABI reads as a `null` value). The copy is a recorded deviation from root `CLAUDE.md` §14 (ledger 301):
+    the C API has no borrowed header value (ledger 305), as for Python's binding.
 
 **Why:** the borrow ends when the sync call returns, or at the async handover `cb`, so a pin
 of exactly that span is sufficient; Task-scoped pinning is unnecessary and fragments the heap.
@@ -695,6 +715,8 @@ per-message allocation CLAUDE.md §12 exists to prevent.
   - Any intermediate copy of key/value; keeping the pin alive until the `Task`
     completes; forgetting to unpin (a permanent pin).
   - Conflating empty (`0`) with absent (`-1`); mutating/resizing a pinned array.
+  - A header value passed through `fixed` over an empty array (a `NULL` pointer, read as a `null`
+    value); a header pin, or a managed copy of a header (`ToArray()` per send), kept past the record build.
 
 **Tests required:**
 
@@ -712,6 +734,8 @@ per-message allocation CLAUDE.md §12 exists to prevent.
     `Send` racing `Close`). A pinned `GCHandle` is a strong root, so a leak is observable
     without any pin-counting API: hand each send a buffer nothing else references and assert
     it becomes collectable.
+  - A record with headers sends them: a `null` value, an empty value and a non-ASCII key read back
+    from the native record; a send with headers adds no managed allocation per header.
 
 ---
 
@@ -737,9 +761,9 @@ standard .NET exceptions — never `KafkaException`.
     non-breakingly.
   - **Precondition:** validate before any pin/marshal/P/Invoke and throw
     `ArgumentNullException` (null topic/record/config),
-    `ArgumentOutOfRangeException` (a **negative partition** — the ABI silently
-    maps negative to "unset", so the binding must reject it — or a negative
-    timeout), or `ObjectDisposedException` / `InvalidOperationException` (closed
+    `ArgumentOutOfRangeException` (a **negative partition** or a **negative
+    timestamp** — the ABI silently maps either to "unset", so the binding must reject it,
+    with Java's texts, ledger 284 — or a negative timeout), or `ObjectDisposedException` / `InvalidOperationException` (closed
     producer). **Mandatory**, not optional: the ABI doesn't validate preconditions
     (CLAUDE.md §3) and some functions `assert!`/panic on violation — a panic
     across FFI is UB.
@@ -773,7 +797,7 @@ exceptions are unchanged.
     async failure faults the `Task` (via mock `error_next`); the handle is freed
     exactly once; a non-ASCII message round-trips.
   - Null topic/record → `ArgumentNullException`; post-`Dispose` →
-    `ObjectDisposedException`; negative partition → `ArgumentOutOfRangeException` —
+    `ObjectDisposedException`; negative partition or timestamp → `ArgumentOutOfRangeException` with Java's text —
     each before any native call.
 
 ---
