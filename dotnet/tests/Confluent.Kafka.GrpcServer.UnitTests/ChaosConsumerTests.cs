@@ -100,7 +100,7 @@ public sealed class ChaosConsumerTests
         Proto.WorkloadEvent pollError = Assert.Single(EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.ConsumerError));
         Assert.Equal(Proto.ConsumerOp.Poll, pollError.ConsumerError.Op);
         Assert.Equal("injected poll failure", pollError.ConsumerError.Error.Message);
-        Assert.Equal(0, pollError.ConsumerError.Error.Code);
+        Assert.Equal(-1, pollError.ConsumerError.Error.Code);
     }
 
     [Theory]

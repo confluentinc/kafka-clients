@@ -15,6 +15,7 @@
 using System;
 
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Common;
@@ -24,7 +25,7 @@ namespace Confluent.Kafka.Common;
 /// <see cref="IsRetriable"/> classify it, and <see cref="Exception.InnerException"/> is Java's <c>getCause()</c>.
 /// </summary>
 /// <remarks>A failed precondition throws the standard .NET exception instead.</remarks>
-public class KafkaException : Exception
+public class KafkaException : Exception, IJavaThrowable
 {
     private const int UnknownServerError = -1;
 
@@ -42,39 +43,55 @@ public class KafkaException : Exception
 
     private const int LocalNullPointer = -32;
 
+    private readonly int? _storedCode;
+
+    // Java's getMessage(), null included; Message is then empty.
+    private readonly string? _javaMessage;
+
     /// <summary>
-    /// Initializes an exception with a default message; <see cref="Code"/> is 0 and <see cref="IsRetriable"/>
-    /// is <see langword="false"/>.
+    /// Initializes an exception with no message, so <see cref="Exception.Message"/> is empty; <see cref="Code"/> is
+    /// <c>-1</c> and <see cref="IsRetriable"/> is <see langword="false"/>.
     /// </summary>
     public KafkaException()
+        : base(string.Empty)
     {
     }
 
     /// <summary>
-    /// Initializes an exception with a message; <see cref="Code"/> is 0 and <see cref="IsRetriable"/> is
+    /// Initializes an exception with a message, an empty <see cref="Exception.Message"/> for
+    /// <see langword="null"/>; <see cref="Code"/> is <c>-1</c> and <see cref="IsRetriable"/> is
     /// <see langword="false"/>.
     /// </summary>
     public KafkaException(string? message)
-        : base(message)
+        : base(message ?? string.Empty)
     {
+        _javaMessage = message;
     }
 
     /// <summary>
-    /// Initializes an exception with a message and a cause; <see cref="Code"/> is 0 and
-    /// <see cref="IsRetriable"/> is <see langword="false"/>.
+    /// Initializes an exception with a message, an empty <see cref="Exception.Message"/> for
+    /// <see langword="null"/>, and a cause; <see cref="Code"/> is <c>-1</c> and <see cref="IsRetriable"/> is
+    /// <see langword="false"/>.
     /// </summary>
     public KafkaException(string? message, Exception? innerException)
-        : base(message, innerException)
+        : base(message ?? string.Empty, innerException)
     {
+        _javaMessage = message;
     }
 
     /// <summary>
-    /// Initializes an exception with a cause, whose type's full name and message, Java's <c>cause.toString()</c>,
-    /// become the message, or the default message for a <see langword="null"/> cause; <see cref="Code"/> is 0 and
-    /// <see cref="IsRetriable"/> is <see langword="false"/>.
+    /// Initializes an exception with a cause, whose Java <c>toString()</c>, its type's full name followed by
+    /// <c>": "</c> and its message when it has one, becomes the message, or no message for a
+    /// <see langword="null"/> cause; <see cref="Code"/> is <c>-1</c> and <see cref="IsRetriable"/> is
+    /// <see langword="false"/>.
     /// </summary>
     public KafkaException(Exception? cause)
-        : base(CauseMessage(cause), cause)
+        : this(cause is null ? null : JavaText.ToString(cause), cause)
+    {
+    }
+
+    internal KafkaException(CoreError _, string? message, Exception? innerException)
+        : this(message, innerException)
     {
     }
 
@@ -84,23 +101,28 @@ public class KafkaException : Exception
     }
 
     internal KafkaException(int code, string? message, bool isRetriable, Exception? innerException)
-        : base(message, innerException)
+        : this(message, innerException)
     {
-        Code = code;
+        _storedCode = code;
         IsRetriable = isRetriable;
     }
 
-    /// <summary>The error's code; for an error the broker reported, its Kafka protocol error code.</summary>
-    public int Code { get; }
+    /// <summary>
+    /// The C ABI's id for the error's Java exception class; <c>-1</c>, the id of a bare Java
+    /// <c>KafkaException</c>, for a class without an id of its own.
+    /// </summary>
+    public int Code => FfiId;
 
     /// <summary>Whether the failed operation may succeed if retried.</summary>
     public bool IsRetriable { get; }
 
-    private static string? CauseMessage(Exception? cause) =>
-        cause is null ? null : cause.GetType().FullName + ": " + cause.Message;
+    internal virtual int FfiId => _storedCode ?? UnknownServerError;
 
-    internal static KafkaException WrapAtPoll(Exception cause) =>
-        cause as KafkaException ?? new KafkaException(UnknownServerError, CauseMessage(cause), false, cause);
+    internal virtual string JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+
+    string IJavaThrowable.JavaToString() => JavaToString();
+
+    internal static KafkaException WrapAtPoll(Exception cause) => cause as KafkaException ?? new KafkaException(cause);
 
     internal static KafkaException WrapAtClose(Exception cause) =>
         new KafkaException(UnknownServerError, "Failed to close kafka consumer", false, cause);
@@ -172,7 +194,7 @@ public class KafkaException : Exception
             // new KafkaException(t): its message is t.toString(), and a KafkaException t is thrown as it is.
             if (inner is not null && WrapsItsSource(message, source))
             {
-                return inner as KafkaException ?? new KafkaException(code, CauseMessage(inner), isRetriable, inner);
+                return inner as KafkaException ?? new KafkaException(code, JavaText.ToString(inner), isRetriable, inner);
             }
 
             return code switch

@@ -16,6 +16,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
 using Xunit;
@@ -103,6 +104,13 @@ public abstract class KafkaFutureTestBase
         failureImpl.CompleteWithError(new InvalidOperationException("foo"));
         Assert.Equal(
             "KafkaFuture{value=null,exception=System.InvalidOperationException: foo,done=true}", failure.Describe());
+
+        var nullMessageImpl = new KafkaFutureImpl<int>();
+        FutureView<int> nullMessage = Wrap(nullMessageImpl);
+        nullMessageImpl.CompleteWithError(new KafkaException());
+        Assert.Equal(
+            "KafkaFuture{value=null,exception=Confluent.Kafka.Common.KafkaException,done=true}",
+            nullMessage.Describe());
 
         var trickyImpl = new KafkaFutureImpl<int>();
         FutureView<int> tricky1 = Wrap(trickyImpl);

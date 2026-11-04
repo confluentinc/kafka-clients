@@ -23,19 +23,15 @@ using System.Text;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The two texts the binding writes for a configuration value, kept apart: <see cref="CoreText"/>, the text the core
-/// parses (exact digits, a <see langword="double"/> as <c>"G17"</c>; the core rounds), and <see cref="ValueOf"/>,
-/// Java's <c>String.valueOf</c>, for the binding's own messages only. Both are in the invariant culture.
+/// The texts Java gives a value: <see cref="ValueOf"/>, Java's <c>String.valueOf</c> in a string concatenation, and
+/// <see cref="ToString(Exception)"/>, <c>Throwable.toString()</c>, so the messages built from them read as Java's;
+/// and <see cref="CoreText"/>, the text the core parses for a configuration value (exact digits, a
+/// <see langword="double"/> as <c>"G17"</c>; the core rounds), kept apart from the message text. All are in the
+/// invariant culture.
 /// </summary>
 internal static class JavaText
 {
-    private const long DoubleMinNormalBits = 0x0010000000000000L;
-    private const float FloatMinNormal = 1.17549435E-38f;
-    private const int DoubleSubnormalShift = 1074;
-    private const int FloatSubnormalShift = 149;
-
-    private static readonly double s_twoToTheFloatSubnormalShift =
-        BitConverter.Int64BitsToDouble((1023L + FloatSubnormalShift) << 52);
+    private const double Log10Of2 = 0.30102999566398120;
 
     internal static string CoreText(object value, ConfigType? keyType)
     {
@@ -67,8 +63,71 @@ internal static class JavaText
         double number => DoubleToString(number),
         float number => FloatToString(number),
         decimal number => DecimalText(number, javaNotation: true),
+        Exception exception => ToString(exception),
         _ => CollectionText(value, ValueOf) ?? InvariantText(value),
     };
+
+    internal static string ToString(Exception exception) =>
+        exception is IJavaThrowable java ? java.JavaToString() : ThrowableToString(exception, exception.Message);
+
+    internal static string ThrowableToString(Exception exception, string? message)
+    {
+        Type type = exception.GetType();
+        string name = type.FullName ?? type.Name;
+        return message is null ? name : name + ": " + message;
+    }
+
+    internal static string DoubleToString(double value)
+    {
+        if (double.IsNaN(value))
+        {
+            return "NaN";
+        }
+
+        if (double.IsInfinity(value))
+        {
+            return value > 0 ? "Infinity" : "-Infinity";
+        }
+
+        long bits = BitConverter.DoubleToInt64Bits(value);
+        bool negative = bits < 0;
+        int biased = (int)((bits >> 52) & 0x7FF);
+        long fraction = bits & 0xFFFFFFFFFFFFFL;
+        if (biased == 0 && fraction == 0)
+        {
+            return negative ? "-0.0" : "0.0";
+        }
+
+        return biased == 0
+            ? Shortest(negative, fraction, -1074, lowerGapHalved: false)
+            : Shortest(negative, fraction | (1L << 52), biased - 1075, lowerGapHalved: fraction == 0 && biased > 1);
+    }
+
+    internal static string FloatToString(float value)
+    {
+        if (float.IsNaN(value))
+        {
+            return "NaN";
+        }
+
+        if (float.IsInfinity(value))
+        {
+            return value > 0 ? "Infinity" : "-Infinity";
+        }
+
+        int bits = BitConverter.ToInt32(BitConverter.GetBytes(value), 0);
+        bool negative = bits < 0;
+        int biased = (bits >> 23) & 0xFF;
+        int fraction = bits & 0x7FFFFF;
+        if (biased == 0 && fraction == 0)
+        {
+            return negative ? "-0.0" : "0.0";
+        }
+
+        return biased == 0
+            ? Shortest(negative, fraction, -149, lowerGapHalved: false)
+            : Shortest(negative, fraction | (1 << 23), biased - 150, lowerGapHalved: fraction == 0 && biased > 1);
+    }
 
     private static string? CollectionText(object value, Func<object?, string> element)
     {
@@ -158,7 +217,7 @@ internal static class JavaText
         string separator = string.Empty;
         foreach (object? item in collection)
         {
-            text.Append(separator).Append(element(item));
+            text.Append(separator).Append(ReferenceEquals(item, collection) ? "(this Collection)" : element(item));
             separator = ", ";
         }
 
@@ -171,7 +230,7 @@ internal static class JavaText
         string separator = string.Empty;
         foreach (DictionaryEntry entry in dictionary)
         {
-            text.Append(separator).Append(element(entry.Key)).Append('=').Append(element(entry.Value));
+            text.Append(separator).Append(Element(entry.Key, dictionary, element)).Append('=').Append(Element(entry.Value, dictionary, element));
             separator = ", ";
         }
 
@@ -184,159 +243,17 @@ internal static class JavaText
         string separator = string.Empty;
         foreach (KeyValuePair<TKey, TValue> pair in (IEnumerable<KeyValuePair<TKey, TValue>>)pairs)
         {
-            text.Append(separator).Append(element(pair.Key)).Append('=').Append(element(pair.Value));
+            text.Append(separator).Append(Element(pair.Key, pairs, element)).Append('=').Append(Element(pair.Value, pairs, element));
             separator = ", ";
         }
 
         return text.Append('}').ToString();
     }
 
-    private static string DoubleToString(double value)
-    {
-        if (double.IsNaN(value) || double.IsInfinity(value) || value == 0)
-        {
-            return JavaSpecialText(value);
-        }
-
-        double magnitude = Math.Abs(value);
-        string text = magnitude.ToString("R", CultureInfo.InvariantCulture);
-        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed)
-            || parsed != magnitude)
-        {
-            text = magnitude.ToString("G17", CultureInfo.InvariantCulture);
-        }
-
-        (string digits, int exponent) = DecimalDigits(text);
-        long bits = BitConverter.DoubleToInt64Bits(magnitude);
-        if (digits.Length == 1 && bits < DoubleMinNormalBits)
-        {
-            (digits, exponent) = ClosestOfTwoDigits(bits, DoubleSubnormalShift, digits, exponent);
-        }
-
-        return JavaNotation(value < 0, digits, exponent);
-    }
-
-    private static string FloatToString(float value)
-    {
-        if (float.IsNaN(value) || float.IsInfinity(value) || value == 0)
-        {
-            return JavaSpecialText(value);
-        }
-
-        float magnitude = Math.Abs(value);
-        string text = magnitude.ToString("R", CultureInfo.InvariantCulture);
-        if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed)
-            || parsed != magnitude)
-        {
-            text = magnitude.ToString("G9", CultureInfo.InvariantCulture);
-        }
-
-        (string digits, int exponent) = DecimalDigits(text);
-        if (digits.Length == 1 && magnitude < FloatMinNormal)
-        {
-            long significand = (long)(magnitude * s_twoToTheFloatSubnormalShift);
-            (digits, exponent) = ClosestOfTwoDigits(significand, FloatSubnormalShift, digits, exponent);
-        }
-
-        return JavaNotation(value < 0, digits, exponent);
-    }
-
-    private static string JavaSpecialText(double value)
-    {
-        if (double.IsNaN(value))
-        {
-            return "NaN";
-        }
-
-        if (double.IsInfinity(value))
-        {
-            return value > 0 ? "Infinity" : "-Infinity";
-        }
-
-        return IsNegative(value) ? "-0.0" : "0.0";
-    }
+    private static string Element(object? item, object map, Func<object?, string> element) =>
+        ReferenceEquals(item, map) ? "(this Map)" : element(item);
 
     private static bool IsNegative(double value) => BitConverter.DoubleToInt64Bits(value) < 0;
-
-    private static (string Digits, int Exponent) DecimalDigits(string text)
-    {
-        int e = text.IndexOfAny(new[] { 'E', 'e' });
-        string mantissa = e < 0 ? text : text.Substring(0, e);
-        int power = e < 0 ? 0 : int.Parse(text.Substring(e + 1), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
-        int point = mantissa.IndexOf('.');
-        string all = point < 0 ? mantissa : mantissa.Remove(point, 1);
-        int integerDigits = point < 0 ? mantissa.Length : point;
-        int leading = 0;
-        while (leading < all.Length - 1 && all[leading] == '0')
-        {
-            leading++;
-        }
-
-        string digits = all.Substring(leading).TrimEnd('0');
-        return (digits.Length == 0 ? "0" : digits, integerDigits - leading - 1 + power);
-    }
-
-    private static (string Digits, int Exponent) ClosestOfTwoDigits(long significand, int shift, string digits, int exponent)
-    {
-        int unitExponent = exponent - 2;
-        BigInteger unitsPerOne = BigInteger.Pow(10, -unitExponent);
-        BigInteger halfUlp = unitsPerOne;
-        BigInteger twiceValue = 2 * significand * unitsPerOne;
-        BigInteger scale = BigInteger.One << (shift + 1);
-        bool evenSignificand = significand % 2 == 0;
-
-        BigInteger best = (digits[0] - '0') * 100;
-        BigInteger bestGap = BigInteger.Abs((best * scale) - twiceValue);
-        for (int step = 10; step >= 1; step /= 10)
-        {
-            for (int candidateDigits = 10; candidateDigits < 100; candidateDigits++)
-            {
-                BigInteger candidate = candidateDigits * step;
-                BigInteger gap = BigInteger.Abs((candidate * scale) - twiceValue);
-                bool readsBack = gap < halfUlp || (gap == halfUlp && evenSignificand);
-                if (readsBack && gap < bestGap)
-                {
-                    best = candidate;
-                    bestGap = gap;
-                }
-            }
-        }
-
-        string all = best.ToString(CultureInfo.InvariantCulture);
-        return (all.TrimEnd('0'), all.Length - 1 + unitExponent);
-    }
-
-    private static string JavaNotation(bool negative, string digits, int exponent)
-    {
-        var text = new StringBuilder(digits.Length + 8);
-        if (negative)
-        {
-            text.Append('-');
-        }
-
-        if (exponent >= -3 && exponent < 7)
-        {
-            if (exponent < 0)
-            {
-                text.Append("0.").Append('0', -exponent - 1).Append(digits);
-            }
-            else if (digits.Length > exponent + 1)
-            {
-                text.Append(digits, 0, exponent + 1).Append('.').Append(digits, exponent + 1, digits.Length - exponent - 1);
-            }
-            else
-            {
-                text.Append(digits).Append('0', exponent + 1 - digits.Length).Append(".0");
-            }
-        }
-        else
-        {
-            text.Append(digits[0]).Append('.').Append(digits.Length > 1 ? digits.Substring(1) : "0")
-                .Append('E').Append(exponent.ToString(CultureInfo.InvariantCulture));
-        }
-
-        return text.ToString();
-    }
 
     private static string DecimalText(decimal value, bool javaNotation)
     {
@@ -374,5 +291,128 @@ internal static class JavaText
         }
 
         return text.Append("0.").Append('0', scale - digits.Length).Append(digits).ToString();
+    }
+
+    // Java's Double.toString / Float.toString as specified since JDK 19: of the decimals that round to the
+    // value, those with the fewest digits (one or two digits when one suffices), and of those the closest, an
+    // even last digit breaking a tie. Exact integer arithmetic, because .NET Framework's own formatting does
+    // not always give the shortest digits.
+    private static string Shortest(bool negative, long significand, int exponent, bool lowerGapHalved)
+    {
+        BigInteger value = significand;
+        int magnitude = DecimalExponent(value, exponent);
+
+        // The interval of decimals that round to the value, in units of 2^(exponent - 2); IEEE 754 rounds a
+        // tie to the even significand, so the ends belong to it only when the significand is even.
+        int binary = exponent - 2;
+        BigInteger scaled = value * 4;
+        BigInteger low = scaled - (lowerGapHalved ? 1 : 2);
+        BigInteger high = scaled + 2;
+        bool endsIncluded = significand % 2 == 0;
+
+        int digits = 1;
+        BigInteger min;
+        BigInteger max;
+        while (!Fits(low, high, binary, magnitude + 1 - digits, endsIncluded, out min, out max))
+        {
+            digits++;
+        }
+
+        int unit = magnitude + 1 - digits;
+        if (digits == 1)
+        {
+            unit--;
+            Fits(low, high, binary, unit, endsIncluded, out min, out max);
+        }
+
+        BigInteger below = Divide(scaled, binary, unit, out BigInteger remainder, out BigInteger divisor);
+        BigInteger above = below + 1;
+        int half = (remainder * 2).CompareTo(divisor);
+        BigInteger chosen = above > max || (below >= min && (half < 0 || (half == 0 && below.IsEven)))
+            ? below
+            : above;
+
+        return Format(negative, chosen.ToString(CultureInfo.InvariantCulture), unit);
+    }
+
+    private static bool Fits(
+        BigInteger low,
+        BigInteger high,
+        int binary,
+        int unit,
+        bool endsIncluded,
+        out BigInteger min,
+        out BigInteger max)
+    {
+        BigInteger lowQuotient = Divide(low, binary, unit, out BigInteger lowRemainder, out _);
+        min = lowRemainder.IsZero && endsIncluded ? lowQuotient : lowQuotient + 1;
+        BigInteger highQuotient = Divide(high, binary, unit, out BigInteger highRemainder, out _);
+        max = highRemainder.IsZero && !endsIncluded ? highQuotient - 1 : highQuotient;
+        return min <= max;
+    }
+
+    private static BigInteger Divide(
+        BigInteger value,
+        int binary,
+        int unit,
+        out BigInteger remainder,
+        out BigInteger divisor)
+    {
+        BigInteger dividend = (value << Math.Max(binary, 0)) * BigInteger.Pow(10, Math.Max(-unit, 0));
+        divisor = (BigInteger.One << Math.Max(-binary, 0)) * BigInteger.Pow(10, Math.Max(unit, 0));
+        return BigInteger.DivRem(dividend, divisor, out remainder);
+    }
+
+    private static int DecimalExponent(BigInteger value, int binary)
+    {
+        int estimate = (int)Math.Floor(Math.Log10((double)value) + (binary * Log10Of2));
+        while (CompareToPowerOfTen(value, binary, estimate) < 0)
+        {
+            estimate--;
+        }
+
+        while (CompareToPowerOfTen(value, binary, estimate + 1) >= 0)
+        {
+            estimate++;
+        }
+
+        return estimate;
+    }
+
+    private static int CompareToPowerOfTen(BigInteger value, int binary, int power)
+    {
+        BigInteger left = (value << Math.Max(binary, 0)) * BigInteger.Pow(10, Math.Max(-power, 0));
+        BigInteger right = (BigInteger.One << Math.Max(-binary, 0)) * BigInteger.Pow(10, Math.Max(power, 0));
+        return left.CompareTo(right);
+    }
+
+    private static string Format(bool negative, string digits, int unit)
+    {
+        int length = digits.Length;
+        while (digits[length - 1] == '0')
+        {
+            length--;
+        }
+
+        string significant = digits.Substring(0, length);
+        int scientific = digits.Length - 1 + unit;
+        StringBuilder text = new StringBuilder(negative ? "-" : string.Empty);
+        if (scientific >= 7 || scientific < -3)
+        {
+            text.Append(significant[0]).Append('.').Append(length > 1 ? significant.Substring(1) : "0")
+                .Append('E').Append(scientific.ToString(CultureInfo.InvariantCulture));
+        }
+        else if (scientific >= 0)
+        {
+            string whole = significant.PadRight(scientific + 1, '0');
+            text.Append(whole, 0, scientific + 1).Append('.')
+                .Append(whole.Length > scientific + 1 ? whole.Substring(scientific + 1) : "0");
+        }
+        else
+        {
+            text.Append("0.").Append('0', -scientific - 1).Append(significant);
+        }
+
+        return text.ToString();
     }
 }
