@@ -248,6 +248,22 @@ static void test_null_handle_in_a_cb_twin_completes_inline(void) {
     assert_ok(err);
 }
 
+static void on_sent(kafka_common_KafkaFuture_t *value, kafka_common_Error_t *error, void *opaque) {
+    TEST_ASSERT_NULL(value);
+    on_assigned(error, opaque);
+}
+
+/* The same for a `kafka_producer_KafkaProducer_*_cb` export, a `void` one and
+ * `send_cb`, which also reports a value. */
+static void test_null_producer_handle_in_a_cb_export_completes_inline(void) {
+    kafka_common_Error_t *delivered = NULL;
+    kafka_producer_KafkaProducer_init_transactions_cb(NULL, on_assigned, &delivered);
+    assert_null_pointer(delivered, "self_ must not be null");
+    delivered = NULL;
+    kafka_producer_KafkaProducer_send_cb(NULL, NULL, NULL, on_sent, &delivered);
+    assert_null_pointer(delivered, "self_ must not be null");
+}
+
 static void on_closed(void *opaque) {
     atomic_fetch_add((atomic_int *)opaque, 1);
 }
@@ -303,5 +319,6 @@ int main(void) {
     RUN_TEST(test_null_handle_is_a_null_pointer_error);
     RUN_TEST(test_null_list_reports_java_s_error);
     RUN_TEST(test_null_handle_in_a_cb_twin_completes_inline);
+    RUN_TEST(test_null_producer_handle_in_a_cb_export_completes_inline);
     return UNITY_END();
 }

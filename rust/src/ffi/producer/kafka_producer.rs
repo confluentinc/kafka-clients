@@ -208,6 +208,22 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
     unsafe { handle(self_, "self_") }.as_producer()
 }
 
+/// The handle's `__as_Producer` view, or NULL for a NULL handle: what a `_cb` export's guard hands
+/// to `completion_sink`, so a NULL `self_` completes `cb` on the calling thread instead of
+/// panicking again outside the guard.
+///
+/// # Safety
+///
+/// `self_` must be NULL or a live handle.
+unsafe fn producer_view(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka_producer_Producer_t {
+    if self_.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: Per this function's `# Safety`, a non-NULL `self_` is a live handle, as `producer`
+    // requires.
+    unsafe { producer(self_) }
+}
+
 /// A producer is instantiated by providing a set of key-value pairs as configuration, a key and a
 /// value `Serializer`.
 ///
@@ -359,13 +375,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_init_transactions_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
@@ -439,13 +456,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_begin_transaction_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction_cb(
@@ -567,13 +585,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 /// that no other call mutates during this one, and `group_metadata` a live
 /// handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_send_offsets_to_transaction_cb`, delivers `cb` itself (a panic
     // inside it included) before it returns, so `cb` has not fired for this `opaque`, as
     // `deliver_panic` requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
@@ -659,13 +678,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_commit_transaction_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
@@ -745,13 +765,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_abort_transaction_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
@@ -846,13 +867,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle (consumed).
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_send_with_callback_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as
     // `deliver_panic_value` requires.
-    unsafe { deliver_panic_value(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic_value(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
@@ -913,6 +935,74 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error, for each of the
+    /// six `_cb` exports: the guard hands `completion_sink` a NULL view (`producer_view`) instead
+    /// of dereferencing the handle again.
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use std::ffi::c_void;
+
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_delivery, record_value_delivery};
+        let void_cbs: [unsafe fn(*mut c_void); 5] = [
+            // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_init_transactions_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+            // SAFETY: as above.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_begin_transaction_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+            |o| {
+                // SAFETY: as above; the NULL handle is checked first.
+                unsafe {
+                    kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        Some(record_delivery),
+                        o,
+                    )
+                }
+            },
+            // SAFETY: as above.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_commit_transaction_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+            // SAFETY: as above.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_abort_transaction_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+        ];
+        for call in void_cbs {
+            let delivered = Delivered::default();
+            // SAFETY: `call` is one of the closures above, given a live `Delivered`.
+            unsafe { call(&delivered as *const Delivered as *mut c_void) };
+            assert_null_self_delivered(&delivered);
+        }
+        /// `record_value_delivery` typed as `send_cb`'s completion.
+        unsafe extern "C" fn record_send(
+            value: *mut kafka_common_KafkaFuture_t,
+            error: *mut kafka_common_Error_t,
+            opaque: *mut c_void,
+        ) {
+            // SAFETY: Per `record_value_delivery`'s `# Safety`, forwarded from this completion's.
+            unsafe { record_value_delivery(value.cast(), error, opaque) }
+        }
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle (checked first), the value recorder and a live
+        // `Delivered`.
+        unsafe {
+            kafka_producer_KafkaProducer_send_cb(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                Some(record_send),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
+    }
 
     /// A C serializer's calls go through `ArcSerializer`, whose futures must
     /// fit `InlineFuture`'s buffer, or every record would box one: for a
