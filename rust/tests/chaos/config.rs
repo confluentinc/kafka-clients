@@ -425,7 +425,7 @@ impl ChaosConfig {
         }
 
         // `--security-protocol`: which broker listener every client uses. A
-        // gRPC (python / c) backend whose server runs in a sibling container
+        // gRPC backend whose server runs in a sibling container
         // reaches the broker through its container-network listeners, which
         // exist for PLAINTEXT, SSL and SASL_SSL but not SASL_PLAINTEXT. A
         // natively launched server uses the host listeners like the Rust
@@ -1089,7 +1089,8 @@ fn check_controller_quorum(
 /// topic, a consumer one; `adds_consumer` (`--rebalance-add-cycle`) adds one
 /// more consumer of the first consumer's backend mid-run. Consumer churn adds
 /// only Rust consumers. The asyncio server (`python-async`) and the C server
-/// have no fixed pool.
+/// have no fixed pool. Neither do the .NET servers (`dotnet`, `dotnet-async`),
+/// so their streams are not counted either.
 fn check_python_server_streams(workloads: &[WorkloadSpec], num_topics: u16, adds_consumer: bool) -> Result<(), String> {
     let python = |w: &&WorkloadSpec| w.backend == Backend::Python;
     let producers = workloads.iter().filter(python).filter(|w| w.role == Role::Producer).count();
@@ -1196,8 +1197,9 @@ fn parse_workloads(s: &str) -> Result<Vec<WorkloadSpec>, String> {
             "consumer" => Role::Consumer,
             _ => return Err(format!("workload role must be producer or consumer, got '{role}'")),
         };
-        let backend = Backend::parse(backend)
-            .ok_or_else(|| format!("workload backend must be rust, python, python-async or c, got '{backend}'"))?;
+        let backend = Backend::parse(backend).ok_or_else(|| {
+            format!("workload backend must be rust, python, python-async, c, dotnet or dotnet-async, got '{backend}'")
+        })?;
         let n = counters.entry((role, backend)).or_insert(0);
         *n += 1;
         specs.push(WorkloadSpec { role, backend, instance: *n });
@@ -1351,6 +1353,55 @@ mod tests {
             parse_err(&[workloads, ("MULTILANG_BACKEND_MODE", "docker")]),
             "MULTILANG_BACKEND_MODE must be container or native, got 'docker'"
         );
+    }
+
+    /// The .NET backends parse like the other gRPC ones, and an unknown
+    /// backend is rejected with the full list.
+    #[test]
+    fn dotnet_workloads_parse_and_unknown_backends_are_rejected() {
+        let cfg = parse(&[("CHAOS_WORKLOADS", "producer:dotnet,consumer:dotnet-async,consumer:dotnet")])
+            .expect("dotnet workloads parse");
+        let labels: Vec<String> = cfg.workloads.iter().map(WorkloadSpec::label).collect();
+        assert_eq!(labels, ["producer-dotnet-1", "consumer-dotnet-async-1", "consumer-dotnet-1"]);
+        assert!(cfg.workloads.iter().all(|w| w.backend.is_grpc()));
+        assert_eq!(cfg.added_consumer_backend(), Backend::DotnetAsync);
+
+        assert_eq!(
+            parse_err(&[("CHAOS_WORKLOADS", "producer:rust,consumer:java")]),
+            "workload backend must be rust, python, python-async, c, dotnet or dotnet-async, got 'java'"
+        );
+    }
+
+    /// A containerised .NET server is rejected for SASL_PLAINTEXT like any
+    /// gRPC backend, and the error names the .NET workload; a native one uses
+    /// the host listener.
+    #[test]
+    fn dotnet_workloads_reject_sasl_plaintext_in_container_mode() {
+        for (workloads, label) in [
+            ("producer:rust,consumer:dotnet-async", "consumer-dotnet-async-1"),
+            ("producer:dotnet,consumer:rust", "producer-dotnet-1"),
+        ] {
+            let workloads = ("CHAOS_WORKLOADS", workloads);
+            assert_eq!(
+                parse_err(&[
+                    workloads,
+                    ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
+                    ("MULTILANG_BACKEND_MODE", "container"),
+                ]),
+                format!(
+                    "--security-protocol sasl_plaintext is not supported for '{label}' with \
+                     MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through \
+                     their container-network listeners, which exist for plaintext, ssl and sasl_ssl only"
+                )
+            );
+            let native = parse(&[
+                workloads,
+                ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
+                ("MULTILANG_BACKEND_MODE", "native"),
+            ])
+            .expect("a natively launched .NET server uses the host SASL_PLAINTEXT listener");
+            assert_eq!(native.security_protocol, SecurityProtocol::SaslPlaintext);
+        }
     }
 
     #[test]

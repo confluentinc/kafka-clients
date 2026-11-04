@@ -82,6 +82,7 @@ this doc omitted this row and so overstated action-matrix parity.
 | Native client | ✅ (C, in-proc-ish) | ✅ Rust in-process |
 | Python binding | — (N/A) | ✅ wired: `--workload consumer:python` starts the python gRPC-server container (auto-selects `multilanguage-tests`) |
 | C binding | ✅ (it *is* C) | ✅ wired: `--workload consumer:c` starts the c gRPC-server container |
+| .NET binding | — | ✅ wired: `--workload consumer:dotnet` / `consumer:dotnet-async` starts the .NET gRPC server (sync / async flavor) |
 | External arbitrary binary | ✅ (spawns any) | ❌ (deliberately not in first cut) |
 | Producer restart accounting | ✅ | N/A — our workloads are in-process, they don't restart |
 

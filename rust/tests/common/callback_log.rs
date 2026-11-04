@@ -34,11 +34,11 @@
 //!   - native  — an in-process `Arc<Mutex<Vec<CallbackLogEntry>>>` appended to
 //!     by real `ConsumerRebalanceListener` / `OffsetCommitCallback` / `Callback`
 //!     implementations,
-//!   - python / python_async / c — the server-side per-client log, read with the
-//!     `GetCallbackLog` unary RPC.
+//!   - python / python_async / c / dotnet / dotnet_async — the server-side
+//!     per-client log, read with the `GetCallbackLog` unary RPC.
 //!
 //! Both produce the same [`CallbackLogEntry`] shape, so one generic test body
-//! asserts the same thing against all four backends.
+//! asserts the same thing against all six backends.
 //!
 //! The log is *eventually consistent*: a callback fires when the client next
 //! makes progress (a later `poll`/`commit`/`close`, per
