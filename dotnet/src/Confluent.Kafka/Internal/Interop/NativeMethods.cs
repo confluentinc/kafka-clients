@@ -67,6 +67,12 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_Error_local_timeout_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorLocalTimeout(IntPtr message, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_unsupported_operation_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalUnsupportedOperation(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_null_pointer_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalNullPointer(IntPtr message, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_common_Error_timeout_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorTimeout(IntPtr message, ref IntPtr outErr);
 

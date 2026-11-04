@@ -42,6 +42,8 @@ public sealed class KafkaExceptionReadTests
         ["local_illegal_argument"] = (NativeMethods.ErrorLocalIllegalArgument, -3),
         ["local_illegal_state"] = (NativeMethods.ErrorLocalIllegalState, -4),
         ["local_timeout"] = (NativeMethods.ErrorLocalTimeout, -5),
+        ["local_unsupported_operation"] = (NativeMethods.ErrorLocalUnsupportedOperation, -31),
+        ["local_null_pointer"] = (NativeMethods.ErrorLocalNullPointer, -32),
     };
 
     [Theory]
@@ -49,6 +51,8 @@ public sealed class KafkaExceptionReadTests
     [InlineData("local_illegal_argument")]
     [InlineData("local_illegal_state")]
     [InlineData("local_timeout")]
+    [InlineData("local_unsupported_operation")]
+    [InlineData("local_null_pointer")]
     public void LocalFactory_ReadsBackItsCode_AndItsNonAsciiMessage(string factory)
     {
         (MessageFactory build, int code) = s_localFactories[factory];
