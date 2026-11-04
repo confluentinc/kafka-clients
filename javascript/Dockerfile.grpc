@@ -28,8 +28,8 @@
 # which bookworm's glibc 2.36 lacks.
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build confluent-kafka-javascript.node against the prebuilt Rust shared lib
-# and install the gRPC packages.
+# Stage 1: Build confluent-kafka-javascript.node against the prebuilt Rust shared lib,
+# compile the TypeScript library (lib/ -> dist/) and install the gRPC packages.
 # ---------------------------------------------------------------------------
 FROM node:22-trixie AS builder
 
@@ -45,16 +45,27 @@ WORKDIR /workspace
 # `_err` twins for language bindings, as the Python extension does.
 COPY rust/target/release/libconfluent_kafka.so /workspace/rust/target/release/libconfluent_kafka.so
 COPY rust/target/include/confluent_kafka_bindings.h /workspace/rust/target/include/confluent_kafka_bindings.h
-COPY javascript/binding.gyp javascript/package.json /workspace/javascript/
+COPY javascript/binding.gyp javascript/package.json javascript/package-lock.json javascript/tsconfig.json \
+     javascript/Makefile /workspace/javascript/
+
+# The devDependencies, from package-lock.json: typescript and @types/node
+# compile the library (the gRPC packages they include are installed again,
+# alone, for the runtime stage below).
+RUN cd /workspace/javascript && npm ci --no-audit --no-fund --ignore-scripts
+
 COPY javascript/src /workspace/javascript/src
 COPY javascript/scripts /workspace/javascript/scripts
 COPY javascript/lib /workspace/javascript/lib
 COPY javascript/grpc_server.js javascript/grpc_translate.js /workspace/javascript/
 
+# `make build`: the addon (node-gyp, npm's bundled copy, against the headers
+# the official image installs under /usr/local/include/node) and the library
+# (tsc, lib/ -> dist/), as on a host.
 ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/rust/target/release \
     CONFLUENT_KAFKA_INCLUDE_DIR=/workspace/rust/target/include
-RUN cd /workspace/javascript && \
-    node /usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js rebuild --nodedir=/usr/local
+RUN make -C /workspace/javascript build && \
+    test -f /workspace/javascript/build/Release/confluent-kafka-javascript.node && \
+    test -f /workspace/javascript/dist/producer/index.js
 
 # The gRPC packages, at the versions pinned in package.json's devDependencies
 # (the single source of truth, shared with the native `make -C javascript
@@ -69,7 +80,7 @@ RUN mkdir -p /workspace/grpc-deps && \
     test -d node_modules/@grpc/grpc-js && test -d node_modules/@grpc/proto-loader
 
 # ---------------------------------------------------------------------------
-# Stage 2: Minimal runtime — Node + the addon + the gRPC packages.
+# Stage 2: Minimal runtime — Node + the addon + the compiled library + the gRPC packages.
 # ---------------------------------------------------------------------------
 FROM node:22-trixie-slim AS runtime
 
@@ -78,9 +89,9 @@ WORKDIR /app
 # The Rust shared library at /app; LD_LIBRARY_PATH below makes the loader find
 # it there, since the addon's rpath names the builder's directory.
 COPY --from=builder /workspace/rust/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
-# lib/_native.js loads the addon from ../build/Release relative to lib/.
+# dist/_native.js loads the addon from ../build/Release relative to dist/.
 COPY --from=builder /workspace/javascript/build/Release/confluent-kafka-javascript.node /app/javascript/build/Release/confluent-kafka-javascript.node
-COPY --from=builder /workspace/javascript/lib /app/javascript/lib
+COPY --from=builder /workspace/javascript/dist /app/javascript/dist
 COPY --from=builder /workspace/javascript/grpc_server.js /workspace/javascript/grpc_translate.js /app/javascript/
 # Beside the server, so `require('@grpc/grpc-js')` resolves without NODE_PATH.
 COPY --from=builder /workspace/grpc-deps/node_modules /app/javascript/node_modules

@@ -12,23 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The generated files of the Node.js client (`javascript/lib/`), from the
-//! same Java sources and FFI enum as the Python client's
+//! The generated files of the Node.js client (`javascript/lib/`, TypeScript
+//! sources that `make -C javascript build` compiles into `javascript/dist/`),
+//! from the same Java sources and FFI enum as the Python client's
 //! (`javascript/CLAUDE.md`, "Generated files"):
 //!
 //!   - the error hierarchy ([`crate::error_hierarchy::js`]): one class per
 //!     Python error class, in the folder of its Java package, plus
-//!     `lib/_error_registry.js`;
+//!     `lib/_error_registry.ts`;
 //!   - the config classes' constants ([`crate::config_consts::js`]);
-//!   - the producer's key-type table `lib/_config_types.js`
+//!   - the producer's key-type table `lib/_config_types.ts`
 //!     ([`crate::config_types::js`]).
 //!
 //! Every generated module carries [`GENERATED_MARKER`]. A folder holding only
-//! generated modules gets a generated `index.js`; a folder that also holds
-//! hand-written ones ([`MIXED_DIRS`]) keeps its hand-written `index.js`, and the
-//! generator owns the two marked blocks in it ([`REQUIRES_BEGIN`],
-//! [`EXPORTS_BEGIN`]). A generated module no generator produces any more is
-//! removed by `generate` and reported by `check-generated`.
+//! generated modules gets a generated `index.ts`; a folder that also holds
+//! hand-written ones ([`MIXED_DIRS`]) keeps its hand-written `index.ts`, and the
+//! generator owns the marked block in it ([`EXPORTS_BEGIN`]). A generated
+//! module no generator produces any more (a `.ts`, or a `.js` left from the
+//! JavaScript sources the client had before) is removed by `generate` and
+//! reported by `check-generated`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -58,34 +60,32 @@ pub(crate) const LICENSE: &str = "// Copyright 2026 Confluent Inc.
 // limitations under the License.
 ";
 
-/// The header of a generated module: the license, then (after a blank line, so
-/// `make types` copies only the license into the `.d.ts`) the marker naming
-/// what the module is generated from.
+/// The header of a generated module: the license, then (after a blank line)
+/// the marker naming what the module is generated from. tsc emits the strict
+/// mode directive itself, so the module has none.
 pub(crate) fn header(from: &str) -> String {
     format!(
-        "{LICENSE}\n// {GENERATED_MARKER}. Produced by `cargo xtask generate-error-codes` from\n// {from};\n// `cargo xtask check-generated` checks it is up to date.\n\n'use strict';\n"
+        "{LICENSE}\n// {GENERATED_MARKER}. Produced by `cargo xtask generate-error-codes` from\n// {from};\n// `cargo xtask check-generated` checks it is up to date.\n"
     )
 }
 
-/// The lib/ folders whose `index.js` is hand-written (they also hold
-/// hand-written modules); the generator owns only the marked blocks there.
+/// The lib/ folders whose `index.ts` is hand-written (they also hold
+/// hand-written modules); the generator owns only the marked block there.
 /// `""` is `lib/` itself.
 const MIXED_DIRS: &[&str] = &["", "common", "common/config", "producer"];
 
-/// The lib/ folders whose `index.js` is hand-written and which hold no
-/// generated module: their parents' blocks do not require them.
+/// The lib/ folders whose `index.ts` is hand-written and which hold no
+/// generated module: their parents' blocks do not export them.
 const HAND_WRITTEN_DIRS: &[&str] = &["common/security", "common/security/auth"];
 
-pub(crate) const REQUIRES_BEGIN: &str = "// BEGIN GENERATED REQUIRES (cargo xtask generate-error-codes; do not edit)";
-pub(crate) const REQUIRES_END: &str = "// END GENERATED REQUIRES";
-pub(crate) const EXPORTS_BEGIN: &str = "  // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)";
-pub(crate) const EXPORTS_END: &str = "  // END GENERATED EXPORTS";
+pub(crate) const EXPORTS_BEGIN: &str = "// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)";
+pub(crate) const EXPORTS_END: &str = "// END GENERATED EXPORTS";
 
 /// A generated file and its content.
 pub(crate) type GeneratedFile = (PathBuf, String);
 
 /// One generated public module: the class `name`, defined in
-/// `lib/<dir>/<stem>.js` (`dir` is `""` for `lib/` itself).
+/// `lib/<dir>/<stem>.ts` (`dir` is `""` for `lib/` itself).
 pub(crate) struct JsModule {
     pub dir: String,
     pub stem: String,
@@ -93,9 +93,9 @@ pub(crate) struct JsModule {
     pub content: String,
 }
 
-/// `require` path from a module in `from_dir` to `lib/<to>` (`to` a path under
-/// lib/ without `.js`).
-pub(crate) fn rel_require(from_dir: &str, to: &str) -> String {
+/// `import` path from a module in `from_dir` to `lib/<to>` (`to` a path under
+/// lib/ without `.ts`).
+pub(crate) fn rel_import(from_dir: &str, to: &str) -> String {
     let from: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
     let target: Vec<&str> = to.split('/').collect();
     let (dirs, file) = target.split_at(target.len() - 1);
@@ -112,9 +112,9 @@ pub(crate) fn rel_require(from_dir: &str, to: &str) -> String {
     }
 }
 
-/// `text` as the lines of a JSDoc block at `indent`, wrapped at 80 columns.
+/// `text` as the lines of a TSDoc block at `indent`, wrapped at 80 columns.
 /// Python's reStructuredText ``code`` becomes Markdown `code`.
-pub(crate) fn jsdoc(text: &str, indent: &str) -> String {
+pub(crate) fn tsdoc(text: &str, indent: &str) -> String {
     let text = text.replace("``", "`").replace("*/", "*\\/");
     let mut out = vec![format!("{indent}/**")];
     let width = 80usize.saturating_sub(indent.len() + 3);
@@ -141,7 +141,7 @@ pub(crate) fn jsdoc(text: &str, indent: &str) -> String {
     out.join("\n")
 }
 
-/// A JavaScript single-quoted string literal.
+/// A TypeScript (JavaScript) single-quoted string literal.
 pub(crate) fn js_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -171,7 +171,33 @@ fn last_segment(dir: &str) -> &str {
     dir.rsplit('/').next().unwrap_or(dir)
 }
 
-/// The `index.js` files and blocks for `modules`.
+/// The `export` lines of a folder's index for `members` and its generated
+/// child folders `subdirs`: a class from its module, a child folder as a
+/// namespace.
+fn export_lines(members: &[&JsModule], subdirs: &[String]) -> Vec<String> {
+    let mut lines: Vec<String> = members
+        .iter()
+        .map(|m| format!("export {{ {} }} from './{}';", m.name, m.stem))
+        .collect();
+    lines.extend(subdirs.iter().map(|d| {
+        let n = last_segment(d);
+        format!("export * as {n} from './{n}';")
+    }));
+    lines
+}
+
+/// The marked block of a hand-written `index.ts` holding `lines`.
+fn exports_block(lines: &[String]) -> String {
+    let mut block = format!("{EXPORTS_BEGIN}\n");
+    for l in lines {
+        block.push_str(l);
+        block.push('\n');
+    }
+    block.push_str(EXPORTS_END);
+    block
+}
+
+/// The `index.ts` files and blocks for `modules`.
 fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, String)>> {
     let lib = repo_root.join(JS_LIB);
     let mut by_dir: BTreeMap<String, Vec<&JsModule>> = BTreeMap::new();
@@ -200,36 +226,28 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
             .cloned()
             .collect()
     };
+    let index_path = |dir: &str| -> PathBuf {
+        if dir.is_empty() {
+            lib.join("index.ts")
+        } else {
+            lib.join(dir).join("index.ts")
+        }
+    };
     let mut out = Vec::new();
     let all_dirs: BTreeSet<String> = by_dir.keys().cloned().chain(generated_dirs.iter().cloned()).collect();
     let mut mixed_seen: BTreeSet<String> = BTreeSet::new();
     for dir in &all_dirs {
         let mut members: Vec<&JsModule> = by_dir.get(dir).cloned().unwrap_or_default();
         members.sort_by(|a, b| a.name.cmp(&b.name));
-        let subdirs = children(dir);
-        let mut requires: Vec<String> = members
-            .iter()
-            .map(|m| format!("const {{ {} }} = require('./{}');", m.name, m.stem))
-            .collect();
-        requires.extend(subdirs.iter().map(|d| {
-            let n = last_segment(d);
-            format!("const {n} = require('./{n}');")
-        }));
-        let mut names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
-        names.extend(subdirs.iter().map(|d| last_segment(d).to_string()));
-        let path = if dir.is_empty() {
-            lib.join("index.js")
-        } else {
-            lib.join(dir).join("index.js")
-        };
+        let lines = export_lines(&members, &children(dir));
+        let path = index_path(dir);
         if MIXED_DIRS.contains(&dir.as_str()) {
             mixed_seen.insert(dir.clone());
             let current = fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            let block = format!("{REQUIRES_BEGIN}\n{}\n{REQUIRES_END}", requires.join("\n"));
-            let with = splice(&current, REQUIRES_BEGIN, REQUIRES_END, &block, &path)?;
-            let exports: Vec<String> = names.iter().map(|n| format!("  {n},")).collect();
-            let block = format!("{EXPORTS_BEGIN}\n{}\n{EXPORTS_END}", exports.join("\n"));
-            out.push((path.clone(), splice(&with, EXPORTS_BEGIN, EXPORTS_END, &block, &path)?));
+            out.push((
+                path.clone(),
+                splice(&current, EXPORTS_BEGIN, EXPORTS_END, &exports_block(&lines), &path)?,
+            ));
             continue;
         }
         let what = if members.is_empty() {
@@ -247,48 +265,28 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
                 format!("lib/{dir}")
             }
         ));
-        for r in &requires {
-            text.push_str(r);
-            text.push('\n');
+        if lines.is_empty() {
+            text.push_str("export {};\n");
         }
-        if !requires.is_empty() {
+        for l in &lines {
+            text.push_str(l);
             text.push('\n');
-        }
-        if names.is_empty() {
-            text.push_str("module.exports = {};\n");
-        } else {
-            text.push_str("module.exports = {\n");
-            for n in &names {
-                text.push_str(&format!("  {n},\n"));
-            }
-            text.push_str("};\n");
         }
         out.push((path, text));
     }
-    // A mixed folder with nothing generated keeps empty blocks.
+    // A mixed folder with nothing generated keeps a block of its generated
+    // child folders (empty when it has none).
     for dir in MIXED_DIRS {
         if mixed_seen.contains(*dir) {
             continue;
         }
-        let subdirs = children(dir);
-        let path = if dir.is_empty() {
-            lib.join("index.js")
-        } else {
-            lib.join(dir).join("index.js")
-        };
+        let path = index_path(dir);
         let current = fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        let requires: Vec<String> = subdirs
-            .iter()
-            .map(|d| {
-                let n = last_segment(d);
-                format!("const {n} = require('./{n}');")
-            })
-            .collect();
-        let block = format!("{REQUIRES_BEGIN}\n{}\n{REQUIRES_END}", requires.join("\n")).replace("\n\n", "\n");
-        let with = splice(&current, REQUIRES_BEGIN, REQUIRES_END, &block, &path)?;
-        let exports: Vec<String> = subdirs.iter().map(|d| format!("  {},", last_segment(d))).collect();
-        let block = format!("{EXPORTS_BEGIN}\n{}\n{EXPORTS_END}", exports.join("\n")).replace("\n\n", "\n");
-        out.push((path.clone(), splice(&with, EXPORTS_BEGIN, EXPORTS_END, &block, &path)?));
+        let lines = export_lines(&[], &children(dir));
+        out.push((
+            path.clone(),
+            splice(&current, EXPORTS_BEGIN, EXPORTS_END, &exports_block(&lines), &path)?,
+        ));
     }
     Ok(out)
 }
@@ -299,7 +297,7 @@ fn splice(current: &str, begin: &str, end: &str, block: &str, path: &Path) -> Re
     match (current.find(begin), current.find(end)) {
         (Some(a), Some(b)) if a < b => Ok(format!("{}{}{}", &current[..a], block, &current[b + end.len()..])),
         _ => anyhow::bail!(
-            "{}: the hand-written index.js lacks the `{begin}` / `{end}` markers",
+            "{}: the hand-written index.ts lacks the `{begin}` / `{end}` markers",
             path.display()
         ),
     }
@@ -315,22 +313,24 @@ pub fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for m in &modules {
         if !seen.insert((m.dir.clone(), m.stem.clone())) {
-            anyhow::bail!("javascript: two generated modules for lib/{}/{}.js", m.dir, m.stem);
+            anyhow::bail!("javascript: two generated modules for lib/{}/{}.ts", m.dir, m.stem);
         }
         let dir = if m.dir.is_empty() {
             lib.clone()
         } else {
             lib.join(&m.dir)
         };
-        out.push((dir.join(format!("{}.js", m.stem)), m.content.clone()));
+        out.push((dir.join(format!("{}.ts", m.stem)), m.content.clone()));
     }
     out.extend(index_outputs(repo_root, &modules)?);
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
-/// Generated modules under lib/ that no generator produces any more: `.js`
-/// files carrying [`GENERATED_MARKER`] that are not among `outputs`.
+/// Generated modules under lib/ that no generator produces any more: `.ts`
+/// files carrying [`GENERATED_MARKER`] that are not among `outputs`, and any
+/// `.js` one (the generated JavaScript modules the client had before its
+/// sources became TypeScript).
 fn orphaned(repo_root: &Path, outputs: &[(PathBuf, String)]) -> Res<Vec<PathBuf>> {
     let expected: BTreeSet<&PathBuf> = outputs.iter().map(|(p, _)| p).collect();
     let mut orphans = Vec::new();
@@ -343,7 +343,7 @@ fn orphaned(repo_root: &Path, outputs: &[(PathBuf, String)]) -> Res<Vec<PathBuf>
                 continue;
             }
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if !name.ends_with(".js") || expected.contains(&path) {
+            if !(name.ends_with(".ts") || name.ends_with(".js")) || expected.contains(&path) {
                 continue;
             }
             let text = fs::read_to_string(&path)?;
@@ -356,8 +356,8 @@ fn orphaned(repo_root: &Path, outputs: &[(PathBuf, String)]) -> Res<Vec<PathBuf>
     Ok(orphans)
 }
 
-/// Write every generated file and remove the orphaned ones. The `.d.ts` beside
-/// each are `make -C javascript types`'s (tsc, from the JSDoc).
+/// Write every generated file and remove the orphaned ones. `make -C
+/// javascript build` compiles them (tsc) into `javascript/dist/`.
 pub fn generate(repo_root: &Path) -> Res<()> {
     let outputs = outputs(repo_root)?;
     for (path, content) in &outputs {
@@ -371,7 +371,7 @@ pub fn generate(repo_root: &Path) -> Res<()> {
         fs::remove_file(path)?;
     }
     println!(
-        "✅ Wrote {} generated Node.js file(s), removed {} orphaned (then run `make -C javascript types`)",
+        "✅ Wrote {} generated Node.js file(s), removed {} orphaned",
         outputs.len(),
         orphans.len()
     );
@@ -397,26 +397,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rel_require() {
-        assert_eq!(rel_require("", "_throwable"), "./_throwable");
-        assert_eq!(rel_require("common/errors", "_throwable"), "../../_throwable");
-        assert_eq!(rel_require("producer", "common/kafka_error"), "../common/kafka_error");
-        assert_eq!(rel_require("common/errors", "common/kafka_error"), "../kafka_error");
-        assert_eq!(rel_require("common/errors", "common/errors/api_error"), "./api_error");
+    fn test_rel_import() {
+        assert_eq!(rel_import("", "_throwable"), "./_throwable");
+        assert_eq!(rel_import("common/errors", "_throwable"), "../../_throwable");
+        assert_eq!(rel_import("producer", "common/kafka_error"), "../common/kafka_error");
+        assert_eq!(rel_import("common/errors", "common/kafka_error"), "../kafka_error");
+        assert_eq!(rel_import("common/errors", "common/errors/api_error"), "./api_error");
     }
 
     #[test]
-    fn test_jsdoc_wraps_and_escapes() {
-        let doc = jsdoc("A ``code`` */ word.\n\nSecond paragraph.", "");
+    fn test_tsdoc_wraps_and_escapes() {
+        let doc = tsdoc("A ``code`` */ word.\n\nSecond paragraph.", "");
         assert_eq!(doc, "/**\n * A `code` *\\/ word.\n *\n * Second paragraph.\n */");
     }
 
     #[test]
     fn test_splice_needs_markers() {
-        let p = Path::new("x/index.js");
-        let s = format!("a\n{REQUIRES_BEGIN}\nold\n{REQUIRES_END}\nb");
-        let got = splice(&s, REQUIRES_BEGIN, REQUIRES_END, "NEW", p).unwrap();
+        let p = Path::new("x/index.ts");
+        let s = format!("a\n{EXPORTS_BEGIN}\nold\n{EXPORTS_END}\nb");
+        let got = splice(&s, EXPORTS_BEGIN, EXPORTS_END, "NEW", p).unwrap();
         assert_eq!(got, "a\nNEW\nb");
-        assert!(splice("a", REQUIRES_BEGIN, REQUIRES_END, "NEW", p).is_err());
+        assert!(splice("a", EXPORTS_BEGIN, EXPORTS_END, "NEW", p).is_err());
+    }
+
+    #[test]
+    fn test_export_lines_and_block() {
+        let m = JsModule {
+            dir: "producer".into(),
+            stem: "x_error".into(),
+            name: "XError".into(),
+            content: String::new(),
+        };
+        let lines = export_lines(&[&m], &["common/errors".to_string()]);
+        assert_eq!(
+            lines,
+            [
+                "export { XError } from './x_error';",
+                "export * as errors from './errors';"
+            ]
+        );
+        assert_eq!(
+            exports_block(&lines),
+            format!("{EXPORTS_BEGIN}\n{}\n{}\n{EXPORTS_END}", lines[0], lines[1])
+        );
+        assert_eq!(exports_block(&[]), format!("{EXPORTS_BEGIN}\n{EXPORTS_END}"));
+    }
+
+    #[test]
+    fn test_header_has_no_strict_directive() {
+        let h = header("x");
+        assert!(h.starts_with(LICENSE));
+        assert!(h.contains(GENERATED_MARKER));
+        assert!(!h.contains("use strict"));
     }
 }

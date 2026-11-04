@@ -29,9 +29,11 @@ c/build
 python/build
 python/*.egg-info
 python/**/__pycache__
-# The host's addon build (Mach-O on macOS) and any node_modules: the JavaScript
-# image builds the addon and installs its gRPC packages itself.
+# The host's addon build (Mach-O on macOS), compiled library and any
+# node_modules: the JavaScript image builds the addon, compiles the library and
+# installs its packages itself.
 javascript/build
+javascript/dist
 javascript/node_modules
 rust/consumer-perf/target
 rust/coverage

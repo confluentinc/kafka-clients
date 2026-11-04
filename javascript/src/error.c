@@ -14,8 +14,8 @@
 
 // kafka_common_Error_t -> a JS error. The C layer reads the error through its
 // accessors into a plain object {code, name, message, retriable, apiError,
-// cause} and hands it to the factory lib/_native.js registered:
-// lib/_errors.js `fromNative` constructs the class of its code (KafkaError or a
+// cause} and hands it to the factory lib/_native.ts registered:
+// lib/_errors.ts `fromNative` constructs the class of its code (KafkaError or a
 // subclass, or a Java built-in such as IllegalStateError). An OWNED error is
 // destroyed once read; a BORROWED one (a delivery callback's, a cause) never.
 

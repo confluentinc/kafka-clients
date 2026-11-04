@@ -42,9 +42,12 @@ tools/java-perf-test/bin/
 !/rust/tools/verifiable-clients/src/bin/*.rs
 
 
-# The Node.js client's build outputs; its package.json is tracked despite the
-# `*.json` rule above.
+# The Node.js client's build outputs (the addon, the compiled library); its
+# package.json, lockfile and tsconfig.json are tracked despite the `*.json`
+# rule above.
 /javascript/build/
+/javascript/dist/
 /javascript/node_modules/
 !/javascript/package.json
 !/javascript/package-lock.json
+!/javascript/tsconfig.json

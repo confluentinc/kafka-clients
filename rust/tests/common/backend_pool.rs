@@ -192,7 +192,8 @@ impl BackendKind {
     /// change the flavor.
     /// JavaScript runs the checked-in `javascript/grpc_server.js` with `node`
     /// (`MULTILANG_NODE` overrides it) against the addon built in
-    /// `javascript/build/Release`; the gRPC packages (`@grpc/grpc-js`,
+    /// `javascript/build/Release` and the library compiled into
+    /// `javascript/dist` (both `make -C javascript build`); the gRPC packages (`@grpc/grpc-js`,
     /// `@grpc/proto-loader`) are resolved through `NODE_PATH`, from
     /// `target/grpc-native/javascript/node_modules` unless
     /// `MULTILANG_JS_NODE_PATH` names another `node_modules` directory. The
@@ -259,6 +260,7 @@ impl BackendKind {
                     &javascript.join("build/Release/confluent-kafka-javascript.node"),
                     TARGET,
                 );
+                require_native_artifact(self, &javascript.join("dist/producer/index.js"), TARGET);
                 require_native_artifact(self, &node_modules.join("@grpc/grpc-js"), TARGET);
                 require_native_artifact(self, &node_modules.join("@grpc/proto-loader"), TARGET);
 

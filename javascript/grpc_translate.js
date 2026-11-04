@@ -24,8 +24,8 @@
 // / uint64 fields arrive as decimal strings, and an unset field -- a proto3
 // `optional` one or a scalar at its default -- is absent (undefined).
 
-const { errorClasses } = require('./lib/_errors');
-const { ProducerRecord } = require('./lib/producer');
+const { errorClasses } = require('./dist/_errors');
+const { ProducerRecord } = require('./dist/producer');
 
 // The client's error classes at the top of a chain: KafkaError and the Java
 // built-ins (IllegalStateError, ...). Every error the client reports or throws
@@ -104,7 +104,7 @@ function int64(value) {
  * tombstone). Headers are forwarded as the C++ server does: the proto's header
  * value is plain `bytes`, so a null header value arrives as an empty one.
  *
- * @throws {import('./lib/illegal_argument_error').IllegalArgumentError | TypeError | RangeError} what ProducerRecord's own checks throw
+ * @throws {import('./dist/illegal_argument_error').IllegalArgumentError | TypeError | RangeError} what ProducerRecord's own checks throw
  */
 function protoToProducerRecord(proto) {
   const record = proto || {};

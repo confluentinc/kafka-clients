@@ -15,9 +15,10 @@
 
 'use strict';
 
-// gRPC server exposing the Node.js producer (lib/producer) over the
-// ProducerService of rust/multilanguage-test-server/proto, the JavaScript twin
-// of python/grpc_server_async.py's ProducerService: the Rust multilanguage
+// gRPC server exposing the Node.js producer (dist/producer, compiled from
+// lib/producer) over the ProducerService of
+// rust/multilanguage-test-server/proto, the JavaScript twin of
+// python/grpc_server_async.py's ProducerService: the Rust multilanguage
 // integration tests run each producer test body against a `__grpc_js` backend
 // that tunnels every Producer call to this server (rust/tests/common/
 // backend_pool.rs, BackendKind::Javascript).
@@ -52,7 +53,7 @@ const path = require('node:path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 
-const { KafkaProducer } = require('./lib/producer');
+const { KafkaProducer } = require('./dist/producer');
 const {
   CallbackLog,
   LOCAL_UNSUPPORTED_OPERATION,
