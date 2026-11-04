@@ -112,8 +112,8 @@ pub(crate) fn node_list(nodes: &[Node]) -> *mut kafka_List_t {
     box_list(elements, Some(destroy_boxed::<NodeInner>))
 }
 
-/// Reads a list of `const kafka_common_Node_t *` into owned copies; null
-/// reads as empty.
+/// Reads a list of `const kafka_common_Node_t *` into owned copies; a
+/// null list or element panics.
 ///
 /// # Safety
 ///

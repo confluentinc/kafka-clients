@@ -31,7 +31,9 @@
 //! `list_partition_reassignments_with_partitions_options`, a `None` value in
 //! `alter_partition_reassignments`). An options pointer is the
 //! `kafka_admin_<Rpc>Options_t` of the RPC, copied as well. A null list or
-//! map where the Rust side takes a non-optional collection reads as empty.
+//! map where the Rust side takes a non-optional collection panics with Java's
+//! NPE, except `describe_user_scram_credentials`' `users`, which reads as
+//! empty (Java's all users).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void};
@@ -1825,7 +1827,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs_with_options(
 ///
 /// - `configs` is a `kafka_Map_t` of `const kafka_common_config_ConfigResource_t *` keys to `const
 ///   kafka_List_t *` values, each a list of `const kafka_admin_AlterConfigOp_t *`; every handle is
-///   live, and a `NULL` map or list reads as empty.
+///   live.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_AlterConfigsResult_destroy`.
 #[ffi_guard]
@@ -1897,7 +1899,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs(
 ///
 /// - `configs` is a `kafka_Map_t` of `const kafka_common_config_ConfigResource_t *` keys to `const
 ///   kafka_List_t *` values, each a list of `const kafka_admin_AlterConfigOp_t *`; every handle is
-///   live, and a `NULL` map or list reads as empty.
+///   live.
 ///
 /// The result handle is owned by the caller, freed with `kafka_admin_AlterConfigsResult_destroy`.
 #[ffi_guard]
@@ -2483,8 +2485,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders_with_options(
 ///
 /// - `reassignments` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
 ///   kafka_admin_NewPartitionReassignment_t *` values, each key live; a `NULL` value is Java's
-///   `Optional.empty()`, which cancels that partition's reassignment, and a `NULL` map reads as an
-///   empty map.
+///   `Optional.empty()`, which cancels that partition's reassignment.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterPartitionReassignmentsResult_destroy`.
@@ -2555,8 +2556,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments(
 ///
 /// - `reassignments` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
 ///   kafka_admin_NewPartitionReassignment_t *` values, each key live; a `NULL` value is Java's
-///   `Optional.empty()`, which cancels that partition's reassignment, and a `NULL` map reads as an
-///   empty map.
+///   `Optional.empty()`, which cancels that partition's reassignment.
 ///
 /// The result handle is owned by the caller, freed with
 /// `kafka_admin_AlterPartitionReassignmentsResult_destroy`.

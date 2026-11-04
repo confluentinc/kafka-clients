@@ -200,9 +200,8 @@ unsafe fn list_topic_partition_infos(list: *const kafka_List_t, param: &'static 
 }
 
 /// `new TopicDescription(String name, boolean internal, List<TopicPartitionInfo> partitions)`:
-/// `partitions` is a borrowed list of `const kafka_common_TopicPartitionInfo_t *`, copied (`NULL`
-/// reads as empty); the authorized operations are the empty set and the topic id `Uuid.ZERO_UUID`,
-/// as in Java.
+/// `partitions` is a borrowed list of `const kafka_common_TopicPartitionInfo_t *`, copied; the
+/// authorized operations are the empty set and the topic id `Uuid.ZERO_UUID`, as in Java.
 ///
 /// # Parameters
 ///
