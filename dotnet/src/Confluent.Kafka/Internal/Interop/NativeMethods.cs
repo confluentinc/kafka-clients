@@ -52,6 +52,9 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorKafka(ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_message_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorKafkaMessage(IntPtr message, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_message_source_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorKafkaMessageSource(IntPtr message, IntPtr source, ref IntPtr outErr);
 

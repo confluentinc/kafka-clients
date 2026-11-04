@@ -81,6 +81,8 @@ public sealed class PublicProducerInCallbackTests
         Assert.Equal(FlushMessage, error.Message);
         Assert.Equal(-1, error.Code);
         Assert.False(error.IsRetriable);
+        // Java's KafkaException(String): no cause.
+        Assert.Null(error.InnerException);
         Assert.Equal(flavor == AsyncFlavor, faultedInCall);
     }
 
