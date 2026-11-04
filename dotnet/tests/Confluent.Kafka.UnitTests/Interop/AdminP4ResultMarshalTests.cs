@@ -86,13 +86,28 @@ public sealed class AdminP4ResultMarshalTests
     }
 
     [Fact]
-    public void PartitionReassignment_NullListsAreCopiedOutEmpty()
+    public void PartitionReassignment_EmptyListsAreCopiedOutEmpty()
     {
-        PartitionReassignment copied = WithReassignment(null, null, null, PartitionReassignmentMarshal.CopyOut);
+        PartitionReassignment copied = WithReassignment(
+            Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>(), PartitionReassignmentMarshal.CopyOut);
 
         Assert.Empty(copied.Replicas);
         Assert.Empty(copied.AddingReplicas);
         Assert.Empty(copied.RemovingReplicas);
+    }
+
+    [Theory]
+    [InlineData(0, "replicas must not be null")]
+    [InlineData(1, "adding_replicas must not be null")]
+    [InlineData(2, "removing_replicas must not be null")]
+    public void PartitionReassignmentNew_ANullList_IsRefusedWithTheNullPointerError(int nullList, string message)
+    {
+        int[]? ListUnless(int index) => nullList == index ? null : Array.Empty<int>();
+
+        ArgumentNullException refused = Assert.Throws<ArgumentNullException>(
+            () => WithReassignment(ListUnless(0), ListUnless(1), ListUnless(2), PartitionReassignmentMarshal.CopyOut));
+
+        Assert.Equal(message, refused.Message);
     }
 
     [Fact]
@@ -101,7 +116,7 @@ public sealed class AdminP4ResultMarshalTests
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> copied = WithReassignment(
             new[] { 5 },
             new[] { 6 },
-            null,
+            Array.Empty<int>(),
             reassignment =>
             {
                 IntPtr outErr = IntPtr.Zero;

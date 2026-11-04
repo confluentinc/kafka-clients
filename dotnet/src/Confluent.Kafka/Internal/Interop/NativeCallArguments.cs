@@ -176,7 +176,7 @@ internal sealed class NativeCallArguments : IDisposable
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.PartitionInfoWithOfflineReplicas(
-            Utf8(topic), partition, leader, replicas, inSyncReplicas, IntPtr.Zero, ref outErr);
+            Utf8(topic), partition, leader, replicas, inSyncReplicas, List(), ref outErr);
         return Track(handle, Kind.PartitionInfo, ref outErr);
     }
 
@@ -193,8 +193,10 @@ internal sealed class NativeCallArguments : IDisposable
                 leader,
                 replicas,
                 isr,
-                info.Elr is null ? IntPtr.Zero : NodeList(info.Elr),
-                info.LastKnownElr is null ? IntPtr.Zero : NodeList(info.LastKnownElr),
+                // The core takes both lists; a missing one is the empty list Java's
+                // four-argument TopicPartitionInfo constructor passes.
+                info.Elr is null ? List() : NodeList(info.Elr),
+                info.LastKnownElr is null ? List() : NodeList(info.LastKnownElr),
                 ref outErr);
         return Track(handle, Kind.TopicPartitionInfo, ref outErr);
     }
