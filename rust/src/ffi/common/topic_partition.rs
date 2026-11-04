@@ -106,11 +106,11 @@ pub(crate) fn sorted_topic_partition_list<'a>(tps: impl IntoIterator<Item = &'a 
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements are topic-partition
-/// handles.
+/// `list` must be a valid list whose elements are topic-partition handles;
+/// a NULL `list` panics.
 pub(crate) unsafe fn list_topic_partitions(list: *const kafka_List_t, param: &'static str) -> Vec<TopicPartition> {
-    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `require_list` requires; the slice is used only within this call, while nothing mutates the
+    // SAFETY: Per this function's `# Safety`, `list` is a valid list handle, or NULL, which
+    // `require_list` panics on, as it requires; the slice is used only within this call, while nothing mutates the
     // list.
     unsafe { require_list(list, param) }
         .iter()

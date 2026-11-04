@@ -268,6 +268,29 @@ static void on_closed(void *opaque) {
     atomic_fetch_add((atomic_int *)opaque, 1);
 }
 
+/* A NULL map given to a MockAdminClient.Builder map setter panics with
+ * Java's NullPointerException, which Java's MockAdminClient constructor
+ * throws in build() when it copies the null map. */
+static void test_null_map_in_a_mock_admin_builder_setter_is_a_null_pointer_error(void) {
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_MockAdminClient_Builder_t *builder = kafka_admin_MockAdminClient_create_err(&err);
+    assert_ok(err);
+    kafka_admin_MockAdminClient_Builder_set_feature_levels_err(builder, NULL, &err);
+    assert_null_pointer(err, "feature_levels must not be null");
+    err = NULL;
+    kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels_err(builder, NULL, &err);
+    assert_null_pointer(err, "min_supported_feature_levels must not be null");
+    err = NULL;
+    kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels_err(builder, NULL, &err);
+    assert_null_pointer(err, "max_supported_feature_levels must not be null");
+    err = NULL;
+    kafka_admin_MockAdminClient_Builder_set_default_group_configs_err(builder, NULL, &err);
+    assert_null_pointer(err, "default_group_configs must not be null");
+    err = NULL;
+    kafka_admin_MockAdminClient_Builder_destroy_err(builder, &err);
+    assert_ok(err);
+}
+
 /* A `_cb` function is declared under its own name and keeps its completion as
  * the channel: queued on the client's callback queue, run exactly once by
  * `__execute_callbacks_err`, which reports how many it ran. */
@@ -320,5 +343,6 @@ int main(void) {
     RUN_TEST(test_null_list_reports_java_s_error);
     RUN_TEST(test_null_handle_in_a_cb_twin_completes_inline);
     RUN_TEST(test_null_producer_handle_in_a_cb_export_completes_inline);
+    RUN_TEST(test_null_map_in_a_mock_admin_builder_setter_is_a_null_pointer_error);
     return UNITY_END();
 }

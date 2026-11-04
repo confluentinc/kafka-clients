@@ -90,7 +90,7 @@ pub(crate) unsafe fn destroy_transaction_description_element(element: *mut c_voi
 /// - `transaction_timeout_ms` - the transaction timeout, in milliseconds.
 /// - `transaction_start_time_ms` - the start time of the transaction, in milliseconds, `-1` for
 ///   none.
-/// - `topic_partitions` - the partitions in the transaction, `NULL` for none.
+/// - `topic_partitions` - the partitions in the transaction.
 ///
 /// # Panics
 ///
@@ -113,8 +113,8 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
     topic_partitions: *const kafka_List_t,
 ) -> *mut kafka_admin_TransactionDescription_t {
     let topic_partitions: HashSet<TopicPartition> =
-        // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
-        // topic-partition handles, as `list_topic_partitions` requires.
+        // SAFETY: Per this function's `# Safety`, `topic_partitions` is a valid list of
+        // topic-partition handles, as `list_topic_partitions` requires; a NULL one panics there.
         unsafe { list_topic_partitions(topic_partitions, "topic_partitions") }.into_iter().collect();
     box_transaction_description(TransactionDescription::new(
         coordinator_id,

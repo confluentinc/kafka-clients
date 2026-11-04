@@ -78,18 +78,16 @@ unsafe fn mock_ref<'a>(self_: *const kafka_admin_MockAdminClient_t, param: &'sta
         .expect("a MockAdminClient handle is built by from_mock")
 }
 
-/// Reads a `kafka_Map_t` of `const char *` to `const int16_t *`.
+/// Reads a `kafka_Map_t` of `const char *` to `const int16_t *`; `NULL`
+/// panics.
 ///
 /// # Safety
 ///
 /// `map` must be `NULL` or a live map of C strings to `const int16_t *`
 /// values, each pointing at an `int16_t`.
 unsafe fn map_string_i16(map: *const kafka_Map_t, param: &'static str) -> HashMap<String, i16> {
-    if map.is_null() {
-        return HashMap::new();
-    }
-    // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a live map,
-    // unmutated during the call since `kafka_Map_put`'s `# Safety` excludes another call using the
+    // SAFETY: Per this function's `# Safety`, `map` is `NULL`, which `require_map` panics on, or a
+    // live map, unmutated during the call since `kafka_Map_put`'s `# Safety` excludes another call using the
     // map at the same time, as `require_map` requires; the slice is dropped before the call returns.
     unsafe { require_map(map, param) }
         .iter()
@@ -813,22 +811,28 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_partiti
 
 /// `Builder.featureLevels(Map<String, Short> featureLevels)`.
 ///
+/// WARNING: `NULL` `feature_levels` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `feature_levels` - a `kafka_Map_t` of `const char *` to `const int16_t *`, copied during the
 ///   call; must not be `NULL`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `feature_levels` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a live builder handle that no other call uses at the same time, and
-/// `feature_levels` `NULL` or a live map of the types above.
+/// `feature_levels` a live map of the types above.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_feature_levels(
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     feature_levels: *const kafka_Map_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `feature_levels` is null or a live map of C strings
+    // SAFETY: Per this function's `# Safety`, `feature_levels` is a live map of C strings
     // to `const int16_t *` values, as `map_string_i16` requires; the entries are copied.
     let feature_levels = unsafe { map_string_i16(feature_levels, "feature_levels") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live builder handle no other call uses
@@ -838,22 +842,28 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_feature_levels(
 
 /// `Builder.minSupportedFeatureLevels(Map<String, Short>)`.
 ///
+/// WARNING: `NULL` `min_supported_feature_levels` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `min_supported_feature_levels` - the map as in
 ///   `kafka_admin_MockAdminClient_Builder_set_feature_levels`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `min_supported_feature_levels` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a live builder handle that no other call uses at the same time, and
-/// `min_supported_feature_levels` `NULL` or a live map of C strings to `const int16_t *`.
+/// `min_supported_feature_levels` a live map of C strings to `const int16_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels(
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     min_supported_feature_levels: *const kafka_Map_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `min_supported_feature_levels` is null or a live map
+    // SAFETY: Per this function's `# Safety`, `min_supported_feature_levels` is a live map
     // of C strings to `const int16_t *` values, as `map_string_i16` requires; the entries are
     // copied.
     let levels = unsafe { map_string_i16(min_supported_feature_levels, "min_supported_feature_levels") };
@@ -864,22 +874,28 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_min_supported_f
 
 /// `Builder.maxSupportedFeatureLevels(Map<String, Short>)`.
 ///
+/// WARNING: `NULL` `max_supported_feature_levels` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `max_supported_feature_levels` - the map as in
 ///   `kafka_admin_MockAdminClient_Builder_set_feature_levels`
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `max_supported_feature_levels` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a live builder handle that no other call uses at the same time, and
-/// `max_supported_feature_levels` `NULL` or a live map of C strings to `const int16_t *`.
+/// `max_supported_feature_levels` a live map of C strings to `const int16_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels(
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     max_supported_feature_levels: *const kafka_Map_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `max_supported_feature_levels` is null or a live map
+    // SAFETY: Per this function's `# Safety`, `max_supported_feature_levels` is a live map
     // of C strings to `const int16_t *` values, as `map_string_i16` requires; the entries are
     // copied.
     let levels = unsafe { map_string_i16(max_supported_feature_levels, "max_supported_feature_levels") };

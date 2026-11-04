@@ -370,6 +370,21 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Contract change: a `NULL` `default_group_configs` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
    - Why: Java's `MockAdminClient` constructor copies the map with `new HashMap<>(defaultGroupConfigs)`, so a `null` fails in `Builder#build`; the builder starts with `Collections.emptyMap()`, which already says "no defaults"; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
    - Accepted:
+1. `kafka_admin_MockAdminClient_Builder_set_feature_levels`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient$Builder#featureLevels`
+   - Contract change: a `NULL` `feature_levels` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: Java's `MockAdminClient` constructor copies the map with `new HashMap<>(featureLevels)`, so a `null` fails in `Builder#build`; the builder starts with `Collections.emptyMap()`, which already says "no features"; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient$Builder#minSupportedFeatureLevels`
+   - Contract change: a `NULL` `min_supported_feature_levels` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: Java's `MockAdminClient` constructor copies the map with `new HashMap<>(minSupportedFeatureLevels)`, so a `null` fails in `Builder#build`; the builder starts with `Collections.emptyMap()`, which already says "no features"; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
+1. `kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels`
+   - Java member: `org.apache.kafka.clients.admin.MockAdminClient$Builder#maxSupportedFeatureLevels`
+   - Contract change: a `NULL` `max_supported_feature_levels` panics with `LocalNullPointerError` (`<param> must not be null`), where Java's setter stores `null`.
+   - Why: Java's `MockAdminClient` constructor copies the map with `new HashMap<>(maxSupportedFeatureLevels)`, so a `null` fails in `Builder#build`; the builder starts with `Collections.emptyMap()`, which already says "no features"; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
 1. `kafka_admin_MockAdminClient_add_topic`
    - Java member: `org.apache.kafka.clients.admin.MockAdminClient#addTopic(boolean,String,List,Map,boolean)`
    - Contract change: a `NULL` `name` panics with `LocalNullPointerError` (`<param> must not be null`), where Java adds a topic named `null`.
