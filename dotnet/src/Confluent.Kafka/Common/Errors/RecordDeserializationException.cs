@@ -85,4 +85,6 @@ public class RecordDeserializationException : SerializationException
 
     /// <summary>The record's headers, or <see langword="null"/> when the constructor was given none.</summary>
     public Headers? Headers { get; }
+
+    internal override int FfiId => -27;
 }

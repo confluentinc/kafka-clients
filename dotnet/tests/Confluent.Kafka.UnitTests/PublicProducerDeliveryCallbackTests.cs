@@ -687,7 +687,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             await Task.Delay(2).ConfigureAwait(false);
         }
 
-        throw new TimeoutException("the swallowed delivery-callback failure was never traced");
+        throw new System.TimeoutException("the swallowed delivery-callback failure was never traced");
     }
 
     // The sync flavor sends on a worker, so an early CompleteNext or ErrorNext can find nothing pending.
@@ -698,7 +698,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "No pending send registered to drive within the deadline — treated as a hang.");
             }
 
@@ -711,7 +711,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         Task winner = await Task.WhenAny(task, Task.Delay(s_deadline)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw new TimeoutException("Send did not complete within the deadline — treated as a hang.");
+            throw new System.TimeoutException("Send did not complete within the deadline — treated as a hang.");
         }
 
         return await task.ConfigureAwait(false);

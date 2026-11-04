@@ -246,7 +246,7 @@ public sealed class SerdesTests
         Assert.IsType<SerializationException>(ex);
         Assert.IsAssignableFrom<KafkaException>(ex);
 
-        Assert.Equal(-1, ex.Code);
+        Assert.Equal(-15, ex.Code);
         Assert.False(ex.IsRetriable);
     }
 }

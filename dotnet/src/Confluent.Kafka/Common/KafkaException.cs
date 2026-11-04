@@ -80,8 +80,8 @@ public class KafkaException : Exception, IJavaThrowable
     /// <see langword="null"/> cause; <see cref="Code"/> is <c>-1</c> and <see cref="IsRetriable"/> is
     /// <see langword="false"/>.
     /// </summary>
-    public KafkaException(Exception? cause)
-        : this(cause is null ? null : JavaText.ToString(cause), cause)
+    public KafkaException(Exception? innerException)
+        : this(innerException is null ? null : JavaText.ToString(innerException), innerException)
     {
     }
 
