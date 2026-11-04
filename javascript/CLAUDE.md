@@ -145,6 +145,12 @@ These decide every question, in this order:
 
 ## Java shape, JS idiom
 
+- Supported import forms: `require`, named imports, `import * as`, and an ES
+  module's default import under Node's own loader. A default import through an
+  interop helper (`esModuleInterop`, Babel) is not supported: every public
+  `index.ts` declares `export declare const __esModule: true;` (tsc emits the
+  marker itself, the declaration no JS), so TypeScript rejects it (TS1192)
+  rather than letting it read a missing `default` (`test/typing` pins this).
 - Class and member names follow Java (`KafkaProducer`, `ProducerRecord`,
   `RecordMetadata`, `send`, `flush`, `close`); methods are camelCase.
 - Java getters are read-only properties named by Python's rule: a leading `get`
@@ -233,7 +239,8 @@ These decide every question, in this order:
   exported, never declared). Every folder is a module: its `index.ts` only
   re-exports, `export { A } from './a'` (`export type { ... }` for a type) for
   its public modules and `export * as errors from './errors'` for its child
-  folders (the namespaces, `common.errors`); the root `index.ts` exports the
+  folders (the namespaces, `common.errors`), plus the one
+  `export declare const __esModule: true;` (above); the root `index.ts` exports the
   namespaces (`producer`, `common`, `consumer`) and the root's own modules,
   the Java built-in errors (Java's `java.*` packages map to the root, as in the
   Python client). The addon is loaded, and its one-time setup done, in

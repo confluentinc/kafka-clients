@@ -6,7 +6,7 @@ Node-API addon written in plain C (`src/`), so one build works on every Node
 release supporting Node-API version 8, under a thin layer written in
 TypeScript (`lib/`), compiled into CommonJS with its type declarations
 (`dist/`), so it is used from CommonJS (`require`), from ES modules (`import`)
-and from TypeScript alike.
+and from TypeScript alike (see "Layout" for the import forms).
 
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
 `RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
@@ -97,6 +97,22 @@ const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/comm
 const { SaslAuthenticationError } = require('@confluentinc/kafka-javascript/common/errors');
 const { SslConfigs, SaslConfigs } = require('@confluentinc/kafka-javascript/common/config');
 ```
+
+The supported import forms are `require` (above), named imports and a
+namespace import, from an ES module or from TypeScript, and an ES module's
+default import under Node's own loader (`.mjs`, `.mts`, `"type": "module"`):
+
+```js
+import { producer, common } from '@confluentinc/kafka-javascript';
+import { KafkaProducer } from '@confluentinc/kafka-javascript/producer';
+import * as kafka from '@confluentinc/kafka-javascript';
+```
+
+A default import compiled to CommonJS by an interop helper (TypeScript's
+`esModuleInterop`, Babel, a bundler's interop) does not work: the compiled
+package sets `__esModule`, so the helper reads a `default` export it does not
+have. TypeScript rejects such an import (TS1192, "has no default export");
+import by name or as a namespace instead.
 
 ```
 lib/index.ts           the namespaces { producer, common, consumer } and the Java built-in

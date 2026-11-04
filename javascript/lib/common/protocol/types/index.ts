@@ -19,3 +19,7 @@
 // `lib/common/protocol/types`: the generated modules of lib/common/protocol/types/.
 
 export { SchemaError } from './schema_error';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined`.
+export declare const __esModule: true;

@@ -16,3 +16,8 @@
 // subpackages this client has.
 
 export * as auth from './auth';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined` (import by
+// name or `import * as` instead; Node's own ESM default import still works).
+export declare const __esModule: true;

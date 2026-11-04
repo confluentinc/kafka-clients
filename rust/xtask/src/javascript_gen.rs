@@ -81,6 +81,13 @@ const HAND_WRITTEN_DIRS: &[&str] = &["common/security", "common/security/auth"];
 pub(crate) const EXPORTS_BEGIN: &str = "// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)";
 pub(crate) const EXPORTS_END: &str = "// END GENERATED EXPORTS";
 
+/// The declaration every public `index.ts` carries (no JS is emitted for it):
+/// tsc's CommonJS output sets `exports.__esModule`, so an interop default
+/// import (`esModuleInterop`, Babel) reads a `default` that does not exist.
+/// Declared, it makes TypeScript reject such an import (TS1192) instead of
+/// letting it crash at run time; Node's own ESM default import still works.
+pub(crate) const ES_MODULE_MARKER: &str = "export declare const __esModule: true;";
+
 /// A generated file and its content.
 pub(crate) type GeneratedFile = (PathBuf, String);
 
@@ -265,13 +272,18 @@ fn index_outputs(repo_root: &Path, modules: &[JsModule]) -> Res<Vec<(PathBuf, St
                 format!("lib/{dir}")
             }
         ));
-        if lines.is_empty() {
-            text.push_str("export {};\n");
-        }
         for l in &lines {
             text.push_str(l);
             text.push('\n');
         }
+        if !lines.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!(
+            "// tsc's CommonJS output sets `exports.__esModule`: declared, a default import\n\
+             // under `esModuleInterop` is a compile error rather than `undefined`.\n\
+             {ES_MODULE_MARKER}\n"
+        ));
         out.push((path, text));
     }
     // A mixed folder with nothing generated keeps a block of its generated
@@ -441,6 +453,18 @@ mod tests {
             format!("{EXPORTS_BEGIN}\n{}\n{}\n{EXPORTS_END}", lines[0], lines[1])
         );
         assert_eq!(exports_block(&[]), format!("{EXPORTS_BEGIN}\n{EXPORTS_END}"));
+    }
+
+    #[test]
+    fn test_generated_index_declares_the_es_module_marker() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).unwrap();
+        let all = outputs(root).unwrap();
+        let errors = all
+            .iter()
+            .find(|(p, _)| p.ends_with("javascript/lib/common/errors/index.ts"))
+            .unwrap();
+        assert!(errors.1.ends_with(&format!("{ES_MODULE_MARKER}\n")));
+        assert!(errors.1.contains("export { ApiError } from './api_error';\n"));
     }
 
     #[test]

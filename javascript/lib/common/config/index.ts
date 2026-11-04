@@ -23,3 +23,8 @@ export { SaslConfigs } from './sasl_configs';
 export { SecurityConfig } from './security_config';
 export { SslConfigs } from './ssl_configs';
 // END GENERATED EXPORTS
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined` (import by
+// name or `import * as` instead; Node's own ESM default import still works).
+export declare const __esModule: true;

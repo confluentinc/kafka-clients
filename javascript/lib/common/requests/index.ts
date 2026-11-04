@@ -19,3 +19,7 @@
 // `lib/common/requests`: the generated modules of lib/common/requests/.
 
 export { CorrelationIdMismatchError } from './correlation_id_mismatch_error';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined`.
+export declare const __esModule: true;

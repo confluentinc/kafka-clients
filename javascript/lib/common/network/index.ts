@@ -19,3 +19,7 @@
 // `lib/common/network`: the generated modules of lib/common/network/.
 
 export { InvalidReceiveError } from './invalid_receive_error';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined`.
+export declare const __esModule: true;

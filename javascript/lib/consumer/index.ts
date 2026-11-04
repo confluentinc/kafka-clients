@@ -24,3 +24,7 @@ export { LogTruncationError } from './log_truncation_error';
 export { NoOffsetForPartitionError } from './no_offset_for_partition_error';
 export { OffsetOutOfRangeError } from './offset_out_of_range_error';
 export { RetriableCommitFailedError } from './retriable_commit_failed_error';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined`.
+export declare const __esModule: true;

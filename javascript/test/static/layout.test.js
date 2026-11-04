@@ -72,7 +72,8 @@ const moduleDirs = libDirs.filter((d) => d !== '' && !isPrivate(d)).map((d) => d
  * The statements of `lib/<dir>index.ts`, which only re-exports: each as
  * `{kind, names, path}`, `kind` `value` for `export { A, B } from './x'`,
  * `type` for `export type { A, B } from './x'` and `namespace` for
- * `export * as x from './x'` (an empty generated index is `export {}`).
+ * `export * as x from './x'`; besides, it declares the `__esModule` marker
+ * (`export declare const __esModule: true`, no JS emitted), exactly once.
  */
 function parseIndex(dir) {
   const code = stripComments(fs.readFileSync(path.join(LIB, dir, 'index.ts'), 'utf8'));
@@ -81,8 +82,15 @@ function parseIndex(dir) {
     .map((s) => s.trim())
     .filter((s) => s !== '');
   const reexports = [];
+  let markers = 0;
   for (const statement of statements) {
-    if (/^export\s*\{\s*\}$/.test(statement)) continue;
+    // tsc's CommonJS output sets `exports.__esModule`; declared, a default
+    // import under esModuleInterop fails to compile instead of reading
+    // `undefined` (test/typing checks it).
+    if (/^export\s+declare\s+const\s+__esModule\s*:\s*true$/.test(statement)) {
+      markers += 1;
+      continue;
+    }
     const named = /^export\s+(type\s+)?\{([\w\s,]+)\}\s*from\s*'(\.\/[\w/]+)'$/.exec(statement);
     if (named !== null) {
       const names = named[2].split(',').map((n) => n.trim()).filter(Boolean);
@@ -96,6 +104,7 @@ function parseIndex(dir) {
     }
     assert.fail(`lib/${dir}index.ts: not a re-export: ${statement}`);
   }
+  assert.equal(markers, 1, `lib/${dir}index.ts declares the __esModule marker ${markers} times, not once`);
   return reexports;
 }
 

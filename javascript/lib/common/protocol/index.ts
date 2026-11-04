@@ -19,3 +19,7 @@
 // `lib/common/protocol`: a parent folder of generated modules.
 
 export * as types from './types';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined`.
+export declare const __esModule: true;

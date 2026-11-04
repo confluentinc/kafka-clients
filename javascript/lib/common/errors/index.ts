@@ -171,3 +171,7 @@ export { UnsupportedSaslMechanismError } from './unsupported_sasl_mechanism_erro
 export { UnsupportedVersionError } from './unsupported_version_error';
 export { VoterNotFoundError } from './voter_not_found_error';
 export { WakeupError } from './wakeup_error';
+
+// tsc's CommonJS output sets `exports.__esModule`: declared, a default import
+// under `esModuleInterop` is a compile error rather than `undefined`.
+export declare const __esModule: true;

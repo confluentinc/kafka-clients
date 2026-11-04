@@ -44,6 +44,11 @@ name needs the agreement of the team that owns it.
 
 ### Known limitations
 
+- A default import (`import kafka from '@confluentinc/kafka-javascript'`)
+  works only under Node's own ES module loader: compiled to CommonJS by an
+  interop helper (TypeScript's `esModuleInterop`, Babel, a bundler) it would
+  read a `default` the package does not have, so TypeScript rejects it (TS1192).
+  Use `require`, named imports or `import * as`.
 - Of the SASL mechanisms, only `PLAIN` is supported. Keys and certificates must
   be PEM (no JKS or PKCS12).
 - The error classes take `(message?, {cause}?)`, not Java's constructors, and
