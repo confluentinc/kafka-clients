@@ -178,7 +178,7 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_new(
     topics: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements are
     // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
     // lasts for this call only.
     SubscriptionInner::boxed(Subscription::new(unsafe { list_strings(topics, "topics") }))
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     topics: *const kafka_List_t,
     user_data: kafka_Bytes_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements are
     // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
     // lasts for this call only. Per this function's `# Safety`, `user_data`'s `data` is null or
     // points to `len` readable bytes not written during the call, as `user_data_of` requires.
@@ -254,14 +254,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     owned_partitions: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
     SubscriptionInner::boxed(Subscription::with_user_data_owned_partitions(
-        // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements
+        // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements
         // are NUL-terminated strings, as `list_strings` requires; the strings are copied, so the
         // borrow lasts for this call only.
         unsafe { list_strings(topics, "topics") },
         // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
         // readable bytes not written during the call, as `user_data_of` requires.
         unsafe { user_data_of(user_data) },
-        // SAFETY: Per this function's `# Safety`, `owned_partitions` is null or a valid list whose
+        // SAFETY: Per this function's `# Safety`, `owned_partitions` is a valid list whose
         // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
         // cloned, so the borrow lasts for this call only.
         unsafe { list_topic_partitions(owned_partitions, "owned_partitions") },
@@ -528,7 +528,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t {
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list whose elements
     // are topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so
     // the borrow lasts for this call only.
     Box::into_raw(Box::new(Assignment::new(unsafe {
@@ -566,7 +566,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_wit
     user_data: kafka_Bytes_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t {
     Box::into_raw(Box::new(Assignment::with_user_data(
-        // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose
+        // SAFETY: Per this function's `# Safety`, `partitions` is a valid list whose
         // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
         // cloned, so the borrow lasts for this call only.
         unsafe { list_topic_partitions(partitions, "partitions") },
@@ -722,7 +722,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     topics: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements are
     // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
     // lasts for this call only.
     let topics = unsafe { list_strings(topics, "topics") };
@@ -779,7 +779,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_par
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     owned_partitions: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `owned_partitions` is null or a valid list whose
+    // SAFETY: Per this function's `# Safety`, `owned_partitions` is a valid list whose
     // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let owned_partitions = unsafe { list_topic_partitions(owned_partitions, "owned_partitions") };

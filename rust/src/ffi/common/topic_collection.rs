@@ -113,7 +113,7 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of uuid handles, as
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of uuid handles, as
     // `list_uuids` requires; the uuids are copied out, so nothing borrows the list after this call.
     boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics, "topics") }))
 }
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
     boxed(TopicCollection::of_topic_names(unsafe { list_strings(topics, "topics") }))

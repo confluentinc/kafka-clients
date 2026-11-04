@@ -239,7 +239,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
     self_: *const kafka_common_metrics_MetricsReporter_t,
     metrics: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `metrics` is null or a valid list, which the caller
+    // SAFETY: Per this function's `# Safety`, `metrics` is a valid list, which the caller
     // keeps alive and does not mutate for this call, as `require_list` requires; the slice is used
     // only within this call.
     let metrics: Vec<Arc<KafkaMetric>> = unsafe { require_list(metrics, "metrics") }

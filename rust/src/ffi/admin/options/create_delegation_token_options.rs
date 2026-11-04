@@ -165,7 +165,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_renewers(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
     renewers: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `renewers` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `renewers` is a valid list whose elements are
     // live principal handles, as `list_kafka_principals` requires; they are copied during the call.
     let renewers = unsafe { list_kafka_principals(renewers, "renewers") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at

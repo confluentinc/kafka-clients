@@ -128,11 +128,11 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
         // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
         // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
         unsafe { optional_node(leader) },
-        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list of node
+        // SAFETY: Per this function's `# Safety`, `replicas` is a valid list of node
         // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
         unsafe { list_nodes(replicas, "replicas") },
-        // SAFETY: Per this function's `# Safety`, `isr` is null or a valid list of node handles, as
+        // SAFETY: Per this function's `# Safety`, `isr` is a valid list of node handles, as
         // `list_nodes` requires; the nodes are cloned, so nothing borrows the list after this call.
         unsafe { list_nodes(isr, "isr") },
     ))
@@ -169,17 +169,17 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr
         // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
         // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
         unsafe { optional_node(leader) },
-        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list of node
+        // SAFETY: Per this function's `# Safety`, `replicas` is a valid list of node
         // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
         unsafe { list_nodes(replicas, "replicas") },
-        // SAFETY: Per this function's `# Safety`, `isr` is null or a valid list of node handles, as
+        // SAFETY: Per this function's `# Safety`, `isr` is a valid list of node handles, as
         // `list_nodes` requires; the nodes are cloned, so nothing borrows the list after this call.
         unsafe { list_nodes(isr, "isr") },
-        // SAFETY: Per this function's `# Safety`, `elr` is null or a valid list of node handles, as
+        // SAFETY: Per this function's `# Safety`, `elr` is a valid list of node handles, as
         // `list_nodes` requires; the nodes are cloned, so nothing borrows the list after this call.
         unsafe { list_nodes(elr, "elr") },
-        // SAFETY: Per this function's `# Safety`, `last_known_elr` is null or a valid list of node
+        // SAFETY: Per this function's `# Safety`, `last_known_elr` is a valid list of node
         // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
         unsafe { list_nodes(last_known_elr, "last_known_elr") },

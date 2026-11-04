@@ -122,7 +122,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_new(
 pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_with_partitions(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_common_ConsumerNoOffsetForPartitionError_t {
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; they are cloned into owned
     // values, so nothing borrows the list after this call.
     Payload::boxed(ConsumerNoOffsetForPartitionError::with_partitions(unsafe {

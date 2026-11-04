@@ -105,7 +105,7 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_new(
     futures: *const kafka_Map_t,
 ) -> *mut kafka_admin_AlterUserScramCredentialsResult_t {
-    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // SAFETY: Per this function's `# Safety`, `futures` is a valid map handle. The borrow
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
     // the same time. That is what `require_map` requires.

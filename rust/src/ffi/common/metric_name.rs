@@ -120,7 +120,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_new(
     description: *const c_char,
     tags: *const kafka_Map_t,
 ) -> *mut kafka_common_MetricName_t {
-    // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
     // strings, as `map_strings` requires; the strings are copied into owned pairs, so nothing
     // borrows the map after this call.
     let tags: BTreeMap<String, String> = unsafe { map_strings(tags, "tags") }.into_iter().collect();

@@ -191,7 +191,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     states: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `states` is null or a valid list, not mutated during
+    // SAFETY: Per this function's `# Safety`, `states` is a valid list, not mutated during
     // the call, which is as long as the borrowed elements are used, as `require_list` requires.
     let states: Vec<TransactionState> = unsafe { require_list(states, "states") }
         .iter()
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids
     self_: *mut kafka_admin_ListTransactionsOptions_t,
     producer_ids: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `producer_ids` is null or a valid list, not mutated
+    // SAFETY: Per this function's `# Safety`, `producer_ids` is a valid list, not mutated
     // during the call, which is as long as the borrowed elements are used, as `require_list`
     // requires.
     let producer_ids: Vec<i64> = unsafe { require_list(producer_ids, "producer_ids") }

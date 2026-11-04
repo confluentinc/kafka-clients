@@ -128,7 +128,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
     name: *const c_char,
     credential_infos: *const kafka_List_t,
 ) -> *mut kafka_admin_UserScramCredentialsDescription_t {
-    // SAFETY: Per this function's `# Safety`, `credential_infos` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `credential_infos` is a valid list, alive and
     // not mutated for this call, as `require_list` requires; the borrowed slice does not outlive
     // the call.
     let infos: Vec<ScramCredentialInfo> = unsafe { require_list(credential_infos, "credential_infos") }

@@ -235,7 +235,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_admin_TopicDescription_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `require_str` requires, and `partitions` null or a valid list whose elements are valid
+    // `require_str` requires, and `partitions` a valid list whose elements are valid
     // topic-partition-info handles, all kept alive and not mutated for this call, as
     // `list_topic_partition_infos` requires.
     box_topic_description(TopicDescription::new(
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
         unsafe { require_str(name, "name") },
         internal != 0,
         // SAFETY: Per this function's `# Safety` (that of `kafka_admin_TopicDescription_new`),
-        // `partitions` is null or a valid list whose elements are valid topic-partition-info
+        // `partitions` is a valid list whose elements are valid topic-partition-info
         // handles, all kept alive and not mutated for this call, as `list_topic_partition_infos`
         // requires.
         unsafe { list_topic_partition_infos(partitions, "partitions") },
@@ -345,7 +345,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
         internal != 0,
         // SAFETY: Per this function's `# Safety` (through that of
         // `kafka_admin_TopicDescription_with_authorized_operations`, that of
-        // `kafka_admin_TopicDescription_new`), `partitions` is null or a valid list whose elements
+        // `kafka_admin_TopicDescription_new`), `partitions` is a valid list whose elements
         // are valid topic-partition-info handles, all kept alive and not mutated for this call, as
         // `list_topic_partition_infos` requires.
         unsafe { list_topic_partition_infos(partitions, "partitions") },

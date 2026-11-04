@@ -163,7 +163,9 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
 ///
 /// # Safety
 ///
-/// Each map must be `NULL` or a valid map of the stated types; both are copied. The returned
+/// `offset_out_of_range_partitions` must be `NULL` or a valid map of the stated types, and
+/// `divergent_offsets` a valid map of them (a `NULL` is refused with `LocalNullPointerError`);
+/// both are copied. The returned
 /// handle is owned, freed with `kafka_common_ConsumerLogTruncationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -183,7 +185,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
                 map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
             }
         },
-        // SAFETY: Per this function's `# Safety`, `divergent_offsets` is null or a valid map of the
+        // SAFETY: Per this function's `# Safety`, `divergent_offsets` is a valid map of the
         // stated types, `kafka_common_TopicPartition_t *` keys and
         // `kafka_consumer_OffsetAndMetadata_t *` values, as
         // `map_topic_partition_offset_and_metadata` requires; the entries are cloned into an owned
@@ -207,8 +209,9 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
 ///
 /// # Safety
 ///
-/// `message` must be a valid NUL-terminated string and each map `NULL` or a
-/// valid map of the stated types; both are copied. The returned handle is owned, freed with
+/// `message` must be a valid NUL-terminated string, `offset_out_of_range_partitions` `NULL` or a
+/// valid map of the stated types, and `divergent_offsets` a valid map of them (a `NULL` is
+/// refused with `LocalNullPointerError`); both are copied. The returned handle is owned, freed with
 /// `kafka_common_ConsumerLogTruncationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -233,7 +236,7 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_with_message(
                 map_topic_partition_i64(offset_out_of_range_partitions, "offset_out_of_range_partitions")
             }
         },
-        // SAFETY: Per this function's `# Safety`, `divergent_offsets` is null or a valid map of the
+        // SAFETY: Per this function's `# Safety`, `divergent_offsets` is a valid map of the
         // stated types, `kafka_common_TopicPartition_t *` keys and
         // `kafka_consumer_OffsetAndMetadata_t *` values, as
         // `map_topic_partition_offset_and_metadata` requires; the entries are cloned into an owned

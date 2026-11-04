@@ -116,7 +116,7 @@ pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_vo
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_new(
     active_producers: *const kafka_List_t,
 ) -> *mut kafka_admin_DescribeProducersResult_PartitionProducerState_t {
-    // SAFETY: Per this function's `# Safety`, `active_producers` is null or a valid list handle,
+    // SAFETY: Per this function's `# Safety`, `active_producers` is a valid list handle,
     // which the caller keeps alive for this call and nothing mutates meanwhile, as `require_list`
     // requires; the borrow ends with the call.
     let active_producers = unsafe { require_list(active_producers, "active_producers") }

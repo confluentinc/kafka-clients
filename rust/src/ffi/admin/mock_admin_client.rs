@@ -160,7 +160,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_with_brokers_controller(
     controller: *const kafka_common_Node_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_MockAdminClient_t {
-    // SAFETY: Per this function's `# Safety`, `brokers` is null or a valid list of node handles,
+    // SAFETY: Per this function's `# Safety`, `brokers` is a valid list of node handles,
     // as `list_nodes` requires; the nodes are copied.
     let brokers = unsafe { list_nodes(brokers, "brokers") };
     // SAFETY: Per this function's `# Safety`, `controller` is a valid node handle, alive for this
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
     // constructor, kept alive for this call, as `mock_ref` requires, and
-    // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
+    // `new_offsets` a live map of `const kafka_common_TopicPartition_t *` handles to
     // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe { mock_ref(self_, "self_").update_beginning_offsets(map_topic_partition_i64(new_offsets, "new_offsets")) }
 }
@@ -235,7 +235,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
     // constructor, kept alive for this call, as `mock_ref` requires, and
-    // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
+    // `new_offsets` a live map of `const kafka_common_TopicPartition_t *` handles to
     // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe { mock_ref(self_, "self_").update_end_offsets(map_topic_partition_i64(new_offsets, "new_offsets")) }
 }
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle from a mock
     // constructor, kept alive for this call, as `mock_ref` requires, and
-    // `new_offsets` null or a live map of `const kafka_common_TopicPartition_t *` handles to
+    // `new_offsets` a live map of `const kafka_common_TopicPartition_t *` handles to
     // `const int64_t *` values, as `map_topic_partition_i64` requires; the entries are copied.
     unsafe {
         mock_ref(self_, "self_").update_consumer_group_offsets(map_topic_partition_i64(new_offsets, "new_offsets"))
@@ -307,7 +307,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     // SAFETY: Per this function's `# Safety`, `name` is a C string, as `require_str` requires;
     // it is copied.
     let name = unsafe { require_str(name, "name") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is `NULL` or a live list, unmutated
+    // SAFETY: Per this function's `# Safety`, `partitions` is a live list, unmutated
     // during the call since `kafka_List_add`'s `# Safety` excludes another call using the list at
     // the same time, as `require_list` requires; the slice is dropped before the call returns.
     let partitions = unsafe { require_list(partitions, "partitions") }
@@ -626,7 +626,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_brokers(
     brokers: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_MockAdminClient_Builder_t {
-    // SAFETY: Per this function's `# Safety`, `brokers` is null or a valid list of node handles,
+    // SAFETY: Per this function's `# Safety`, `brokers` is a valid list of node handles,
     // as `list_nodes` requires; the nodes are copied.
     let brokers = unsafe { list_nodes(brokers, "brokers") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live builder handle no other call uses
@@ -727,7 +727,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     broker_log_dirs: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `broker_log_dirs` is null or a valid list,
+    // SAFETY: Per this function's `# Safety`, `broker_log_dirs` is a valid list,
     // unmutated during the call since `kafka_List_add`'s `# Safety` excludes another call using the
     // list at the same time, as `require_list` requires; the slice is dropped before the call
     // returns.
@@ -928,7 +928,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_group_c
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     default_group_configs: *const kafka_Map_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `default_group_configs` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `default_group_configs` is a valid map of
     // `const char *` keys and values, i.e. NUL-terminated strings, as `map_strings` requires; they
     // are copied.
     let configs: HashMap<String, String> = unsafe { map_strings(default_group_configs, "default_group_configs") }

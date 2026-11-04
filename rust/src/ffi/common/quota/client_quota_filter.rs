@@ -85,7 +85,7 @@ pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_c
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
     components: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaFilter_t {
-    // SAFETY: Per this function's `# Safety`, `components` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `components` is a valid list of
     // filter-component handles, as `list_client_quota_filter_components` requires; the components
     // are copied, so nothing borrows the list after this call.
     box_client_quota_filter(ClientQuotaFilter::contains(unsafe {
@@ -122,7 +122,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
     components: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaFilter_t {
-    // SAFETY: Per this function's `# Safety`, `components` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `components` is a valid list of
     // filter-component handles, as `list_client_quota_filter_components` requires; the components
     // are copied, so nothing borrows the list after this call.
     box_client_quota_filter(ClientQuotaFilter::contains_only(unsafe {

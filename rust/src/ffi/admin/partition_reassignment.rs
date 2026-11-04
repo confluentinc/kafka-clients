@@ -117,15 +117,15 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
     removing_replicas: *const kafka_List_t,
 ) -> *mut kafka_admin_PartitionReassignment_t {
     box_partition_reassignment(PartitionReassignment::new(
-        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list whose elements
+        // SAFETY: Per this function's `# Safety`, `replicas` is a valid list whose elements
         // point at `int32_t`s, kept alive and not mutated for this call, as `list_broker_ids`
         // requires.
         unsafe { list_broker_ids(replicas, "replicas") },
-        // SAFETY: Per this function's `# Safety`, `adding_replicas` is null or a valid list whose
+        // SAFETY: Per this function's `# Safety`, `adding_replicas` is a valid list whose
         // elements point at `int32_t`s, kept alive and not mutated for this call, as
         // `list_broker_ids` requires.
         unsafe { list_broker_ids(adding_replicas, "adding_replicas") },
-        // SAFETY: Per this function's `# Safety`, `removing_replicas` is null or a valid list whose
+        // SAFETY: Per this function's `# Safety`, `removing_replicas` is a valid list whose
         // elements point at `int32_t`s, kept alive and not mutated for this call, as
         // `list_broker_ids` requires.
         unsafe { list_broker_ids(removing_replicas, "removing_replicas") },

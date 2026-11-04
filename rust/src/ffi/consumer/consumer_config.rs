@@ -146,7 +146,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     // configuration logs while it is built are not lost when it is created before any client;
     // its clients do not log them again.
     init_default_logger();
-    // SAFETY: Per this function's `# Safety`, `props` is null or a valid map of `char *` keys and
+    // SAFETY: Per this function's `# Safety`, `props` is a valid map of `char *` keys and
     // values, as `map_strings` requires; they are copied into owned strings.
     let props: HashMap<String, String> = unsafe { map_strings(props, "props") }.into_iter().collect();
     match ConsumerConfig::new(&props) {

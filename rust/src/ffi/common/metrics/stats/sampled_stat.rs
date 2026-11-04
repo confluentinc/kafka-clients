@@ -513,7 +513,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
     config: *const kafka_common_metrics_MetricConfig_t,
     now: i64,
 ) -> f64 {
-    // SAFETY: Per this function's `# Safety`, `samples` is null or a valid list handle, alive and
+    // SAFETY: Per this function's `# Safety`, `samples` is a valid list handle, alive and
     // not mutated during this call, as `require_list` requires; the slice is used only within this
     // call, its samples being cloned before return.
     let samples: Vec<Sample> = unsafe { require_list(samples, "samples") }

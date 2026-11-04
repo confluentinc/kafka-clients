@@ -369,7 +369,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `new_topics` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `new_topics` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_admin_NewTopic_t *` handle no other call mutates
     // meanwhile, as `new_topic_ref` requires; each value is cloned before the call returns.
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `new_topics` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `new_topics` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_admin_NewTopic_t *` handle no other call mutates
     // meanwhile, as `new_topic_ref` requires; each value is cloned before the call returns.
@@ -463,7 +463,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let topics_ = unsafe { list_strings(topics, "topics") };
@@ -501,7 +501,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice_optio
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let topics_ = unsafe { list_strings(topics, "topics") };
@@ -695,7 +695,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `topic_names` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `topic_names` is a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
     let topic_names_ = unsafe { list_strings(topic_names, "topic_names") };
@@ -735,7 +735,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names_opti
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `topic_names` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `topic_names` is a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
     let topic_names_ = unsafe { list_strings(topic_names, "topic_names") };
@@ -861,7 +861,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `new_partitions` is null or a valid map whose keys
+    // SAFETY: Per this function's `# Safety`, `new_partitions` is a valid map whose keys
     // are null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_NewPartitions_t *` handle no other call mutates meanwhile, as
@@ -939,7 +939,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `new_partitions` is null or a valid map whose keys
+    // SAFETY: Per this function's `# Safety`, `new_partitions` is a valid map whose keys
     // are null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_NewPartitions_t *` handle no other call mutates meanwhile, as
@@ -993,7 +993,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `records_to_delete` is null or a valid map whose keys
+    // SAFETY: Per this function's `# Safety`, `records_to_delete` is a valid map whose keys
     // are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated during this
     // call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only, each a live
     // `const kafka_admin_RecordsToDelete_t *` handle no other call mutates meanwhile, as
@@ -1042,7 +1042,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `records_to_delete` is null or a valid map whose keys
+    // SAFETY: Per this function's `# Safety`, `records_to_delete` is a valid map whose keys
     // are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated during this
     // call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only, each a live
     // `const kafka_admin_RecordsToDelete_t *` handle no other call mutates meanwhile, as
@@ -1092,7 +1092,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
     let partitions_ = unsafe { list_topic_partitions(partitions, "partitions") };
@@ -1135,7 +1135,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
     let partitions_ = unsafe { list_topic_partitions(partitions, "partitions") };
@@ -1334,7 +1334,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `transactional_ids` is a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
     let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
@@ -1376,7 +1376,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `transactional_ids` is a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
     let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
@@ -1423,7 +1423,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `transactional_ids` is a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
     let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
@@ -1463,7 +1463,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `transactional_ids` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `transactional_ids` is a valid list of
     // NUL-terminated `const char *`, unmutated during this call, as `list_strings` requires; the
     // strings are copied.
     let transactional_ids_ = unsafe { list_strings(transactional_ids, "transactional_ids") };
@@ -1711,7 +1711,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `config_resources` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `config_resources` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_config_ConfigResource_t *` handle no other
     // call mutates meanwhile, as `config_resource_ref` requires; each value is cloned before the
@@ -1783,7 +1783,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `config_resources` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `config_resources` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_config_ConfigResource_t *` handle no other
     // call mutates meanwhile, as `config_resource_ref` requires; each value is cloned before the
@@ -1837,7 +1837,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, alive and unmutated
+    // SAFETY: Per this function's `# Safety`, `configs` is a valid map, alive and unmutated
     // during this call, as `keyed` requires. `keyed` passes the key closure its keys only, each a
     // live `const kafka_common_config_ConfigResource_t *` handle no other call mutates meanwhile,
     // as `config_resource_ref` requires, and the value closure its values only, each a valid
@@ -1910,7 +1910,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs_with_option
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, alive and unmutated
+    // SAFETY: Per this function's `# Safety`, `configs` is a valid map, alive and unmutated
     // during this call, as `keyed` requires. `keyed` passes the key closure its keys only, each a
     // live `const kafka_common_config_ConfigResource_t *` handle no other call mutates meanwhile,
     // as `config_resource_ref` requires, and the value closure its values only, each a valid
@@ -1997,7 +1997,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `config_resource_types` is null or a valid list,
+    // SAFETY: Per this function's `# Safety`, `config_resource_types` is a valid list,
     // alive and unmutated during this call, as `list_refs` requires, and `list_refs` passes the
     // closure its elements only, each one of the `kafka_common_config_ConfigResource_Type_t`
     // singletons, as `type_of` requires; each value is copied out.
@@ -2052,7 +2052,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `brokers` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `brokers` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const int32_t *` pointing at an `int32_t` no other call writes
     // meanwhile, so reading it is sound.
@@ -2096,7 +2096,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `brokers` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `brokers` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const int32_t *` pointing at an `int32_t` no other call writes
     // meanwhile, so reading it is sound.
@@ -2152,7 +2152,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `replica_assignment` is null or a valid map, alive
+    // SAFETY: Per this function's `# Safety`, `replica_assignment` is a valid map, alive
     // and unmutated during this call, as `keyed` requires. `keyed` passes the key closure its keys
     // only, each a live `const kafka_common_TopicPartitionReplica_t *` handle no other call mutates
     // meanwhile, as `topic_partition_replica_ref` requires, and the value closure its values only,
@@ -2212,7 +2212,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `replica_assignment` is null or a valid map, alive
+    // SAFETY: Per this function's `# Safety`, `replica_assignment` is a valid map, alive
     // and unmutated during this call, as `keyed` requires. `keyed` passes the key closure its keys
     // only, each a live `const kafka_common_TopicPartitionReplica_t *` handle no other call mutates
     // meanwhile, as `topic_partition_replica_ref` requires, and the value closure its values only,
@@ -2270,7 +2270,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `replicas` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_TopicPartitionReplica_t *` handle no other
     // call mutates meanwhile, as `topic_partition_replica_ref` requires; each value is cloned
@@ -2319,7 +2319,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs_with_option
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `replicas` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_TopicPartitionReplica_t *` handle no other
     // call mutates meanwhile, as `topic_partition_replica_ref` requires; each value is cloned
@@ -2497,7 +2497,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `reassignments` is null or a valid map whose keys are
+    // SAFETY: Per this function's `# Safety`, `reassignments` is a valid map whose keys are
     // live `const kafka_common_TopicPartition_t *` handles, alive and unmutated during this call,
     // as `tp_keyed` requires, and `tp_keyed` passes the closure its values only, each null or a
     // live `const kafka_admin_NewPartitionReassignment_t *` handle no other call mutates meanwhile,
@@ -2570,7 +2570,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments_with_op
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `reassignments` is null or a valid map whose keys are
+    // SAFETY: Per this function's `# Safety`, `reassignments` is a valid map whose keys are
     // live `const kafka_common_TopicPartition_t *` handles, alive and unmutated during this call,
     // as `tp_keyed` requires, and `tp_keyed` passes the closure its values only, each null or a
     // live `const kafka_admin_NewPartitionReassignment_t *` handle no other call mutates meanwhile,
@@ -2650,7 +2650,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_par
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
     let partitions_ = unsafe { list_topic_partitions(partitions, "partitions") }
@@ -2796,7 +2796,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `topic_partition_offsets` is null or a valid map
+    // SAFETY: Per this function's `# Safety`, `topic_partition_offsets` is a valid map
     // whose keys are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated
     // during this call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only,
     // each a `const kafka_admin_OffsetSpec_t *` singleton, or an owned handle not yet destroyed
@@ -2848,7 +2848,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `topic_partition_offsets` is null or a valid map
+    // SAFETY: Per this function's `# Safety`, `topic_partition_offsets` is a valid map
     // whose keys are live `const kafka_common_TopicPartition_t *` handles, alive and unmutated
     // during this call, as `tp_keyed` requires, and `tp_keyed` passes the closure its values only,
     // each a `const kafka_admin_OffsetSpec_t *` singleton, or an owned handle not yet destroyed
@@ -2963,7 +2963,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `group_ids` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
@@ -3004,7 +3004,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `group_ids` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
@@ -3051,7 +3051,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `group_ids` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
@@ -3092,7 +3092,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `group_ids` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
@@ -3219,7 +3219,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_specs` is null or a valid map whose keys are
+    // SAFETY: Per this function's `# Safety`, `group_specs` is a valid map whose keys are
     // null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_ListConsumerGroupOffsetsSpec_t *` handle no other call mutates meanwhile,
@@ -3269,7 +3269,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_specs` is null or a valid map whose keys are
+    // SAFETY: Per this function's `# Safety`, `group_specs` is a valid map whose keys are
     // null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_ListConsumerGroupOffsetsSpec_t *` handle no other call mutates meanwhile,
@@ -3329,7 +3329,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
     // `require_str` requires; it is copied.
     let group_id_ = unsafe { require_str(group_id, "group_id") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `const kafka_common_TopicPartition_t *` keys to `const kafka_consumer_OffsetAndMetadata_t *`
     // values, all live, that no other call mutates during this one, as `map_offset_and_metadata`
     // requires; the entries are cloned.
@@ -3379,7 +3379,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_opt
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
     // `require_str` requires; it is copied.
     let group_id_ = unsafe { require_str(group_id, "group_id") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `const kafka_common_TopicPartition_t *` keys to `const kafka_consumer_OffsetAndMetadata_t *`
     // values, all live, that no other call mutates during this one, as `map_offset_and_metadata`
     // requires; the entries are cloned.
@@ -3431,7 +3431,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
     // `require_str` requires; it is copied.
     let group_id_ = unsafe { require_str(group_id, "group_id") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
     let partitions_ = unsafe { list_topic_partitions(partitions, "partitions") }
@@ -3480,7 +3480,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_op
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a NUL-terminated string, as
     // `require_str` requires; it is copied.
     let group_id_ = unsafe { require_str(group_id, "group_id") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `const kafka_common_TopicPartition_t *` handles, all live and unmutated during this call, as
     // `list_topic_partitions` requires; the values are cloned.
     let partitions_ = unsafe { list_topic_partitions(partitions, "partitions") }
@@ -3527,7 +3527,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `group_ids` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
@@ -3568,7 +3568,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `group_ids` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `group_ids` is a valid list of NUL-terminated
     // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
     // copied.
     let group_ids_ = unsafe { list_strings(group_ids, "group_ids") };
@@ -3656,7 +3656,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `acls` is null or a valid list, alive and unmutated
+    // SAFETY: Per this function's `# Safety`, `acls` is a valid list, alive and unmutated
     // during this call, as `list_refs` requires, and `list_refs` passes the closure its elements
     // only, each a live `const kafka_common_acl_AclBinding_t *` handle no other call mutates
     // meanwhile, as `acl_binding_ref` requires; each value is cloned before the call returns.
@@ -3704,7 +3704,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `acls` is null or a valid list, alive and unmutated
+    // SAFETY: Per this function's `# Safety`, `acls` is a valid list, alive and unmutated
     // during this call, as `list_refs` requires, and `list_refs` passes the closure its elements
     // only, each a live `const kafka_common_acl_AclBinding_t *` handle no other call mutates
     // meanwhile, as `acl_binding_ref` requires; each value is cloned before the call returns.
@@ -3830,7 +3830,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `filters` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `filters` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_acl_AclBindingFilter_t *` handle no other call
     // mutates meanwhile, as `acl_binding_filter_ref` requires; each value is cloned before the call
@@ -3877,7 +3877,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `filters` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `filters` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_acl_AclBindingFilter_t *` handle no other call
     // mutates meanwhile, as `acl_binding_filter_ref` requires; each value is cloned before the call
@@ -4022,7 +4022,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `entries` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `entries` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_quota_ClientQuotaAlteration_t *` handle no
     // other call mutates meanwhile, as `client_quota_alteration_ref` requires; each value is cloned
@@ -4084,7 +4084,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `entries` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `entries` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_common_quota_ClientQuotaAlteration_t *` handle no
     // other call mutates meanwhile, as `client_quota_alteration_ref` requires; each value is cloned
@@ -4276,7 +4276,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `alterations` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `alterations` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_admin_UserScramCredentialAlteration_t *` handle no
     // other call mutates meanwhile, as `user_scram_credential_alteration_ref` requires; each value
@@ -4341,7 +4341,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials_with_opt
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `alterations` is null or a valid list, alive and
+    // SAFETY: Per this function's `# Safety`, `alterations` is a valid list, alive and
     // unmutated during this call, as `list_refs` requires, and `list_refs` passes the closure its
     // elements only, each a live `const kafka_admin_UserScramCredentialAlteration_t *` handle no
     // other call mutates meanwhile, as `user_scram_credential_alteration_ref` requires; each value
@@ -4822,7 +4822,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `feature_updates` is null or a valid map whose keys
+    // SAFETY: Per this function's `# Safety`, `feature_updates` is a valid map whose keys
     // are null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_FeatureUpdate_t *` handle no other call mutates meanwhile, as
@@ -4922,7 +4922,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features_with_options(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
     // call, which is as long as `client` is used, as `client_ref` requires.
     let client = unsafe { client_ref(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `feature_updates` is null or a valid map whose keys
+    // SAFETY: Per this function's `# Safety`, `feature_updates` is a valid map whose keys
     // are null or NUL-terminated strings, alive and unmutated during this call, as `string_keyed`
     // requires, and `string_keyed` passes the closure its values only, each a live
     // `const kafka_admin_FeatureUpdate_t *` handle no other call mutates meanwhile, as

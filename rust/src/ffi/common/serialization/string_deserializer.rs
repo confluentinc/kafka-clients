@@ -205,7 +205,7 @@ mod tests {
         // `box_record_headers` and is destroyed once, after the last call reading it; `topic`,
         // `source` and the arrays outlive the calls reading them; `err` is a valid slot pointing at
         // null, left null by every call (asserted), and every value returned is an owned string
-        // that `take_string` frees once; `configure` gets a null map, which reads as empty.
+        // that `take_string` frees once; `configure` gets an empty map.
         unsafe {
             let view = kafka_common_serialization_StringDeserializer__as_Deserializer(handle);
             assert_eq!(view, kafka_common_serialization_StringDeserializer__as_Deserializer(handle));

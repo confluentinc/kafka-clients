@@ -253,7 +253,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
     ops: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaAlteration_t {
-    // SAFETY: Per this function's `# Safety`, `ops` is null or a valid list, which the caller keeps
+    // SAFETY: Per this function's `# Safety`, `ops` is a valid list, which the caller keeps
     // alive and does not mutate for this call, as `require_list` requires; the borrow of its
     // elements ends when the ops are collected.
     let ops = unsafe { require_list(ops, "ops") }

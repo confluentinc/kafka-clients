@@ -177,7 +177,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_new(
 ) -> *mut kafka_admin_LogDirDescription_t {
     // SAFETY: Per this function's `# Safety`, `error` is null or an owned error handle not yet
     // destroyed, that no other call uses at the same time, which `take_error` consumes, as it
-    // requires; and `replica_infos` is null or a valid map whose keys are valid topic-partition
+    // requires; and `replica_infos` is a valid map whose keys are valid topic-partition
     // handles and whose values are valid replica-info handles, all kept alive and not mutated for
     // this call, as `map_replica_infos` requires.
     box_log_dir_description(LogDirDescription::new(unsafe { take_error(error) }, unsafe {
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
         // the same time, which `take_error` consumes, as it requires.
         unsafe { take_error(error) },
         // SAFETY: Per this function's `# Safety` (that of `kafka_admin_LogDirDescription_new`),
-        // `replica_infos` is null or a valid map whose keys are valid topic-partition handles and
+        // `replica_infos` is a valid map whose keys are valid topic-partition handles and
         // whose values are valid replica-info handles, all kept alive and not mutated for this
         // call, as `map_replica_infos` requires.
         unsafe { map_replica_infos(replica_infos, "replica_infos") },
@@ -265,7 +265,7 @@ pub unsafe extern "C" fn kafka_admin_LogDirDescription_with_total_bytes_usable_b
         // the same time, which `take_error` consumes, as it requires.
         unsafe { take_error(error) },
         // SAFETY: Per this function's `# Safety` (that of `kafka_admin_LogDirDescription_new`),
-        // `replica_infos` is null or a valid map whose keys are valid topic-partition handles and
+        // `replica_infos` is a valid map whose keys are valid topic-partition handles and
         // whose values are valid replica-info handles, all kept alive and not mutated for this
         // call, as `map_replica_infos` requires.
         unsafe { map_replica_infos(replica_infos, "replica_infos") },

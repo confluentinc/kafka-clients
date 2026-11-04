@@ -246,7 +246,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
         // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
         unsafe { require_str(group, "group") },
-        // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+        // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
         // strings, as `map_strings` requires; the entries are copied into owned `String`s, so
         // nothing borrows the map after this call.
         unsafe { map_strings(tags, "tags") }.into_iter().collect::<BTreeMap<_, _>>(),
@@ -296,7 +296,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
         // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
         unsafe { require_str(description, "description") },
-        // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+        // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
         // strings, as `map_strings` requires; the entries are copied into owned `String`s, so
         // nothing borrows the map after this call.
         unsafe { map_strings(tags, "tags") }.into_iter().collect::<BTreeMap<_, _>>(),
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
     key_value: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_MetricName_t {
-    // SAFETY: Per this function's `# Safety`, `key_value` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `key_value` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
     let key_value = unsafe { list_strings(key_value, "key_value") };
@@ -1164,7 +1164,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_key_v
     key_value: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_MetricName_t {
-    // SAFETY: Per this function's `# Safety`, `key_value` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `key_value` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
     let key_value = unsafe { list_strings(key_value, "key_value") };
@@ -1215,7 +1215,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_tags(
             // handle, as `metric_name_template_ref` requires; the reference is used only within
             // this call.
             unsafe { metric_name_template_ref(template, "template") },
-            // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of
+            // SAFETY: Per this function's `# Safety`, `tags` is a valid map of
             // NUL-terminated strings, as `map_strings` requires; the entries are copied into owned
             // `String`s, so nothing borrows the map after this call.
             unsafe { map_strings(tags, "tags") }.into_iter().collect::<BTreeMap<_, _>>(),

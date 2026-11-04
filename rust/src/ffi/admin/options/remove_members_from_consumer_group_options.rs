@@ -148,7 +148,7 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
 ///
 /// # Errors
 ///
-/// - `kafka_common_Error_is_local_illegal_argument_error` - `members` is empty or `NULL`
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `members` is empty
 ///   ("Invalid empty members has been provided").
 /// - `kafka_common_Error_is_local_illegal_state_error` - a Rust panic caught at the FFI boundary.
 ///
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
     members: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t {
-    // SAFETY: Per this function's `# Safety`, `members` is null or a valid list, not mutated during
+    // SAFETY: Per this function's `# Safety`, `members` is a valid list, not mutated during
     // the call, which is as long as the borrowed elements are used, as `require_list` requires.
     let members: Vec<MemberToRemove> = unsafe { require_list(members, "members") }
         .iter()

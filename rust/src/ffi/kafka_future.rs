@@ -946,7 +946,7 @@ pub unsafe extern "C" fn kafka_common_KafkaFuture_is_done(self_: *const kafka_co
 pub unsafe extern "C" fn kafka_common_KafkaFuture_all_of(
     futures: *const kafka_List_t,
 ) -> *mut kafka_common_KafkaFuture_t {
-    // SAFETY: per this function's `# Safety`, `futures` is null or a valid list, which the
+    // SAFETY: per this function's `# Safety`, `futures` is a valid list, which the
     // caller keeps alive for this call; the borrow ends before return.
     let inners: Vec<Arc<FutureInner>> = unsafe { require_list(futures, "futures") }
         .iter()

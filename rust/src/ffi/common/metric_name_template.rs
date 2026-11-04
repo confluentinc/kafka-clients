@@ -105,7 +105,7 @@ pub unsafe extern "C" fn kafka_common_MetricNameTemplate_new(
     description: *const c_char,
     tag_names: *const kafka_List_t,
 ) -> *mut kafka_common_MetricNameTemplate_t {
-    // SAFETY: Per this function's `# Safety`, `tag_names` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `tag_names` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
     let tag_names: IndexSet<String> = unsafe { list_strings(tag_names, "tag_names") }.into_iter().collect();

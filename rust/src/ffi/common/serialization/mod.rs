@@ -427,7 +427,7 @@ pub(crate) fn build_configs(configs: &HashMap<String, String>) -> *mut kafka_Map
 /// `configs` must be null or a valid map of NUL-terminated strings.
 pub(crate) unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String, String> {
     // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `require_map`
-    // requires (null reads as empty); the borrow of its entries ends when they are collected.
+    // requires (a null panics); the borrow of its entries ends when they are collected.
     unsafe { require_map(configs, "configs") }
         .iter()
         .map(|&(k, v)| {

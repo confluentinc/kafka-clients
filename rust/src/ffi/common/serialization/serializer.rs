@@ -1074,8 +1074,9 @@ unsafe fn invoke_void_cb(
 /// # Safety
 ///
 /// `configs` maps NUL-terminated keys to NUL-terminated values, copied
-/// during the call. `self_` must be a valid serializer handle, `configs` null or a valid
-/// map of NUL-terminated strings and `out_err` a valid slot pointing at null.
+/// during the call. `self_` must be a valid serializer handle, `configs` a
+/// valid map of NUL-terminated strings (a `NULL` is refused with
+/// `LocalNullPointerError`) and `out_err` a valid slot pointing at null.
 /// An error stored in `*out_err` is owned by the caller, freed with
 /// `kafka_common_Error_destroy`.
 #[ffi_guard]
@@ -1086,7 +1087,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_configure(
     is_key: i8,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `configs` is a valid map of NUL-terminated
     // strings.
     let configs = unsafe { read_configs(configs) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle.
@@ -1137,7 +1138,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Serializer_configure_cb(
     opaque: *mut c_void,
 ) {
     let cb = require_fn(cb, "cb");
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `configs` is a valid map of NUL-terminated
     // strings.
     let configs = unsafe { read_configs(configs) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid serializer handle and `cb` a valid

@@ -897,7 +897,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, kept alive for this call, as `builder_mut` requires, and `synonyms`
-    // null or a valid list whose elements are valid config-synonym handles, all kept alive and not
+    // a valid list whose elements are valid config-synonym handles, all kept alive and not
     // mutated for this call, as `list_config_synonyms` requires; the list is read before the
     // exclusive borrow is taken.
     unsafe { builder_mut(self_, "self_") }.synonyms = Some(unsafe { list_config_synonyms(synonyms, "synonyms") });

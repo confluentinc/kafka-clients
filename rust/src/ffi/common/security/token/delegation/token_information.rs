@@ -146,7 +146,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
         // SAFETY: Per this function's `# Safety`, `owner` is a valid principal handle, as
         // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(owner, "owner") }.clone(),
-        // SAFETY: Per this function's `# Safety`, `renewers` is null or a valid list of principal
+        // SAFETY: Per this function's `# Safety`, `renewers` is a valid list of principal
         // handles, as `list_kafka_principals` requires; the principals are cloned, so nothing
         // borrows the list after this call.
         unsafe { list_kafka_principals(renewers, "renewers") },
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
         // SAFETY: Per this function's `# Safety`, `token_requester` is a valid principal handle, as
         // `kafka_principal_ref` requires; it is cloned, so the borrow lasts for this call only.
         unsafe { kafka_principal_ref(token_requester, "token_requester") }.clone(),
-        // SAFETY: Per this function's `# Safety`, `renewers` is null or a valid list of principal
+        // SAFETY: Per this function's `# Safety`, `renewers` is a valid list of principal
         // handles, as `list_kafka_principals` requires; the principals are cloned, so nothing
         // borrows the list after this call.
         unsafe { list_kafka_principals(renewers, "renewers") },

@@ -1209,7 +1209,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
@@ -1270,7 +1270,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
@@ -1334,7 +1334,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
@@ -1397,7 +1397,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout_cb
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
@@ -2890,7 +2890,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
@@ -2950,7 +2950,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
@@ -3003,7 +3003,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
@@ -3065,7 +3065,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
@@ -3351,7 +3351,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
@@ -3425,7 +3425,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
     let inner = unsafe { inner(self_, "self_") };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
     let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };

@@ -177,7 +177,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
     next_offsets: *const kafka_Map_t,
 ) -> *mut kafka_consumer_ConsumerRecords_t {
     let mut by_partition: IndexMap<TopicPartition, Vec<GenericRecord>> = IndexMap::new();
-    // SAFETY: Per this function's `# Safety`, `records` is null or a valid map that no other call
+    // SAFETY: Per this function's `# Safety`, `records` is a valid map that no other call
     // mutates during this one, as `require_map` requires; the entries are read only within this
     // loop.
     for &(tp, list) in unsafe { require_map(records, "records") } {
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
             .collect();
         by_partition.insert(tp, records);
     }
-    // SAFETY: Per this function's `# Safety`, `next_offsets` is null or a valid map of
+    // SAFETY: Per this function's `# Safety`, `next_offsets` is a valid map of
     // topic-partition to offset-and-metadata handles that no other call mutates during this one, as
     // `map_offset_and_metadata` requires.
     let next_offsets = unsafe { map_offset_and_metadata(next_offsets, "next_offsets") };

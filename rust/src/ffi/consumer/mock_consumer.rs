@@ -448,7 +448,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // Blocking: the registered listener's callbacks run on the calling thread.
-    // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `new_assignment` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(new_assignment, "new_assignment") };
@@ -504,7 +504,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     opaque: *mut c_void,
 ) {
     let cb = require_fn(cb, "cb");
-    // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `new_assignment` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(new_assignment, "new_assignment") };
@@ -564,7 +564,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
     partitions_lost: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions_lost` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions_lost, "partitions_lost") };
@@ -618,7 +618,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions_cb(
     opaque: *mut c_void,
 ) {
     let cb = require_fn(cb, "cb");
-    // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions_lost` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
     let partitions = unsafe { list_topic_partitions(partitions_lost, "partitions_lost") };
