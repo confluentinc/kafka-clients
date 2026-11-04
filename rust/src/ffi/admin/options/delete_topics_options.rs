@@ -21,6 +21,7 @@
 
 use crate::admin::DeleteTopicsOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`DeleteTopicsOptions`], owned by the caller and freed with
 /// [`kafka_admin_DeleteTopicsOptions_destroy`].
@@ -37,12 +38,13 @@ pub struct kafka_admin_DeleteTopicsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn delete_topics_options_ref<'a>(
     options: *const kafka_admin_DeleteTopicsOptions_t,
+    param: &'static str,
 ) -> &'a DeleteTopicsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_DeleteTopicsOptions_t` is the
     // `Box::into_raw` of a `Box<DeleteTopicsOptions>` (`boxed`), so the shared reference is to a
     // live `DeleteTopicsOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const DeleteTopicsOptions) }
+    unsafe { require_ref::<_, DeleteTopicsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -51,12 +53,15 @@ pub(crate) unsafe fn delete_topics_options_ref<'a>(
 ///
 /// `options` must be a live handle, kept alive for `'a`, to which no other
 /// reference is live meanwhile.
-unsafe fn options_mut<'a>(options: *mut kafka_admin_DeleteTopicsOptions_t) -> &'a mut DeleteTopicsOptions {
+unsafe fn options_mut<'a>(
+    options: *mut kafka_admin_DeleteTopicsOptions_t,
+    param: &'static str,
+) -> &'a mut DeleteTopicsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_DeleteTopicsOptions_t` is the
     // `Box::into_raw` of a `Box<DeleteTopicsOptions>` (`boxed`), so the exclusive reference is to a
     // live `DeleteTopicsOptions`.
-    unsafe { &mut *(options as *mut DeleteTopicsOptions) }
+    unsafe { require_mut::<_, DeleteTopicsOptions>(options, param) }
 }
 
 fn boxed(options: DeleteTopicsOptions) -> *mut kafka_admin_DeleteTopicsOptions_t {
@@ -95,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -117,7 +122,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `delete_topics_options_ref` requires.
-    unsafe { delete_topics_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { delete_topics_options_ref(self_, "self_") }.timeout_ms().unwrap_or(-1)
 }
 
 /// `DeleteTopicsOptions.retryOnQuotaViolation(boolean retryOnQuotaViolation)`.
@@ -139,7 +144,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsOptions_set_retry_on_quota_viol
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_retry_on_quota_violation(retry_on_quota_violation != 0);
 }
 
@@ -160,7 +165,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsOptions_should_retry_on_quota_v
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `delete_topics_options_ref` requires.
-    i8::from(unsafe { delete_topics_options_ref(self_) }.should_retry_on_quota_violation())
+    i8::from(unsafe { delete_topics_options_ref(self_, "self_") }.should_retry_on_quota_violation())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

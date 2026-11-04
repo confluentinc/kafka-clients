@@ -16,6 +16,7 @@
 //! (CLAUDE.md §4). Java's `Optional<GroupType>` and `Optional<GroupState>`
 //! cross as a nullable singleton pointer: null is `Optional.empty()`.
 
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 
@@ -24,7 +25,7 @@ use crate::common::{GroupState, GroupType};
 use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupListing`].
 #[repr(C)]
@@ -53,12 +54,12 @@ impl GroupListingInner {
 /// # Safety
 ///
 /// `listing` must be a live group-listing handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(listing: *const kafka_admin_GroupListing_t) -> &'a GroupListingInner {
+unsafe fn inner_ref<'a>(listing: *const kafka_admin_GroupListing_t, param: &'static str) -> &'a GroupListingInner {
     // SAFETY: Per this function's `# Safety`, `listing` is a live group-listing handle kept alive
     // for `'a`. Every `kafka_admin_GroupListing_t` comes from `box_group_listing`, which boxes a
     // `GroupListingInner`, so the cast yields a valid shared reference. The type has no setters, so
     // nothing mutates it while borrowed.
-    unsafe { &*(listing as *const GroupListingInner) }
+    unsafe { require_ref::<_, GroupListingInner>(listing, param) }
 }
 
 /// Hands `listing` to C as an owned handle, freed with
@@ -72,10 +73,13 @@ pub(crate) fn box_group_listing(listing: GroupListing) -> *mut kafka_admin_Group
 /// # Safety
 ///
 /// `listing` must be a live group-listing handle, kept alive for `'a`.
-pub(crate) unsafe fn group_listing_ref<'a>(listing: *const kafka_admin_GroupListing_t) -> &'a GroupListing {
+pub(crate) unsafe fn group_listing_ref<'a>(
+    listing: *const kafka_admin_GroupListing_t,
+    param: &'static str,
+) -> &'a GroupListing {
     // SAFETY: Per this function's `# Safety`, `listing` is a live group-listing handle kept alive
     // for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(listing) }.listing
+    &unsafe { inner_ref(listing, param) }.listing
 }
 
 /// Frees a `kafka_admin_GroupListing_t *` element of an owned container.
@@ -101,6 +105,15 @@ pub(crate) unsafe fn destroy_group_listing_element(element: *mut c_void) {
 /// - `protocol` - Protocol
 /// - `group_state` - Group state
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `group_id` is `NULL`
+/// - `LocalNullPointerError` if `protocol` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `group_id`, `protocol` panic; Java stores `null`.
+///
 /// # Safety
 ///
 /// `group_id` and `protocol` must be valid NUL-terminated strings;
@@ -121,7 +134,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
         // SAFETY: Per this function's `# Safety`, `group_type` is null or a
         // `kafka_common_GroupType_t` singleton, and this branch runs only when it is non-null, as
         // `group_type::value_of` requires.
-        Some(unsafe { group_type::value_of(group_type) })
+        Some(unsafe { group_type::value_of(group_type, "group_type") })
     };
     let group_state: Option<GroupState> = if group_state.is_null() {
         None
@@ -129,16 +142,16 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
         // SAFETY: Per this function's `# Safety`, `group_state` is null or a
         // `kafka_common_GroupState_t` singleton, and this branch runs only when it is non-null, as
         // `group_state::value_of` requires.
-        Some(unsafe { group_state::value_of(group_state) })
+        Some(unsafe { group_state::value_of(group_state, "group_state") })
     };
     box_group_listing(GroupListing::new(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
-        unsafe { c_str_to_string(group_id) },
+        unsafe { require_str(group_id, "group_id") },
         group_type,
         // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(protocol) },
+        // `require_str` requires.
+        unsafe { require_str(protocol, "protocol") },
         group_state,
     ))
 }
@@ -160,7 +173,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(self_: *const kafka_a
     // SAFETY: Per this function's `# Safety`, `self_` is a valid group-listing handle, kept alive
     // for this call, as `inner_ref` requires. The returned string is a `CString` the handle owns,
     // so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.group_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.group_id_c.as_ptr()
 }
 
 /// `type()`: the `kafka_common_GroupType_t` singleton (never freed), or `NULL`
@@ -180,7 +193,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_type(
 ) -> *const kafka_common_GroupType_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid group-listing handle, kept alive
     // for this call, as `group_listing_ref` requires.
-    unsafe { group_listing_ref(self_) }
+    unsafe { group_listing_ref(self_, "self_") }
         .r#type()
         .map_or(ptr::null(), group_type::singleton)
 }
@@ -202,7 +215,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(self_: *const kafka_a
     // SAFETY: Per this function's `# Safety`, `self_` is a valid group-listing handle, kept alive
     // for this call, as `inner_ref` requires. The returned string is a `CString` the handle owns,
     // so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.protocol_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.protocol_c.as_ptr()
 }
 
 /// `groupState()`: the `kafka_common_GroupState_t` singleton (never freed),
@@ -222,7 +235,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
 ) -> *const kafka_common_GroupState_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid group-listing handle, kept alive
     // for this call, as `group_listing_ref` requires.
-    unsafe { group_listing_ref(self_) }
+    unsafe { group_listing_ref(self_, "self_") }
         .group_state()
         .map_or(ptr::null(), group_state::singleton)
 }
@@ -243,7 +256,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid group-listing handle, kept alive
     // for this call, as `group_listing_ref` requires.
-    i8::from(unsafe { group_listing_ref(self_) }.is_simple_consumer_group())
+    i8::from(unsafe { group_listing_ref(self_, "self_") }.is_simple_consumer_group())
 }
 
 /// Returns the text form of the listing.
@@ -257,7 +270,7 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
 pub unsafe extern "C" fn kafka_admin_GroupListing_to_string(self_: *const kafka_admin_GroupListing_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid group-listing handle, kept alive
     // for this call, as `group_listing_ref` requires.
-    into_c_string(&unsafe { group_listing_ref(self_) }.to_string())
+    into_c_string(&unsafe { group_listing_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned group-listing handle; `NULL` is a no-op.

@@ -86,12 +86,13 @@ pub(crate) fn box_list_partition_reassignments_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_ListPartitionReassignmentsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<ListPartitionReassignmentsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_ListPartitionReassignmentsResult_t` is built by
     // `box_result::<ListPartitionReassignmentsResult, _>` (in
     // `box_list_partition_reassignments_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a future which yields a map containing each partition's reassignments
@@ -114,7 +115,7 @@ pub unsafe extern "C" fn kafka_admin_ListPartitionReassignmentsResult_reassignme
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `reassignments_map` makes through
     // `box_map`, and the handle holds only owned data and no thread-bound state, so it may be freed
     // from any thread and read from several at once, as `handle_future` requires.

@@ -106,13 +106,23 @@ impl DescribeUserScramCredentialsResult {
     /// - `user_name` - the name of the user description being requested
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#description")]
     pub fn description(&self, user_name: &str) -> KafkaFuture<UserScramCredentialsDescription> {
-        let user_name = user_name.to_string();
+        self.description_for(Some(user_name))
+    }
+
+    /// [`Self::description`] for a name that may be Java's `null` (the C binding's `NULL`), which
+    /// matches no user: Java's `result.user().equals(null)` is false for every result.
+    pub(crate) fn description_for(&self, user_name: Option<&str>) -> KafkaFuture<UserScramCredentialsDescription> {
+        let user_name = user_name.map(str::to_string);
         self.data_future
             .then_apply(move |data: DescribeUserScramCredentialsResponseData| {
-                match data.results.iter().find(|result| result.user == user_name) {
+                match data
+                    .results
+                    .iter()
+                    .find(|result| user_name.as_deref() == Some(result.user.as_str()))
+                {
                     None => Err(Error::with_message(
                         Errors::ResourceNotFound,
-                        format!("No such user: {user_name}"),
+                        format!("No such user: {}", user_name.as_deref().unwrap_or("null")),
                     )),
                     Some(user_result) => {
                         if user_result.error_code != Errors::None.code() {
@@ -228,6 +238,17 @@ mod tests {
         );
         assert!(results.description(failed_user).get().await.is_err());
         assert!(results.description(unknown_user).get().await.is_err());
+    }
+
+    /// Java's `description(null)` matches no user (`result.user().equals(null)` is false) and
+    /// fails its future with `ResourceNotFoundException`, printing `null`.
+    #[tokio::test]
+    async fn test_description_of_a_null_user_fails_with_resource_not_found() {
+        let data_future = data_future_completed(vec![user_result("goodUser", Errors::None.code(), vec![])]);
+        let results = DescribeUserScramCredentialsResult::new(data_future);
+        let error = results.description_for(None).get().await.unwrap_err();
+        assert!(error.is_resource_not_found_error(), "{error:?}");
+        assert_eq!(error.message(), "No such user: null");
     }
 
     // Mirrors `DescribeUserScramCredentialsResultTest.testSuccessfulDescription`.

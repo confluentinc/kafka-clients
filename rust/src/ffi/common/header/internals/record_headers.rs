@@ -21,6 +21,7 @@
 //! moves it after the view exists. The `Headers` methods themselves
 //! (`add_*`, `remove`, `last_header`, ...) are reached through that view.
 
+use crate::ffi::precondition::{null, require_ref};
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
@@ -230,6 +231,7 @@ pub(crate) fn box_record_headers(headers: RecordHeaders) -> *mut kafka_common_he
 /// `'a`.
 pub(crate) unsafe fn record_headers_ref<'a>(
     headers: *const kafka_common_header_internals_RecordHeaders_t,
+    param: &'static str,
 ) -> &'a RecordHeaders {
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
     // not mutated for `'a`, so it points at a live `RecordHeadersInner`: the `Box::into_raw` of
@@ -237,7 +239,7 @@ pub(crate) unsafe fn record_headers_ref<'a>(
     // `RecordDeserializationError` handle embeds boxed and hands out through `as_ptr`, which lives
     // as long as that parent, or the call-local one a serializer or deserializer invoker passes
     // to C. The shared reference to its `headers` field is therefore sound for `'a`.
-    unsafe { &*(headers as *const RecordHeadersInner) }.headers()
+    unsafe { require_ref::<_, RecordHeadersInner>(headers, param) }.headers()
 }
 
 /// The headers behind a handle, mutable. The header handles the handle's
@@ -252,7 +254,11 @@ pub(crate) unsafe fn record_headers_ref<'a>(
 /// in use for `'a`.
 pub(crate) unsafe fn record_headers_mut<'a>(
     headers: *mut kafka_common_header_internals_RecordHeaders_t,
+    param: &'static str,
 ) -> &'a mut RecordHeaders {
+    if headers.is_null() {
+        null(param)
+    }
     // SAFETY: Per this function's `# Safety`, `headers` points at a live `RecordHeadersInner` (see
     // `record_headers_ref`) with no other reference to it or its view in use.
     unsafe { RecordHeadersInner::clear_view_cache(headers as *mut RecordHeadersInner) };
@@ -297,7 +303,13 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
     // SAFETY: Per this function's `# Safety`, `headers` is null or a valid list of record-header
     // handles, as `list_record_headers` requires; the headers are cloned into owned values, so
     // nothing borrows the list after this call.
-    box_record_headers(RecordHeaders::with_header_slice(&unsafe { list_record_headers(headers) }))
+    box_record_headers(RecordHeaders::with_header_slice(&unsafe {
+        if headers.is_null() {
+            Default::default()
+        } else {
+            list_record_headers(headers, "headers")
+        }
+    }))
 }
 
 /// `new RecordHeaders(Iterable<Header> headers)`.
@@ -321,7 +333,13 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
     // SAFETY: Per this function's `# Safety`, `headers` is null or a valid list of record-header
     // handles, as `list_record_headers` requires; the headers are cloned into owned values, so
     // nothing borrows the list after this call.
-    box_record_headers(RecordHeaders::with_header_iter(unsafe { list_record_headers(headers) }))
+    box_record_headers(RecordHeaders::with_header_iter(unsafe {
+        if headers.is_null() {
+            Default::default()
+        } else {
+            list_record_headers(headers, "headers")
+        }
+    }))
 }
 
 /// `new RecordHeaders(RecordHeaders other)`: a mutable copy of `other`.
@@ -344,7 +362,9 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_record
     // SAFETY: Per this function's `# Safety`, `other` is a valid record-headers handle, as
     // `record_headers_ref` requires; the result is copied into an owned value before return, so the
     // borrow lasts for this call only.
-    box_record_headers(RecordHeaders::with_record_headers(unsafe { record_headers_ref(other) }))
+    box_record_headers(RecordHeaders::with_record_headers(unsafe {
+        record_headers_ref(other, "other")
+    }))
 }
 
 /// `setReadOnly()`: every later mutation through the `Headers` view fails
@@ -381,7 +401,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_is_read_onl
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-headers handle, as
     // `record_headers_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { record_headers_ref(self_) }.is_read_only())
+    i8::from(unsafe { record_headers_ref(self_, "self_") }.is_read_only())
 }
 
 /// Returns `toString()`, as a string.
@@ -399,7 +419,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-headers handle, as
     // `record_headers_ref` requires; the result is copied into an owned value before return, so the
     // borrow lasts for this call only.
-    into_c_string(&unsafe { record_headers_ref(self_) }.to_string())
+    into_c_string(&unsafe { record_headers_ref(self_, "self_") }.to_string())
 }
 
 /// Returns the handle as the `Headers` interface it implements. It takes a `const` handle, so the read-only
@@ -491,21 +511,24 @@ mod tests {
             kafka_List_destroy(list);
             kafka_common_header_internals_RecordHeader_destroy(header);
             let expected = RecordHeaders::with_header_iter([RecordHeader::new("a".to_string(), Some(vec![1]))]);
-            assert_eq!(record_headers_ref(from_slice), &expected);
-            assert_eq!(record_headers_ref(from_iter), &expected);
+            assert_eq!(record_headers_ref(from_slice, "from_slice"), &expected);
+            assert_eq!(record_headers_ref(from_iter, "from_iter"), &expected);
 
             let copy = kafka_common_header_internals_RecordHeaders_with_record_headers(from_slice);
-            assert_eq!(record_headers_ref(copy), &expected);
+            assert_eq!(record_headers_ref(copy, "copy"), &expected);
             let s = kafka_common_header_internals_RecordHeaders_to_string(copy);
             assert_eq!(CStr::from_ptr(s).to_str().unwrap(), expected.to_string());
             kafka_string_destroy(s);
 
             let empty = kafka_common_header_internals_RecordHeaders_new();
-            assert_eq!(record_headers_ref(empty), &RecordHeaders::new());
+            assert_eq!(record_headers_ref(empty, "empty"), &RecordHeaders::new());
             assert_eq!(
-                record_headers_ref(kafka_common_header_internals_RecordHeaders_with_header_slice(ptr::null()))
-                    .to_array()
-                    .len(),
+                record_headers_ref(
+                    kafka_common_header_internals_RecordHeaders_with_header_slice(ptr::null()),
+                    "value"
+                )
+                .to_array()
+                .len(),
                 0
             );
 
@@ -534,12 +557,14 @@ mod tests {
             kafka_common_header_Headers_add_with_key_value(view, k.as_ptr(), kafka_Bytes_t::from_slice(&[7]), &mut err);
             assert!(err.is_null());
             // The class handle sees the mutation made through the view ...
-            assert_eq!(record_headers_ref(headers).to_array().len(), 1);
+            assert_eq!(record_headers_ref(headers, "headers").to_array().len(), 1);
             // ... and the view hands the header back as a borrowed handle.
             let array = kafka_common_header_Headers_to_array(view);
             assert_eq!(kafka_List_size(array), 1);
-            let first =
-                record_header_ref(kafka_List_get(array, 0) as *const kafka_common_header_internals_RecordHeader_t);
+            let first = record_header_ref(
+                kafka_List_get(array, 0) as *const kafka_common_header_internals_RecordHeader_t,
+                "value",
+            );
             assert_eq!(first.key(), "k");
             assert_eq!(first.value(), Some(&[7_u8][..]));
             kafka_List_destroy(array);

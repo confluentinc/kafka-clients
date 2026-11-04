@@ -31,6 +31,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -73,27 +74,28 @@ type Handle = ProducerHandle<KafkaProducer<GenericValue, GenericValue>>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_init_transactions_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_begin_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_send_offsets_to_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_commit_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of a `void` transactional method on the class: the same shape
 /// as the interface's.
 pub type kafka_producer_KafkaProducer_abort_transaction_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 /// Completion of [`kafka_producer_KafkaProducer_send_cb`]: the same shape as
 /// `kafka_producer_Producer_send_cb_t`.
-pub type kafka_producer_KafkaProducer_send_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+pub type kafka_producer_KafkaProducer_send_cb_t = Option<
+    unsafe extern "C" fn(value: *mut kafka_common_KafkaFuture_t, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+>;
 
 /// The serializer behind a `NULL` handle: the `void *` is a `kafka_Bytes_t *`
 /// and its bytes are the serialized form (`data == NULL` is Java's `null`),
@@ -106,12 +108,16 @@ impl Serializer<GenericValue> for BytesPassthrough {
         _topic: &'a str,
         data: Option<&'a GenericValue>,
     ) -> Result<Option<Cow<'a, [u8]>>, Error> {
-        Ok(data.filter(|v| !v.is_null()).and_then(|v| {
+        Ok(data.and_then(|v| {
+            let bytes = v.as_ptr() as *const kafka_Bytes_t;
+            if bytes.is_null() {
+                return None;
+            }
             // SAFETY: by contract a `void *` key or value of a producer built without a serializer
             // points at a live `kafka_Bytes_t` whose bytes stay unchanged while the record is
             // borrowed (`kafka_producer_Producer_send_cb`: during the call, or until `cb` fires),
             // which covers `'a`, the borrow of the value itself.
-            unsafe { (*(v.as_ptr() as *const kafka_Bytes_t)).as_slice() }.map(Cow::Borrowed)
+            unsafe { (*bytes).as_slice() }.map(Cow::Borrowed)
         }))
     }
 }
@@ -171,7 +177,7 @@ pub(crate) unsafe fn serializer_from(
         // SAFETY: Per this function's `# Safety`, `serializer` is a live handle (non-null, checked
         // above), as `take_serializer` requires; an owned one is not used again by the caller, as
         // the `# Safety` states.
-        let serializer = unsafe { take_serializer(serializer) };
+        let serializer = unsafe { take_serializer(serializer, "serializer") };
         let is_c = serializer.is_c();
         (Box::new(ArcSerializer(serializer)), is_c)
     }
@@ -182,12 +188,12 @@ pub(crate) unsafe fn serializer_from(
 /// # Safety
 ///
 /// `self_` must be a live handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_producer_KafkaProducer_t) -> &'a Handle {
+unsafe fn handle<'a>(self_: *const kafka_producer_KafkaProducer_t, param: &'static str) -> &'a Handle {
     // SAFETY: Per this function's `# Safety`, `self_` is a live class handle kept alive for `'a`,
     // i.e. the `Box::into_raw` of a `Handle` in `kafka_producer_KafkaProducer_new`, the only
     // constructor. `Handle` is only ever shared (`destroy` takes it back by `Box::from_raw`), so
     // the shared reference is sound.
-    unsafe { &*(self_ as *const Handle) }
+    unsafe { require_ref::<_, Handle>(self_, param) }
 }
 
 /// The handle's `__as_Producer` view.
@@ -199,7 +205,23 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
     // SAFETY: Per this function's `# Safety`, `self_` is a live class handle, as `handle` requires;
     // the view returned is the address of the handle's `client` field, which lives as long as the
     // handle.
-    unsafe { handle(self_) }.as_producer()
+    unsafe { handle(self_, "self_") }.as_producer()
+}
+
+/// The handle's `__as_Producer` view, or NULL for a NULL handle: what a `_cb` export's guard hands
+/// to `completion_sink`, so a NULL `self_` completes `cb` on the calling thread instead of
+/// panicking again outside the guard.
+///
+/// # Safety
+///
+/// `self_` must be NULL or a live handle.
+unsafe fn producer_view(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka_producer_Producer_t {
+    if self_.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: Per this function's `# Safety`, a non-NULL `self_` is a live handle, as `producer`
+    // requires.
+    unsafe { producer(self_) }
 }
 
 /// A producer is instantiated by providing a set of key-value pairs as configuration, a key and a
@@ -255,7 +277,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     // `kafka_producer_ProducerConfig_set_partitioner` call can run on it meanwhile, since that
     // function's `# Safety` excludes any other call using the handle at the same time, so
     // `producer_config_ref`'s requirement holds for this statement, the only use of the reference.
-    let config = match unsafe { producer_config_ref(config) }.build() {
+    let config = match unsafe { producer_config_ref(config, "config") }.build() {
         Ok(config) => config,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => return unsafe { fail_with(out_err, error) },
@@ -353,13 +375,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_init_transactions_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_init_transactions_cb(
@@ -433,13 +456,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_begin_transaction_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_begin_transaction_cb(
@@ -561,13 +585,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transactio
 /// that no other call mutates during this one, and `group_metadata` a live
 /// handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_send_offsets_to_transaction_cb`, delivers `cb` itself (a panic
     // inside it included) before it returns, so `cb` has not fired for this `opaque`, as
     // `deliver_panic` requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
@@ -653,13 +678,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_commit_transaction_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_commit_transaction_cb(
@@ -739,13 +765,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction(
 ///
 /// `self_` must be a live handle.
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_abort_transaction_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as `deliver_panic`
     // requires.
-    unsafe { deliver_panic(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_abort_transaction_cb(
@@ -840,13 +867,14 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send(
 /// `self_` and `record` must be live handles, `callback` null or a live
 /// handle (consumed).
 #[ffi_guard(on_panic = |err| {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, so `producer(self_)` is its
-    // live `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the
-    // body did not return, and the body's one step, the call to
+    // SAFETY: `self_` is a live handle per this function's `# Safety`, or NULL, which the body
+    // reports by panicking (C header boundary rule), so `producer_view(self_)` is NULL or its live
+    // `__as_Producer` view, as `completion_sink` requires. The guard runs this only when the body
+    // did not return, and the body's one step, the call to
     // `kafka_producer_Producer_send_with_callback_cb`, delivers `cb` itself (a panic inside it
     // included) before it returns, so `cb` has not fired for this `opaque`, as
     // `deliver_panic_value` requires.
-    unsafe { deliver_panic_value(completion_sink(producer(self_)), cb, opaque, err) }
+    unsafe { deliver_panic_value(completion_sink(producer_view(self_)), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
@@ -908,6 +936,74 @@ mod tests {
 
     use super::*;
 
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error, for each of the
+    /// six `_cb` exports: the guard hands `completion_sink` a NULL view (`producer_view`) instead
+    /// of dereferencing the handle again.
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use std::ffi::c_void;
+
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_delivery, record_value_delivery};
+        let void_cbs: [unsafe fn(*mut c_void); 5] = [
+            // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_init_transactions_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+            // SAFETY: as above.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_begin_transaction_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+            |o| {
+                // SAFETY: as above; the NULL handle is checked first.
+                unsafe {
+                    kafka_producer_KafkaProducer_send_offsets_to_transaction_cb(
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        Some(record_delivery),
+                        o,
+                    )
+                }
+            },
+            // SAFETY: as above.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_commit_transaction_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+            // SAFETY: as above.
+            |o| unsafe {
+                kafka_producer_KafkaProducer_abort_transaction_cb(std::ptr::null(), Some(record_delivery), o)
+            },
+        ];
+        for call in void_cbs {
+            let delivered = Delivered::default();
+            // SAFETY: `call` is one of the closures above, given a live `Delivered`.
+            unsafe { call(&delivered as *const Delivered as *mut c_void) };
+            assert_null_self_delivered(&delivered);
+        }
+        /// `record_value_delivery` typed as `send_cb`'s completion.
+        unsafe extern "C" fn record_send(
+            value: *mut kafka_common_KafkaFuture_t,
+            error: *mut kafka_common_Error_t,
+            opaque: *mut c_void,
+        ) {
+            // SAFETY: Per `record_value_delivery`'s `# Safety`, forwarded from this completion's.
+            unsafe { record_value_delivery(value.cast(), error, opaque) }
+        }
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle (checked first), the value recorder and a live
+        // `Delivered`.
+        unsafe {
+            kafka_producer_KafkaProducer_send_cb(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                Some(record_send),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
+    }
+
     /// A C serializer's calls go through `ArcSerializer`, whose futures must
     /// fit `InlineFuture`'s buffer, or every record would box one: for a
     /// built-in and a C implementation (a pending report).
@@ -930,13 +1026,10 @@ mod tests {
         // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
         // producer's `Arc` frees it.
         let asynchronous = unsafe {
-            ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
-                std::ptr::null_mut(),
-                async_fn,
-                None,
-                None,
-                None,
-            )))
+            ArcSerializer(take_serializer(
+                kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), Some(async_fn), None, None, None),
+                "serializer",
+            ))
         };
         let mut headers = RecordHeaders::new();
         for (kind, serializer) in [("built-in", &built_in), ("C", &asynchronous)] {
@@ -1029,14 +1122,26 @@ mod tests {
                 ("built-in", built_in, built_in, true),
                 (
                     "C key",
-                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
+                    kafka_common_serialization_Serializer_new_async(
+                        std::ptr::null_mut(),
+                        Some(async_fn),
+                        None,
+                        None,
+                        None,
+                    ),
                     std::ptr::null_mut(),
                     false,
                 ),
                 (
                     "C value",
                     built_in,
-                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
+                    kafka_common_serialization_Serializer_new_async(
+                        std::ptr::null_mut(),
+                        Some(async_fn),
+                        None,
+                        None,
+                        None,
+                    ),
                     false,
                 ),
             ];
@@ -1044,7 +1149,7 @@ mod tests {
                 let producer = kafka_producer_KafkaProducer_new(config, key, value, &raw mut err);
                 assert!(err.is_null());
                 let view = kafka_producer_KafkaProducer__as_Producer(producer);
-                assert_eq!(client_ref(view).tries_send_inline, inline, "{kind}");
+                assert_eq!(client_ref(view, "view").tries_send_inline, inline, "{kind}");
                 kafka_producer_KafkaProducer_destroy(producer);
             }
             kafka_common_serialization_StringSerializer_destroy(string);
@@ -1063,7 +1168,7 @@ mod tests {
         // SAFETY: Test code: `producer` is a live class handle; the view is used only within this
         // call, while the handle lives.
         let client_ids = |producer: *mut kafka_producer_KafkaProducer_t| unsafe {
-            client_ref(kafka_producer_KafkaProducer__as_Producer(producer))
+            client_ref(kafka_producer_KafkaProducer__as_Producer(producer), "value")
                 .producer()
                 .expect("not destroyed")
                 .metrics()
@@ -1196,12 +1301,12 @@ mod tests {
             unsafe {
                 let producer = unreachable_producer("60000");
                 let view = kafka_producer_KafkaProducer__as_Producer(producer);
-                let client = Arc::clone(client_ref(view));
+                let client = Arc::clone(client_ref(view, "view"));
                 let record =
                     kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
                 let gate = client.submission_gate.try_lock().expect("the gate is free");
                 for _ in 0..3 {
-                    kafka_producer_Producer_send_cb(view, record, record_send, sends_opaque);
+                    kafka_producer_Producer_send_cb(view, record, Some(record_send), sends_opaque);
                 }
                 let start = std::time::Instant::now();
                 if queued {
@@ -1209,7 +1314,7 @@ mod tests {
                     kafka_producer_Producer_close_with_timeout_cb(
                         view,
                         500,
-                        record_void,
+                        Some(record_void),
                         &closed as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
                     );
                     while closed.lock().unwrap().is_empty() {
@@ -1264,7 +1369,7 @@ mod tests {
     unsafe fn live_tasks(view: *const kafka_producer_Producer_t) -> usize {
         // SAFETY: Per this function's `# Safety`, `view` is a live view, as `client_ref` requires;
         // the reference is used only within this call.
-        let client = unsafe { client_ref(view) };
+        let client = unsafe { client_ref(view, "view") };
         client.tasks.lock().unwrap().iter().filter(|task| !task.is_finished()).count()
     }
 
@@ -1298,7 +1403,7 @@ mod tests {
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let started = Instant::now();
             for _ in 0..2 {
-                kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+                kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
             }
             while sends.lock().unwrap().len() < 2 {
                 assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
@@ -1343,7 +1448,7 @@ mod tests {
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
             wait_until("the record waits on a task of its own", || live_tasks(view) == 1);
             // Inside its `send`, waiting for the topic's metadata.
             std::thread::sleep(Duration::from_millis(100));
@@ -1393,11 +1498,11 @@ mod tests {
         unsafe {
             let producer = unreachable_producer("500");
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
-            let client = Arc::clone(client_ref(view));
+            let client = Arc::clone(client_ref(view, "view"));
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let gate = client.submission_gate.try_lock().expect("the gate is free");
-            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
             let handle = producer as usize;
             std::thread::scope(|scope| {
                 let destroy = scope.spawn(move || kafka_producer_KafkaProducer_destroy(handle as *mut _));
@@ -1439,12 +1544,17 @@ mod tests {
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            kafka_producer_Producer_send_cb(view, record, record_send, &sends as *const _ as *mut c_void);
-            kafka_producer_Producer_close_cb(view, record_void, &closes as *const _ as *mut c_void);
+            kafka_producer_Producer_send_cb(view, record, Some(record_send), &sends as *const _ as *mut c_void);
+            kafka_producer_Producer_close_cb(view, Some(record_void), &closes as *const _ as *mut c_void);
             // The send waits for the topic's metadata, on a task of its own.
             std::thread::sleep(std::time::Duration::from_millis(100));
             let start = std::time::Instant::now();
-            kafka_producer_Producer_close_with_timeout_cb(view, 0, record_void, &closes as *const _ as *mut c_void);
+            kafka_producer_Producer_close_with_timeout_cb(
+                view,
+                0,
+                Some(record_void),
+                &closes as *const _ as *mut c_void,
+            );
             kafka_producer_KafkaProducer_destroy(producer);
             let elapsed = start.elapsed();
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
@@ -1524,7 +1634,7 @@ mod tests {
             for _ in 0..SENDS {
                 let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
                     &delivered as *const std::sync::Mutex<Vec<Result<i64, String>>> as *mut c_void,
-                    record_delivery,
+                    Some(record_delivery),
                 );
                 futures.push(kafka_producer_KafkaProducer_send(producer, record, callback, &raw mut err));
                 assert!(err.is_null());
@@ -1577,7 +1687,7 @@ mod tests {
             let mut err = std::ptr::null_mut();
             crate::ffi::producer::kafka_producer_Producer_flush(ctx.view, &raw mut err);
             record_void(err, opaque);
-            crate::ffi::producer::kafka_producer_Producer_flush_cb(ctx.view, record_void, opaque);
+            crate::ffi::producer::kafka_producer_Producer_flush_cb(ctx.view, Some(record_void), opaque);
             let start = std::time::Instant::now();
             let mut err = std::ptr::null_mut();
             kafka_producer_Producer_close_with_timeout(ctx.view, 60_000, &raw mut err);
@@ -1622,7 +1732,7 @@ mod tests {
             let ctx = InCallback { view, outcomes: std::sync::Mutex::new(Vec::new()) };
             let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
                 &ctx as *const InCallback as *mut c_void,
-                flush_and_close_from_the_callback,
+                Some(flush_and_close_from_the_callback),
             );
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
@@ -1749,7 +1859,7 @@ mod tests {
             kafka_producer_Producer_close_with_timeout_cb(
                 view,
                 -1,
-                record_rejection,
+                Some(record_rejection),
                 &rejected as *const std::sync::Mutex<Option<String>> as *mut c_void,
             );
             assert_eq!(kafka_producer_Producer__execute_callbacks(view), 1);
@@ -1792,7 +1902,7 @@ mod tests {
             kafka_producer_Producer_send_cb(
                 view,
                 record,
-                record_send,
+                Some(record_send),
                 &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
             );
             let elapsed = started.elapsed();
@@ -1840,11 +1950,11 @@ mod tests {
             let view = kafka_producer_KafkaProducer__as_Producer(producer);
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
-            drop(client_ref(view).submit_tx.lock().unwrap().take());
+            drop(client_ref(view, "view").submit_tx.lock().unwrap().take());
             kafka_producer_Producer_send_cb(
                 view,
                 record,
-                record_send,
+                Some(record_send),
                 &seen as *const std::sync::Mutex<Vec<Option<String>>> as *mut c_void,
             );
             assert_eq!(

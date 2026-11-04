@@ -22,6 +22,7 @@
 //! receives are borrowed for the callback's duration, and the ones built by
 //! [`kafka_producer_RecordMetadata_new`] are the caller's.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 
 use crate::common::TopicPartition;
@@ -58,11 +59,14 @@ pub(crate) fn box_record_metadata(metadata: RecordMetadata) -> *mut kafka_produc
 /// # Safety
 ///
 /// `metadata` must be a live handle, kept alive for `'a`.
-pub(crate) unsafe fn record_metadata_ref<'a>(metadata: *const kafka_producer_RecordMetadata_t) -> &'a RecordMetadata {
+pub(crate) unsafe fn record_metadata_ref<'a>(
+    metadata: *const kafka_producer_RecordMetadata_t,
+    param: &'static str,
+) -> &'a RecordMetadata {
     // SAFETY: Per this function's `# Safety`, `metadata` is a live handle kept alive for `'a`, as
     // `inner` requires; the reference returned borrows the handle's `metadata` field, so it lives
     // as long as the handle does.
-    &unsafe { inner(metadata) }.metadata
+    &unsafe { inner(metadata, param) }.metadata
 }
 
 /// The `RecordMetadataInner` behind a handle.
@@ -70,14 +74,14 @@ pub(crate) unsafe fn record_metadata_ref<'a>(metadata: *const kafka_producer_Rec
 /// # Safety
 ///
 /// `metadata` must be a live handle, kept alive for `'a`.
-unsafe fn inner<'a>(metadata: *const kafka_producer_RecordMetadata_t) -> &'a RecordMetadataInner {
+unsafe fn inner<'a>(metadata: *const kafka_producer_RecordMetadata_t, param: &'static str) -> &'a RecordMetadataInner {
     // SAFETY: Per this function's `# Safety`, `metadata` is a live handle kept alive for `'a`.
     // Every `kafka_producer_RecordMetadata_t` is the `Box::into_raw` of a `RecordMetadataInner` in
     // `box_record_metadata`, whoever owns it (the caller of `kafka_producer_RecordMetadata_new`, a
     // send future, or a queued delivery-callback job), so the cast targets a live, correctly typed
     // value. Nothing writes a `RecordMetadataInner` after it is built, so the shared reference is
     // sound.
-    unsafe { &*(metadata as *const RecordMetadataInner) }
+    unsafe { require_ref::<_, RecordMetadataInner>(metadata, param) }
 }
 
 /// Creates a new instance with the provided parameters.
@@ -108,7 +112,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_new(
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a live handle, as
     // `topic_partition_ref` requires; the topic-partition is cloned before return, so the borrow
     // lasts only this call.
-    let topic_partition: TopicPartition = unsafe { topic_partition_ref(topic_partition) }.clone();
+    let topic_partition: TopicPartition = unsafe { topic_partition_ref(topic_partition, "topic_partition") }.clone();
     box_record_metadata(RecordMetadata::new(
         topic_partition,
         base_offset,
@@ -133,7 +137,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_new(
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_offset(self_: *const kafka_producer_RecordMetadata_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { record_metadata_ref(self_) }.has_offset())
+    i8::from(unsafe { record_metadata_ref(self_, "self_") }.has_offset())
 }
 
 /// The offset of the record in the topic/partition.
@@ -150,7 +154,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_offset(self_: *const 
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(self_: *const kafka_producer_RecordMetadata_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    unsafe { record_metadata_ref(self_) }.offset()
+    unsafe { record_metadata_ref(self_, "self_") }.offset()
 }
 
 /// Indicates whether the record metadata includes the timestamp.
@@ -169,7 +173,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_timestamp(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { record_metadata_ref(self_) }.has_timestamp())
+    i8::from(unsafe { record_metadata_ref(self_, "self_") }.has_timestamp())
 }
 
 /// The timestamp of the record in the topic/partition.
@@ -186,7 +190,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_timestamp(
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(self_: *const kafka_producer_RecordMetadata_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    unsafe { record_metadata_ref(self_) }.timestamp()
+    unsafe { record_metadata_ref(self_, "self_") }.timestamp()
 }
 
 /// # Returns
@@ -204,7 +208,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_key_size(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    unsafe { record_metadata_ref(self_) }.serialized_key_size()
+    unsafe { record_metadata_ref(self_, "self_") }.serialized_key_size()
 }
 
 /// # Returns
@@ -222,7 +226,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_value_size(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    unsafe { record_metadata_ref(self_) }.serialized_value_size()
+    unsafe { record_metadata_ref(self_, "self_") }.serialized_value_size()
 }
 
 /// # Returns
@@ -240,7 +244,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `inner` requires. The
     // pointer returned points into the handle's `topic_c`, which is neither moved nor written while
     // the handle lives, so it stays valid until the handle is freed, as the rustdoc states.
-    unsafe { inner(self_) }.topic_c.as_ptr()
+    unsafe { inner(self_, "self_") }.topic_c.as_ptr()
 }
 
 /// # Returns
@@ -255,7 +259,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(self_: *const kafka_producer_RecordMetadata_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call.
-    unsafe { record_metadata_ref(self_) }.partition()
+    unsafe { record_metadata_ref(self_, "self_") }.partition()
 }
 
 /// `RecordMetadata.toString()`.
@@ -275,7 +279,7 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `record_metadata_ref`
     // requires; the reference is used only within this call, and the text is copied into an owned
     // string.
-    into_c_string(&unsafe { record_metadata_ref(self_) }.to_string())
+    into_c_string(&unsafe { record_metadata_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned handle, such as one from

@@ -28,7 +28,7 @@ use crate::ffi::admin::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_string_keyed_map, box_string_list, c_str_to_string};
+use crate::ffi::util::{box_string_keyed_map, box_string_list, c_str_to_option};
 
 /// Opaque handle to a [`DescribeUserScramCredentialsResult`], owned and
 /// freed with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`].
@@ -65,12 +65,13 @@ pub(crate) fn box_describe_user_scram_credentials_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeUserScramCredentialsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<DescribeUserScramCredentialsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeUserScramCredentialsResult_t` is built by
     // `box_result::<DescribeUserScramCredentialsResult, _>` (in
     // `box_describe_user_scram_credentials_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// # Returns
@@ -95,7 +96,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `descriptions_map` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
     // may be freed from any thread and read from several at once, as `handle_future` requires.
@@ -128,7 +129,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_list_element` frees exactly the list `box_string_list` makes through
     // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
     // freed from any thread and read from several at once, as `handle_future` requires.
@@ -143,7 +144,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
 
 /// # Parameters
 ///
-/// - `user_name` - the name of the user description being requested
+/// - `user_name` - the name of the user description being requested, or `NULL`, which names no user
 ///
 /// # Returns
 ///
@@ -155,7 +156,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle and `user_name` a valid
+/// `self_` must be a live result handle and `user_name` `NULL` or a valid
 /// NUL-terminated string.
 ///
 /// The returned future is owned and freed with `kafka_common_KafkaFuture_destroy`; its `get`
@@ -170,17 +171,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
-    // SAFETY: Per this function's `# Safety`, `user_name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into a `String` during the call.
-    let user_name = unsafe { c_str_to_string(user_name) };
+    let h = unsafe { handle(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `user_name` is NULL or a valid NUL-terminated string,
+    // as `c_str_to_option` requires; it is copied into a `String` during the call. A NULL name is
+    // Java's `null`, which no user matches.
+    let user_name = unsafe { c_str_to_option(user_name) };
     // SAFETY: `destroy_user_scram_credentials_description_element` frees exactly the handle
     // `box_user_scram_credentials_description` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
     // `handle_future` requires.
     unsafe {
         h.ctx.handle_future(
-            &h.result.description(&user_name),
+            &h.result.description_for(user_name.as_deref()),
             |d| box_user_scram_credentials_description(d) as *mut c_void,
             destroy_user_scram_credentials_description_element,
         )
