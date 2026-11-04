@@ -53,9 +53,10 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     // real per-send regression raises every attempt.
     private const int MeasurementAttempts = 4;
 
-    // The absolute per-send budget of the callback overload: the measured 424 B (net8.0, net10.0; the callback is
-    // a field of the delivery state) plus 16 B, less than one more object (24 B).
-    private const long CallbackFastPathPerSendBudgetBytes = 440;
+    // The absolute per-send budget of the callback overload: the measured 464 B (net8.0, net10.0; the delivery
+    // state, which holds the callback, its KafkaFutureImpl, the delivery task, the record and the record's Headers)
+    // plus 16 B, less than one more object (24 B).
+    private const long CallbackFastPathPerSendBudgetBytes = 480;
 
     // More attempts than the paired tests, as an absolute figure has no matched pair to cancel a one-off allocation.
     private const int AbsoluteMeasurementAttempts = 8;

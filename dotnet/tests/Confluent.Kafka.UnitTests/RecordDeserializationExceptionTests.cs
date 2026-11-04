@@ -88,7 +88,7 @@ public sealed class RecordDeserializationExceptionTests
     public void ARecordWithoutAKey_KeepsTheValueBuffer()
     {
         RecordDeserializationException e = new RecordDeserializationException(
-            Origin.KEY, s_tp, 3, 1, TimestampType.CREATE_TIME, null, new byte[] { (byte)'v' }, Headers.Empty, "m", null);
+            Origin.KEY, s_tp, 3, 1, TimestampType.CREATE_TIME, null, new byte[] { (byte)'v' }, new Headers(), "m", null);
 
         Assert.Null(e.KeyBuffer);
         Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer);

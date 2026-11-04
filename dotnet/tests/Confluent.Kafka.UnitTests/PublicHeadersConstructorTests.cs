@@ -39,7 +39,7 @@ public sealed class PublicHeadersConstructorTests
         backing.Add(new Header("key", new byte[] { (byte)'w' }));
 
         Assert.NotSame(original, copy);
-        Assert.Equal(2, original.Count);
+        Assert.Equal(2, original.ToArray().Length);
         Assert.Same(header, Assert.Single(copy));
     }
 

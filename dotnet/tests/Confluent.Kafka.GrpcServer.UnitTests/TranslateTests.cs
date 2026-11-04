@@ -16,9 +16,11 @@ using System;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Confluent.Kafka.Producer;
+using Google.Protobuf;
 using Xunit;
 
 using Proto = Confluent.Kafka.Test;
@@ -28,7 +30,8 @@ namespace Confluent.Kafka.GrpcServer.UnitTests;
 /// <summary>
 /// <see cref="Translate.ToProto"/>'s wire code for each exception type, Python's
 /// <c>_kafka_error_to_proto</c> by type (<c>dotnet/CLAUDE.md</c> §7.6), and the record metadata a send returns,
-/// as Python's <c>_record_metadata_to_proto</c> sends it.
+/// as Python's <c>_record_metadata_to_proto</c> sends it, and the record a send builds from the proto, its headers
+/// included.
 /// </summary>
 public sealed class TranslateTests
 {
@@ -120,6 +123,55 @@ public sealed class TranslateTests
         Assert.Equal(5, proto.SerializedValueSize);
         Assert.Equal("orders", proto.Topic);
         Assert.Equal(4, proto.Partition);
+    }
+
+    [Fact]
+    public void AProducerRecord_KeepsTheProtosHeaders_InTheirOrder()
+    {
+        Proto.ProducerRecord proto = new Proto.ProducerRecord { Topic = "orders", Value = ByteString.CopyFrom(7) };
+        proto.Headers.Add(new Proto.Header { Key = "b", Value = ByteString.CopyFrom(1, 2) });
+        proto.Headers.Add(new Proto.Header { Key = "trace-é", Value = ByteString.CopyFrom(9) });
+        proto.Headers.Add(new Proto.Header { Key = "b", Value = ByteString.CopyFrom(3) });
+
+        ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
+
+        Header[] headers = record.Headers.ToArray();
+        Assert.Equal(3, headers.Length);
+        Assert.Equal("b", headers[0].Key);
+        Assert.Equal(new byte[] { 1, 2 }, headers[0].Value);
+        Assert.Equal("trace-é", headers[1].Key);
+        Assert.Equal(new byte[] { 9 }, headers[1].Value);
+        Assert.Equal("b", headers[2].Key);
+        Assert.Equal(new byte[] { 3 }, headers[2].Value);
+        Assert.Equal(new byte[] { 7 }, record.Value);
+    }
+
+    [Fact]
+    public void AProducerRecord_KeepsAnEmptyHeaderValueEmpty()
+    {
+        Proto.ProducerRecord proto = new Proto.ProducerRecord { Topic = "orders" };
+        proto.Headers.Add(new Proto.Header { Key = "empty", Value = ByteString.Empty });
+
+        ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
+
+        Header header = Assert.Single(record.Headers);
+        Assert.Equal("empty", header.Key);
+        byte[]? value = header.Value;
+        Assert.NotNull(value);
+        Assert.Empty(value);
+    }
+
+    [Fact]
+    public void AProducerRecord_WithoutProtoHeaders_HasNoHeaders()
+    {
+        Proto.ProducerRecord proto = new Proto.ProducerRecord { Topic = "orders", Key = ByteString.CopyFrom(1) };
+
+        ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
+
+        Assert.Empty(record.Headers);
+        Assert.Equal("orders", record.Topic);
+        Assert.Equal(new byte[] { 1 }, record.Key);
+        Assert.Null(record.Value);
     }
 
     private static void AssertBare(Exception error, int code) => AssertBare(error, code, error.Message);

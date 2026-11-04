@@ -33,7 +33,7 @@ layer.
 
 ```
 producer.Send(record)  ──►  ValueTask<AsyncKafkaFuture<RecordMetadata>>   (await → handed over · await future.Get() → delivered)
-   validate args · serialize · pin key/value · Callback_new (self = the record's state)
+   validate args · serialize · seal headers · pin key/value · build the record (OptionsBuilder) · Callback_new (self = the record's state)
         │  P/Invoke: kafka_producer_Producer_send_with_callback_cb(view, record, callback, cb, opaque)
         │  the handover cb unpins; the first stage completes in Send when the producer takes or refuses
         │    the record at once, else in the cb on the CompletionThread. Later on_completion runs the user
@@ -171,8 +171,8 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   (`Confluent.Kafka.Internal.Interop`): the `NativeMethods`
   `[DllImport]` class (`NativeMethods.cs` — the name CA1060 requires),
   `SafeHandle`s, `Utf8Marshal` helpers, callback delegates, and the blittable
-  `[StructLayout]` mirror structs (e.g. the `ProducerRecord_t` mirror — the
-  interop twin of the public `ProducerRecord`). `unsafe` lives only here; 1:1
+  `[StructLayout]` structs the ABI passes by value (`KafkaBytes`, the ABI's `kafka_Bytes_t`); a
+  record (`ProducerRecord_t`) is an opaque handle, not mirrored. `unsafe` lives only here; 1:1
   with `ffi-marshalling.md`.
 - `tests/Confluent.Kafka.UnitTests/` — `Mock*` unit tests
   (`MockProducer`; `MockConsumer` as the consumer lands), a top-level sibling of
@@ -204,8 +204,11 @@ public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V
     public long? Timestamp { get; }              // null = producer stamps it
     public TKey? Key { get; }                    // null (ref) = no key; three-state via the serializer (§4)
     public TValue? Value { get; }                // null (ref) = tombstone; three-state via the serializer (§4)
+    public Headers Headers { get; }              // the record's own copy; read-only once a KafkaProducer sends it
     public ProducerRecord(string topic, TValue? value,
-        TKey? key = default, int? partition = null, long? timestamp = null);
+        TKey? key = default, int? partition = null, long? timestamp = null,
+        IEnumerable<Header>? headers = null);   // Java's checks, topic → timestamp → partition
+    // Equals, GetHashCode and ToString are Java's (topic, partition, headers, key, value, timestamp)
 }
 
 public sealed class RecordMetadata {            // NON-generic (no K/V on the ack); getters → properties
@@ -300,9 +303,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **no
 longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
 `kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
-`send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10):
-`ProducerRecord.headers()`,
-and `MockProducer.history()` (Java returns the full record list; the ABI gives
+`send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10;
+`ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` (Java returns the full record list; the ABI gives
 only a count, hence `HistoryCount()` — a **method**, not a property, per the FDG
 precedent that `Assignment()`/`Subscription()`/`Paused()` are methods (each does a
 P/Invoke and can throw) plus Python `history_count()` parity). Add each when the
@@ -311,8 +313,9 @@ ABI grows to cover it.
 **The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
 the binding, **above** the bytes-based native producer and **before** the P/Invoke
 (no serializer callback through the ABI, `CLAUDE.md §11`; the per-record `Callback_t` is the
-delivery callback, not a serde, ffi §A6); the serialized bytes flow into the record that
-`ProducerRecord_new*` builds (an internal `SerializedProducerRecord` carrier). Three decisions:
+delivery callback, not a serde, ffi §A6); the serialized bytes and the record's sealed headers flow into the record that
+`ProducerRecord_with_options` builds through the OptionsBuilder, for every record, as Python's
+binding builds it (ledger 300; an internal `SerializedProducerRecord` carrier). Three decisions:
 
   - **Invoke-on-null (Java-faithful).** The serializer is **always invoked**, even for
     a `null` `TKey`/`TValue` (Java `KafkaProducer.doSend` calls `serialize(topic, …,
@@ -348,7 +351,7 @@ public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>
     public TimestampType TimestampType { get; }
     public TKey Key { get; }     // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
     public TValue Value { get; } // deserialized; default(TValue) if absent (a tombstone; deser NOT called)
-    public Headers Headers { get; }  // materialized owned bytes (not routed through a deserializer this phase)
+    public Headers Headers { get; }  // the record's own, writable copies (not routed through a deserializer this phase)
 }
 
 public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerRecords<K,V>`
@@ -542,8 +545,8 @@ consumer, which is what Java gets for free. (The **producer's** half — Java's
 `send(record, Callback)` — closed later, in M14/P1; see the §4 delivery-callback
 divergence. This sentence used to read "the callback-parity work" unqualified, which
 was true of the consumer only.) Still to come:
-pattern subscribe and typed *headers* on `ConsumerRecord<K,V>` (they are materialized
-owned bytes today). ⚠ The typed **producer** is **no longer** deferred — it shipped in
+pattern subscribe and headers for the deserializers (row 153; each `ConsumerRecord`'s `Headers` are its own, writable
+copies today, ledger 293). ⚠ The typed **producer** is **no longer** deferred — it shipped in
 M11/P5 (generic-only, see the producer sketch above); this line said otherwise until
 M14/P1 corrected it, and the producer completion model (§A7) turned out not to gate it.
 
@@ -626,6 +629,7 @@ its C# realization, and where the enforcing rule lives.
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
 | a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling: `RecordMetadata.UNKNOWN_PARTITION`, `Uuid.ZERO_UUID`, `ResourceType.ANY`; numeric values unchanged. A member with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`, `Serdes`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`) the text the binding prints or sends is Java's, from an internal map, and the enum's own `ToString()` is a recorded deviation | ledger 285 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
+| `Headers` / `Header` (record headers) | `Headers : IEnumerable<Header>` with Java's `Add` / `Remove` / `LastHeader` / `ToArray` and `GetHeaders(key)` for Java's `headers(String)` (CS0542); read-only once a `KafkaProducer` sends the record (`InvalidOperationException("RecordHeaders has been closed.")`), never on the mocks; a fetched record's are its own and writable | send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Duration` (timeouts: `poll`/`close`/`committed`) | `TimeSpan` | ABI takes `int64_t` ms |

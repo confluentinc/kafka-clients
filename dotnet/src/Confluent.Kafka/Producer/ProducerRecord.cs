@@ -13,7 +13,10 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.Producer;
@@ -33,7 +36,7 @@ public sealed class ProducerRecord<TKey, TValue>
 {
     /// <summary>
     /// Initializes a record from the topic and value, as Java's <c>ProducerRecord(topic, value)</c>, and the optional
-    /// key, partition and timestamp.
+    /// key, partition, timestamp and headers.
     /// </summary>
     /// <param name="topic">The destination topic (required, non-null).</param>
     /// <param name="value">
@@ -51,7 +54,13 @@ public sealed class ProducerRecord<TKey, TValue>
     /// The record timestamp (milliseconds since epoch), or <see langword="null"/> to let the
     /// producer stamp it. Must be non-negative when specified.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <param name="headers">
+    /// The headers to include in the record, copied into the record's own <see cref="Headers"/>; a
+    /// <see langword="null"/> sequence gives no headers.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/> is null, or <paramref name="headers"/> contains a <see langword="null"/> header.
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="timestamp"/> or <paramref name="partition"/> is specified and negative; the timestamp is
     /// checked first.
@@ -61,7 +70,8 @@ public sealed class ProducerRecord<TKey, TValue>
         TValue? value,
         TKey? key = default,
         int? partition = null,
-        long? timestamp = null)
+        long? timestamp = null,
+        IEnumerable<Header>? headers = null)
     {
         Topic = topic ?? throw new ArgumentNullException(nameof(topic), "Topic cannot be null.");
 
@@ -91,6 +101,7 @@ public sealed class ProducerRecord<TKey, TValue>
         Timestamp = timestamp;
         Key = key;
         Value = value;
+        Headers = new Headers(headers);
     }
 
     /// <summary>The destination topic.</summary>
@@ -113,14 +124,51 @@ public sealed class ProducerRecord<TKey, TValue>
     /// <summary>The record value, or <see langword="null"/> for a tombstone.</summary>
     public TValue? Value { get; }
 
+    /// <summary>
+    /// The record's own headers, a writable copy of the constructor's <c>headers</c>, empty when there were none.
+    /// Once a <see cref="KafkaProducer{TKey, TValue}"/> or <see cref="AsyncKafkaProducer{TKey, TValue}"/> has
+    /// serialized the record for a send, they are read-only: <c>Add</c> and <c>Remove</c> throw
+    /// <see cref="InvalidOperationException"/>. The mock producers leave them writable.
+    /// </summary>
+    public Headers Headers { get; }
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj)
+    {
+        if (ReferenceEquals(this, obj))
+        {
+            return true;
+        }
+
+        return obj is ProducerRecord<TKey, TValue> other
+            && EqualityComparer<TKey?>.Default.Equals(Key, other.Key)
+            && Partition == other.Partition
+            && string.Equals(Topic, other.Topic, StringComparison.Ordinal)
+            && Headers.Equals(other.Headers)
+            && EqualityComparer<TValue?>.Default.Equals(Value, other.Value)
+            && Timestamp == other.Timestamp;
+    }
+
+    /// <inheritdoc/>
+    public override int GetHashCode()
+    {
+        int result = StringComparer.Ordinal.GetHashCode(Topic);
+        result = unchecked((31 * result) + (Partition ?? 0));
+        result = unchecked((31 * result) + Headers.GetHashCode());
+        result = unchecked((31 * result) + (Key is null ? 0 : EqualityComparer<TKey>.Default.GetHashCode(Key)));
+        result = unchecked((31 * result) + (Value is null ? 0 : EqualityComparer<TValue>.Default.GetHashCode(Value)));
+        return unchecked((31 * result) + (Timestamp is { } t ? t.GetHashCode() : 0));
+    }
+
     /// <inheritdoc/>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
-            "ProducerRecord(topic={0}, partition={1}, timestamp={2}, key={3}, value={4})",
+            "ProducerRecord(topic={0}, partition={1}, headers={2}, key={3}, value={4}, timestamp={5})",
             Topic,
             Partition is { } p ? p.ToString(CultureInfo.InvariantCulture) : "null",
-            Timestamp is { } t ? t.ToString(CultureInfo.InvariantCulture) : "null",
+            Headers.ToString(),
             Key?.ToString() ?? "null",
-            Value?.ToString() ?? "null");
+            Value?.ToString() ?? "null",
+            Timestamp is { } t ? t.ToString(CultureInfo.InvariantCulture) : "null");
 }
