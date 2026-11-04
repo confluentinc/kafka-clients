@@ -296,6 +296,14 @@ pub unsafe extern "C" fn kafka_common_Cluster_with_invalid_topics_controller(
 /// - `controller` - the controller node, or `NULL`
 /// - `topic_ids` - the topic ids by topic name
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` (`id must not be null`) if a value of `topic_ids` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: a `NULL` value in `topic_ids` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// As `kafka_common_Cluster_with_invalid_topics_controller`, plus

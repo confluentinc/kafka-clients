@@ -150,6 +150,11 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Contract change: a `NULL` `topic`, `replicas`, `in_sync_replicas`, `offline_replicas` panic with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
    - Why: Java's client builds a `PartitionInfo` only in `MetadataResponse#toPartitionInfo` and `AbstractPartitionAssignor`, from a topic name and node arrays that are never `null`; Java tolerates a `null` array (`toString` prints it as `[]`, like an empty one), so `null` says no more than the empty slice Rust takes, and the getters return the value unwrapped; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
    - Accepted: 2026-11-03 Emanuele Sabellico 
+1. `kafka_common_Cluster_with_invalid_topics_controller_topic_ids`
+   - Java member: `org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Set,Node,Map)`
+   - Contract change: a `NULL` value in `topic_ids` panics with `LocalNullPointerError` (`id must not be null`), where Java's constructor stores the `null` id (and maps the `null` id to the topic name in `topicNames`).
+   - Why: Java's client builds a `Cluster`'s topic ids only from a metadata response, whose `TopicId` is non-nullable (`Uuid.ZERO_UUID` when the broker has none); Rust's `Cluster` takes `HashMap<String, Uuid>` and `topic_id` returns a `Uuid` unwrapped, so it has no value for a `null` id; reading `NULL` as `Uuid.ZERO_UUID` would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
+   - Accepted:
 1. `kafka_admin_TopicListing_new`
    - Java member: `org.apache.kafka.clients.admin.TopicListing#TopicListing`
    - Contract change: a `NULL` `name`, `topic_id` panic with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.

@@ -3,3 +3,4 @@
 # A line matching no finding any more is itself a finding: delete it. Rewrite with
 # `cargo xtask doc-baseline`; see everything with
 # `cargo xtask lint-custom check-api-docs --no-baseline`.
+warning kafka_common_Cluster_with_invalid_topics_controller_topic_ids
