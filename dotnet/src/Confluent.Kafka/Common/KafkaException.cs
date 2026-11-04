@@ -85,8 +85,8 @@ public class KafkaException : Exception, IJavaThrowable
     /// <see langword="null"/> cause; <see cref="Code"/> is <c>-1</c> and <see cref="IsRetriable"/> is
     /// <see langword="false"/>.
     /// </summary>
-    public KafkaException(Exception? cause)
-        : this(cause is null ? null : JavaText.ToString(cause), cause)
+    public KafkaException(Exception? innerException)
+        : this(innerException is null ? null : JavaText.ToString(innerException), innerException)
     {
     }
 
@@ -204,7 +204,7 @@ public class KafkaException : Exception, IJavaThrowable
                 LocalTimeout => new TimeoutException(message, inner),
                 LocalUnsupportedOperation => new NotSupportedException(message, inner),
                 LocalNullPointer => new ArgumentNullException(message, inner),
-                Config => ConfigException.FromCore(message, inner),
+                Config => new ConfigException(default(CoreError), message, inner),
                 _ => new KafkaException(code, message, isRetriable, inner),
             };
         }

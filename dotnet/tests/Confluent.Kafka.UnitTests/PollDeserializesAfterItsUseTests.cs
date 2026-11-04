@@ -414,7 +414,7 @@ public sealed class PollDeserializesAfterItsUseTests
             Thread poller = StartThread(() => polled = Record.Exception(poll));
             if (!trace.WaitEntered())
             {
-                throw new TimeoutException("the seek-backs never traced the unassigned partition");
+                throw new System.TimeoutException("the seek-backs never traced the unassigned partition");
             }
 
             TopicPartition probe = new TopicPartition(topic, values.Failed == 0 ? 1 : 0);
@@ -456,7 +456,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         if (!thread.Join(s_deadline))
         {
-            throw new TimeoutException("a thread of the seek-back window never ended");
+            throw new System.TimeoutException("a thread of the seek-back window never ended");
         }
     }
 
@@ -467,7 +467,7 @@ public sealed class PollDeserializesAfterItsUseTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();

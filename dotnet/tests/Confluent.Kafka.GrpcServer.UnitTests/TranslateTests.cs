@@ -94,7 +94,7 @@ public sealed class TranslateTests
 
     [Fact]
     public void ATimeoutException_IsLocalTimeout_WithItsMessage() =>
-        AssertBare(new TimeoutException("Timeout expired after 500ms"), -5);
+        AssertBare(new System.TimeoutException("Timeout expired after 500ms"), -5);
 
     [Fact]
     public void ANotSupportedException_IsLocalUnsupportedOperation_WithItsMessage() =>

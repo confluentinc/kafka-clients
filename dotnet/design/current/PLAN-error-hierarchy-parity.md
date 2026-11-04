@@ -274,7 +274,7 @@ and calls the generated core-path constructor (D3). It mirrors Python's `py_Kafk
 and there are only 12 of them.
 
 The generated registry maps each id to a factory delegate:
-`(message, inner, error) => new X(CoreError.Value, message, inner)` for a class without fields, or,
+`(message, inner, error) => new X(default(CoreError), message, inner)` for a class without fields, or,
 for a class with fields, a call to a fixed hand-written reader,
 `ErrorPayloadMarshal.Read<Class>(message, inner, error)`. The generator never changes for Phase 4:
 Phase 2 adds `ErrorPayloadMarshal` with readers that build the class from the message only, and
@@ -325,7 +325,9 @@ The D6 and D15 classes are generated, from the graph and the `JDK_BUILTINS` tabl
 
 The generator skips the hand-written ones through a `CSHARP_HAND_WRITTEN` list, and the hierarchy
 test (Phase 3) still checks their parents and ids. `SerializationException` becomes generated; its
-four public constructors match Java's, so its API is unchanged apart from `Code` (D4).
+four public constructors match Java's, so its API is unchanged apart from `Code` (D4) and the
+name of its cause parameter, `innerException` (D3), as on `KafkaException`: a call that names
+the argument `cause:` no longer compiles.
 *Recommendation:* as above.
 **Decided:** as recommended. `RecordDeserializationException`'s shape is decision 22's, outside
 this plan.
@@ -826,7 +828,9 @@ generated `.cs` files are also reviewed by `dotnet-critic`.
   their bodies without a generator change.
 - **Checks.** `check-generated` diffs the C# output. The Python-only parts of the generator
   (`generated_outputs`, `orphaned_outputs`, `unlisted_packages`) get C# counterparts: the orphan
-  check walks `dotnet/src` and flags a generated `.cs` the Java sources no longer produce.
+  check walks `dotnet/src/Confluent.Kafka` and `dotnet/tests/Confluent.Kafka.UnitTests` (which holds
+  the generated `ErrorClassRows.g.cs`) and flags a `.cs` there that carries the generated marker in
+  its first 25 lines but that the Java sources no longer produce; `generate` deletes it.
 - **Generation errors.** Generation stops on a constructor signature clash (D3, the core-path
   constructor included), a Java type with no C# mapping, or a class whose package has no folder
   rule.
