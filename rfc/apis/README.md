@@ -21,7 +21,7 @@ than holding them all back for a single large proposal.
 | Language | RFC | Status |
 | --- | --- | --- |
 | Rust | `rust.md` | Proposed |
-| Python | `python.md` | Planned |
+| Python | `python.md` | Draft |
 | .NET | `dotnet.md` | Planned |
 | JavaScript | `javascript.md` | Planned |
 | C / C++ | `c-cpp.md` | Planned |
