@@ -17,31 +17,37 @@ using System;
 namespace Confluent.Kafka.Common.Errors;
 
 /// <summary>
-/// A failed serialization or deserialization of a record key or value, Java's <c>SerializationException</c>:
-/// a <see cref="KafkaException"/> whose <see cref="KafkaException.Code"/> is 0.
+/// A failed serialization or deserialization of a record key or value, Java's <c>SerializationException</c>, a
+/// <see cref="KafkaException"/>.
 /// </summary>
 public class SerializationException : KafkaException
 {
-    /// <summary>Initializes an exception with a default message.</summary>
+    /// <summary>Initializes an exception with no message, so <see cref="Exception.Message"/> is empty.</summary>
     public SerializationException()
     {
     }
 
-    /// <summary>Initializes an exception with a message.</summary>
+    /// <summary>
+    /// Initializes an exception with a message, an empty <see cref="Exception.Message"/> for <see langword="null"/>.
+    /// </summary>
     public SerializationException(string? message)
         : base(message)
     {
     }
 
-    /// <summary>Initializes an exception with a message and a cause.</summary>
+    /// <summary>
+    /// Initializes an exception with a message, an empty <see cref="Exception.Message"/> for <see langword="null"/>,
+    /// and a cause.
+    /// </summary>
     public SerializationException(string? message, Exception? innerException)
         : base(message, innerException)
     {
     }
 
     /// <summary>
-    /// Initializes an exception with a cause, whose type's full name and message, Java's <c>cause.toString()</c>,
-    /// become the message, or the default message for a <see langword="null"/> cause.
+    /// Initializes an exception with a cause, whose Java <c>toString()</c>, its type's full name followed by
+    /// <c>": "</c> and its message when it has one, becomes the message, or no message for a
+    /// <see langword="null"/> cause.
     /// </summary>
     public SerializationException(Exception? cause)
         : base(cause)

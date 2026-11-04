@@ -68,6 +68,87 @@ public sealed class KafkaExceptionTests
     }
 
     [Fact]
+    public void PublicConstructors_CodeIsTheIdOfABareKafkaException()
+    {
+        Exception cause = new InvalidOperationException("c");
+        KafkaException[] built =
+        {
+            new KafkaException(),
+            new KafkaException("m"),
+            new KafkaException("m", cause),
+            new KafkaException(cause),
+        };
+
+        Assert.All(built, exception => Assert.Equal(-1, exception.Code));
+        Assert.All(built, exception => Assert.Equal(-1, exception.FfiId));
+        Assert.All(built, exception => Assert.False(exception.IsRetriable));
+    }
+
+    [Fact]
+    public void NullMessage_MessageIsEmpty_JavaToStringIsTheTypeName()
+    {
+        KafkaException withoutMessage = new KafkaException((string?)null);
+        KafkaException withoutMessageWithCause = new KafkaException(null, new InvalidOperationException("c"));
+        KafkaException emptyMessage = new KafkaException(string.Empty);
+
+        Assert.Equal(string.Empty, withoutMessage.Message);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", JavaText.ToString(withoutMessage));
+        Assert.Equal(string.Empty, withoutMessageWithCause.Message);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", JavaText.ToString(withoutMessageWithCause));
+        Assert.Equal(string.Empty, emptyMessage.Message);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException: ", JavaText.ToString(emptyMessage));
+    }
+
+    [Fact]
+    public void CoreErrorConstructor_KeepsTheMessageAndCause_CodeIsTheIdOfABareKafkaException()
+    {
+        Exception cause = new InvalidOperationException("c");
+
+        KafkaException exception = new KafkaException(default(CoreError), "core message: café", cause);
+
+        Assert.Equal("core message: café", exception.Message);
+        Assert.Same(cause, exception.InnerException);
+        Assert.Equal(-1, exception.Code);
+        Assert.False(exception.IsRetriable);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException: core message: café", JavaText.ToString(exception));
+    }
+
+    [Fact]
+    public void CoreErrorConstructor_NullMessage_MessageIsEmpty()
+    {
+        KafkaException exception = new KafkaException(default(CoreError), null, null);
+
+        Assert.Equal(string.Empty, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", JavaText.ToString(exception));
+    }
+
+    [Fact]
+    public void CodedConstructor_CodeIsTheStoredCode()
+    {
+        KafkaException exception = new KafkaException(36, "m", isRetriable: true);
+
+        Assert.Equal(36, exception.Code);
+        Assert.Equal(36, exception.FfiId);
+        Assert.True(exception.IsRetriable);
+    }
+
+    [Fact]
+    public void WrapAtPoll_WrapsAnotherExceptionAsJavasNewKafkaException_AndKeepsAKafkaException()
+    {
+        Exception cause = new InvalidOperationException("listener failed");
+        KafkaException kafka = new KafkaException(36, "m", isRetriable: false);
+
+        KafkaException wrapped = KafkaException.WrapAtPoll(cause);
+
+        Assert.Equal("System.InvalidOperationException: listener failed", wrapped.Message);
+        Assert.Same(cause, wrapped.InnerException);
+        Assert.Equal(-1, wrapped.Code);
+        Assert.False(wrapped.IsRetriable);
+        Assert.Same(kafka, KafkaException.WrapAtPoll(kafka));
+    }
+
+    [Fact]
     public void FromHandle_NullHandle_ReturnsNull()
     {
         Assert.Null(KafkaException.FromHandle(IntPtr.Zero));

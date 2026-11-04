@@ -642,7 +642,8 @@ needs the same, through two internal helpers:
   one (D16); otherwise the type's name, plus `": " + message` only when Java's message is
   non-null. It replaces `CauseMessage`, and builds the message of `ExecutionException(cause)`
   (D13), of every generated `(Throwable cause)` constructor, of `WrapAtPoll` and of the
-  local-callback wrap.
+  local-callback wrap, and the exception part of `KafkaFuture.ToString()`, as Java's
+  `KafkaFutureImpl.toString` prints the exception's `toString()`.
 
 The choice is which name `ToString(Exception)` prints: (a) the .NET type's full name
 (`Confluent.Kafka.Common.Errors.TopicExistsException`), as Python prints its Python class path;
