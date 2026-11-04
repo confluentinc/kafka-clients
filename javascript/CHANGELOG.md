@@ -58,5 +58,8 @@ name needs the agreement of the team that owns it.
 - The root exports the module namespaces (`producer`, `common`, `consumer`)
   and the Java built-in errors; each namespace, nested ones included
   (`<package>/common/errors`), is also an entry point with its own TypeScript
-  declarations, generated from the JSDoc.
+  declarations.
+- Written in TypeScript and published compiled (`dist/`: CommonJS, which
+  `require` loads and an ES module `import`s, with its `.d.ts` declarations
+  and source maps).
 - Installing runs no build (`"gypfile": false`, no install scripts).
