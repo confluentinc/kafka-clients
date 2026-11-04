@@ -29,7 +29,7 @@ public sealed class ConfigResource
     /// <summary>Creates a config resource — Java's constructor.</summary>
     /// <param name="type">
     /// The resource type. A value that is not a defined <see cref="ConfigResourceType"/>
-    /// member is stored as <see cref="ConfigResourceType.Unknown"/>, as Java's
+    /// member is stored as <see cref="ConfigResourceType.UNKNOWN"/>, as Java's
     /// <c>Type.forId</c> maps an id it has no member for, so a request and its answer key the
     /// same resource.
     /// </param>
@@ -86,16 +86,16 @@ public sealed class ConfigResource
         string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", JavaName(Type), Name);
 
     private static ConfigResourceType DefinedOrUnknown(ConfigResourceType type) =>
-        Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.Unknown;
+        Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.UNKNOWN;
 
     private static string JavaName(ConfigResourceType type) => type switch
     {
-        ConfigResourceType.Unknown => "UNKNOWN",
-        ConfigResourceType.Topic => "TOPIC",
-        ConfigResourceType.Broker => "BROKER",
-        ConfigResourceType.BrokerLogger => "BROKER_LOGGER",
-        ConfigResourceType.ClientMetrics => "CLIENT_METRICS",
-        ConfigResourceType.Group => "GROUP",
+        ConfigResourceType.UNKNOWN => "UNKNOWN",
+        ConfigResourceType.TOPIC => "TOPIC",
+        ConfigResourceType.BROKER => "BROKER",
+        ConfigResourceType.BROKER_LOGGER => "BROKER_LOGGER",
+        ConfigResourceType.CLIENT_METRICS => "CLIENT_METRICS",
+        ConfigResourceType.GROUP => "GROUP",
         _ => ((int)type).ToString(CultureInfo.InvariantCulture),
     };
 }

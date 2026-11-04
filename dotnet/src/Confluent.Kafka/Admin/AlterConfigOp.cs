@@ -24,12 +24,12 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// When altering broker logger levels under <see cref="ConfigResourceType.BrokerLogger"/>, prefer
+/// When altering broker logger levels under <see cref="ConfigResourceType.BROKER_LOGGER"/>, prefer
 /// Kafka's log-level constants over string literals, so the value passes the broker's log-level
 /// validation.
 /// </para>
 /// <para>
-/// A <see cref="AlterConfigOpType.Delete"/> whose entry value is <see langword="null"/> sends a null
+/// A <see cref="AlterConfigOpType.DELETE"/> whose entry value is <see langword="null"/> sends a null
 /// value, as in Java.
 /// </para>
 /// </remarks>
@@ -101,10 +101,10 @@ public sealed class AlterConfigOp
 
     private static string JavaName(AlterConfigOpType opType) => opType switch
     {
-        AlterConfigOpType.Set => "SET",
-        AlterConfigOpType.Delete => "DELETE",
-        AlterConfigOpType.Append => "APPEND",
-        AlterConfigOpType.Subtract => "SUBTRACT",
+        AlterConfigOpType.SET => "SET",
+        AlterConfigOpType.DELETE => "DELETE",
+        AlterConfigOpType.APPEND => "APPEND",
+        AlterConfigOpType.SUBTRACT => "SUBTRACT",
         _ => ((int)opType).ToString(CultureInfo.InvariantCulture),
     };
 }

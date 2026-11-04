@@ -40,13 +40,13 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <summary>
     /// The cluster id of a mock whose <see cref="Builder"/> sets none, Java's <c>MockAdminClient.DEFAULT_CLUSTER_ID</c>.
     /// </summary>
-    public const string DefaultClusterId = MockAdminClient.DefaultClusterId;
+    public const string DEFAULT_CLUSTER_ID = MockAdminClient.DEFAULT_CLUSTER_ID;
 
     /// <summary>
     /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
     /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    public static IReadOnlyList<string> DefaultLogDirs { get; } = MockAdminClient.DefaultLogDirs;
+    public static IReadOnlyList<string> DEFAULT_LOG_DIRS { get; } = MockAdminClient.DEFAULT_LOG_DIRS;
 
     private readonly NativeAdminClient _native;
 

@@ -21,17 +21,17 @@ namespace Confluent.Kafka.Common.Acl;
 public enum AclPermissionType
 {
     /// <summary>A permission type this client does not recognize — Java's <c>UNKNOWN</c> (code 0).</summary>
-    Unknown = 0,
+    UNKNOWN = 0,
 
     /// <summary>
     /// In a filter, matches any permission type — Java's <c>ANY</c> (code 1). Rejected by
     /// <see cref="AccessControlEntry"/>'s constructor; legal on <see cref="AccessControlEntryFilter"/>.
     /// </summary>
-    Any = 1,
+    ANY = 1,
 
     /// <summary>Disallows the operation — Java's <c>DENY</c> (code 2).</summary>
-    Deny = 2,
+    DENY = 2,
 
     /// <summary>Allows the operation — Java's <c>ALLOW</c> (code 3).</summary>
-    Allow = 3,
+    ALLOW = 3,
 }

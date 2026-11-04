@@ -16,8 +16,10 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Linq;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
@@ -171,7 +173,9 @@ public sealed class ListTransactionsOptions
             CultureInfo.InvariantCulture,
             "ListTransactionsOptions(filteredStates=[{0}], filteredProducerIds=[{1}]"
                 + ", filteredDuration={2}, filteredTransactionalIdPattern={3}, timeoutMs={4})",
-            string.Join(", ", _filteredStates),
+            string.Join(
+                ", ",
+                _filteredStates.Select(static state => TransactionMarshal.NameFromState(state) ?? state.ToString())),
             string.Join(", ", _filteredProducerIds),
             FilteredDuration,
             FilteredTransactionalIdPattern ?? "null",

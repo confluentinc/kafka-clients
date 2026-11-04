@@ -19,13 +19,17 @@ namespace Confluent.Kafka.Common;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Java's five constants, in Java's order. <see cref="Unknown"/> is a real member, not an
+/// Java's five constants, in Java's order. <see cref="UNKNOWN"/> is a real member, not an
 /// error: a broker newer than this client can name a type this client does not know.
 /// </para>
 /// <para>
 /// The value crossing the C ABI is Java's <c>toString()</c> spelling (<c>"Consumer"</c>,
 /// <c>"Classic"</c>, <c>"Share"</c>, <c>"Streams"</c>, <c>"Unknown"</c>), not the underlying
 /// <c>int</c>, which means nothing outside this assembly; do not persist it.
+/// </para>
+/// <para>
+/// <c>ToString()</c> gives the Java constant name (<c>CONSUMER</c>), not Java's <c>toString()</c>
+/// text (<c>"Consumer"</c>): a recorded deviation.
 /// </para>
 /// <para>
 /// Java's <c>parse(String)</c> is not published (a recorded deviation): it decodes a wire
@@ -38,17 +42,17 @@ public enum GroupType
     /// The type is not known to this client — Java's <c>UNKNOWN</c>, the type for a name this
     /// client does not recognise.
     /// </summary>
-    Unknown,
+    UNKNOWN,
 
     /// <summary>A consumer group using the KIP-848 protocol — Java's <c>CONSUMER</c>.</summary>
-    Consumer,
+    CONSUMER,
 
     /// <summary>A consumer group using the classic protocol — Java's <c>CLASSIC</c>.</summary>
-    Classic,
+    CLASSIC,
 
     /// <summary>A share group — Java's <c>SHARE</c>.</summary>
-    Share,
+    SHARE,
 
     /// <summary>A Kafka Streams group — Java's <c>STREAMS</c>.</summary>
-    Streams,
+    STREAMS,
 }

@@ -203,5 +203,5 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => asyncAll.Get()));
     }
 
-    private static ConsumerGroupDescription Description(string groupId) => new ConsumerGroupDescription(groupId, false, null, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
+    private static ConsumerGroupDescription Description(string groupId) => new ConsumerGroupDescription(groupId, false, null, "range", GroupType.CONSUMER, GroupState.STABLE, null, null, null, null);
 }

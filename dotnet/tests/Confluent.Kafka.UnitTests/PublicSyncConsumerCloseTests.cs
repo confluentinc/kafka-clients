@@ -49,9 +49,9 @@ public sealed class PublicSyncConsumerCloseTests
 
     public static IEnumerable<object[]> Operations() => new[]
     {
-        new object[] { GroupMembershipOperation.LeaveGroup },
-        new object[] { GroupMembershipOperation.RemainInGroup },
-        new object[] { GroupMembershipOperation.Default },
+        new object[] { GroupMembershipOperation.LEAVE_GROUP },
+        new object[] { GroupMembershipOperation.REMAIN_IN_GROUP },
+        new object[] { GroupMembershipOperation.DEFAULT },
     };
 
     [Theory]
@@ -74,7 +74,7 @@ public sealed class PublicSyncConsumerCloseTests
 
         AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => consumer.Close(CloseOptions.Timeout(s_negative))));
         AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(
-            () => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(-1)).WithGroupMembershipOperation(GroupMembershipOperation.LeaveGroup))));
+            () => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(-1)).WithGroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP))));
 
         Assert.Empty(consumer.Subscription());
         TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
@@ -125,7 +125,7 @@ public sealed class PublicSyncConsumerCloseTests
     {
         IConsumer<byte[], byte[]> consumer = Create(mock);
 
-        TestTimeout.Run(() => consumer.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.Default)), s_deadline);
+        TestTimeout.Run(() => consumer.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.DEFAULT)), s_deadline);
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
     }
@@ -147,7 +147,7 @@ public sealed class PublicSyncConsumerCloseTests
 
         IConsumer<byte[], byte[]> third = Create(mock);
         TestTimeout.Dispose(third);
-        TestTimeout.Run(() => third.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LeaveGroup)), s_deadline);
+        TestTimeout.Run(() => third.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP)), s_deadline);
     }
 
     [Theory]

@@ -33,7 +33,8 @@ namespace Confluent.Kafka.IntegrationTests;
 
 /// <summary>
 /// The producer's send against a broker: a record taken on the calling thread once its topic's metadata is
-/// cached, and a record taken at once while another waits for a partition the topic does not have yet.
+/// cached, a record taken at once while another waits for a partition the topic does not have yet, and the
+/// serialized sizes and timestamp a delivery reports.
 /// </summary>
 public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 {
@@ -42,6 +43,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     private static readonly TimeSpan s_readBackWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan s_readBackPoll = TimeSpan.FromSeconds(0.5);
     private static readonly TimeSpan s_firstSendStarts = TimeSpan.FromSeconds(1);
+    private static readonly long s_timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     private readonly KafkaBrokerFixture _broker;
     private readonly ITestOutputHelper _output;
@@ -130,6 +132,44 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         await _broker.AddPartitionsAsync(topic, 2);
         AsyncKafkaFuture<RecordMetadata> first = await firstStage.AsTask().WaitAsync(s_partitionWait);
         Assert.Equal(1, (await first.Get(s_partitionWait)).Partition);
+    }
+
+    [SkippableFact]
+    public async Task Send_ReportsTheSerializedSizesAndTheTimestamp()
+    {
+        string topic = await TopicAsync();
+        using KafkaProducer<byte[], byte[]> producer =
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray);
+
+        AssertDelivered(producer.Send(SizedRecord(topic)).Get(s_get), keySize: 3, valueSize: 5);
+        AssertDelivered(producer.Send(TombstoneRecord(topic)).Get(s_get), keySize: -1, valueSize: -1);
+    }
+
+    [SkippableFact]
+    public async Task AsyncSend_ReportsTheSerializedSizesAndTheTimestamp()
+    {
+        string topic = await TopicAsync();
+        await using AsyncKafkaProducer<byte[], byte[]> producer =
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray);
+
+        AssertDelivered(await (await producer.Send(SizedRecord(topic))).Get(s_get), keySize: 3, valueSize: 5);
+        AssertDelivered(await (await producer.Send(TombstoneRecord(topic))).Get(s_get), keySize: -1, valueSize: -1);
+    }
+
+    private static ProducerRecord<byte[], byte[]> SizedRecord(string topic) =>
+        new ProducerRecord<byte[], byte[]>(
+            topic, Encoding.UTF8.GetBytes("hello"), Encoding.UTF8.GetBytes("abc"), partition: 0, timestamp: s_timestamp);
+
+    private static ProducerRecord<byte[], byte[]> TombstoneRecord(string topic) =>
+        new ProducerRecord<byte[], byte[]>(topic, value: null, key: null, partition: 0, timestamp: s_timestamp);
+
+    private static void AssertDelivered(RecordMetadata metadata, int keySize, int valueSize)
+    {
+        Assert.True(metadata.HasOffset);
+        Assert.True(metadata.HasTimestamp);
+        Assert.Equal(s_timestamp, metadata.Timestamp);
+        Assert.Equal(keySize, metadata.SerializedKeySize);
+        Assert.Equal(valueSize, metadata.SerializedValueSize);
     }
 
     private static ProducerRecord<byte[], byte[]> Record(string topic, int partition, string value) =>

@@ -135,22 +135,22 @@ public sealed class PublicTopicCollectionTests
     [Fact]
     public void AclOperation_MembersCarryJavasWireCodes()
     {
-        Assert.Equal(0, (int)AclOperation.Unknown);
-        Assert.Equal(1, (int)AclOperation.Any);
-        Assert.Equal(2, (int)AclOperation.All);
-        Assert.Equal(3, (int)AclOperation.Read);
-        Assert.Equal(4, (int)AclOperation.Write);
-        Assert.Equal(5, (int)AclOperation.Create);
-        Assert.Equal(6, (int)AclOperation.Delete);
-        Assert.Equal(7, (int)AclOperation.Alter);
-        Assert.Equal(8, (int)AclOperation.Describe);
-        Assert.Equal(9, (int)AclOperation.ClusterAction);
-        Assert.Equal(10, (int)AclOperation.DescribeConfigs);
-        Assert.Equal(11, (int)AclOperation.AlterConfigs);
-        Assert.Equal(12, (int)AclOperation.IdempotentWrite);
-        Assert.Equal(13, (int)AclOperation.CreateTokens);
-        Assert.Equal(14, (int)AclOperation.DescribeTokens);
-        Assert.Equal(15, (int)AclOperation.TwoPhaseCommit);
+        Assert.Equal(0, (int)AclOperation.UNKNOWN);
+        Assert.Equal(1, (int)AclOperation.ANY);
+        Assert.Equal(2, (int)AclOperation.ALL);
+        Assert.Equal(3, (int)AclOperation.READ);
+        Assert.Equal(4, (int)AclOperation.WRITE);
+        Assert.Equal(5, (int)AclOperation.CREATE);
+        Assert.Equal(6, (int)AclOperation.DELETE);
+        Assert.Equal(7, (int)AclOperation.ALTER);
+        Assert.Equal(8, (int)AclOperation.DESCRIBE);
+        Assert.Equal(9, (int)AclOperation.CLUSTER_ACTION);
+        Assert.Equal(10, (int)AclOperation.DESCRIBE_CONFIGS);
+        Assert.Equal(11, (int)AclOperation.ALTER_CONFIGS);
+        Assert.Equal(12, (int)AclOperation.IDEMPOTENT_WRITE);
+        Assert.Equal(13, (int)AclOperation.CREATE_TOKENS);
+        Assert.Equal(14, (int)AclOperation.DESCRIBE_TOKENS);
+        Assert.Equal(15, (int)AclOperation.TWO_PHASE_COMMIT);
 
         Assert.Equal(16, Enum.GetValues(typeof(AclOperation)).Cast<AclOperation>().Count());
     }

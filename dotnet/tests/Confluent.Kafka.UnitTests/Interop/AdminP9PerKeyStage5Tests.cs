@@ -202,9 +202,9 @@ public sealed class AdminP9PerKeyStage5Tests
         AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.OfClient(admin.AlterUserScramCredentials(
             new UserScramCredentialAlteration[]
             {
-                new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.ScramSha256),
-                new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.ScramSha512),
-                new UserScramCredentialDeletion("cp6-user-b", ScramMechanism.ScramSha256),
+                new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.SCRAM_SHA_256),
+                new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.SCRAM_SHA_512),
+                new UserScramCredentialDeletion("cp6-user-b", ScramMechanism.SCRAM_SHA_256),
             },
             options: null));
 
@@ -219,12 +219,12 @@ public sealed class AdminP9PerKeyStage5Tests
 
     private static AclBinding Binding(string name) =>
         new AclBinding(
-            new ResourcePattern(ResourceType.Topic, name, PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, name, PatternType.LITERAL),
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 
     private static ClientQuotaEntity Entity(string name) =>
         new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.ClientId] = name });
+            new Dictionary<string, string?> { [ClientQuotaEntity.CLIENT_ID] = name });
 
     private static ClientQuotaAlteration Alteration(ClientQuotaEntity entity) =>
         new ClientQuotaAlteration(

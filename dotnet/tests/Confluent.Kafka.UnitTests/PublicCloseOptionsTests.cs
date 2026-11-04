@@ -40,7 +40,7 @@ public sealed class PublicCloseOptionsTests
     [Fact]
     public void OperationShouldHaveDefaultValue()
     {
-        Assert.Equal(GroupMembershipOperation.Default, CloseOptions.Timeout(TimeSpan.Zero).GroupMembershipOperation());
+        Assert.Equal(GroupMembershipOperation.DEFAULT, CloseOptions.Timeout(TimeSpan.Zero).GroupMembershipOperation());
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public sealed class PublicCloseOptionsTests
     [Fact]
     public void TimeoutShouldBeDefaultEmpty()
     {
-        Assert.Null(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.Default).Timeout());
+        Assert.Null(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.DEFAULT).Timeout());
     }
 
     [Fact]
@@ -62,11 +62,11 @@ public sealed class PublicCloseOptionsTests
     {
         CloseOptions timed = CloseOptions.Timeout(TimeSpan.FromSeconds(3));
         Assert.Equal(TimeSpan.FromSeconds(3), timed.Timeout());
-        Assert.Equal(GroupMembershipOperation.Default, timed.GroupMembershipOperation());
+        Assert.Equal(GroupMembershipOperation.DEFAULT, timed.GroupMembershipOperation());
 
-        CloseOptions leaving = CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LeaveGroup);
+        CloseOptions leaving = CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP);
         Assert.Null(leaving.Timeout());
-        Assert.Equal(GroupMembershipOperation.LeaveGroup, leaving.GroupMembershipOperation());
+        Assert.Equal(GroupMembershipOperation.LEAVE_GROUP, leaving.GroupMembershipOperation());
     }
 
     [Fact]
@@ -75,9 +75,9 @@ public sealed class PublicCloseOptionsTests
         CloseOptions options = CloseOptions.Timeout(TimeSpan.FromSeconds(1));
 
         Assert.Same(options, options.WithTimeout(TimeSpan.FromSeconds(2)));
-        Assert.Same(options, options.WithGroupMembershipOperation(GroupMembershipOperation.RemainInGroup));
+        Assert.Same(options, options.WithGroupMembershipOperation(GroupMembershipOperation.REMAIN_IN_GROUP));
         Assert.Equal(TimeSpan.FromSeconds(2), options.Timeout());
-        Assert.Equal(GroupMembershipOperation.RemainInGroup, options.GroupMembershipOperation());
+        Assert.Equal(GroupMembershipOperation.REMAIN_IN_GROUP, options.GroupMembershipOperation());
 
         options.WithTimeout(null);
         Assert.Null(options.Timeout());
@@ -104,7 +104,7 @@ public sealed class PublicCloseOptionsTests
         Assert.True(type.IsEnum);
         Assert.Null(type.DeclaringType);
         Assert.Equal(
-            new[] { "LeaveGroup", "RemainInGroup", "Default" },
+            new[] { "LEAVE_GROUP", "REMAIN_IN_GROUP", "DEFAULT" },
             type.GetFields(BindingFlags.Public | BindingFlags.Static).OrderBy(f => (int)f.GetValue(null)!).Select(f => f.Name));
     }
 

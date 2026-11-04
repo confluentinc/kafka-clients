@@ -150,9 +150,9 @@ public sealed class AdminP3ResultMarshalTests
         GC.Collect();
         GC.WaitForPendingFinalizers();
 
-        Assert.Contains(resources, resource => resource.Type == ConfigResourceType.Broker && resource.Name == "0");
+        Assert.Contains(resources, resource => resource.Type == ConfigResourceType.BROKER && resource.Name == "0");
         Assert.Contains(
-            resources, resource => resource.Type == ConfigResourceType.BrokerLogger && resource.Name == "0");
+            resources, resource => resource.Type == ConfigResourceType.BROKER_LOGGER && resource.Name == "0");
         Assert.Equal(2, resources.Count(resource => resource.Name == "0"));
         Assert.Equal(resources, await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
@@ -162,10 +162,10 @@ public sealed class AdminP3ResultMarshalTests
     {
         ConfigResource[] unsorted =
         {
-            new ConfigResource(ConfigResourceType.Group, "g"),
-            new ConfigResource(ConfigResourceType.Topic, "b"),
-            new ConfigResource(ConfigResourceType.Topic, "a"),
-            new ConfigResource(ConfigResourceType.Unknown, "u"),
+            new ConfigResource(ConfigResourceType.GROUP, "g"),
+            new ConfigResource(ConfigResourceType.TOPIC, "b"),
+            new ConfigResource(ConfigResourceType.TOPIC, "a"),
+            new ConfigResource(ConfigResourceType.UNKNOWN, "u"),
         };
         Assert.Equal(unsorted, CopyOutThroughANativeList(unsorted));
     }
@@ -177,38 +177,38 @@ public sealed class AdminP3ResultMarshalTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> unfiltered = await List(admin, null);
-        IReadOnlyCollection<ConfigResource> brokersOnly = await List(admin, new[] { ConfigResourceType.Broker });
-        IReadOnlyCollection<ConfigResource> groups = await List(admin, new[] { ConfigResourceType.Group });
+        IReadOnlyCollection<ConfigResource> brokersOnly = await List(admin, new[] { ConfigResourceType.BROKER });
+        IReadOnlyCollection<ConfigResource> groups = await List(admin, new[] { ConfigResourceType.GROUP });
 
-        Assert.Contains(unfiltered, resource => resource.Type == ConfigResourceType.BrokerLogger);
-        Assert.DoesNotContain(brokersOnly, resource => resource.Type == ConfigResourceType.BrokerLogger);
-        Assert.Contains(brokersOnly, resource => resource.Type == ConfigResourceType.Broker);
+        Assert.Contains(unfiltered, resource => resource.Type == ConfigResourceType.BROKER_LOGGER);
+        Assert.DoesNotContain(brokersOnly, resource => resource.Type == ConfigResourceType.BROKER_LOGGER);
+        Assert.Contains(brokersOnly, resource => resource.Type == ConfigResourceType.BROKER);
         Assert.Empty(groups);
     }
 
     [Fact]
     public void ConfigResourceTypeFromId_MapsJavasIds_AndAnyOtherIdToUnknown()
     {
-        Assert.Equal(ConfigResourceType.Unknown, ConfigResourceMarshal.TypeFromId(0));
-        Assert.Equal(ConfigResourceType.Topic, ConfigResourceMarshal.TypeFromId(2));
-        Assert.Equal(ConfigResourceType.Broker, ConfigResourceMarshal.TypeFromId(4));
-        Assert.Equal(ConfigResourceType.BrokerLogger, ConfigResourceMarshal.TypeFromId(8));
-        Assert.Equal(ConfigResourceType.ClientMetrics, ConfigResourceMarshal.TypeFromId(16));
-        Assert.Equal(ConfigResourceType.Group, ConfigResourceMarshal.TypeFromId(32));
+        Assert.Equal(ConfigResourceType.UNKNOWN, ConfigResourceMarshal.TypeFromId(0));
+        Assert.Equal(ConfigResourceType.TOPIC, ConfigResourceMarshal.TypeFromId(2));
+        Assert.Equal(ConfigResourceType.BROKER, ConfigResourceMarshal.TypeFromId(4));
+        Assert.Equal(ConfigResourceType.BROKER_LOGGER, ConfigResourceMarshal.TypeFromId(8));
+        Assert.Equal(ConfigResourceType.CLIENT_METRICS, ConfigResourceMarshal.TypeFromId(16));
+        Assert.Equal(ConfigResourceType.GROUP, ConfigResourceMarshal.TypeFromId(32));
 
         foreach (int other in new[] { 64, 1, int.MaxValue, -1, int.MinValue })
         {
-            Assert.Equal(ConfigResourceType.Unknown, ConfigResourceMarshal.TypeFromId(other));
+            Assert.Equal(ConfigResourceType.UNKNOWN, ConfigResourceMarshal.TypeFromId(other));
         }
     }
 
     [Theory]
-    [InlineData(ConfigResourceType.Unknown)]
-    [InlineData(ConfigResourceType.Topic)]
-    [InlineData(ConfigResourceType.Broker)]
-    [InlineData(ConfigResourceType.BrokerLogger)]
-    [InlineData(ConfigResourceType.ClientMetrics)]
-    [InlineData(ConfigResourceType.Group)]
+    [InlineData(ConfigResourceType.UNKNOWN)]
+    [InlineData(ConfigResourceType.TOPIC)]
+    [InlineData(ConfigResourceType.BROKER)]
+    [InlineData(ConfigResourceType.BROKER_LOGGER)]
+    [InlineData(ConfigResourceType.CLIENT_METRICS)]
+    [InlineData(ConfigResourceType.GROUP)]
     public void ConfigResource_RoundTripsThroughTheCore(ConfigResourceType type)
     {
         ConfigResource resource = new ConfigResource(type, "résumé-中");

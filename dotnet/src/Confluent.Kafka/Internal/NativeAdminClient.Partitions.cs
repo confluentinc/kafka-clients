@@ -307,14 +307,14 @@ internal sealed partial class NativeAdminClient
             }
 
             if (options is not null
-                && options.IsolationLevel != IsolationLevel.ReadUncommitted
-                && options.IsolationLevel != IsolationLevel.ReadCommitted)
+                && options.IsolationLevel != IsolationLevel.READ_UNCOMMITTED
+                && options.IsolationLevel != IsolationLevel.READ_COMMITTED)
             {
                 throw new ArgumentOutOfRangeException(
                     "options",
                     options.IsolationLevel,
-                    "ListOffsetsOptions.IsolationLevel must be IsolationLevel.ReadUncommitted or "
-                    + "IsolationLevel.ReadCommitted.");
+                    "ListOffsetsOptions.IsolationLevel must be IsolationLevel.READ_UNCOMMITTED or "
+                    + "IsolationLevel.READ_COMMITTED.");
             }
 
             List<TopicPartition> keys = new List<TopicPartition>(topicPartitionOffsets.Count);
@@ -406,7 +406,7 @@ internal sealed partial class NativeAdminClient
     private static IntPtr NativeIsolationLevel(IsolationLevel isolationLevel)
     {
         IntPtr outErr = IntPtr.Zero;
-        IntPtr level = isolationLevel == IsolationLevel.ReadCommitted
+        IntPtr level = isolationLevel == IsolationLevel.READ_COMMITTED
             ? NativeMethods.IsolationLevelReadCommitted(ref outErr)
             : NativeMethods.IsolationLevelReadUncommitted(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);

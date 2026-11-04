@@ -24,7 +24,7 @@ public sealed class CloseOptions
 {
     private TimeSpan? _timeout;
 
-    private Confluent.Kafka.Consumer.GroupMembershipOperation _operation = Confluent.Kafka.Consumer.GroupMembershipOperation.Default;
+    private Confluent.Kafka.Consumer.GroupMembershipOperation _operation = Confluent.Kafka.Consumer.GroupMembershipOperation.DEFAULT;
 
     private CloseOptions()
     {
@@ -32,7 +32,7 @@ public sealed class CloseOptions
 
     /// <summary>Creates options with <paramref name="timeout"/> — Java's static <c>timeout(Duration)</c>.</summary>
     /// <param name="timeout">The maximum time to wait for the consumer to close; null applies the default close timeout.</param>
-    /// <returns>New options with that timeout and <see cref="Confluent.Kafka.Consumer.GroupMembershipOperation.Default"/>.</returns>
+    /// <returns>New options with that timeout and <see cref="Confluent.Kafka.Consumer.GroupMembershipOperation.DEFAULT"/>.</returns>
     public static CloseOptions Timeout(TimeSpan? timeout) => new CloseOptions().WithTimeout(timeout);
 
     /// <summary>
@@ -75,7 +75,7 @@ public sealed class CloseOptions
     }
 
     /// <summary>The group membership operation — Java's <c>groupMembershipOperation()</c>.</summary>
-    /// <returns>The operation; <see cref="Confluent.Kafka.Consumer.GroupMembershipOperation.Default"/> unless set.</returns>
+    /// <returns>The operation; <see cref="Confluent.Kafka.Consumer.GroupMembershipOperation.DEFAULT"/> unless set.</returns>
     public Confluent.Kafka.Consumer.GroupMembershipOperation GroupMembershipOperation() => _operation;
 
     /// <summary>The timeout — Java's <c>timeout()</c>.</summary>

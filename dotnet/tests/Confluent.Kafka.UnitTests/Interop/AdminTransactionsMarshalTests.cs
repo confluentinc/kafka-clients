@@ -35,15 +35,15 @@ public sealed class AdminTransactionsMarshalTests
     private static readonly Dictionary<string, (Func<IntPtr> Singleton, TransactionState Expected)> s_states =
         new Dictionary<string, (Func<IntPtr>, TransactionState)>(StringComparer.Ordinal)
         {
-            ["ongoing"] = (() => Singleton(Native.TransactionStateOngoing), TransactionState.Ongoing),
-            ["prepare_abort"] = (() => Singleton(Native.TransactionStatePrepareAbort), TransactionState.PrepareAbort),
-            ["prepare_commit"] = (() => Singleton(Native.TransactionStatePrepareCommit), TransactionState.PrepareCommit),
-            ["complete_abort"] = (() => Singleton(Native.TransactionStateCompleteAbort), TransactionState.CompleteAbort),
-            ["complete_commit"] = (() => Singleton(Native.TransactionStateCompleteCommit), TransactionState.CompleteCommit),
-            ["empty"] = (() => Singleton(Native.TransactionStateEmpty), TransactionState.Empty),
+            ["ongoing"] = (() => Singleton(Native.TransactionStateOngoing), TransactionState.ONGOING),
+            ["prepare_abort"] = (() => Singleton(Native.TransactionStatePrepareAbort), TransactionState.PREPARE_ABORT),
+            ["prepare_commit"] = (() => Singleton(Native.TransactionStatePrepareCommit), TransactionState.PREPARE_COMMIT),
+            ["complete_abort"] = (() => Singleton(Native.TransactionStateCompleteAbort), TransactionState.COMPLETE_ABORT),
+            ["complete_commit"] = (() => Singleton(Native.TransactionStateCompleteCommit), TransactionState.COMPLETE_COMMIT),
+            ["empty"] = (() => Singleton(Native.TransactionStateEmpty), TransactionState.EMPTY),
             ["prepare_epoch_fence"] =
-                (() => Singleton(Native.TransactionStatePrepareEpochFence), TransactionState.PrepareEpochFence),
-            ["unknown"] = (() => Singleton(Native.TransactionStateUnknown), TransactionState.Unknown),
+                (() => Singleton(Native.TransactionStatePrepareEpochFence), TransactionState.PREPARE_EPOCH_FENCE),
+            ["unknown"] = (() => Singleton(Native.TransactionStateUnknown), TransactionState.UNKNOWN),
         };
 
     private delegate IntPtr SingletonGetter(ref IntPtr outErr);
@@ -117,7 +117,7 @@ public sealed class AdminTransactionsMarshalTests
             partitions: new[] { new TopicPartition("txn-été", 1), new TopicPartition("alpha", 2), new TopicPartition("alpha", 0) });
 
         Assert.Equal(7, copied.CoordinatorId);
-        Assert.Equal(TransactionState.Ongoing, copied.State);
+        Assert.Equal(TransactionState.ONGOING, copied.State);
         Assert.Equal(1_234_567_890_123L, copied.ProducerId);
         Assert.Equal(5, copied.ProducerEpoch);
         Assert.Equal(60_000L, copied.TransactionTimeoutMs);

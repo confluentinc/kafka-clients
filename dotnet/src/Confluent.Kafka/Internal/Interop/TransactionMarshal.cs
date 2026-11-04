@@ -26,17 +26,20 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class TransactionMarshal
 {
-    internal static string WireName(TransactionState state) =>
+    internal static string WireName(TransactionState state) => NameFromState(state) ?? "Unknown";
+
+    internal static string? NameFromState(TransactionState state) =>
         state switch
         {
-            TransactionState.Ongoing => "Ongoing",
-            TransactionState.PrepareAbort => "PrepareAbort",
-            TransactionState.PrepareCommit => "PrepareCommit",
-            TransactionState.CompleteAbort => "CompleteAbort",
-            TransactionState.CompleteCommit => "CompleteCommit",
-            TransactionState.Empty => "Empty",
-            TransactionState.PrepareEpochFence => "PrepareEpochFence",
-            _ => "Unknown",
+            TransactionState.ONGOING => "Ongoing",
+            TransactionState.PREPARE_ABORT => "PrepareAbort",
+            TransactionState.PREPARE_COMMIT => "PrepareCommit",
+            TransactionState.COMPLETE_ABORT => "CompleteAbort",
+            TransactionState.COMPLETE_COMMIT => "CompleteCommit",
+            TransactionState.EMPTY => "Empty",
+            TransactionState.PREPARE_EPOCH_FENCE => "PrepareEpochFence",
+            TransactionState.UNKNOWN => "Unknown",
+            _ => null,
         };
 
     internal static IntPtr Singleton(TransactionState state)

@@ -83,13 +83,13 @@ public sealed class RecordDeserializationTests
         consumer.AddRecord(Topic, 0, 1, key: null, value: Bytes("x"));
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(Origin.Value, e.Origin);
+        Assert.Equal(Origin.VALUE, e.Origin);
         Assert.Equal(s_tp0, e.TopicPartition);
         Assert.Equal(1L, e.Offset);
         Assert.Null(e.KeyBuffer);
         Assert.Equal(Bytes("x"), e.ValueBuffer);
         Assert.Equal(-1L, e.Timestamp);
-        Assert.Equal(TimestampType.NoTimestampType, e.TimestampType);
+        Assert.Equal(TimestampType.NO_TIMESTAMP_TYPE, e.TimestampType);
         Assert.Empty(e.Headers!);
         Assert.Equal(
             "Error deserializing VALUE for partition deserialization-topic-0 at offset 1. If needed, please seek past "
@@ -115,7 +115,7 @@ public sealed class RecordDeserializationTests
 
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(Origin.Key, e.Origin);
+        Assert.Equal(Origin.KEY, e.Origin);
         Assert.Equal(Bytes("k"), e.KeyBuffer);
         Assert.Equal(Bytes("v"), e.ValueBuffer);
         Assert.Equal(

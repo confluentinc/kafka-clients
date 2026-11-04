@@ -30,23 +30,23 @@ namespace Confluent.Kafka.Admin;
 public enum AlterConfigOpType
 {
     /// <summary>Set the entry's value — Java's <c>SET</c> (id 0).</summary>
-    Set = 0,
+    SET = 0,
 
     /// <summary>
     /// Revert the entry to its default value, possibly null — Java's <c>DELETE</c> (id 1). Its
     /// entry's value may be <see langword="null"/>, and is sent as a null.
     /// </summary>
-    Delete = 1,
+    DELETE = 1,
 
     /// <summary>
     /// For list-valued entries, add the given values to the current value — Java's
     /// <c>APPEND</c> (id 2).
     /// </summary>
-    Append = 2,
+    APPEND = 2,
 
     /// <summary>
     /// For list-valued entries, remove the given values from the current value — Java's
     /// <c>SUBTRACT</c> (id 3).
     /// </summary>
-    Subtract = 3,
+    SUBTRACT = 3,
 }

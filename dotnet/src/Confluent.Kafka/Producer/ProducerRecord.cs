@@ -25,8 +25,7 @@ namespace Confluent.Kafka.Producer;
 /// The producer calls its serializers also for a <see langword="null"/> key or value, as Java does. A
 /// <see langword="null"/> result is an absent field (no key, or a tombstone), and an empty result a present, empty
 /// one. For a value type <c>TValue?</c> is not <c>Nullable&lt;T&gt;</c>: a value-type tombstone needs a nullable
-/// value type, such as <c>long?</c>, with a matching serde. A negative <see cref="Timestamp"/> is not rejected,
-/// where Java's constructor rejects it.
+/// value type, such as <c>long?</c>, with a matching serde.
 /// </remarks>
 /// <typeparam name="TKey">The key type.</typeparam>
 /// <typeparam name="TValue">The value type.</typeparam>
@@ -50,11 +49,12 @@ public sealed class ProducerRecord<TKey, TValue>
     /// </param>
     /// <param name="timestamp">
     /// The record timestamp (milliseconds since epoch), or <see langword="null"/> to let the
-    /// producer stamp it.
+    /// producer stamp it. Must be non-negative when specified.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="partition"/> is specified and negative.
+    /// <paramref name="timestamp"/> or <paramref name="partition"/> is specified and negative; the timestamp is
+    /// checked first.
     /// </exception>
     public ProducerRecord(
         string topic,
@@ -63,14 +63,28 @@ public sealed class ProducerRecord<TKey, TValue>
         int? partition = null,
         long? timestamp = null)
     {
-        Topic = topic ?? throw new ArgumentNullException(nameof(topic));
+        Topic = topic ?? throw new ArgumentNullException(nameof(topic), "Topic cannot be null.");
 
-        if (partition.HasValue && partition.Value < 0)
+        if (timestamp is { } t && t < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(timestamp),
+                t,
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Invalid timestamp: {0}. Timestamp should always be non-negative or null.",
+                    t));
+        }
+
+        if (partition is { } p && p < 0)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(partition),
-                partition.Value,
-                "Partition must not be negative.");
+                p,
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Invalid partition: {0}. Partition number should always be non-negative or null.",
+                    p));
         }
 
         Partition = partition;

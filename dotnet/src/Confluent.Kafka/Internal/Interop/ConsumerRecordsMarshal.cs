@@ -297,7 +297,7 @@ internal static class ConsumerRecordsMarshal
             CopyBytes(value),
             headers,
             "Error deserializing "
-                + (origin == RecordDeserializationException.DeserializationExceptionOrigin.Key ? "KEY" : "VALUE")
+                + (origin == RecordDeserializationException.DeserializationExceptionOrigin.KEY ? "KEY" : "VALUE")
                 + " for partition " + partition.ToString() + " at offset "
                 + offset.ToString(CultureInfo.InvariantCulture)
                 + ". If needed, please seek past the record to continue consumption.",
@@ -305,9 +305,9 @@ internal static class ConsumerRecordsMarshal
 
     private static TimestampType ToTimestampType(int value) => value switch
     {
-        1 => TimestampType.CreateTime,
-        2 => TimestampType.LogAppendTime,
-        _ => TimestampType.NoTimestampType,
+        1 => TimestampType.CREATE_TIME,
+        2 => TimestampType.LOG_APPEND_TIME,
+        _ => TimestampType.NO_TIMESTAMP_TYPE,
     };
 
     // A topic decoded once per run of partitions of the same topic, and a timestamp type read once per singleton:
@@ -363,7 +363,7 @@ internal static class ConsumerRecordsMarshal
                 catch (Exception cause)
                 {
                     return NewError(
-                        RecordDeserializationException.DeserializationExceptionOrigin.Key,
+                        RecordDeserializationException.DeserializationExceptionOrigin.KEY,
                         new TopicPartition(topic, partition), offset, timestamp, timestampType, key, value, headers, cause);
                 }
             }
@@ -378,7 +378,7 @@ internal static class ConsumerRecordsMarshal
                 catch (Exception cause)
                 {
                     return NewError(
-                        RecordDeserializationException.DeserializationExceptionOrigin.Value,
+                        RecordDeserializationException.DeserializationExceptionOrigin.VALUE,
                         new TopicPartition(topic, partition), offset, timestamp, timestampType, key, value, headers, cause);
                 }
             }
@@ -403,7 +403,7 @@ internal static class ConsumerRecordsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             if (pointer == IntPtr.Zero)
             {
-                return TimestampType.NoTimestampType;
+                return TimestampType.NO_TIMESTAMP_TYPE;
             }
 
             if (pointer != _timestampTypePointer)

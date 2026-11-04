@@ -41,8 +41,8 @@ namespace Confluent.Kafka.Common.Acl;
 public sealed class AccessControlEntryFilter
 {
     /// <summary>A filter matching every access control entry — Java's <c>ANY</c>.</summary>
-    public static AccessControlEntryFilter Any { get; } =
-        new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any);
+    public static AccessControlEntryFilter ANY { get; } =
+        new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
 
     /// <summary>
     /// Creates an access control entry filter — Java's constructor. Unlike
@@ -55,13 +55,13 @@ public sealed class AccessControlEntryFilter
     /// The host, or <c>null</c> to match any. <c>""</c> filters on the empty host.
     /// </param>
     /// <param name="operation">
-    /// The operation, or <see cref="AclOperation.Any"/>. A value that is not a defined member is
-    /// stored as <see cref="AclOperation.Unknown"/>, as Java's <c>fromCode</c> maps a code it has
+    /// The operation, or <see cref="AclOperation.ANY"/>. A value that is not a defined member is
+    /// stored as <see cref="AclOperation.UNKNOWN"/>, as Java's <c>fromCode</c> maps a code it has
     /// no member for.
     /// </param>
     /// <param name="permissionType">
-    /// The permission type, or <see cref="AclPermissionType.Any"/>. A value that is not a defined
-    /// member is stored as <see cref="AclPermissionType.Unknown"/>, as Java's <c>fromCode</c>
+    /// The permission type, or <see cref="AclPermissionType.ANY"/>. A value that is not a defined
+    /// member is stored as <see cref="AclPermissionType.UNKNOWN"/>, as Java's <c>fromCode</c>
     /// maps it.
     /// </param>
     public AccessControlEntryFilter(
@@ -90,10 +90,10 @@ public sealed class AccessControlEntryFilter
     public AclPermissionType PermissionType { get; }
 
     /// <summary>
-    /// Whether the operation or permission type is <c>Unknown</c> — Java's <c>isUnknown()</c>.
+    /// Whether the operation or permission type is <c>UNKNOWN</c> — Java's <c>isUnknown()</c>.
     /// </summary>
     public bool IsUnknown =>
-        Operation == AclOperation.Unknown || PermissionType == AclPermissionType.Unknown;
+        Operation == AclOperation.UNKNOWN || PermissionType == AclPermissionType.UNKNOWN;
 
     /// <summary>Value equality over all four components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
@@ -124,9 +124,7 @@ public sealed class AccessControlEntryFilter
 
     /// <summary>
     /// A diagnostic rendering in the shape of Java's <c>toString()</c>, which renders a null
-    /// component as <c>&lt;any&gt;</c>. The operation and permission type print with their .NET
-    /// names (<c>Read</c>, <c>Allow</c>), where Java prints its constants (<c>READ</c>,
-    /// <c>ALLOW</c>).
+    /// component as <c>&lt;any&gt;</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

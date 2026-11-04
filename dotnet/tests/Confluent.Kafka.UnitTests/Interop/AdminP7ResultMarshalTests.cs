@@ -53,7 +53,7 @@ public sealed class AdminP7ResultMarshalTests
         Assert.Empty(emptyCopy.CredentialInfos);
         Assert.Equal("alice", aliceCopy.Name);
         Assert.Equal(
-            new[] { ScramMechanism.ScramSha256, ScramMechanism.ScramSha512, ScramMechanism.ScramSha256 },
+            new[] { ScramMechanism.SCRAM_SHA_256, ScramMechanism.SCRAM_SHA_512, ScramMechanism.SCRAM_SHA_256 },
             aliceCopy.CredentialInfos.Select(info => info.Mechanism));
         Assert.Equal(new[] { 4096, 8192, 16384 }, aliceCopy.CredentialInfos.Select(info => info.Iterations));
     }
@@ -68,7 +68,7 @@ public sealed class AdminP7ResultMarshalTests
         UserScramCredentialsDescription second = UserScramCredentialMarshal.CopyOutDescription(alice);
 
         Assert.Equal(first, second);
-        Assert.Equal(ScramMechanism.ScramSha512, second.CredentialInfos.Single().Mechanism);
+        Assert.Equal(ScramMechanism.SCRAM_SHA_512, second.CredentialInfos.Single().Mechanism);
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public sealed class AdminP7ResultMarshalTests
 
         ScramCredentialInfo info = UserScramCredentialMarshal.CopyOutDescription(user).CredentialInfos.Single();
 
-        Assert.Equal(ScramMechanism.Unknown, info.Mechanism);
+        Assert.Equal(ScramMechanism.UNKNOWN, info.Mechanism);
         Assert.Equal(4096, info.Iterations);
     }
 
@@ -109,7 +109,7 @@ public sealed class AdminP7ResultMarshalTests
         Assert.Equal(4096, copied["alice"].CredentialInfos.Single().Iterations);
         Assert.Equal("bob", copied["bob"].Name);
         Assert.Equal(
-            new[] { ScramMechanism.ScramSha512, ScramMechanism.ScramSha256 },
+            new[] { ScramMechanism.SCRAM_SHA_512, ScramMechanism.SCRAM_SHA_256 },
             copied["bob"].CredentialInfos.Select(info => info.Mechanism));
         Assert.False(copied.ContainsKey("Alice"));
     }

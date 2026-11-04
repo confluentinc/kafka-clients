@@ -100,17 +100,17 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         Assert.Equal((4_242, ReadUncommitted()), ReadBack(new ListOffsetsOptions { TimeoutMs = 4_242 }));
         Assert.Equal((0, ReadUncommitted()), ReadBack(new ListOffsetsOptions { TimeoutMs = 0 }));
         Assert.Equal((0, ReadUncommitted()), ReadBack(new ListOffsetsOptions { TimeoutMs = -5 }));
-        Assert.Equal((-1, ReadCommitted()), ReadBack(new ListOffsetsOptions { IsolationLevel = IsolationLevel.ReadCommitted }));
+        Assert.Equal((-1, ReadCommitted()), ReadBack(new ListOffsetsOptions { IsolationLevel = IsolationLevel.READ_COMMITTED }));
         Assert.Equal(
-            (-1, ReadUncommitted()), ReadBack(new ListOffsetsOptions { IsolationLevel = IsolationLevel.ReadUncommitted }));
+            (-1, ReadUncommitted()), ReadBack(new ListOffsetsOptions { IsolationLevel = IsolationLevel.READ_UNCOMMITTED }));
 
         ListOffsetsOptions options = new ListOffsetsOptions
         {
             TimeoutMs = 10,
-            IsolationLevel = IsolationLevel.ReadUncommitted,
+            IsolationLevel = IsolationLevel.READ_UNCOMMITTED,
         };
         options.TimeoutMs = null;
-        options.IsolationLevel = IsolationLevel.ReadCommitted;
+        options.IsolationLevel = IsolationLevel.READ_COMMITTED;
         Assert.Equal((-1, ReadCommitted()), ReadBack(options));
     }
 

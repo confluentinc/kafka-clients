@@ -150,23 +150,23 @@ public sealed class PublicAdminConfigsShapeParityTests
     {
         Assert.True(
             new ConfigEntry(
-                "k", "v", ConfigEntry.ConfigSource.DefaultConfig, false, false,
-                Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.String, null).IsDefault);
+                "k", "v", ConfigEntry.ConfigSource.DEFAULT_CONFIG, false, false,
+                Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.STRING, null).IsDefault);
 
         foreach (ConfigEntry.ConfigSource source in Enum.GetValues(typeof(ConfigEntry.ConfigSource))
                      .Cast<ConfigEntry.ConfigSource>()
-                     .Where(source => source != ConfigEntry.ConfigSource.DefaultConfig))
+                     .Where(source => source != ConfigEntry.ConfigSource.DEFAULT_CONFIG))
         {
             Assert.False(
                 new ConfigEntry(
                     "k", "v", source, false, false, Array.Empty<ConfigEntry.ConfigSynonym>(),
-                    ConfigEntry.ConfigType.String, null).IsDefault,
+                    ConfigEntry.ConfigType.STRING, null).IsDefault,
                 $"{source} is not DEFAULT_CONFIG, so IsDefault must be false");
         }
 
         ConfigEntry plain = new ConfigEntry("k", "v");
-        Assert.Equal(ConfigEntry.ConfigSource.Unknown, plain.Source);
-        Assert.Equal(ConfigEntry.ConfigType.Unknown, plain.Type);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, plain.Source);
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, plain.Type);
         Assert.Empty(plain.Synonyms);
         Assert.Null(plain.Documentation);
         Assert.False(plain.IsDefault);
@@ -179,15 +179,15 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(typeof(ConfigEntry), typeof(ConfigEntry.ConfigSource).DeclaringType);
 
         Assert.Equal(
-            new[] { "Unknown", "Boolean", "String", "Int", "Short", "Long", "Double", "List", "Class", "Password" },
+            new[] { "UNKNOWN", "BOOLEAN", "STRING", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS", "PASSWORD" },
             Enum.GetNames(typeof(ConfigEntry.ConfigType)));
 
         Assert.Equal(
             new[]
             {
-                "DynamicTopicConfig", "DynamicBrokerLoggerConfig", "DynamicBrokerConfig",
-                "DynamicDefaultBrokerConfig", "DynamicClientMetricsConfig", "DynamicGroupConfig",
-                "StaticBrokerConfig", "DefaultConfig", "Unknown",
+                "DYNAMIC_TOPIC_CONFIG", "DYNAMIC_BROKER_LOGGER_CONFIG", "DYNAMIC_BROKER_CONFIG",
+                "DYNAMIC_DEFAULT_BROKER_CONFIG", "DYNAMIC_CLIENT_METRICS_CONFIG", "DYNAMIC_GROUP_CONFIG",
+                "STATIC_BROKER_CONFIG", "DEFAULT_CONFIG", "UNKNOWN",
             },
             Enum.GetNames(typeof(ConfigEntry.ConfigSource)));
     }
@@ -231,13 +231,13 @@ public sealed class PublicAdminConfigsShapeParityTests
             typeof(AlterConfigOpType), Property(typeof(AlterConfigOp), nameof(AlterConfigOp.OpType)).PropertyType);
 
         ConfigEntry entry = new ConfigEntry("k", "v");
-        AlterConfigOp op = new AlterConfigOp(entry, AlterConfigOpType.Set);
+        AlterConfigOp op = new AlterConfigOp(entry, AlterConfigOpType.SET);
 
-        Assert.Equal(new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set), op);
+        Assert.Equal(new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET), op);
         Assert.Equal(
-            new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set).GetHashCode(), op.GetHashCode());
-        Assert.NotEqual(new AlterConfigOp(entry, AlterConfigOpType.Delete), op);
-        Assert.NotEqual(new AlterConfigOp(new ConfigEntry("k", "other"), AlterConfigOpType.Set), op);
+            new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET).GetHashCode(), op.GetHashCode());
+        Assert.NotEqual(new AlterConfigOp(entry, AlterConfigOpType.DELETE), op);
+        Assert.NotEqual(new AlterConfigOp(new ConfigEntry("k", "other"), AlterConfigOpType.SET), op);
 
         Assert.StartsWith("AlterConfigOp{opType=SET, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
 
@@ -248,20 +248,20 @@ public sealed class PublicAdminConfigsShapeParityTests
             new ConfigEntry(
                 "k",
                 "v",
-                ConfigEntry.ConfigSource.Unknown,
+                ConfigEntry.ConfigSource.UNKNOWN,
                 isSensitive: true,
                 isReadOnly: true,
                 synonyms: Array.Empty<ConfigEntry.ConfigSynonym>(),
-                type: ConfigEntry.ConfigType.Unknown,
+                type: ConfigEntry.ConfigType.UNKNOWN,
                 documentation: null).ToString(),
             StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData(AlterConfigOpType.Set, 0)]
-    [InlineData(AlterConfigOpType.Delete, 1)]
-    [InlineData(AlterConfigOpType.Append, 2)]
-    [InlineData(AlterConfigOpType.Subtract, 3)]
+    [InlineData(AlterConfigOpType.SET, 0)]
+    [InlineData(AlterConfigOpType.DELETE, 1)]
+    [InlineData(AlterConfigOpType.APPEND, 2)]
+    [InlineData(AlterConfigOpType.SUBTRACT, 3)]
     public void AlterConfigOpType_CarriesJavasWireIds(AlterConfigOpType opType, int id)
     {
         Assert.Equal(id, (int)opType);
@@ -273,7 +273,7 @@ public sealed class PublicAdminConfigsShapeParityTests
     {
         Assert.Null(typeof(AlterConfigOpType).DeclaringType);
         Assert.Equal(
-            new[] { "Append", "Delete", "Set", "Subtract" },
+            new[] { "APPEND", "DELETE", "SET", "SUBTRACT" },
             Enum.GetNames(typeof(AlterConfigOpType)).OrderBy(name => name, StringComparer.Ordinal));
 
         // AlterConfigOp has a member named OpType, so a nested type of that name would be CS0102: the enum is flattened.
@@ -420,50 +420,50 @@ public sealed class PublicAdminConfigsShapeParityTests
     private static readonly Dictionary<ConfigResourceType, string> s_javaResourceTypes =
         new Dictionary<ConfigResourceType, string>
         {
-            [ConfigResourceType.Unknown] = "UNKNOWN",
-            [ConfigResourceType.Topic] = "TOPIC",
-            [ConfigResourceType.Broker] = "BROKER",
-            [ConfigResourceType.BrokerLogger] = "BROKER_LOGGER",
-            [ConfigResourceType.ClientMetrics] = "CLIENT_METRICS",
-            [ConfigResourceType.Group] = "GROUP",
+            [ConfigResourceType.UNKNOWN] = "UNKNOWN",
+            [ConfigResourceType.TOPIC] = "TOPIC",
+            [ConfigResourceType.BROKER] = "BROKER",
+            [ConfigResourceType.BROKER_LOGGER] = "BROKER_LOGGER",
+            [ConfigResourceType.CLIENT_METRICS] = "CLIENT_METRICS",
+            [ConfigResourceType.GROUP] = "GROUP",
         };
 
     private static readonly Dictionary<AlterConfigOpType, string> s_javaOpTypes =
         new Dictionary<AlterConfigOpType, string>
         {
-            [AlterConfigOpType.Set] = "SET",
-            [AlterConfigOpType.Delete] = "DELETE",
-            [AlterConfigOpType.Append] = "APPEND",
-            [AlterConfigOpType.Subtract] = "SUBTRACT",
+            [AlterConfigOpType.SET] = "SET",
+            [AlterConfigOpType.DELETE] = "DELETE",
+            [AlterConfigOpType.APPEND] = "APPEND",
+            [AlterConfigOpType.SUBTRACT] = "SUBTRACT",
         };
 
     private static readonly Dictionary<ConfigEntry.ConfigSource, string> s_javaSources =
         new Dictionary<ConfigEntry.ConfigSource, string>
         {
-            [ConfigEntry.ConfigSource.DynamicTopicConfig] = "DYNAMIC_TOPIC_CONFIG",
-            [ConfigEntry.ConfigSource.DynamicBrokerLoggerConfig] = "DYNAMIC_BROKER_LOGGER_CONFIG",
-            [ConfigEntry.ConfigSource.DynamicBrokerConfig] = "DYNAMIC_BROKER_CONFIG",
-            [ConfigEntry.ConfigSource.DynamicDefaultBrokerConfig] = "DYNAMIC_DEFAULT_BROKER_CONFIG",
-            [ConfigEntry.ConfigSource.DynamicClientMetricsConfig] = "DYNAMIC_CLIENT_METRICS_CONFIG",
-            [ConfigEntry.ConfigSource.DynamicGroupConfig] = "DYNAMIC_GROUP_CONFIG",
-            [ConfigEntry.ConfigSource.StaticBrokerConfig] = "STATIC_BROKER_CONFIG",
-            [ConfigEntry.ConfigSource.DefaultConfig] = "DEFAULT_CONFIG",
-            [ConfigEntry.ConfigSource.Unknown] = "UNKNOWN",
+            [ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG] = "DYNAMIC_TOPIC_CONFIG",
+            [ConfigEntry.ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG] = "DYNAMIC_BROKER_LOGGER_CONFIG",
+            [ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG] = "DYNAMIC_BROKER_CONFIG",
+            [ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG] = "DYNAMIC_DEFAULT_BROKER_CONFIG",
+            [ConfigEntry.ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG] = "DYNAMIC_CLIENT_METRICS_CONFIG",
+            [ConfigEntry.ConfigSource.DYNAMIC_GROUP_CONFIG] = "DYNAMIC_GROUP_CONFIG",
+            [ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG] = "STATIC_BROKER_CONFIG",
+            [ConfigEntry.ConfigSource.DEFAULT_CONFIG] = "DEFAULT_CONFIG",
+            [ConfigEntry.ConfigSource.UNKNOWN] = "UNKNOWN",
         };
 
     private static readonly Dictionary<ConfigEntry.ConfigType, string> s_javaConfigTypes =
         new Dictionary<ConfigEntry.ConfigType, string>
         {
-            [ConfigEntry.ConfigType.Unknown] = "UNKNOWN",
-            [ConfigEntry.ConfigType.Boolean] = "BOOLEAN",
-            [ConfigEntry.ConfigType.String] = "STRING",
-            [ConfigEntry.ConfigType.Int] = "INT",
-            [ConfigEntry.ConfigType.Short] = "SHORT",
-            [ConfigEntry.ConfigType.Long] = "LONG",
-            [ConfigEntry.ConfigType.Double] = "DOUBLE",
-            [ConfigEntry.ConfigType.List] = "LIST",
-            [ConfigEntry.ConfigType.Class] = "CLASS",
-            [ConfigEntry.ConfigType.Password] = "PASSWORD",
+            [ConfigEntry.ConfigType.UNKNOWN] = "UNKNOWN",
+            [ConfigEntry.ConfigType.BOOLEAN] = "BOOLEAN",
+            [ConfigEntry.ConfigType.STRING] = "STRING",
+            [ConfigEntry.ConfigType.INT] = "INT",
+            [ConfigEntry.ConfigType.SHORT] = "SHORT",
+            [ConfigEntry.ConfigType.LONG] = "LONG",
+            [ConfigEntry.ConfigType.DOUBLE] = "DOUBLE",
+            [ConfigEntry.ConfigType.LIST] = "LIST",
+            [ConfigEntry.ConfigType.CLASS] = "CLASS",
+            [ConfigEntry.ConfigType.PASSWORD] = "PASSWORD",
         };
 
     [Fact]
@@ -506,7 +506,7 @@ public sealed class PublicAdminConfigsShapeParityTests
             Assert.Equal(
                 "ConfigEntry(name=k, value=v, source=" + java + ", isSensitive=false, isReadOnly=false, "
                     + "synonyms=[], type=UNKNOWN, documentation=doc)",
-                Entry(source, ConfigEntry.ConfigType.Unknown, "v", "doc").ToString());
+                Entry(source, ConfigEntry.ConfigType.UNKNOWN, "v", "doc").ToString());
             Assert.Equal(
                 "ConfigSynonym(name=a, value=1, source=" + java + ")",
                 new ConfigEntry.ConfigSynonym("a", "1", source).ToString());
@@ -520,7 +520,7 @@ public sealed class PublicAdminConfigsShapeParityTests
             Assert.Equal(
                 "ConfigEntry(name=k, value=v, source=UNKNOWN, isSensitive=false, isReadOnly=false, "
                     + "synonyms=[], type=" + java + ", documentation=doc)",
-                Entry(ConfigEntry.ConfigSource.Unknown, type, "v", "doc").ToString());
+                Entry(ConfigEntry.ConfigSource.UNKNOWN, type, "v", "doc").ToString());
         }
     }
 
@@ -533,7 +533,7 @@ public sealed class PublicAdminConfigsShapeParityTests
             new ConfigEntry("k", null).ToString());
         Assert.Equal(
             "ConfigSynonym(name=a, value=null, source=DEFAULT_CONFIG)",
-            new ConfigEntry.ConfigSynonym("a", null, ConfigEntry.ConfigSource.DefaultConfig).ToString());
+            new ConfigEntry.ConfigSynonym("a", null, ConfigEntry.ConfigSource.DEFAULT_CONFIG).ToString());
         Assert.Equal(
             "Config(entries=[ConfigEntry(name=a, value=1, source=UNKNOWN, isSensitive=false, isReadOnly=false, "
                 + "synonyms=[], type=UNKNOWN, documentation=null)])",
@@ -560,11 +560,11 @@ public sealed class PublicAdminConfigsShapeParityTests
             ConfigEntry sensitive = new ConfigEntry(
                 "k",
                 value,
-                ConfigEntry.ConfigSource.DynamicBrokerConfig,
+                ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG,
                 isSensitive: true,
                 isReadOnly: false,
                 synonyms: Array.Empty<ConfigEntry.ConfigSynonym>(),
-                type: ConfigEntry.ConfigType.Password,
+                type: ConfigEntry.ConfigType.PASSWORD,
                 documentation: null);
 
             Assert.Equal(

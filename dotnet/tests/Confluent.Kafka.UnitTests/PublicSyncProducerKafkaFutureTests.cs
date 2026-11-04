@@ -196,6 +196,9 @@ public sealed class PublicSyncProducerKafkaFutureTests
             Assert.Equal(ApiTopic, placeholder.Topic);
             Assert.Equal(-1, placeholder.Partition);
             Assert.Equal(-1L, placeholder.Offset);
+            Assert.False(placeholder.HasTimestamp);
+            Assert.Equal(-1, placeholder.SerializedKeySize);
+            Assert.Equal(-1, placeholder.SerializedValueSize);
         }
         finally
         {

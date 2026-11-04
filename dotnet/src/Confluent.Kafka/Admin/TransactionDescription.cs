@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
@@ -151,7 +152,7 @@ public sealed class TransactionDescription
             "TransactionDescription(coordinatorId={0}, state={1}, producerId={2}, producerEpoch={3}"
                 + ", transactionTimeoutMs={4}, transactionStartTimeMs={5}, topicPartitions=[{6}])",
             CoordinatorId,
-            State,
+            TransactionMarshal.NameFromState(State) ?? State.ToString(),
             ProducerId,
             ProducerEpoch,
             TransactionTimeoutMs,

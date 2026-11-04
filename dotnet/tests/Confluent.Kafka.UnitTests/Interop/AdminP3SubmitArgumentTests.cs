@@ -109,12 +109,12 @@ public sealed class AdminP3SubmitArgumentTests
     }
 
     [Theory]
-    [InlineData(ConfigResourceType.Unknown, 0)]
-    [InlineData(ConfigResourceType.Topic, 2)]
-    [InlineData(ConfigResourceType.Broker, 4)]
-    [InlineData(ConfigResourceType.BrokerLogger, 8)]
-    [InlineData(ConfigResourceType.ClientMetrics, 16)]
-    [InlineData(ConfigResourceType.Group, 32)]
+    [InlineData(ConfigResourceType.UNKNOWN, 0)]
+    [InlineData(ConfigResourceType.TOPIC, 2)]
+    [InlineData(ConfigResourceType.BROKER, 4)]
+    [InlineData(ConfigResourceType.BROKER_LOGGER, 8)]
+    [InlineData(ConfigResourceType.CLIENT_METRICS, 16)]
+    [InlineData(ConfigResourceType.GROUP, 32)]
     [InlineData((ConfigResourceType)99, 0)]
     [InlineData((ConfigResourceType)(-3), 0)]
     public void ListConfigResources_ARequestedType_ReachesTheCoreAsItsJavaId(ConfigResourceType type, int expectedId)

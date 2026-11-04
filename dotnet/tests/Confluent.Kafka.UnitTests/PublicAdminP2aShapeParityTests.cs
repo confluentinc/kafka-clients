@@ -169,7 +169,7 @@ public sealed class PublicAdminP2aShapeParityTests
         TopicDescription bare = new TopicDescription("t", false, Array.Empty<TopicPartitionInfo>());
         Assert.NotNull(bare.AuthorizedOperations);
         Assert.Empty(bare.AuthorizedOperations!);
-        Assert.Equal(Uuid.Zero, bare.TopicId);
+        Assert.Equal(Uuid.ZERO_UUID, bare.TopicId);
 
         // Java renders the boolean in lowercase, where bool.ToString() gives "True" and "False".
         Assert.StartsWith("(name=t, internal=false, ", bare.ToString(), StringComparison.Ordinal);

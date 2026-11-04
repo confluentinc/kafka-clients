@@ -43,7 +43,7 @@ public sealed class AdminConfigsSubmitArgumentTests
 
     private const string Topic = "cfg-topic";
 
-    private static readonly ConfigResource s_topicResource = new ConfigResource(ConfigResourceType.Topic, Topic);
+    private static readonly ConfigResource s_topicResource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
     [Fact]
     public void DescribeConfigs_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
@@ -129,12 +129,12 @@ public sealed class AdminConfigsSubmitArgumentTests
     }
 
     [Theory]
-    [InlineData(AlterConfigOpType.Set, "1", 0)]
-    [InlineData(AlterConfigOpType.Delete, null, 1)]
-    [InlineData(AlterConfigOpType.Append, "x,y", 2)]
-    [InlineData(AlterConfigOpType.Subtract, "", 3)]
-    [InlineData(AlterConfigOpType.Set, "", 0)]
-    [InlineData(AlterConfigOpType.Delete, "ignored", 1)]
+    [InlineData(AlterConfigOpType.SET, "1", 0)]
+    [InlineData(AlterConfigOpType.DELETE, null, 1)]
+    [InlineData(AlterConfigOpType.APPEND, "x,y", 2)]
+    [InlineData(AlterConfigOpType.SUBTRACT, "", 3)]
+    [InlineData(AlterConfigOpType.SET, "", 0)]
+    [InlineData(AlterConfigOpType.DELETE, "ignored", 1)]
     public void AnOperation_ReachesTheCore_AsItsNameValueAndJavaId(AlterConfigOpType type, string? value, int javaId)
     {
         AlterConfigOp op = new AlterConfigOp(new ConfigEntry("cfg.näme", value), type);
@@ -187,14 +187,14 @@ public sealed class AdminConfigsSubmitArgumentTests
 
         await Alter(admin, Ops(
             s_topicResource,
-            new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.Set),
-            new AlterConfigOp(new ConfigEntry("cleanup.policy", string.Empty), AlterConfigOpType.Set)));
+            new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET),
+            new AlterConfigOp(new ConfigEntry("cleanup.policy", string.Empty), AlterConfigOpType.SET)));
         Config set = await Describe(admin, s_topicResource);
         Assert.Equal("1000", set.Get("retention.ms")!.Value);
         Assert.Equal(string.Empty, set.Get("cleanup.policy")!.Value);
 
         await Alter(admin, Ops(
-            s_topicResource, new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.Delete)));
+            s_topicResource, new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.DELETE)));
         Config deleted = await Describe(admin, s_topicResource);
         Assert.Null(deleted.Get("retention.ms"));
         Assert.Equal(string.Empty, deleted.Get("cleanup.policy")!.Value);
@@ -210,12 +210,12 @@ public sealed class AdminConfigsSubmitArgumentTests
         Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs =
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(ReferenceComparer.Instance)
             {
-                [new ConfigResource(ConfigResourceType.Topic, Topic)] =
-                    new[] { new AlterConfigOp(new ConfigEntry("retention.ms", "1"), AlterConfigOpType.Set) },
-                [new ConfigResource(ConfigResourceType.Topic, Topic)] = new[]
+                [new ConfigResource(ConfigResourceType.TOPIC, Topic)] =
+                    new[] { new AlterConfigOp(new ConfigEntry("retention.ms", "1"), AlterConfigOpType.SET) },
+                [new ConfigResource(ConfigResourceType.TOPIC, Topic)] = new[]
                 {
-                    new AlterConfigOp(new ConfigEntry("retention.ms", "2"), AlterConfigOpType.Set),
-                    new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), AlterConfigOpType.Set),
+                    new AlterConfigOp(new ConfigEntry("retention.ms", "2"), AlterConfigOpType.SET),
+                    new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), AlterConfigOpType.SET),
                 },
             };
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, null));
@@ -270,17 +270,17 @@ public sealed class AdminConfigsSubmitArgumentTests
             new[]
             {
                 s_topicResource,
-                new ConfigResource(ConfigResourceType.Topic, Topic),
-                new ConfigResource(ConfigResourceType.Broker, "0"),
+                new ConfigResource(ConfigResourceType.TOPIC, Topic),
+                new ConfigResource(ConfigResourceType.BROKER, "0"),
                 new ConfigResource((ConfigResourceType)64, "x"),
-                new ConfigResource(ConfigResourceType.Unknown, "x"),
+                new ConfigResource(ConfigResourceType.UNKNOWN, "x"),
             },
             null));
 
         Assert.Equal(3, result.Values.Count);
         Assert.Contains(s_topicResource, result.Values.Keys);
-        Assert.Contains(new ConfigResource(ConfigResourceType.Broker, "0"), result.Values.Keys);
-        Assert.Contains(new ConfigResource(ConfigResourceType.Unknown, "x"), result.Values.Keys);
+        Assert.Contains(new ConfigResource(ConfigResourceType.BROKER, "0"), result.Values.Keys);
+        Assert.Contains(new ConfigResource(ConfigResourceType.UNKNOWN, "x"), result.Values.Keys);
     }
 
     private static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> Ops(

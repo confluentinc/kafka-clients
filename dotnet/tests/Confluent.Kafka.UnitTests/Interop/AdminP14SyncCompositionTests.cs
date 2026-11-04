@@ -103,7 +103,7 @@ public sealed class AdminP14SyncCompositionTests
                     Uuid betaId = new Uuid(0x0102030405060708L, 0x1112131415161718L);
                     harness.SetResult("alpha", Metadata(3, 2));
                     harness.SetResult("beta", new CreateTopicsResult.TopicMetadataAndConfig(betaId, 1, 1, Empty()));
-                    harness.SetResult("gamma", new CreateTopicsResult.TopicMetadataAndConfig(Uuid.Zero, 5, 3, gammaConfig));
+                    harness.SetResult("gamma", new CreateTopicsResult.TopicMetadataAndConfig(Uuid.ZERO_UUID, 5, 3, gammaConfig));
 
                     Assert.Equal(s_topics, harness.ValuesKeys());
                     foreach (string topic in s_topics)
@@ -595,7 +595,7 @@ public sealed class AdminP14SyncCompositionTests
         Node broker = new Node(1, "broker-1", 9092, "rack-a");
         Node controller = new Node(2, "broker-2", 9093, null);
         IReadOnlyCollection<Node> nodes = new[] { broker, controller };
-        IReadOnlyCollection<AclOperation> operations = new[] { AclOperation.Read, AclOperation.Write };
+        IReadOnlyCollection<AclOperation> operations = new[] { AclOperation.READ, AclOperation.WRITE };
 
         switch (row)
         {
@@ -676,8 +676,8 @@ public sealed class AdminP14SyncCompositionTests
         ListConfigResourcesHarness harness = ListConfigResourcesHarness.For(flavour);
         IReadOnlyCollection<ConfigResource> resources = new[]
         {
-            new ConfigResource(ConfigResourceType.Topic, "alpha"),
-            new ConfigResource(ConfigResourceType.Broker, "1"),
+            new ConfigResource(ConfigResourceType.TOPIC, "alpha"),
+            new ConfigResource(ConfigResourceType.BROKER, "1"),
         };
 
         switch (row)
@@ -727,7 +727,7 @@ public sealed class AdminP14SyncCompositionTests
         RunKeyedRow(
             row,
             ValuedHarness<ConfigResource, Config>.DescribeConfigs(flavour, Resources()),
-            new ConfigResource(ConfigResourceType.Topic, "delta"));
+            new ConfigResource(ConfigResourceType.TOPIC, "delta"));
 
     [Theory]
     [MemberData(nameof(AlterConfigsRows))]
@@ -735,7 +735,7 @@ public sealed class AdminP14SyncCompositionTests
         RunKeyedRow(
             row,
             VoidHarness<ConfigResource>.IncrementalAlterConfigs(flavour, Resources()),
-            new ConfigResource(ConfigResourceType.Topic, "delta"));
+            new ConfigResource(ConfigResourceType.TOPIC, "delta"));
 
     [Theory]
     [MemberData(nameof(DescribeLogDirsRows))]
@@ -1275,7 +1275,7 @@ public sealed class AdminP14SyncCompositionTests
         RunKeyedRow(
             row,
             VoidHarness<AclBinding>.CreateAcls(flavour, Bindings(), Bindings()),
-            Binding(ResourceType.Topic, "beta", "User:alice"));
+            Binding(ResourceType.TOPIC, "beta", "User:alice"));
 
     [Theory]
     [MemberData(nameof(DeleteAclsRows))]
@@ -1293,10 +1293,10 @@ public sealed class AdminP14SyncCompositionTests
                     KafkaException first = new KafkaException(31, "the first filter's second delete failed", isRetriable: false);
                     KafkaException second = new KafkaException(32, "the second filter's delete failed", isRetriable: true);
                     DeleteAclsResult.FilterResults firstResults = Matched(
-                        Deleted(Binding(ResourceType.Topic, "alpha", "User:alice")),
-                        Failed(Binding(ResourceType.Topic, "alpha", "User:bob"), first));
+                        Deleted(Binding(ResourceType.TOPIC, "alpha", "User:alice")),
+                        Failed(Binding(ResourceType.TOPIC, "alpha", "User:bob"), first));
                     DeleteAclsResult.FilterResults secondResults = Matched(
-                        Failed(Binding(ResourceType.Topic, "beta", "User:alice"), second));
+                        Failed(Binding(ResourceType.TOPIC, "beta", "User:alice"), second));
                     FutureProbe? before = null;
                     Assert.Null(Thrown(() => before = harness.All()));
                     before!.AssertPending();
@@ -1323,7 +1323,7 @@ public sealed class AdminP14SyncCompositionTests
                     // so the projection never runs and the outer failure wins although it is later in filter order.
                     KafkaException inner = new KafkaException(31, "the first filter's delete failed", isRetriable: false);
                     KafkaException outer = new KafkaException(7, "the second filter failed", isRetriable: true);
-                    harness.Succeed(filters[0], Matched(Failed(Binding(ResourceType.Topic, "alpha", "User:alice"), inner)));
+                    harness.Succeed(filters[0], Matched(Failed(Binding(ResourceType.TOPIC, "alpha", "User:alice"), inner)));
                     harness.Fail(filters[1], outer);
                     harness.Succeed(filters[2]);
 
@@ -1388,7 +1388,7 @@ public sealed class AdminP14SyncCompositionTests
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> quotas =
             new Dictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>
             {
-                [Entity(ClientQuotaEntity.User, "alice")] =
+                [Entity(ClientQuotaEntity.USER, "alice")] =
                     new Dictionary<string, double>(StringComparer.Ordinal) { ["producer_byte_rate"] = 1024d },
             };
         return RunSingleRow(
@@ -1423,7 +1423,7 @@ public sealed class AdminP14SyncCompositionTests
                 await RunKeyedRow(
                     row,
                     VoidHarness<ClientQuotaEntity>.AlterClientQuotas(flavour, Entities(), Entities()),
-                    Entity(ClientQuotaEntity.User, "bob"));
+                    Entity(ClientQuotaEntity.USER, "bob"));
                 break;
         }
     }
@@ -2306,7 +2306,7 @@ public sealed class AdminP14SyncCompositionTests
             $"The future was not done within {BlockingCall.Deadline}.");
 
     private static IReadOnlyCollection<TransactionListing> Listings(int broker) =>
-        new[] { new TransactionListing("txn-" + broker, 100L + broker, TransactionState.Ongoing) };
+        new[] { new TransactionListing("txn-" + broker, 100L + broker, TransactionState.ONGOING) };
 
     private static void AssertGathered(
         IReadOnlyList<int> brokers,
@@ -2634,9 +2634,9 @@ public sealed class AdminP14SyncCompositionTests
 
     private static ConfigResource[] Resources() => new[]
     {
-        new ConfigResource(ConfigResourceType.Topic, "alpha"),
-        new ConfigResource(ConfigResourceType.Broker, "1"),
-        new ConfigResource(ConfigResourceType.Topic, "gamma"),
+        new ConfigResource(ConfigResourceType.TOPIC, "alpha"),
+        new ConfigResource(ConfigResourceType.BROKER, "1"),
+        new ConfigResource(ConfigResourceType.TOPIC, "gamma"),
     };
 
     private static TopicPartitionReplica[] Replicas() => new[]
@@ -2655,28 +2655,28 @@ public sealed class AdminP14SyncCompositionTests
 
     private static AclBinding[] Bindings() => new[]
     {
-        Binding(ResourceType.Topic, "alpha", "User:alice"),
-        Binding(ResourceType.Topic, "alpha", "User:bob"),
-        Binding(ResourceType.Group, "alpha", "User:alice"),
+        Binding(ResourceType.TOPIC, "alpha", "User:alice"),
+        Binding(ResourceType.TOPIC, "alpha", "User:bob"),
+        Binding(ResourceType.GROUP, "alpha", "User:alice"),
     };
 
     private static AclBinding Binding(ResourceType resourceType, string name, string principal) =>
         new AclBinding(
-            new ResourcePattern(resourceType, name, PatternType.Literal),
-            new AccessControlEntry(principal, "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(resourceType, name, PatternType.LITERAL),
+            new AccessControlEntry(principal, "*", AclOperation.READ, AclPermissionType.ALLOW));
 
     private static AclBindingFilter[] Filters() => new[] { Filter("alpha"), Filter("beta"), Filter("gamma") };
 
     private static AclBindingFilter Filter(string name) =>
         new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Literal),
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePatternFilter(ResourceType.TOPIC, name, PatternType.LITERAL),
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 
     private static ClientQuotaEntity[] Entities() => new[]
     {
-        Entity(ClientQuotaEntity.User, "alice"),
-        Entity(ClientQuotaEntity.User, null),
-        Entity(ClientQuotaEntity.ClientId, "alice"),
+        Entity(ClientQuotaEntity.USER, "alice"),
+        Entity(ClientQuotaEntity.USER, null),
+        Entity(ClientQuotaEntity.CLIENT_ID, "alice"),
     };
 
     private static ClientQuotaEntity Entity(string entityType, string? name) =>
@@ -2691,7 +2691,7 @@ public sealed class AdminP14SyncCompositionTests
         new DeleteAclsResult.FilterResult(binding, failure);
 
     private static GroupListing Listing(string groupId) =>
-        new GroupListing(groupId, GroupType.Consumer, "consumer", GroupState.Stable);
+        new GroupListing(groupId, GroupType.CONSUMER, "consumer", GroupState.STABLE);
 
     private static Dictionary<TopicPartition, KafkaException?> Outcomes(
         IReadOnlyList<TopicPartition> partitions, params KafkaException?[] outcomes)
@@ -2706,7 +2706,7 @@ public sealed class AdminP14SyncCompositionTests
     }
 
     private static CreateTopicsResult.TopicMetadataAndConfig Metadata(int numPartitions, int replicationFactor) =>
-        new CreateTopicsResult.TopicMetadataAndConfig(Uuid.Zero, numPartitions, replicationFactor, Empty());
+        new CreateTopicsResult.TopicMetadataAndConfig(Uuid.ZERO_UUID, numPartitions, replicationFactor, Empty());
 
     private static DelegationToken Token(string tokenId) =>
         new DelegationToken(
@@ -3576,10 +3576,10 @@ public sealed class AdminP14SyncCompositionTests
 
         private static ConsumerGroupDescription ConsumerGroup(string groupId) =>
             new ConsumerGroupDescription(
-                groupId, false, null, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
+                groupId, false, null, "range", GroupType.CONSUMER, GroupState.STABLE, null, null, null, null);
 
         private static ClassicGroupDescription ClassicGroup(string groupId) =>
-            new ClassicGroupDescription(groupId, "consumer", "range", null, ClassicGroupState.Stable, null);
+            new ClassicGroupDescription(groupId, "consumer", "range", null, ClassicGroupState.STABLE, null);
     }
 
     /// <summary>
@@ -3807,7 +3807,7 @@ public sealed class AdminP14SyncCompositionTests
         private static TransactionDescription Transaction(string transactionalId) =>
             new TransactionDescription(
                 1,
-                TransactionState.Ongoing,
+                TransactionState.ONGOING,
                 1_000L + transactionalId.Sum(character => (long)character),
                 3,
                 60_000L,
@@ -4418,8 +4418,8 @@ public sealed class AdminP14SyncCompositionTests
                 _values.Add(
                     keys[index],
                     Matched(
-                        Deleted(Binding(ResourceType.Topic, s_topics[index], "User:alice")),
-                        Deleted(Binding(ResourceType.Topic, s_topics[index], "User:bob"))));
+                        Deleted(Binding(ResourceType.TOPIC, s_topics[index], "User:alice")),
+                        Deleted(Binding(ResourceType.TOPIC, s_topics[index], "User:bob"))));
             }
 
             _sync = sync;

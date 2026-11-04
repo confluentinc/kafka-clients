@@ -121,7 +121,7 @@ public sealed class PublicAdminListGroupsResultTests
     }
 
     private static GroupListing Listing(string groupId) =>
-        new GroupListing(groupId, GroupType.Consumer, "consumer", GroupState.Stable);
+        new GroupListing(groupId, GroupType.CONSUMER, "consumer", GroupState.STABLE);
 
     private static KafkaException Error(string message) => new KafkaException(message);
 

@@ -220,5 +220,5 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => asyncAll.Get()));
     }
 
-    private static ClassicGroupDescription Description(string groupId) => new ClassicGroupDescription(groupId, "consumer", "range", null, ClassicGroupState.Stable, null);
+    private static ClassicGroupDescription Description(string groupId) => new ClassicGroupDescription(groupId, "consumer", "range", null, ClassicGroupState.STABLE, null);
 }

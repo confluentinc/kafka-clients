@@ -73,12 +73,12 @@ public sealed class AdminP5SubmitArgumentTests
         ListGroupsOptions options = new ListGroupsOptions
         {
             TimeoutMs = 5,
-            GroupStates = new[] { GroupState.Stable },
+            GroupStates = new[] { GroupState.STABLE },
             ProtocolTypes = new[] { "consumer" },
-            Types = new[] { GroupType.Share },
+            Types = new[] { GroupType.SHARE },
         };
         options.TimeoutMs = 7;
-        options.GroupStates = new[] { GroupState.Dead, GroupState.Empty };
+        options.GroupStates = new[] { GroupState.DEAD, GroupState.EMPTY };
         options.ProtocolTypes = Array.Empty<string>();
         options.Types = null!;
 
@@ -94,7 +94,7 @@ public sealed class AdminP5SubmitArgumentTests
 
         ListGroupsReadBack sent = ReadBack(options);
         Assert.Equal(7, sent.TimeoutMs);
-        Assert.Equal(new[] { GroupState.Dead, GroupState.Empty }, sent.GroupStates.OrderBy(state => state));
+        Assert.Equal(new[] { GroupState.DEAD, GroupState.EMPTY }, sent.GroupStates.OrderBy(state => state));
         Assert.Empty(sent.ProtocolTypes);
         Assert.Empty(sent.Types);
     }
@@ -114,18 +114,18 @@ public sealed class AdminP5SubmitArgumentTests
     {
         ListGroupsReadBack sent = ReadBack(new ListGroupsOptions
         {
-            GroupStates = new[] { GroupState.Stable, GroupState.Empty, GroupState.Stable, GroupState.Reconciling },
+            GroupStates = new[] { GroupState.STABLE, GroupState.EMPTY, GroupState.STABLE, GroupState.RECONCILING },
             ProtocolTypes = new[] { "", "consumer", "prötocol-日本" },
-            Types = new[] { GroupType.Consumer },
+            Types = new[] { GroupType.CONSUMER },
         });
 
         Assert.Equal(
-            new[] { GroupState.Stable, GroupState.Empty, GroupState.Reconciling },
+            new[] { GroupState.STABLE, GroupState.EMPTY, GroupState.RECONCILING },
             sent.GroupStates.OrderBy(state => state));
         Assert.Equal(
             new[] { "", "consumer", "prötocol-日本" },
             sent.ProtocolTypes.OrderBy(name => name, StringComparer.Ordinal));
-        Assert.Equal(new[] { GroupType.Consumer }, sent.Types);
+        Assert.Equal(new[] { GroupType.CONSUMER }, sent.Types);
     }
 
     [Fact]
@@ -136,17 +136,17 @@ public sealed class AdminP5SubmitArgumentTests
             new[] { nameof(ListGroupsOptions.Types), nameof(ListGroupsOptions.ProtocolTypes) },
             consumer.Setters.InOrder);
         ListGroupsReadBack forConsumer = ReadBack(consumer);
-        Assert.Equal(new[] { GroupType.Consumer, GroupType.Classic }, forConsumer.Types.OrderBy(type => type));
+        Assert.Equal(new[] { GroupType.CONSUMER, GroupType.CLASSIC }, forConsumer.Types.OrderBy(type => type));
         Assert.Equal(new[] { "", "consumer" }, forConsumer.ProtocolTypes.OrderBy(name => name, StringComparer.Ordinal));
         Assert.Empty(forConsumer.GroupStates);
         Assert.Equal(-1, forConsumer.TimeoutMs);
 
         ListGroupsReadBack forShare = ReadBack(ListGroupsOptions.ForShareGroups());
-        Assert.Equal(new[] { GroupType.Share }, forShare.Types);
+        Assert.Equal(new[] { GroupType.SHARE }, forShare.Types);
         Assert.Empty(forShare.ProtocolTypes);
 
         ListGroupsReadBack forStreams = ReadBack(ListGroupsOptions.ForStreamsGroups());
-        Assert.Equal(new[] { GroupType.Streams }, forStreams.Types);
+        Assert.Equal(new[] { GroupType.STREAMS }, forStreams.Types);
         Assert.Empty(forStreams.ProtocolTypes);
     }
 

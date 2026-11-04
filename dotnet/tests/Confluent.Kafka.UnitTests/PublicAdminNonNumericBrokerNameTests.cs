@@ -49,14 +49,14 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     private const int CallTimeoutMs = 200;
 
     [Theory]
-    [InlineData(ConfigResourceType.Broker)]
-    [InlineData(ConfigResourceType.BrokerLogger)]
+    [InlineData(ConfigResourceType.BROKER)]
+    [InlineData(ConfigResourceType.BROKER_LOGGER)]
     public async Task RealClient_DescribeConfigs_SendsTheCall(ConfigResourceType brokerType)
     {
         AsyncKafkaAdminClient admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(
             new[] { broker, topic }, new DescribeConfigsOptions { TimeoutMs = CallTimeoutMs });
@@ -67,14 +67,14 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     }
 
     [Theory]
-    [InlineData(ConfigResourceType.Broker)]
-    [InlineData(ConfigResourceType.BrokerLogger)]
+    [InlineData(ConfigResourceType.BROKER)]
+    [InlineData(ConfigResourceType.BROKER_LOGGER)]
     public async Task RealClient_IncrementalAlterConfigs_SendsTheCall(ConfigResourceType brokerType)
     {
         AsyncKafkaAdminClient admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             Alterations(broker, topic), new AlterConfigsOptions { TimeoutMs = CallTimeoutMs });
@@ -89,8 +89,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     {
         AsyncMockAdminClient admin = await NewMockWithTopic();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "x");
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource broker = new ConfigResource(ConfigResourceType.BROKER, "x");
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
 
@@ -103,8 +103,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     {
         AsyncMockAdminClient admin = await NewMockWithTopic();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BrokerLogger, "x");
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BROKER_LOGGER, "x");
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { brokerLogger, topic });
 
@@ -117,8 +117,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     {
         AsyncMockAdminClient admin = await NewMockWithTopic();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "x");
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource broker = new ConfigResource(ConfigResourceType.BROKER, "x");
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
 
@@ -131,8 +131,8 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     {
         AsyncMockAdminClient admin = await NewMockWithTopic();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BrokerLogger, "x");
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource brokerLogger = new ConfigResource(ConfigResourceType.BROKER_LOGGER, "x");
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(brokerLogger, topic));
 
@@ -172,7 +172,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         foreach (ConfigResource resource in resources)
         {
             alterations[resource] =
-                new[] { new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), AlterConfigOpType.Set) };
+                new[] { new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact"), AlterConfigOpType.SET) };
         }
 
         return alterations;

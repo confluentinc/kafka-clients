@@ -51,7 +51,7 @@ public sealed class PublicAdminConfigsTests
             }).All().Get(),
             s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { resource });
 
         Config config = await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
@@ -70,7 +70,7 @@ public sealed class PublicAdminConfigsTests
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -78,7 +78,7 @@ public sealed class PublicAdminConfigsTests
                 {
                     [resource] = new[]
                     {
-                        new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.Set),
+                        new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET),
                     },
                 }).All().Get(),
             s_deadline);
@@ -104,7 +104,7 @@ public sealed class PublicAdminConfigsTests
             }).All().Get(),
             s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -112,7 +112,7 @@ public sealed class PublicAdminConfigsTests
                 {
                     [resource] = new[]
                     {
-                        new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.Delete),
+                        new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.DELETE),
                     },
                 }).All().Get(),
             s_deadline);
@@ -130,14 +130,14 @@ public sealed class PublicAdminConfigsTests
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, Topic);
-        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "public-cfg-absent");
+        ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, Topic);
+        ConfigResource missing = new ConfigResource(ConfigResourceType.TOPIC, "public-cfg-absent");
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
-                [present] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.Set) },
-                [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.Set) },
+                [present] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.SET) },
+                [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.SET) },
             });
 
         await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
@@ -153,10 +153,10 @@ public sealed class PublicAdminConfigsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ConfigResource subscription = new ConfigResource(ConfigResourceType.ClientMetrics, "sub-1");
+        ConfigResource subscription = new ConfigResource(ConfigResourceType.CLIENT_METRICS, "sub-1");
 
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All().Get(), s_deadline));
+            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }).All().Get(), s_deadline));
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -165,13 +165,13 @@ public sealed class PublicAdminConfigsTests
                     [subscription] = new[]
                     {
                         new AlterConfigOp(
-                            new ConfigEntry("interval.ms", "60000"), AlterConfigOpType.Set),
+                            new ConfigEntry("interval.ms", "60000"), AlterConfigOpType.SET),
                     },
                 }).All().Get(),
             s_deadline);
 
         IReadOnlyCollection<ConfigResource> filtered = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }).All().Get(), s_deadline);
         Assert.Equal(subscription, Assert.Single(filtered));
 
         Config config = await TestTimeout.Run(
@@ -190,14 +190,14 @@ public sealed class PublicAdminConfigsTests
                 new[] { new NewTopic(Topic, 1, 1), new NewTopic("public-cfg-sibling", 1, 1) }).All().Get(),
             s_deadline);
 
-        ConfigResource noOps = new ConfigResource(ConfigResourceType.Topic, Topic);
-        ConfigResource sibling = new ConfigResource(ConfigResourceType.Topic, "public-cfg-sibling");
+        ConfigResource noOps = new ConfigResource(ConfigResourceType.TOPIC, Topic);
+        ConfigResource sibling = new ConfigResource(ConfigResourceType.TOPIC, "public-cfg-sibling");
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
                 [noOps] = Array.Empty<AlterConfigOp>(),
-                [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
+                [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
 
         await TestTimeout.Run(() => result.Values[noOps].Get(), s_deadline);
@@ -221,7 +221,7 @@ public sealed class PublicAdminConfigsTests
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
@@ -239,7 +239,7 @@ public sealed class PublicAdminConfigsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "public-cfg-never-created");
+        ConfigResource absent = new ConfigResource(ConfigResourceType.TOPIC, "public-cfg-never-created");
 
         // Zero operations are sent as an empty operation list, so the core answers and rejects them.
         AsyncAlterConfigsResult zeroOps = admin.IncrementalAlterConfigs(
@@ -255,7 +255,7 @@ public sealed class PublicAdminConfigsTests
         AsyncAlterConfigsResult withOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
-                [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
+                [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => withOps.Values[absent].Get()), s_deadline);
@@ -272,8 +272,8 @@ public sealed class PublicAdminConfigsTests
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
 
         ConfigResource key = Assert.Single(result.Values.Keys);
-        Assert.Equal(ConfigResourceType.Unknown, key.Type);
-        Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.Unknown, "x")));
+        Assert.Equal(ConfigResourceType.UNKNOWN, key.Type);
+        Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
 
         NotSupportedException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<NotSupportedException>(() => result.Values[undefined].Get()), s_deadline);
@@ -285,7 +285,7 @@ public sealed class PublicAdminConfigsTests
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         Assert.Null(Record.Exception(
             () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions { TimeoutMs = -1 })));
@@ -308,7 +308,7 @@ public sealed class PublicAdminConfigsTests
             () => admin.DescribeConfigs(new ConfigResource[] { null! }));
         Assert.Equal("resources", nullResource.ParamName);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         ArgumentException nullOps = Assert.Throws<ArgumentException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }));
@@ -323,7 +323,7 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("configs", nullOp.ParamName);
 
         // AlterConfigOp itself rejects a null entry, so the submit path never sees one.
-        Assert.Throws<ArgumentNullException>(() => new AlterConfigOp(null!, AlterConfigOpType.Set));
+        Assert.Throws<ArgumentNullException>(() => new AlterConfigOp(null!, AlterConfigOpType.SET));
     }
 
     [Fact]
@@ -332,7 +332,7 @@ public sealed class PublicAdminConfigsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         Assert.Throws<ObjectDisposedException>(() => admin.DescribeConfigs(new[] { resource }));
         Assert.Throws<ObjectDisposedException>(
             () => admin.IncrementalAlterConfigs(
@@ -348,13 +348,13 @@ public sealed class PublicAdminConfigsTests
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("cfg-smoke", 1, 1) }).All().Get(), s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "cfg-smoke");
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, "cfg-smoke");
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
-                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
+                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
                 }).All().Get(),
             s_deadline);
 
@@ -371,13 +371,13 @@ public sealed class PublicAdminConfigsTests
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
-                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("x", "y"), AlterConfigOpType.Set) },
+                    [resource] = new[] { new AlterConfigOp(new ConfigEntry("x", "y"), AlterConfigOpType.SET) },
                 }).All().Get(),
             s_deadline);
 

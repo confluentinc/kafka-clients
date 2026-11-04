@@ -126,9 +126,9 @@ internal static class Translate
 
     private static GroupMembershipOperation GroupMembershipOperationFromName(string name) => name switch
     {
-        "LEAVE_GROUP" => GroupMembershipOperation.LeaveGroup,
-        "REMAIN_IN_GROUP" => GroupMembershipOperation.RemainInGroup,
-        "DEFAULT" => GroupMembershipOperation.Default,
+        "LEAVE_GROUP" => GroupMembershipOperation.LEAVE_GROUP,
+        "REMAIN_IN_GROUP" => GroupMembershipOperation.REMAIN_IN_GROUP,
+        "DEFAULT" => GroupMembershipOperation.DEFAULT,
         _ => throw new KeyNotFoundException($"'{name}'"),
     };
 
@@ -319,13 +319,12 @@ internal static class Translate
         return new ProducerRecord<byte[], byte[]>(proto.Topic, value, key, partition, timestamp);
     }
 
-    // -1: the public RecordMetadata has no serialized-size accessors (Python sends the sizes).
     internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata
     {
         Offset = metadata.Offset,
         Timestamp = metadata.Timestamp,
-        SerializedKeySize = -1,
-        SerializedValueSize = -1,
+        SerializedKeySize = metadata.SerializedKeySize,
+        SerializedValueSize = metadata.SerializedValueSize,
         Topic = metadata.Topic,
         Partition = metadata.Partition,
     };

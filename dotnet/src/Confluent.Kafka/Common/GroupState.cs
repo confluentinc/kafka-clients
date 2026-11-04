@@ -31,6 +31,10 @@ namespace Confluent.Kafka.Common;
 /// assembly; do not persist it.
 /// </para>
 /// <para>
+/// <c>ToString()</c> gives the Java constant name (<c>STABLE</c>), not Java's <c>toString()</c>
+/// text (<c>"Stable"</c>): a recorded deviation.
+/// </para>
+/// <para>
 /// Java's <c>parse(String)</c> is not published (a recorded deviation): it decodes a wire
 /// spelling the caller never sees.
 /// </para>
@@ -41,31 +45,31 @@ public enum GroupState
     /// The state is not known to this client — Java's <c>UNKNOWN</c>, the state for a name this
     /// client does not recognise.
     /// </summary>
-    Unknown,
+    UNKNOWN,
 
     /// <summary>Java's <c>PREPARING_REBALANCE</c>.</summary>
-    PreparingRebalance,
+    PREPARING_REBALANCE,
 
     /// <summary>Java's <c>COMPLETING_REBALANCE</c>.</summary>
-    CompletingRebalance,
+    COMPLETING_REBALANCE,
 
     /// <summary>Java's <c>STABLE</c>.</summary>
-    Stable,
+    STABLE,
 
     /// <summary>Java's <c>DEAD</c>.</summary>
-    Dead,
+    DEAD,
 
     /// <summary>Java's <c>EMPTY</c>.</summary>
-    Empty,
+    EMPTY,
 
     /// <summary>Java's <c>ASSIGNING</c>.</summary>
-    Assigning,
+    ASSIGNING,
 
     /// <summary>Java's <c>RECONCILING</c>.</summary>
-    Reconciling,
+    RECONCILING,
 
     /// <summary>Java's <c>NOT_READY</c>.</summary>
-    NotReady,
+    NOT_READY,
 }
 
 /// <summary>
@@ -86,55 +90,55 @@ public static class GroupStateExtensions
     /// <param name="type">The group type to tabulate.</param>
     /// <returns>A new collection on each call, as Java's <c>Set.of(…)</c>.</returns>
     /// <exception cref="ArgumentException">
-    /// <paramref name="type"/> is <see cref="GroupType.Unknown"/> or is not a defined
+    /// <paramref name="type"/> is <see cref="GroupType.UNKNOWN"/> or is not a defined
     /// <see cref="GroupType"/>, with Java's message "Group type not known".
     /// </exception>
     /// <remarks>
-    /// <see cref="GroupState.Unknown"/> is in none of the sets, as in Java's code.
+    /// <see cref="GroupState.UNKNOWN"/> is in none of the sets, as in Java's code.
     /// </remarks>
     public static IReadOnlyCollection<GroupState> GroupStatesForType(this GroupType type)
     {
         switch (type)
         {
-            case GroupType.Classic:
+            case GroupType.CLASSIC:
                 return new HashSet<GroupState>
                 {
-                    GroupState.PreparingRebalance,
-                    GroupState.CompletingRebalance,
-                    GroupState.Stable,
-                    GroupState.Dead,
-                    GroupState.Empty,
+                    GroupState.PREPARING_REBALANCE,
+                    GroupState.COMPLETING_REBALANCE,
+                    GroupState.STABLE,
+                    GroupState.DEAD,
+                    GroupState.EMPTY,
                 };
 
-            case GroupType.Consumer:
+            case GroupType.CONSUMER:
                 return new HashSet<GroupState>
                 {
-                    GroupState.PreparingRebalance,
-                    GroupState.CompletingRebalance,
-                    GroupState.Stable,
-                    GroupState.Dead,
-                    GroupState.Empty,
-                    GroupState.Assigning,
-                    GroupState.Reconciling,
+                    GroupState.PREPARING_REBALANCE,
+                    GroupState.COMPLETING_REBALANCE,
+                    GroupState.STABLE,
+                    GroupState.DEAD,
+                    GroupState.EMPTY,
+                    GroupState.ASSIGNING,
+                    GroupState.RECONCILING,
                 };
 
-            case GroupType.Streams:
+            case GroupType.STREAMS:
                 return new HashSet<GroupState>
                 {
-                    GroupState.Stable,
-                    GroupState.Dead,
-                    GroupState.Empty,
-                    GroupState.Assigning,
-                    GroupState.Reconciling,
-                    GroupState.NotReady,
+                    GroupState.STABLE,
+                    GroupState.DEAD,
+                    GroupState.EMPTY,
+                    GroupState.ASSIGNING,
+                    GroupState.RECONCILING,
+                    GroupState.NOT_READY,
                 };
 
-            case GroupType.Share:
+            case GroupType.SHARE:
                 return new HashSet<GroupState>
                 {
-                    GroupState.Stable,
-                    GroupState.Dead,
-                    GroupState.Empty,
+                    GroupState.STABLE,
+                    GroupState.DEAD,
+                    GroupState.EMPTY,
                 };
 
             default:

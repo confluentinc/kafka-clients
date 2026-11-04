@@ -19,18 +19,22 @@ namespace Confluent.Kafka.Common;
 /// </summary>
 /// <remarks>
 /// <para>
-/// All six Java constants, in Java's order. <see cref="Unknown"/> is a real member: a state too
+/// All six Java constants, in Java's order. <see cref="UNKNOWN"/> is a real member: a state too
 /// new for this client reads as it, as Java's <c>parse</c> maps it.
 /// </para>
 /// <para>
-/// A separate enum from <see cref="GroupState"/>, as in Java: <see cref="GroupState.NotReady"/>,
-/// <c>Assigning</c> and <c>Reconciling</c> have no counterpart here, so the two are not
-/// intercastable.
+/// A separate enum from <see cref="GroupState"/>, as in Java: <see cref="GroupState.NOT_READY"/>,
+/// <see cref="GroupState.ASSIGNING"/> and <see cref="GroupState.RECONCILING"/> have no
+/// counterpart here, so the two are not intercastable.
 /// </para>
 /// <para>
 /// The wire value is Java's <c>toString()</c> spelling (<c>"Stable"</c>,
 /// <c>"PreparingRebalance"</c>, …); Java's constants carry no numeric id, so never persist the
 /// underlying <see langword="int"/>.
+/// </para>
+/// <para>
+/// <c>ToString()</c> gives the Java constant name (<c>STABLE</c>), not Java's <c>toString()</c>
+/// text (<c>"Stable"</c>): a recorded deviation.
 /// </para>
 /// <para>
 /// Java's <c>parse(String)</c> is not published, a recorded deviation: it decodes a wire
@@ -43,20 +47,20 @@ public enum ClassicGroupState
     /// The state is not known to this client — Java's <c>UNKNOWN</c>, the value <c>parse</c>
     /// yields for a name it does not recognise.
     /// </summary>
-    Unknown,
+    UNKNOWN,
 
     /// <summary>Java's <c>PREPARING_REBALANCE</c>.</summary>
-    PreparingRebalance,
+    PREPARING_REBALANCE,
 
     /// <summary>Java's <c>COMPLETING_REBALANCE</c>.</summary>
-    CompletingRebalance,
+    COMPLETING_REBALANCE,
 
     /// <summary>Java's <c>STABLE</c>.</summary>
-    Stable,
+    STABLE,
 
     /// <summary>Java's <c>DEAD</c>.</summary>
-    Dead,
+    DEAD,
 
     /// <summary>Java's <c>EMPTY</c>.</summary>
-    Empty,
+    EMPTY,
 }

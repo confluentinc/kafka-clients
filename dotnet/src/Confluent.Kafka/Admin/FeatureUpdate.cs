@@ -29,20 +29,20 @@ public sealed class FeatureUpdate
     public enum UpgradeType : byte
     {
         /// <summary>Unrecognized — Java's <c>UNKNOWN</c>.</summary>
-        Unknown = 0,
+        UNKNOWN = 0,
 
         /// <summary>Raise the feature level — Java's <c>UPGRADE</c>.</summary>
-        Upgrade = 1,
+        UPGRADE = 1,
 
         /// <summary>
         /// Lower the level, but only where no metadata is lost — Java's <c>SAFE_DOWNGRADE</c>.
         /// </summary>
-        SafeDowngrade = 2,
+        SAFE_DOWNGRADE = 2,
 
         /// <summary>
         /// Lower the level, allowing metadata loss — Java's <c>UNSAFE_DOWNGRADE</c>.
         /// </summary>
-        UnsafeDowngrade = 3,
+        UNSAFE_DOWNGRADE = 3,
     }
 
     /// <summary>Creates an update — Java's constructor.</summary>
@@ -53,11 +53,11 @@ public sealed class FeatureUpdate
     /// <param name="upgradeType">The kind of change.</param>
     /// <exception cref="ArgumentException">
     /// <paramref name="maxVersionLevel"/> is <c>0</c> with
-    /// <see cref="UpgradeType.Upgrade"/>, or is negative.
+    /// <see cref="UpgradeType.UPGRADE"/>, or is negative.
     /// </exception>
     public FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)
     {
-        if (maxVersionLevel == 0 && upgradeType == UpgradeType.Upgrade)
+        if (maxVersionLevel == 0 && upgradeType == UpgradeType.UPGRADE)
         {
             throw new ArgumentException(
                 string.Format(
@@ -119,10 +119,10 @@ public sealed class FeatureUpdate
 
     private static string JavaName(UpgradeType upgradeType) => upgradeType switch
     {
-        UpgradeType.Unknown => "UNKNOWN",
-        UpgradeType.Upgrade => "UPGRADE",
-        UpgradeType.SafeDowngrade => "SAFE_DOWNGRADE",
-        UpgradeType.UnsafeDowngrade => "UNSAFE_DOWNGRADE",
+        UpgradeType.UNKNOWN => "UNKNOWN",
+        UpgradeType.UPGRADE => "UPGRADE",
+        UpgradeType.SAFE_DOWNGRADE => "SAFE_DOWNGRADE",
+        UpgradeType.UNSAFE_DOWNGRADE => "UNSAFE_DOWNGRADE",
         _ => ((int)upgradeType).ToString(CultureInfo.InvariantCulture),
     };
 }
@@ -135,16 +135,16 @@ public static class UpgradeTypes
 {
     /// <summary>
     /// The upgrade type for a code — Java's <c>UpgradeType.fromCode(int)</c>. An unknown code
-    /// gives <see cref="FeatureUpdate.UpgradeType.Unknown"/>; it never throws.
+    /// gives <see cref="FeatureUpdate.UpgradeType.UNKNOWN"/>; it never throws.
     /// </summary>
     /// <param name="code">The code.</param>
     /// <returns>The upgrade type.</returns>
     public static FeatureUpdate.UpgradeType FromCode(int code) =>
         code switch
         {
-            1 => FeatureUpdate.UpgradeType.Upgrade,
-            2 => FeatureUpdate.UpgradeType.SafeDowngrade,
-            3 => FeatureUpdate.UpgradeType.UnsafeDowngrade,
-            _ => FeatureUpdate.UpgradeType.Unknown,
+            1 => FeatureUpdate.UpgradeType.UPGRADE,
+            2 => FeatureUpdate.UpgradeType.SAFE_DOWNGRADE,
+            3 => FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE,
+            _ => FeatureUpdate.UpgradeType.UNKNOWN,
         };
 }

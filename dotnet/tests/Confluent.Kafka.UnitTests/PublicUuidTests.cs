@@ -70,9 +70,9 @@ public sealed class PublicUuidTests
     [Fact]
     public void Zero_IsTheAllZeroIdentifier()
     {
-        Assert.Equal(new Uuid(0L, 0L), Uuid.Zero);
-        Assert.Equal(0L, Uuid.Zero.MostSignificantBits);
-        Assert.Equal(0L, Uuid.Zero.LeastSignificantBits);
+        Assert.Equal(new Uuid(0L, 0L), Uuid.ZERO_UUID);
+        Assert.Equal(0L, Uuid.ZERO_UUID.MostSignificantBits);
+        Assert.Equal(0L, Uuid.ZERO_UUID.LeastSignificantBits);
     }
 
     [Fact]
@@ -137,7 +137,7 @@ public sealed class PublicUuidTests
         Assert.Equal("value", slash.ParamName);
 
         Assert.False(Uuid.TryParse(standard, out Uuid rejected));
-        Assert.Equal(Uuid.Zero, rejected);
+        Assert.Equal(Uuid.ZERO_UUID, rejected);
 
         Assert.Throws<ArgumentException>(() => Uuid.Parse("AAAAAAAAAAAAAAAAAAAA+A"));
         Assert.Equal("AAAAAAAAAAAAAAAAAAAA-A", Uuid.Parse("AAAAAAAAAAAAAAAAAAAA-A").ToString());
@@ -176,7 +176,7 @@ public sealed class PublicUuidTests
         Assert.Equal("value", rejected.ParamName);
 
         Assert.False(Uuid.TryParse(shortOfPadding, out Uuid fromTryParse));
-        Assert.Equal(Uuid.Zero, fromTryParse);
+        Assert.Equal(Uuid.ZERO_UUID, fromTryParse);
 
         Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded.Substring(0, 22)));
     }
@@ -185,7 +185,7 @@ public sealed class PublicUuidTests
     public void TryParse_ReportsFailureWithoutThrowing()
     {
         Assert.False(Uuid.TryParse(null, out Uuid fromNull));
-        Assert.Equal(Uuid.Zero, fromNull);
+        Assert.Equal(Uuid.ZERO_UUID, fromNull);
 
         Assert.False(Uuid.TryParse("AAAAAAAAAAAAAAAAAAAAAAAAA", out _));
         Assert.False(Uuid.TryParse("AAAAAAAAAAAAAAAAAAAAAAA", out _));
@@ -199,20 +199,20 @@ public sealed class PublicUuidTests
     [Fact]
     public void ReservedConstants_MirrorJava()
     {
-        Assert.Equal(new Uuid(0L, 1L), Uuid.One);
-        Assert.Equal("AAAAAAAAAAAAAAAAAAAAAQ", Uuid.One.ToString());
-        Assert.Equal(Uuid.One, Uuid.MetadataTopicId);
+        Assert.Equal(new Uuid(0L, 1L), Uuid.ONE_UUID);
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAAAQ", Uuid.ONE_UUID.ToString());
+        Assert.Equal(Uuid.ONE_UUID, Uuid.METADATA_TOPIC_ID);
 
-        Assert.Equal(2, Uuid.Reserved.Count);
-        Assert.Contains(Uuid.Zero, Uuid.Reserved);
-        Assert.Contains(Uuid.One, Uuid.Reserved);
+        Assert.Equal(2, Uuid.RESERVED.Count);
+        Assert.Contains(Uuid.ZERO_UUID, Uuid.RESERVED);
+        Assert.Contains(Uuid.ONE_UUID, Uuid.RESERVED);
         Assert.Equal(
-            new HashSet<Uuid> { Uuid.Zero, Uuid.One },
-            new HashSet<Uuid>(Uuid.Reserved));
+            new HashSet<Uuid> { Uuid.ZERO_UUID, Uuid.ONE_UUID },
+            new HashSet<Uuid>(Uuid.RESERVED));
 
-        ICollection<Uuid> asCollection = Assert.IsAssignableFrom<ICollection<Uuid>>(Uuid.Reserved);
+        ICollection<Uuid> asCollection = Assert.IsAssignableFrom<ICollection<Uuid>>(Uuid.RESERVED);
         Assert.True(asCollection.IsReadOnly);
-        Assert.Throws<NotSupportedException>(() => asCollection.Remove(Uuid.Zero));
+        Assert.Throws<NotSupportedException>(() => asCollection.Remove(Uuid.ZERO_UUID));
         Assert.Throws<NotSupportedException>(() => asCollection.Add(new Uuid(0L, 2L)));
     }
 
@@ -225,9 +225,9 @@ public sealed class PublicUuidTests
 
         foreach ((string name, Type type) in new[]
         {
-            (nameof(Uuid.One), typeof(Uuid)),
-            (nameof(Uuid.MetadataTopicId), typeof(Uuid)),
-            (nameof(Uuid.Reserved), typeof(IReadOnlyCollection<Uuid>)),
+            (nameof(Uuid.ONE_UUID), typeof(Uuid)),
+            (nameof(Uuid.METADATA_TOPIC_ID), typeof(Uuid)),
+            (nameof(Uuid.RESERVED), typeof(IReadOnlyCollection<Uuid>)),
         })
         {
             PropertyInfo property = typeof(Uuid).GetProperty(name, BindingFlags.Public | BindingFlags.Static)!;
@@ -294,7 +294,7 @@ public sealed class PublicUuidTests
         {
             Uuid uuid = Uuid.RandomUuid();
 
-            Assert.DoesNotContain(uuid, Uuid.Reserved);
+            Assert.DoesNotContain(uuid, Uuid.RESERVED);
             Assert.DoesNotContain("-", uuid.ToString(), StringComparison.Ordinal);
             Assert.Equal(4L, (uuid.MostSignificantBits >> 12) & 0xF);
             Assert.Equal(2UL, (ulong)uuid.LeastSignificantBits >> 62);
@@ -313,7 +313,7 @@ public sealed class PublicUuidTests
         Assert.DoesNotContain("-", valid.ToString(), StringComparison.Ordinal);
 
         Queue<Uuid> candidates = new Queue<Uuid>(
-            new[] { Uuid.Zero, Uuid.One, dashLeading, dashInside, valid });
+            new[] { Uuid.ZERO_UUID, Uuid.ONE_UUID, dashLeading, dashInside, valid });
 
         Uuid chosen = Uuid.RandomUuid(candidates.Dequeue);
 

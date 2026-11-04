@@ -39,14 +39,14 @@ public sealed class PublicAdminP8TypesTests
         Assert.Equal(
             new[]
             {
-                "Ongoing",
-                "PrepareAbort",
-                "PrepareCommit",
-                "CompleteAbort",
-                "CompleteCommit",
-                "Empty",
-                "PrepareEpochFence",
-                "Unknown",
+                "ONGOING",
+                "PREPARE_ABORT",
+                "PREPARE_COMMIT",
+                "COMPLETE_ABORT",
+                "COMPLETE_COMMIT",
+                "EMPTY",
+                "PREPARE_EPOCH_FENCE",
+                "UNKNOWN",
             },
             Enum.GetNames(typeof(TransactionState)));
     }
@@ -56,7 +56,7 @@ public sealed class PublicAdminP8TypesTests
     {
         // The broker-side TransactionState has a ninth DEAD constant with no client counterpart; the client enum is the
         // contract.
-        Assert.DoesNotContain("Dead", Enum.GetNames(typeof(TransactionState)));
+        Assert.DoesNotContain("DEAD", Enum.GetNames(typeof(TransactionState)));
     }
 
     [Fact]
@@ -139,11 +139,11 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void TransactionListing_ExposesJavasThreeAccessors()
     {
-        TransactionListing listing = new TransactionListing("txn-1", 77L, TransactionState.PrepareCommit);
+        TransactionListing listing = new TransactionListing("txn-1", 77L, TransactionState.PREPARE_COMMIT);
 
         Assert.Equal("txn-1", listing.TransactionalId);
         Assert.Equal(77L, listing.ProducerId);
-        Assert.Equal(TransactionState.PrepareCommit, listing.State);
+        Assert.Equal(TransactionState.PREPARE_COMMIT, listing.State);
 
         // Java names the accessor state() although the field is transactionState.
         Assert.Contains("State", DeclaredPublicPropertyNames(typeof(TransactionListing)));
@@ -154,7 +154,7 @@ public sealed class PublicAdminP8TypesTests
     public void TransactionListing_RejectsANullTransactionalId()
     {
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(
-            () => new TransactionListing(null!, 1L, TransactionState.Empty));
+            () => new TransactionListing(null!, 1L, TransactionState.EMPTY));
 
         Assert.Equal("transactionalId", error.ParamName);
     }
@@ -162,30 +162,30 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void TransactionListing_EqualityCoversAllThreeFields()
     {
-        TransactionListing baseline = new TransactionListing("txn-1", 77L, TransactionState.Ongoing);
+        TransactionListing baseline = new TransactionListing("txn-1", 77L, TransactionState.ONGOING);
 
-        Assert.Equal(baseline, new TransactionListing("txn-1", 77L, TransactionState.Ongoing));
+        Assert.Equal(baseline, new TransactionListing("txn-1", 77L, TransactionState.ONGOING));
         Assert.Equal(
             baseline.GetHashCode(),
-            new TransactionListing("txn-1", 77L, TransactionState.Ongoing).GetHashCode());
+            new TransactionListing("txn-1", 77L, TransactionState.ONGOING).GetHashCode());
 
-        Assert.NotEqual(baseline, new TransactionListing("txn-2", 77L, TransactionState.Ongoing));
-        Assert.NotEqual(baseline, new TransactionListing("txn-1", 78L, TransactionState.Ongoing));
-        Assert.NotEqual(baseline, new TransactionListing("txn-1", 77L, TransactionState.Empty));
+        Assert.NotEqual(baseline, new TransactionListing("txn-2", 77L, TransactionState.ONGOING));
+        Assert.NotEqual(baseline, new TransactionListing("txn-1", 78L, TransactionState.ONGOING));
+        Assert.NotEqual(baseline, new TransactionListing("txn-1", 77L, TransactionState.EMPTY));
     }
 
     [Fact]
     public void TransactionListing_ToStringMatchesJavasShape() =>
         Assert.Equal(
             "TransactionListing(transactionalId='txn-1', producerId=77, transactionState=Ongoing)",
-            new TransactionListing("txn-1", 77L, TransactionState.Ongoing).ToString());
+            new TransactionListing("txn-1", 77L, TransactionState.ONGOING).ToString());
 
     [Fact]
     public void TransactionDescription_ExposesEveryFieldWithJavasWidths()
     {
         TransactionDescription description = new TransactionDescription(
             coordinatorId: 3,
-            state: TransactionState.CompleteAbort,
+            state: TransactionState.COMPLETE_ABORT,
             producerId: 44L,
             producerEpoch: 5,
             transactionTimeoutMs: 60_000L,
@@ -193,7 +193,7 @@ public sealed class PublicAdminP8TypesTests
             topicPartitions: new[] { new TopicPartition("orders", 7) });
 
         Assert.Equal(3, description.CoordinatorId);
-        Assert.Equal(TransactionState.CompleteAbort, description.State);
+        Assert.Equal(TransactionState.COMPLETE_ABORT, description.State);
         Assert.Equal(44L, description.ProducerId);
         Assert.Equal(5, description.ProducerEpoch);
         Assert.Equal(60_000L, description.TransactionTimeoutMs);
@@ -216,20 +216,20 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void TransactionDescription_AbsentStartTimeIsNull() =>
         Assert.Null(
-            new TransactionDescription(1, TransactionState.Empty, 2L, 3, 4L, null, null)
+            new TransactionDescription(1, TransactionState.EMPTY, 2L, 3, 4L, null, null)
                 .TransactionStartTimeMs);
 
     [Fact]
     public void TransactionDescription_NullPartitionsBecomeAnEmptyCollection() =>
         Assert.Empty(
-            new TransactionDescription(1, TransactionState.Empty, 2L, 3, 4L, null, null).TopicPartitions);
+            new TransactionDescription(1, TransactionState.EMPTY, 2L, 3, 4L, null, null).TopicPartitions);
 
     [Fact]
     public void TransactionDescription_PartitionsAreDeduplicatedAndSetCompared()
     {
         TransactionDescription duplicated = new TransactionDescription(
             1,
-            TransactionState.Ongoing,
+            TransactionState.ONGOING,
             2L,
             3,
             4L,
@@ -240,7 +240,7 @@ public sealed class PublicAdminP8TypesTests
 
         TransactionDescription reordered = new TransactionDescription(
             1,
-            TransactionState.Ongoing,
+            TransactionState.ONGOING,
             2L,
             3,
             4L,
@@ -256,37 +256,37 @@ public sealed class PublicAdminP8TypesTests
     {
         TopicPartition[] partitions = new[] { new TopicPartition("t", 0) };
         TransactionDescription baseline = new TransactionDescription(
-            1, TransactionState.Ongoing, 2L, 3, 4L, 5L, partitions);
+            1, TransactionState.ONGOING, 2L, 3, 4L, 5L, partitions);
 
         Assert.Equal(
             baseline,
-            new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 4L, 5L, partitions));
+            new TransactionDescription(1, TransactionState.ONGOING, 2L, 3, 4L, 5L, partitions));
 
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(9, TransactionState.Ongoing, 2L, 3, 4L, 5L, partitions));
+            new TransactionDescription(9, TransactionState.ONGOING, 2L, 3, 4L, 5L, partitions));
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(1, TransactionState.Empty, 2L, 3, 4L, 5L, partitions));
+            new TransactionDescription(1, TransactionState.EMPTY, 2L, 3, 4L, 5L, partitions));
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(1, TransactionState.Ongoing, 9L, 3, 4L, 5L, partitions));
+            new TransactionDescription(1, TransactionState.ONGOING, 9L, 3, 4L, 5L, partitions));
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(1, TransactionState.Ongoing, 2L, 9, 4L, 5L, partitions));
+            new TransactionDescription(1, TransactionState.ONGOING, 2L, 9, 4L, 5L, partitions));
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 9L, 5L, partitions));
+            new TransactionDescription(1, TransactionState.ONGOING, 2L, 3, 9L, 5L, partitions));
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 4L, 9L, partitions));
+            new TransactionDescription(1, TransactionState.ONGOING, 2L, 3, 4L, 9L, partitions));
         Assert.NotEqual(
             baseline,
-            new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 4L, null, partitions));
+            new TransactionDescription(1, TransactionState.ONGOING, 2L, 3, 4L, null, partitions));
         Assert.NotEqual(
             baseline,
             new TransactionDescription(
-                1, TransactionState.Ongoing, 2L, 3, 4L, 5L, new[] { new TopicPartition("t", 9) }));
+                1, TransactionState.ONGOING, 2L, 3, 4L, 5L, new[] { new TopicPartition("t", 9) }));
     }
 
     [Fact]
@@ -296,12 +296,12 @@ public sealed class PublicAdminP8TypesTests
             "TransactionDescription(coordinatorId=1, state=Ongoing, producerId=2, producerEpoch=3"
                 + ", transactionTimeoutMs=4, transactionStartTimeMs=OptionalLong[5], topicPartitions=[t-0])",
             new TransactionDescription(
-                1, TransactionState.Ongoing, 2L, 3, 4L, 5L, new[] { new TopicPartition("t", 0) })
+                1, TransactionState.ONGOING, 2L, 3, 4L, 5L, new[] { new TopicPartition("t", 0) })
                 .ToString());
 
         Assert.Contains(
             "transactionStartTimeMs=OptionalLong.empty",
-            new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 4L, null, null).ToString());
+            new TransactionDescription(1, TransactionState.ONGOING, 2L, 3, 4L, null, null).ToString());
     }
 
     [Fact]
@@ -458,16 +458,16 @@ public sealed class PublicAdminP8TypesTests
     {
         List<TransactionState> states = new List<TransactionState>
         {
-            TransactionState.Ongoing,
-            TransactionState.Ongoing,
-            TransactionState.PrepareAbort,
+            TransactionState.ONGOING,
+            TransactionState.ONGOING,
+            TransactionState.PREPARE_ABORT,
         };
 
         ListTransactionsOptions options = new ListTransactionsOptions { FilteredStates = states };
 
         Assert.Equal(2, options.FilteredStates.Count);
 
-        states.Add(TransactionState.Empty);
+        states.Add(TransactionState.EMPTY);
         Assert.Equal(2, options.FilteredStates.Count);
         Assert.NotSame(states, options.FilteredStates);
     }
@@ -477,7 +477,7 @@ public sealed class PublicAdminP8TypesTests
     {
         ListTransactionsOptions baseline = new ListTransactionsOptions
         {
-            FilteredStates = new[] { TransactionState.Ongoing },
+            FilteredStates = new[] { TransactionState.ONGOING },
             FilteredProducerIds = new[] { 7L },
             FilteredDuration = 1_000L,
             FilteredTransactionalIdPattern = "txn-.*",
@@ -486,7 +486,7 @@ public sealed class PublicAdminP8TypesTests
 
         ListTransactionsOptions differentTimeout = new ListTransactionsOptions
         {
-            FilteredStates = new[] { TransactionState.Ongoing },
+            FilteredStates = new[] { TransactionState.ONGOING },
             FilteredProducerIds = new[] { 7L },
             FilteredDuration = 1_000L,
             FilteredTransactionalIdPattern = "txn-.*",
@@ -500,7 +500,7 @@ public sealed class PublicAdminP8TypesTests
         Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredDuration = 1_001L));
         Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredTransactionalIdPattern = "other"));
         Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredTransactionalIdPattern = null));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredStates = new[] { TransactionState.Empty }));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredStates = new[] { TransactionState.EMPTY }));
         Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredProducerIds = new[] { 8L }));
     }
 
@@ -511,7 +511,7 @@ public sealed class PublicAdminP8TypesTests
                 + ", filteredDuration=1000, filteredTransactionalIdPattern=txn-.*, timeoutMs=500)",
             new ListTransactionsOptions
             {
-                FilteredStates = new[] { TransactionState.Ongoing },
+                FilteredStates = new[] { TransactionState.ONGOING },
                 FilteredProducerIds = new[] { 7L },
                 FilteredDuration = 1_000L,
                 FilteredTransactionalIdPattern = "txn-.*",

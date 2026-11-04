@@ -40,11 +40,11 @@ public class PublicClientQuotaTypesTests
     public void FilterComponent_ThreeFactories_ProduceThreeMatchTypes()
     {
         ClientQuotaFilterComponent exact =
-            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice");
+            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice");
         ClientQuotaFilterComponent dflt =
-            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User);
+            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.USER);
         ClientQuotaFilterComponent specified =
-            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User);
+            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER);
 
         Assert.Equal(ClientQuotaMatchType.Exact, exact.MatchType);
         Assert.Equal("alice", exact.MatchName);
@@ -55,18 +55,18 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(ClientQuotaMatchType.Specified, specified.MatchType);
         Assert.Null(specified.MatchName);
 
-        Assert.Equal(ClientQuotaEntity.User, exact.EntityType);
-        Assert.Equal(ClientQuotaEntity.User, dflt.EntityType);
-        Assert.Equal(ClientQuotaEntity.User, specified.EntityType);
+        Assert.Equal(ClientQuotaEntity.USER, exact.EntityType);
+        Assert.Equal(ClientQuotaEntity.USER, dflt.EntityType);
+        Assert.Equal(ClientQuotaEntity.USER, specified.EntityType);
     }
 
     [Fact]
     public void FilterComponent_DefaultAndSpecified_AreDistinct()
     {
         ClientQuotaFilterComponent dflt =
-            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User);
+            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.USER);
         ClientQuotaFilterComponent specified =
-            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User);
+            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER);
 
         Assert.NotEqual(dflt, specified);
         Assert.NotEqual(dflt.GetHashCode(), specified.GetHashCode());
@@ -79,21 +79,21 @@ public class PublicClientQuotaTypesTests
         };
 
         Assert.Equal(2, byComponent.Count);
-        Assert.Equal("default-user", byComponent[ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User)]);
-        Assert.Equal("any-named-user", byComponent[ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User)]);
+        Assert.Equal("default-user", byComponent[ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.USER)]);
+        Assert.Equal("any-named-user", byComponent[ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER)]);
     }
 
     [Fact]
     public void FilterComponent_ValueEquality()
     {
-        ClientQuotaFilterComponent a = ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.Ip, "10.0.0.1");
-        ClientQuotaFilterComponent b = ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.Ip, "10.0.0.1");
+        ClientQuotaFilterComponent a = ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.IP, "10.0.0.1");
+        ClientQuotaFilterComponent b = ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.IP, "10.0.0.1");
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
 
-        Assert.NotEqual(a, ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.Ip, "10.0.0.2"));
-        Assert.NotEqual(a, ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "10.0.0.1"));
+        Assert.NotEqual(a, ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.IP, "10.0.0.2"));
+        Assert.NotEqual(a, ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "10.0.0.1"));
         Assert.False(a.Equals("not a component"));
     }
 
@@ -103,7 +103,7 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(
             "entityName",
             Assert.Throws<ArgumentNullException>(
-                () => ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, null!)).ParamName);
+                () => ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, null!)).ParamName);
 
         Assert.Equal(
             "entityType",
@@ -132,27 +132,27 @@ public class PublicClientQuotaTypesTests
     {
         Assert.Equal(
             "ClientQuotaFilterComponent(entityType=user, matchType=Exact, matchName=alice)",
-            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice").ToString());
+            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice").ToString());
 
         Assert.Equal(
             "ClientQuotaFilterComponent(entityType=user, matchType=Default, matchName=null)",
-            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User).ToString());
+            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.USER).ToString());
 
         Assert.Equal(
             "ClientQuotaFilterComponent(entityType=user, matchType=Specified, matchName=null)",
-            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User).ToString());
+            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER).ToString());
     }
 
     [Fact]
     public void Entity_EntityTypeConstants()
     {
-        Assert.Equal("user", ClientQuotaEntity.User);
-        Assert.Equal("client-id", ClientQuotaEntity.ClientId);
-        Assert.Equal("ip", ClientQuotaEntity.Ip);
+        Assert.Equal("user", ClientQuotaEntity.USER);
+        Assert.Equal("client-id", ClientQuotaEntity.CLIENT_ID);
+        Assert.Equal("ip", ClientQuotaEntity.IP);
 
-        Assert.True(ClientQuotaEntity.IsValidEntityType(ClientQuotaEntity.User));
-        Assert.True(ClientQuotaEntity.IsValidEntityType(ClientQuotaEntity.ClientId));
-        Assert.True(ClientQuotaEntity.IsValidEntityType(ClientQuotaEntity.Ip));
+        Assert.True(ClientQuotaEntity.IsValidEntityType(ClientQuotaEntity.USER));
+        Assert.True(ClientQuotaEntity.IsValidEntityType(ClientQuotaEntity.CLIENT_ID));
+        Assert.True(ClientQuotaEntity.IsValidEntityType(ClientQuotaEntity.IP));
 
         Assert.False(ClientQuotaEntity.IsValidEntityType("User"));
         Assert.False(ClientQuotaEntity.IsValidEntityType("client_id"));
@@ -164,11 +164,11 @@ public class PublicClientQuotaTypesTests
     public void Entity_NullValueIsNeitherEmptyNorAName()
     {
         var defaultUser = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = null });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = null });
         var emptyNamedUser = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = string.Empty });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = string.Empty });
         var namedUser = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" });
 
         Assert.NotEqual(defaultUser, emptyNamedUser);
         Assert.NotEqual(defaultUser, namedUser);
@@ -185,21 +185,21 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(3, quotas.Count);
         Assert.Equal(
             1.0,
-            quotas[new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = null })]);
+            quotas[new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.USER] = null })]);
         Assert.Equal(
             2.0,
             quotas[new ClientQuotaEntity(
-                new Dictionary<string, string?> { [ClientQuotaEntity.User] = string.Empty })]);
+                new Dictionary<string, string?> { [ClientQuotaEntity.USER] = string.Empty })]);
         Assert.Equal(
             3.0,
-            quotas[new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" })]);
+            quotas[new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" })]);
     }
 
     [Fact]
     public void Entity_NullValueIsNotAnAbsentEntry()
     {
         var defaultUser = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = null });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = null });
         var empty = new ClientQuotaEntity(new Dictionary<string, string?>());
 
         Assert.NotEqual(defaultUser, empty);
@@ -212,13 +212,13 @@ public class PublicClientQuotaTypesTests
     {
         var a = new ClientQuotaEntity(new Dictionary<string, string?>
         {
-            [ClientQuotaEntity.User] = "alice",
-            [ClientQuotaEntity.ClientId] = null,
+            [ClientQuotaEntity.USER] = "alice",
+            [ClientQuotaEntity.CLIENT_ID] = null,
         });
         var b = new ClientQuotaEntity(new Dictionary<string, string?>
         {
-            [ClientQuotaEntity.ClientId] = null,
-            [ClientQuotaEntity.User] = "alice",
+            [ClientQuotaEntity.CLIENT_ID] = null,
+            [ClientQuotaEntity.USER] = "alice",
         });
 
         Assert.Equal(a, b);
@@ -226,8 +226,8 @@ public class PublicClientQuotaTypesTests
 
         var different = new ClientQuotaEntity(new Dictionary<string, string?>
         {
-            [ClientQuotaEntity.User] = "alice",
-            [ClientQuotaEntity.ClientId] = "app",
+            [ClientQuotaEntity.USER] = "alice",
+            [ClientQuotaEntity.CLIENT_ID] = "app",
         });
 
         Assert.NotEqual(a, different);
@@ -237,14 +237,14 @@ public class PublicClientQuotaTypesTests
     [Fact]
     public void Entity_CopiesItsEntries()
     {
-        var source = new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" };
+        var source = new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" };
         var entity = new ClientQuotaEntity(source);
 
-        source[ClientQuotaEntity.User] = "bob";
-        source[ClientQuotaEntity.Ip] = "10.0.0.1";
+        source[ClientQuotaEntity.USER] = "bob";
+        source[ClientQuotaEntity.IP] = "10.0.0.1";
 
         Assert.Single(entity.Entries);
-        Assert.Equal("alice", entity.Entries[ClientQuotaEntity.User]);
+        Assert.Equal("alice", entity.Entries[ClientQuotaEntity.USER]);
     }
 
     [Fact]
@@ -260,19 +260,19 @@ public class PublicClientQuotaTypesTests
     {
         Assert.Equal(
             "ClientQuotaEntity(entries={user=null})",
-            new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = null })
+            new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.USER] = null })
                 .ToString());
 
         Assert.Equal(
             "ClientQuotaEntity(entries={user=alice})",
-            new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" })
+            new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" })
                 .ToString());
     }
 
     [Fact]
     public void Filter_ThreeFactories()
     {
-        var components = new[] { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User) };
+        var components = new[] { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER) };
 
         ClientQuotaFilter contains = ClientQuotaFilter.Contains(components);
         ClientQuotaFilter containsOnly = ClientQuotaFilter.ContainsOnly(components);
@@ -295,13 +295,13 @@ public class PublicClientQuotaTypesTests
     {
         ClientQuotaFilter a = ClientQuotaFilter.Contains(new[]
         {
-            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
-            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.ClientId),
+            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice"),
+            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.CLIENT_ID),
         });
         ClientQuotaFilter b = ClientQuotaFilter.Contains(new[]
         {
-            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
-            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.ClientId),
+            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice"),
+            ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.CLIENT_ID),
         });
 
         Assert.Equal(a, b);
@@ -310,8 +310,8 @@ public class PublicClientQuotaTypesTests
 
         ClientQuotaFilter specified = ClientQuotaFilter.Contains(new[]
         {
-            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
-            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.ClientId),
+            ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice"),
+            ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.CLIENT_ID),
         });
 
         Assert.NotEqual(a, specified);
@@ -321,13 +321,13 @@ public class PublicClientQuotaTypesTests
     [Fact]
     public void Filter_CopiesItsComponents()
     {
-        var source = new[] { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User) };
+        var source = new[] { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER) };
         ClientQuotaFilter filter = ClientQuotaFilter.Contains(source);
 
-        source[0] = ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.Ip, "10.0.0.1");
+        source[0] = ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.IP, "10.0.0.1");
 
         Assert.Equal(
-            ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User) }),
+            ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER) }),
             filter);
     }
 
@@ -357,7 +357,7 @@ public class PublicClientQuotaTypesTests
             "ClientQuotaFilter(components=[ClientQuotaFilterComponent(entityType=user, matchType=Default, "
                 + "matchName=null)], strict=true)",
             ClientQuotaFilter.ContainsOnly(
-                new[] { ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User) }).ToString());
+                new[] { ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.USER) }).ToString());
     }
 
     [Fact]
@@ -395,7 +395,7 @@ public class PublicClientQuotaTypesTests
     public void Alteration_CarriesEntityAndOps()
     {
         var entity = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" });
         var ops = new[]
         {
             new ClientQuotaAlteration.Op("producer_byte_rate", 1024.0),
@@ -416,7 +416,7 @@ public class PublicClientQuotaTypesTests
     public void Alteration_RejectsNullArguments()
     {
         var entity = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" });
 
         Assert.Equal(
             "entity",
@@ -438,7 +438,7 @@ public class PublicClientQuotaTypesTests
     public void Alteration_UsesReferenceEqualityLikeJava()
     {
         var entity = new ClientQuotaEntity(
-            new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" });
+            new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" });
         var ops = new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1024.0) };
 
         var a = new ClientQuotaAlteration(entity, ops);
@@ -460,7 +460,7 @@ public class PublicClientQuotaTypesTests
             new ClientQuotaAlteration.Op("producer_byte_rate", 0.0).ToString());
 
         var alteration = new ClientQuotaAlteration(
-            new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" }),
+            new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" }),
             new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1024.0) });
 
         Assert.Equal(

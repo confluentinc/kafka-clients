@@ -1396,8 +1396,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr outErr = IntPtr.Zero;
         IntPtr singleton = operation switch
         {
-            GroupMembershipOperation.LeaveGroup => NativeMethods.CloseOptionsLeaveGroup(ref outErr),
-            GroupMembershipOperation.RemainInGroup => NativeMethods.CloseOptionsRemainInGroup(ref outErr),
+            GroupMembershipOperation.LEAVE_GROUP => NativeMethods.CloseOptionsLeaveGroup(ref outErr),
+            GroupMembershipOperation.REMAIN_IN_GROUP => NativeMethods.CloseOptionsRemainInGroup(ref outErr),
             _ => NativeMethods.CloseOptionsDefault(ref outErr),
         };
         KafkaException.ThrowIfFfiFailed(ref outErr);

@@ -74,8 +74,7 @@ public sealed class UserScramCredentialsDescription
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c>. Each mechanism prints
-    /// with its .NET name, as in <see cref="ScramCredentialInfo.ToString"/>.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

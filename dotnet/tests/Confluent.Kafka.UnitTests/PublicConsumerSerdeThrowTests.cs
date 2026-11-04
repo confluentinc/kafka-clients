@@ -49,7 +49,7 @@ public sealed class PublicConsumerSerdeThrowTests
 
         Assert.IsAssignableFrom<SerializationException>(ex);
         Assert.IsType<ThrowingDeserializer<int>.BoomException>(ex.InnerException);
-        Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.Value, ex.Origin);
+        Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.VALUE, ex.Origin);
         Assert.Equal(
             "Error deserializing VALUE for partition " + Topic + "-" + Partition.ToString(CultureInfo.InvariantCulture)
                 + " at offset 99. If needed, please seek past the record to continue consumption.",
@@ -67,7 +67,7 @@ public sealed class PublicConsumerSerdeThrowTests
 
         RecordDeserializationException ex = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.Key, ex.Origin);
+        Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.KEY, ex.Origin);
         Assert.Equal(
             "Error deserializing KEY for partition " + Topic + "-" + Partition.ToString(CultureInfo.InvariantCulture)
                 + " at offset 5. If needed, please seek past the record to continue consumption.",
@@ -92,7 +92,7 @@ public sealed class PublicConsumerSerdeThrowTests
                 () => TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline));
 
             Assert.IsType<ThrowingDeserializer<int>.BoomException>(ex.InnerException);
-            Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.Value, ex.Origin);
+            Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.VALUE, ex.Origin);
             Assert.Equal(
                 "Error deserializing VALUE for partition " + Topic + "-" + Partition.ToString(CultureInfo.InvariantCulture)
                     + " at offset 7. If needed, please seek past the record to continue consumption.",

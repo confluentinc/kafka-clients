@@ -47,8 +47,8 @@ public sealed class AdminP6SubmitArgumentTests
     public void Filter_NullIsANullPointer_AndEmptyIsAPointerToANul()
     {
         AclBindingFilter nulls = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
-            new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any));
+            new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.ANY),
+            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY));
         WithFilter(nulls, (pattern, entry) =>
         {
             Assert.Equal(IntPtr.Zero, Read(pattern, NativeMethods.ResourcePatternFilterName));
@@ -57,8 +57,8 @@ public sealed class AdminP6SubmitArgumentTests
         });
 
         AclBindingFilter empties = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Any),
-            new AccessControlEntryFilter(string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any));
+            new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.ANY),
+            new AccessControlEntryFilter(string.Empty, string.Empty, AclOperation.ANY, AclPermissionType.ANY));
         WithFilter(empties, (pattern, entry) =>
         {
             AssertEmptyString(Read(pattern, NativeMethods.ResourcePatternFilterName));
@@ -71,18 +71,18 @@ public sealed class AdminP6SubmitArgumentTests
     public void Filter_CarriesEveryColumn()
     {
         AclBindingFilter filter = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Group, "grüppe-ü", PatternType.Prefixed),
-            new AccessControlEntryFilter("User:bjørn", "10.0.0.1", AclOperation.Describe, AclPermissionType.Deny));
+            new ResourcePatternFilter(ResourceType.GROUP, "grüppe-ü", PatternType.PREFIXED),
+            new AccessControlEntryFilter("User:bjørn", "10.0.0.1", AclOperation.DESCRIBE, AclPermissionType.DENY));
         WithFilter(filter, (pattern, entry) =>
         {
-            Assert.Equal((sbyte)ResourceType.Group, ResourceTypeCode(pattern, NativeMethods.ResourcePatternFilterResourceType));
+            Assert.Equal((sbyte)ResourceType.GROUP, ResourceTypeCode(pattern, NativeMethods.ResourcePatternFilterResourceType));
             Assert.Equal("grüppe-ü", Utf8Marshal.PtrToString(Read(pattern, NativeMethods.ResourcePatternFilterName)));
-            Assert.Equal((sbyte)PatternType.Prefixed, PatternTypeCode(pattern, NativeMethods.ResourcePatternFilterPatternType));
+            Assert.Equal((sbyte)PatternType.PREFIXED, PatternTypeCode(pattern, NativeMethods.ResourcePatternFilterPatternType));
             Assert.Equal("User:bjørn", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryFilterPrincipal)));
             Assert.Equal("10.0.0.1", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryFilterHost)));
-            Assert.Equal((sbyte)AclOperation.Describe, OperationCode(entry, NativeMethods.AccessControlEntryFilterOperation));
+            Assert.Equal((sbyte)AclOperation.DESCRIBE, OperationCode(entry, NativeMethods.AccessControlEntryFilterOperation));
             Assert.Equal(
-                (sbyte)AclPermissionType.Deny,
+                (sbyte)AclPermissionType.DENY,
                 PermissionTypeCode(entry, NativeMethods.AccessControlEntryFilterPermissionType));
         });
     }
@@ -91,7 +91,7 @@ public sealed class AdminP6SubmitArgumentTests
     [MemberData(nameof(ResourceTypes))]
     public void Filter_EveryResourceType_CrossesAsItsCode(ResourceType resourceType) =>
         WithFilter(
-            Filter(resourceType, PatternType.Any, AclOperation.Any, AclPermissionType.Any),
+            Filter(resourceType, PatternType.ANY, AclOperation.ANY, AclPermissionType.ANY),
             (pattern, _) => Assert.Equal(
                 (sbyte)resourceType, ResourceTypeCode(pattern, NativeMethods.ResourcePatternFilterResourceType)));
 
@@ -99,7 +99,7 @@ public sealed class AdminP6SubmitArgumentTests
     [MemberData(nameof(PatternTypes))]
     public void Filter_EveryPatternType_CrossesAsItsCode(PatternType patternType) =>
         WithFilter(
-            Filter(ResourceType.Any, patternType, AclOperation.Any, AclPermissionType.Any),
+            Filter(ResourceType.ANY, patternType, AclOperation.ANY, AclPermissionType.ANY),
             (pattern, _) => Assert.Equal(
                 (sbyte)patternType, PatternTypeCode(pattern, NativeMethods.ResourcePatternFilterPatternType)));
 
@@ -107,7 +107,7 @@ public sealed class AdminP6SubmitArgumentTests
     [MemberData(nameof(Operations))]
     public void Filter_EveryOperation_CrossesAsItsCode(AclOperation operation) =>
         WithFilter(
-            Filter(ResourceType.Any, PatternType.Any, operation, AclPermissionType.Any),
+            Filter(ResourceType.ANY, PatternType.ANY, operation, AclPermissionType.ANY),
             (_, entry) => Assert.Equal(
                 (sbyte)operation, OperationCode(entry, NativeMethods.AccessControlEntryFilterOperation)));
 
@@ -115,7 +115,7 @@ public sealed class AdminP6SubmitArgumentTests
     [MemberData(nameof(PermissionTypes))]
     public void Filter_EveryPermissionType_CrossesAsItsCode(AclPermissionType permissionType) =>
         WithFilter(
-            Filter(ResourceType.Any, PatternType.Any, AclOperation.Any, permissionType),
+            Filter(ResourceType.ANY, PatternType.ANY, AclOperation.ANY, permissionType),
             (_, entry) => Assert.Equal(
                 (sbyte)permissionType, PermissionTypeCode(entry, NativeMethods.AccessControlEntryFilterPermissionType)));
 
@@ -123,17 +123,17 @@ public sealed class AdminP6SubmitArgumentTests
     public void Binding_CarriesEveryColumn()
     {
         AclBinding binding = new AclBinding(
-            new ResourcePattern(ResourceType.TransactionalId, "tx-ünï", PatternType.Literal),
-            new AccessControlEntry("User:ålice", "*", AclOperation.Write, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TRANSACTIONAL_ID, "tx-ünï", PatternType.LITERAL),
+            new AccessControlEntry("User:ålice", "*", AclOperation.WRITE, AclPermissionType.ALLOW));
         WithBinding(binding, (pattern, entry) =>
         {
-            Assert.Equal((sbyte)ResourceType.TransactionalId, ResourceTypeCode(pattern, NativeMethods.ResourcePatternResourceType));
+            Assert.Equal((sbyte)ResourceType.TRANSACTIONAL_ID, ResourceTypeCode(pattern, NativeMethods.ResourcePatternResourceType));
             Assert.Equal("tx-ünï", Utf8Marshal.PtrToString(Read(pattern, NativeMethods.ResourcePatternName)));
-            Assert.Equal((sbyte)PatternType.Literal, PatternTypeCode(pattern, NativeMethods.ResourcePatternPatternType));
+            Assert.Equal((sbyte)PatternType.LITERAL, PatternTypeCode(pattern, NativeMethods.ResourcePatternPatternType));
             Assert.Equal("User:ålice", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryPrincipal)));
             Assert.Equal("*", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryHost)));
-            Assert.Equal((sbyte)AclOperation.Write, OperationCode(entry, NativeMethods.AccessControlEntryOperation));
-            Assert.Equal((sbyte)AclPermissionType.Allow, PermissionTypeCode(entry, NativeMethods.AccessControlEntryPermissionType));
+            Assert.Equal((sbyte)AclOperation.WRITE, OperationCode(entry, NativeMethods.AccessControlEntryOperation));
+            Assert.Equal((sbyte)AclPermissionType.ALLOW, PermissionTypeCode(entry, NativeMethods.AccessControlEntryPermissionType));
         });
     }
 
@@ -141,8 +141,8 @@ public sealed class AdminP6SubmitArgumentTests
     public void Binding_AnEmptyString_IsAPointerToANul()
     {
         AclBinding binding = new AclBinding(
-            new ResourcePattern(ResourceType.Topic, string.Empty, PatternType.Literal),
-            new AccessControlEntry(string.Empty, string.Empty, AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, string.Empty, PatternType.LITERAL),
+            new AccessControlEntry(string.Empty, string.Empty, AclOperation.READ, AclPermissionType.ALLOW));
         WithBinding(binding, (pattern, entry) =>
         {
             AssertEmptyString(Read(pattern, NativeMethods.ResourcePatternName));
@@ -200,9 +200,9 @@ public sealed class AdminP6SubmitArgumentTests
         ClientQuotaFilter filter = ClientQuotaFilter.Contains(
             new[]
             {
-                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
-                ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.ClientId),
-                ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.Ip),
+                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice"),
+                ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.CLIENT_ID),
+                ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.IP),
             });
         WithQuotaFilter(filter, (components, strict) =>
         {
@@ -224,8 +224,8 @@ public sealed class AdminP6SubmitArgumentTests
         ClientQuotaFilter filter = ClientQuotaFilter.Contains(
             new[]
             {
-                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, string.Empty),
-                ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User),
+                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, string.Empty),
+                ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER),
             });
         WithQuotaFilter(filter, (components, _) =>
         {
@@ -249,7 +249,7 @@ public sealed class AdminP6SubmitArgumentTests
     public void QuotaFilter_StrictIsForwardedBothWays()
     {
         ClientQuotaFilterComponent[] components =
-            { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User) };
+            { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER) };
 
         WithQuotaFilter(ClientQuotaFilter.ContainsOnly(components), (native, strict) =>
         {
@@ -267,7 +267,7 @@ public sealed class AdminP6SubmitArgumentTests
     public void QuotaFilter_NonAsciiNameRoundTrips() =>
         WithQuotaFilter(
             ClientQuotaFilter.Contains(
-                new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "用户-ü") }),
+                new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "用户-ü") }),
             (components, _) => Assert.Equal(
                 "ClientQuotaFilterComponent(entityType=user, match=Optional[用户-ü])",
                 OwnedString(components[0], Native.ClientQuotaFilterComponentToString)));
@@ -276,7 +276,7 @@ public sealed class AdminP6SubmitArgumentTests
     public void Alteration_ANullOpValueIsNaN_AndZeroIsZero() =>
         WithAlteration(
             new ClientQuotaAlteration(
-                Entity(ClientQuotaEntity.User, "ternary"),
+                Entity(ClientQuotaEntity.USER, "ternary"),
                 new[]
                 {
                     new ClientQuotaAlteration.Op("producer_byte_rate", null),
@@ -293,7 +293,7 @@ public sealed class AdminP6SubmitArgumentTests
     public void Alteration_TheEntityNameTernary_IsANullPointer_AnEmptyString_OrTheName()
     {
         WithAlteration(
-            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, null), s_noOps),
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.USER, null), s_noOps),
             (entity, _) =>
             {
                 EntityEntry entry = Assert.Single(EntityEntries(entity));
@@ -302,7 +302,7 @@ public sealed class AdminP6SubmitArgumentTests
                 Assert.Null(entry.Name);
             });
         WithAlteration(
-            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, string.Empty), s_noOps),
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.USER, string.Empty), s_noOps),
             (entity, _) =>
             {
                 EntityEntry entry = Assert.Single(EntityEntries(entity));
@@ -310,7 +310,7 @@ public sealed class AdminP6SubmitArgumentTests
                 Assert.Equal(string.Empty, entry.Name);
             });
         WithAlteration(
-            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "x"), s_noOps),
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.USER, "x"), s_noOps),
             (entity, _) =>
             {
                 EntityEntry entry = Assert.Single(EntityEntries(entity));
@@ -326,8 +326,8 @@ public sealed class AdminP6SubmitArgumentTests
             new ClientQuotaEntity(
                 new Dictionary<string, string?>(StringComparer.Ordinal)
                 {
-                    [ClientQuotaEntity.User] = "u",
-                    [ClientQuotaEntity.ClientId] = "c",
+                    [ClientQuotaEntity.USER] = "u",
+                    [ClientQuotaEntity.CLIENT_ID] = "c",
                 }),
             new[]
             {
@@ -361,7 +361,7 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public void Alteration_WithNoOps_CrossesAsAnEmptyOpList() =>
         WithAlteration(
-            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "no-ops"), s_noOps),
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.USER, "no-ops"), s_noOps),
             (entity, ops) =>
             {
                 Assert.Empty(ops);
@@ -372,7 +372,7 @@ public sealed class AdminP6SubmitArgumentTests
     public void Alteration_NonAsciiNameAndKeyRoundTrip() =>
         WithAlteration(
             new ClientQuotaAlteration(
-                Entity(ClientQuotaEntity.User, "用户-ü"),
+                Entity(ClientQuotaEntity.USER, "用户-ü"),
                 new[] { new ClientQuotaAlteration.Op("配额-café", 7d) }),
             (entity, ops) =>
             {

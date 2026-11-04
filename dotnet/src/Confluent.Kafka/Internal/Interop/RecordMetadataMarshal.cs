@@ -35,7 +35,16 @@ internal static class RecordMetadataMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         long timestamp = NativeMethods.RecordMetadataTimestamp(metadata, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
+        int serializedKeySize = NativeMethods.RecordMetadataSerializedKeySize(metadata, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int serializedValueSize = NativeMethods.RecordMetadataSerializedValueSize(metadata, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        return new RecordMetadata(Utf8Marshal.PtrToString(topic) ?? string.Empty, partition, offset, timestamp);
+        return new RecordMetadata(
+            new TopicPartition(Utf8Marshal.PtrToString(topic) ?? string.Empty, partition),
+            offset,
+            timestamp,
+            serializedKeySize,
+            serializedValueSize);
     }
 }

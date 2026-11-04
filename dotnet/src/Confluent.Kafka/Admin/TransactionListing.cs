@@ -14,6 +14,7 @@
 
 using System;
 using System.Globalization;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
@@ -79,5 +80,5 @@ public sealed class TransactionListing
             "TransactionListing(transactionalId='{0}', producerId={1}, transactionState={2})",
             TransactionalId,
             ProducerId,
-            State);
+            TransactionMarshal.NameFromState(State) ?? State.ToString());
 }

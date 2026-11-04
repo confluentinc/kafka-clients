@@ -118,15 +118,15 @@ internal static class ConfigEntriesMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return id switch
         {
-            0 => ConfigEntry.ConfigSource.DynamicTopicConfig,
-            1 => ConfigEntry.ConfigSource.DynamicBrokerLoggerConfig,
-            2 => ConfigEntry.ConfigSource.DynamicBrokerConfig,
-            3 => ConfigEntry.ConfigSource.DynamicDefaultBrokerConfig,
-            4 => ConfigEntry.ConfigSource.DynamicClientMetricsConfig,
-            5 => ConfigEntry.ConfigSource.DynamicGroupConfig,
-            6 => ConfigEntry.ConfigSource.StaticBrokerConfig,
-            7 => ConfigEntry.ConfigSource.DefaultConfig,
-            _ => ConfigEntry.ConfigSource.Unknown,
+            0 => ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG,
+            1 => ConfigEntry.ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG,
+            2 => ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG,
+            3 => ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG,
+            4 => ConfigEntry.ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG,
+            5 => ConfigEntry.ConfigSource.DYNAMIC_GROUP_CONFIG,
+            6 => ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG,
+            7 => ConfigEntry.ConfigSource.DEFAULT_CONFIG,
+            _ => ConfigEntry.ConfigSource.UNKNOWN,
         };
     }
 
@@ -142,16 +142,16 @@ internal static class ConfigEntriesMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return id switch
         {
-            1 => ConfigEntry.ConfigType.Boolean,
-            2 => ConfigEntry.ConfigType.String,
-            3 => ConfigEntry.ConfigType.Int,
-            4 => ConfigEntry.ConfigType.Short,
-            5 => ConfigEntry.ConfigType.Long,
-            6 => ConfigEntry.ConfigType.Double,
-            7 => ConfigEntry.ConfigType.List,
-            8 => ConfigEntry.ConfigType.Class,
-            9 => ConfigEntry.ConfigType.Password,
-            _ => ConfigEntry.ConfigType.Unknown,
+            1 => ConfigEntry.ConfigType.BOOLEAN,
+            2 => ConfigEntry.ConfigType.STRING,
+            3 => ConfigEntry.ConfigType.INT,
+            4 => ConfigEntry.ConfigType.SHORT,
+            5 => ConfigEntry.ConfigType.LONG,
+            6 => ConfigEntry.ConfigType.DOUBLE,
+            7 => ConfigEntry.ConfigType.LIST,
+            8 => ConfigEntry.ConfigType.CLASS,
+            9 => ConfigEntry.ConfigType.PASSWORD,
+            _ => ConfigEntry.ConfigType.UNKNOWN,
         };
     }
 

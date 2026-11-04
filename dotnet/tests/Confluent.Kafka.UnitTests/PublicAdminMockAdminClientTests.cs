@@ -71,28 +71,28 @@ public sealed class PublicAdminMockAdminClientTests
     [Fact]
     public async Task DefaultClusterIdAndDefaultLogDirs_AreJavasValues_AndTheBuildersDefaults_OnBothMocks()
     {
-        Assert.Equal(DefaultClusterId, MockAdminClient.DefaultClusterId);
-        Assert.Equal(DefaultClusterId, AsyncMockAdminClient.DefaultClusterId);
-        Assert.Equal(new[] { DefaultLogDir }, MockAdminClient.DefaultLogDirs);
-        Assert.Equal(new[] { DefaultLogDir }, AsyncMockAdminClient.DefaultLogDirs);
-        Assert.Throws<NotSupportedException>(() => ((IList<string>)MockAdminClient.DefaultLogDirs)[0] = "/elsewhere");
-        Assert.Throws<NotSupportedException>(() => ((IList<string>)AsyncMockAdminClient.DefaultLogDirs)[0] = "/elsewhere");
+        Assert.Equal(DefaultClusterId, MockAdminClient.DEFAULT_CLUSTER_ID);
+        Assert.Equal(DefaultClusterId, AsyncMockAdminClient.DEFAULT_CLUSTER_ID);
+        Assert.Equal(new[] { DefaultLogDir }, MockAdminClient.DEFAULT_LOG_DIRS);
+        Assert.Equal(new[] { DefaultLogDir }, AsyncMockAdminClient.DEFAULT_LOG_DIRS);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)MockAdminClient.DEFAULT_LOG_DIRS)[0] = "/elsewhere");
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)AsyncMockAdminClient.DEFAULT_LOG_DIRS)[0] = "/elsewhere");
 
         MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        Assert.Equal(MockAdminClient.DefaultClusterId, sync.DescribeCluster().ClusterId().Get(s_deadline));
+        Assert.Equal(MockAdminClient.DEFAULT_CLUSTER_ID, sync.DescribeCluster().ClusterId().Get(s_deadline));
         sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(s_deadline);
         Assert.Equal(
-            MockAdminClient.DefaultLogDirs, sync.DescribeLogDirs(new[] { 0 }).Descriptions[0].Get(s_deadline).Keys);
+            MockAdminClient.DEFAULT_LOG_DIRS, sync.DescribeLogDirs(new[] { 0 }).Descriptions[0].Get(s_deadline).Keys);
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         Assert.Equal(
-            AsyncMockAdminClient.DefaultClusterId,
+            AsyncMockAdminClient.DEFAULT_CLUSTER_ID,
             await TestTimeout.Run(() => async.DescribeCluster().ClusterId().Get(), s_deadline));
         await TestTimeout.Run(() => async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(), s_deadline);
         Assert.Equal(
-            AsyncMockAdminClient.DefaultLogDirs,
+            AsyncMockAdminClient.DEFAULT_LOG_DIRS,
             (await TestTimeout.Run(() => async.DescribeLogDirs(new[] { 0 }).Descriptions[0].Get(), s_deadline)).Keys);
     }
 
@@ -180,7 +180,7 @@ public sealed class PublicAdminMockAdminClientTests
     [Fact]
     public async Task Builder_DefaultReplicationFactor_IsItsShortValue_OnBothMocks()
     {
-        ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "0");
+        ConfigResource broker = new ConfigResource(ConfigResourceType.BROKER, "0");
 
         MockAdminClient sync = MockAdminClient.Create().DefaultReplicationFactor(65538).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);

@@ -28,50 +28,50 @@ public enum AclOperation
     /// (code 0). A code the broker sends that this client has no member for is mapped
     /// here, mirroring Java's <c>fromCode</c>.
     /// </summary>
-    Unknown = 0,
+    UNKNOWN = 0,
 
     /// <summary>In a filter, matches any operation — Java's <c>ANY</c> (code 1).</summary>
-    Any = 1,
+    ANY = 1,
 
     /// <summary>All operations — Java's <c>ALL</c> (code 2).</summary>
-    All = 2,
+    ALL = 2,
 
     /// <summary>READ — Java's <c>READ</c> (code 3).</summary>
-    Read = 3,
+    READ = 3,
 
     /// <summary>WRITE — Java's <c>WRITE</c> (code 4).</summary>
-    Write = 4,
+    WRITE = 4,
 
     /// <summary>CREATE — Java's <c>CREATE</c> (code 5).</summary>
-    Create = 5,
+    CREATE = 5,
 
     /// <summary>DELETE — Java's <c>DELETE</c> (code 6).</summary>
-    Delete = 6,
+    DELETE = 6,
 
     /// <summary>ALTER — Java's <c>ALTER</c> (code 7).</summary>
-    Alter = 7,
+    ALTER = 7,
 
     /// <summary>DESCRIBE — Java's <c>DESCRIBE</c> (code 8).</summary>
-    Describe = 8,
+    DESCRIBE = 8,
 
     /// <summary>CLUSTER_ACTION — Java's <c>CLUSTER_ACTION</c> (code 9).</summary>
-    ClusterAction = 9,
+    CLUSTER_ACTION = 9,
 
     /// <summary>DESCRIBE_CONFIGS — Java's <c>DESCRIBE_CONFIGS</c> (code 10).</summary>
-    DescribeConfigs = 10,
+    DESCRIBE_CONFIGS = 10,
 
     /// <summary>ALTER_CONFIGS — Java's <c>ALTER_CONFIGS</c> (code 11).</summary>
-    AlterConfigs = 11,
+    ALTER_CONFIGS = 11,
 
     /// <summary>IDEMPOTENT_WRITE — Java's <c>IDEMPOTENT_WRITE</c> (code 12).</summary>
-    IdempotentWrite = 12,
+    IDEMPOTENT_WRITE = 12,
 
     /// <summary>CREATE_TOKENS — Java's <c>CREATE_TOKENS</c> (code 13).</summary>
-    CreateTokens = 13,
+    CREATE_TOKENS = 13,
 
     /// <summary>DESCRIBE_TOKENS — Java's <c>DESCRIBE_TOKENS</c> (code 14).</summary>
-    DescribeTokens = 14,
+    DESCRIBE_TOKENS = 14,
 
     /// <summary>TWO_PHASE_COMMIT — Java's <c>TWO_PHASE_COMMIT</c> (code 15).</summary>
-    TwoPhaseCommit = 15,
+    TWO_PHASE_COMMIT = 15,
 }

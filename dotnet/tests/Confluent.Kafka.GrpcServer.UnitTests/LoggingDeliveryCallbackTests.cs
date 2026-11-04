@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Confluent.Kafka.Producer;
@@ -35,7 +36,8 @@ public sealed class LoggingDeliveryCallbackTests
         CallbackLog log = new CallbackLog();
 
         new LoggingDeliveryCallback(log, 7).OnCompletion(
-            new RecordMetadata("t", -1, -1, -1), TestValues.Coded(13, "the record failed"));
+            new RecordMetadata(new TopicPartition("t", -1), -1L, -1, -1L, -1, -1),
+            TestValues.Coded(13, "the record failed"));
 
         Proto.CallbackLogEntry entry = Assert.Single(log.Response(7).Entries);
         Assert.Equal("delivery", entry.Kind);

@@ -110,37 +110,37 @@ public sealed class PublicAdminShapeParityTests
     [Fact]
     public void ConfigEntry_TheEightArgumentConstructor_DerivesIsDefault_AndHasValueEquality()
     {
-        ConfigEntry defaulted = Full(ConfigEntry.ConfigSource.DefaultConfig);
+        ConfigEntry defaulted = Full(ConfigEntry.ConfigSource.DEFAULT_CONFIG);
         Assert.True(defaulted.IsDefault);
-        Assert.Equal(ConfigEntry.ConfigSource.DefaultConfig, defaulted.Source);
+        Assert.Equal(ConfigEntry.ConfigSource.DEFAULT_CONFIG, defaulted.Source);
         Assert.Equal("k", defaulted.Name);
         Assert.Equal("v", defaulted.Value);
         Assert.True(defaulted.IsSensitive);
         Assert.False(defaulted.IsReadOnly);
         Assert.Empty(defaulted.Synonyms);
-        Assert.Equal(ConfigEntry.ConfigType.String, defaulted.Type);
+        Assert.Equal(ConfigEntry.ConfigType.STRING, defaulted.Type);
         Assert.Equal("doc", defaulted.Documentation);
 
         foreach (ConfigEntry.ConfigSource source in
             (ConfigEntry.ConfigSource[])Enum.GetValues(typeof(ConfigEntry.ConfigSource)))
         {
-            Assert.Equal(source == ConfigEntry.ConfigSource.DefaultConfig, Full(source).IsDefault);
+            Assert.Equal(source == ConfigEntry.ConfigSource.DEFAULT_CONFIG, Full(source).IsDefault);
         }
 
-        ConfigEntry same = Full(ConfigEntry.ConfigSource.DefaultConfig);
+        ConfigEntry same = Full(ConfigEntry.ConfigSource.DEFAULT_CONFIG);
         Assert.Equal(defaulted, same);
         Assert.Equal(defaulted.GetHashCode(), same.GetHashCode());
-        Assert.NotEqual(defaulted, Full(ConfigEntry.ConfigSource.StaticBrokerConfig));
+        Assert.NotEqual(defaulted, Full(ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG));
 
         ArgumentNullException nullName = Assert.Throws<ArgumentNullException>(() => new ConfigEntry(
-            null!, "v", ConfigEntry.ConfigSource.DefaultConfig, false, false,
-            Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.String, null));
+            null!, "v", ConfigEntry.ConfigSource.DEFAULT_CONFIG, false, false,
+            Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.STRING, null));
         Assert.Equal("name", nullName.ParamName);
         Assert.Equal(new ArgumentNullException("name").Message, nullName.Message);
 
         ArgumentNullException nullSynonyms = Assert.Throws<ArgumentNullException>(() => new ConfigEntry(
-            "k", "v", ConfigEntry.ConfigSource.DefaultConfig, false, false,
-            null!, ConfigEntry.ConfigType.String, null));
+            "k", "v", ConfigEntry.ConfigSource.DEFAULT_CONFIG, false, false,
+            null!, ConfigEntry.ConfigType.STRING, null));
         Assert.Equal("synonyms", nullSynonyms.ParamName);
         Assert.Equal(new ArgumentNullException("synonyms").Message, nullSynonyms.Message);
     }
@@ -149,7 +149,7 @@ public sealed class PublicAdminShapeParityTests
     public void ConfigEntry_TheEightArgumentConstructor_RejectsANullSynonymElement()
     {
         ConfigEntry.ConfigSynonym synonym =
-            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.StaticBrokerConfig);
+            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG);
         string expected =
             new ArgumentNullException("synonyms", "Config synonyms must not contain a null element.").Message;
 
@@ -170,14 +170,14 @@ public sealed class PublicAdminShapeParityTests
     public void ConfigEntry_TheEightArgumentConstructor_CopiesTheSynonyms()
     {
         ConfigEntry.ConfigSynonym synonym =
-            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.StaticBrokerConfig);
+            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG);
         List<ConfigEntry.ConfigSynonym> callers = new List<ConfigEntry.ConfigSynonym> { synonym };
 
         ConfigEntry entry = WithSynonyms(callers);
         ConfigEntry twin = WithSynonyms(new[] { synonym });
         int hash = entry.GetHashCode();
 
-        callers[0] = new ConfigEntry.ConfigSynonym("b", "2", ConfigEntry.ConfigSource.DefaultConfig);
+        callers[0] = new ConfigEntry.ConfigSynonym("b", "2", ConfigEntry.ConfigSource.DEFAULT_CONFIG);
         callers.Add(null!);
 
         Assert.Equal(new[] { synonym }, entry.Synonyms);
@@ -195,11 +195,11 @@ public sealed class PublicAdminShapeParityTests
         new ConfigEntry(
             "k",
             "v",
-            ConfigEntry.ConfigSource.DefaultConfig,
+            ConfigEntry.ConfigSource.DEFAULT_CONFIG,
             isSensitive: false,
             isReadOnly: false,
             synonyms,
-            ConfigEntry.ConfigType.String,
+            ConfigEntry.ConfigType.STRING,
             "doc");
 
     private static ConfigEntry Full(ConfigEntry.ConfigSource source) =>
@@ -210,7 +210,7 @@ public sealed class PublicAdminShapeParityTests
             isSensitive: true,
             isReadOnly: false,
             Array.Empty<ConfigEntry.ConfigSynonym>(),
-            ConfigEntry.ConfigType.String,
+            ConfigEntry.ConfigType.STRING,
             "doc");
 
     private static void AssertParameters(ConstructorInfo ctor, params (Type Type, string Name)[] expected)

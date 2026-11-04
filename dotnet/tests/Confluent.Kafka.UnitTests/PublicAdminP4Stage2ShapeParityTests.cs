@@ -236,8 +236,8 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     }
 
     [Theory]
-    [InlineData(IsolationLevel.ReadUncommitted, 0)]
-    [InlineData(IsolationLevel.ReadCommitted, 1)]
+    [InlineData(IsolationLevel.READ_UNCOMMITTED, 0)]
+    [InlineData(IsolationLevel.READ_COMMITTED, 1)]
     public void IsolationLevel_CarriesJavasIds(IsolationLevel level, int id)
     {
         Assert.Equal(id, (int)level);
@@ -248,7 +248,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     public void IsolationLevel_HasExactlyJavasTwoMembers()
     {
         Assert.Equal(
-            new[] { "ReadCommitted", "ReadUncommitted" },
+            new[] { "READ_COMMITTED", "READ_UNCOMMITTED" },
             Enum.GetNames(typeof(IsolationLevel)).OrderBy(name => name, StringComparer.Ordinal));
     }
 
@@ -306,7 +306,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         // ListOffsetsOptions defaults to READ_UNCOMMITTED, which is Java's default.
         ListOffsetsOptions offsets = new ListOffsetsOptions();
         Assert.Null(offsets.TimeoutMs);
-        Assert.Equal(IsolationLevel.ReadUncommitted, offsets.IsolationLevel);
+        Assert.Equal(IsolationLevel.READ_UNCOMMITTED, offsets.IsolationLevel);
         Assert.Equal(
             new[] { nameof(ListOffsetsOptions.IsolationLevel), nameof(ListOffsetsOptions.TimeoutMs) },
             PropertyNames(typeof(ListOffsetsOptions)));

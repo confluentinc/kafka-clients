@@ -480,8 +480,8 @@ public sealed class PublicAdminListTopicsTests
         Assert.False(listings[Orders].IsInternal);
         Assert.Equal(Offsets, listings[Offsets].Name);
         Assert.True(listings[Offsets].IsInternal);
-        Assert.NotEqual(Uuid.Zero, listings[Orders].TopicId);
-        Assert.NotEqual(Uuid.Zero, listings[Offsets].TopicId);
+        Assert.NotEqual(Uuid.ZERO_UUID, listings[Orders].TopicId);
+        Assert.NotEqual(Uuid.ZERO_UUID, listings[Offsets].TopicId);
         Assert.NotEqual(listings[Orders].TopicId, listings[Offsets].TopicId);
     }
 

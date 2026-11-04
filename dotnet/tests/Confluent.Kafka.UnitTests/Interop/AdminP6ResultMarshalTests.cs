@@ -51,11 +51,11 @@ public sealed class AdminP6ResultMarshalTests
     public void CopyOutFilter_KeepsNullApartFromEmpty()
     {
         AclBindingFilter nulls = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Literal),
-            new AccessControlEntryFilter(null, null, AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.LITERAL),
+            new AccessControlEntryFilter(null, null, AclOperation.READ, AclPermissionType.ALLOW));
         AclBindingFilter empties = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal),
-            new AccessControlEntryFilter(string.Empty, string.Empty, AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL),
+            new AccessControlEntryFilter(string.Empty, string.Empty, AclOperation.READ, AclPermissionType.ALLOW));
 
         AclBindingFilter fromNulls = RoundTrip(nulls);
         AclBindingFilter fromEmpties = RoundTrip(empties);
@@ -75,18 +75,18 @@ public sealed class AdminP6ResultMarshalTests
     public void CopyOutFilter_RestoresEverySlot()
     {
         AclBindingFilter filter = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Group, "grüppe-ü", PatternType.Prefixed),
-            new AccessControlEntryFilter("User:bjørn", "10.0.0.1", AclOperation.Describe, AclPermissionType.Deny));
+            new ResourcePatternFilter(ResourceType.GROUP, "grüppe-ü", PatternType.PREFIXED),
+            new AccessControlEntryFilter("User:bjørn", "10.0.0.1", AclOperation.DESCRIBE, AclPermissionType.DENY));
 
         AclBindingFilter copied = RoundTrip(filter);
 
-        Assert.Equal(ResourceType.Group, copied.PatternFilter.ResourceType);
+        Assert.Equal(ResourceType.GROUP, copied.PatternFilter.ResourceType);
         Assert.Equal("grüppe-ü", copied.PatternFilter.Name);
-        Assert.Equal(PatternType.Prefixed, copied.PatternFilter.PatternType);
+        Assert.Equal(PatternType.PREFIXED, copied.PatternFilter.PatternType);
         Assert.Equal("User:bjørn", copied.EntryFilter.Principal);
         Assert.Equal("10.0.0.1", copied.EntryFilter.Host);
-        Assert.Equal(AclOperation.Describe, copied.EntryFilter.Operation);
-        Assert.Equal(AclPermissionType.Deny, copied.EntryFilter.PermissionType);
+        Assert.Equal(AclOperation.DESCRIBE, copied.EntryFilter.Operation);
+        Assert.Equal(AclPermissionType.DENY, copied.EntryFilter.PermissionType);
         Assert.Equal(filter, copied);
     }
 
@@ -95,7 +95,7 @@ public sealed class AdminP6ResultMarshalTests
     public void CopyOutFilter_EveryResourceType_CrossesAsItself(ResourceType resourceType) =>
         Assert.Equal(
             resourceType,
-            RoundTrip(Filter(resourceType, PatternType.Any, AclOperation.Any, AclPermissionType.Any))
+            RoundTrip(Filter(resourceType, PatternType.ANY, AclOperation.ANY, AclPermissionType.ANY))
                 .PatternFilter.ResourceType);
 
     [Theory]
@@ -103,7 +103,7 @@ public sealed class AdminP6ResultMarshalTests
     public void CopyOutFilter_EveryPatternType_CrossesAsItself(PatternType patternType) =>
         Assert.Equal(
             patternType,
-            RoundTrip(Filter(ResourceType.Any, patternType, AclOperation.Any, AclPermissionType.Any))
+            RoundTrip(Filter(ResourceType.ANY, patternType, AclOperation.ANY, AclPermissionType.ANY))
                 .PatternFilter.PatternType);
 
     [Theory]
@@ -111,7 +111,7 @@ public sealed class AdminP6ResultMarshalTests
     public void CopyOutFilter_EveryOperation_CrossesAsItself(AclOperation operation) =>
         Assert.Equal(
             operation,
-            RoundTrip(Filter(ResourceType.Any, PatternType.Any, operation, AclPermissionType.Any))
+            RoundTrip(Filter(ResourceType.ANY, PatternType.ANY, operation, AclPermissionType.ANY))
                 .EntryFilter.Operation);
 
     [Theory]
@@ -119,25 +119,25 @@ public sealed class AdminP6ResultMarshalTests
     public void CopyOutFilter_EveryPermissionType_CrossesAsItself(AclPermissionType permissionType) =>
         Assert.Equal(
             permissionType,
-            RoundTrip(Filter(ResourceType.Any, PatternType.Any, AclOperation.Any, permissionType))
+            RoundTrip(Filter(ResourceType.ANY, PatternType.ANY, AclOperation.ANY, permissionType))
                 .EntryFilter.PermissionType);
 
     [Fact]
     public void CopyOutBinding_RestoresEverySlot()
     {
         AclBinding binding = new AclBinding(
-            new ResourcePattern(ResourceType.TransactionalId, "tx-ünï", PatternType.Literal),
-            new AccessControlEntry("User:ålice", "*", AclOperation.Write, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TRANSACTIONAL_ID, "tx-ünï", PatternType.LITERAL),
+            new AccessControlEntry("User:ålice", "*", AclOperation.WRITE, AclPermissionType.ALLOW));
 
         AclBinding copied = RoundTrip(binding);
 
-        Assert.Equal(ResourceType.TransactionalId, copied.Pattern.ResourceType);
+        Assert.Equal(ResourceType.TRANSACTIONAL_ID, copied.Pattern.ResourceType);
         Assert.Equal("tx-ünï", copied.Pattern.Name);
-        Assert.Equal(PatternType.Literal, copied.Pattern.PatternType);
+        Assert.Equal(PatternType.LITERAL, copied.Pattern.PatternType);
         Assert.Equal("User:ålice", copied.Entry.Principal);
         Assert.Equal("*", copied.Entry.Host);
-        Assert.Equal(AclOperation.Write, copied.Entry.Operation);
-        Assert.Equal(AclPermissionType.Allow, copied.Entry.PermissionType);
+        Assert.Equal(AclOperation.WRITE, copied.Entry.Operation);
+        Assert.Equal(AclPermissionType.ALLOW, copied.Entry.PermissionType);
         Assert.Equal(binding, copied);
     }
 
@@ -387,8 +387,8 @@ public sealed class AdminP6ResultMarshalTests
 
     private static AclBinding Binding(string name) =>
         new AclBinding(
-            new ResourcePattern(ResourceType.Topic, name, PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, name, PatternType.LITERAL),
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 
     private static AclBindingFilter RoundTrip(AclBindingFilter filter)
     {

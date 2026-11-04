@@ -61,12 +61,12 @@ public sealed class PublicAdminDeleteAclsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter wildcard = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
-            new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any));
+            new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.ANY),
+            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY));
         AclBindingFilter literalEmpty = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Any),
+            new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.ANY),
             new AccessControlEntryFilter(
-                string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any));
+                string.Empty, string.Empty, AclOperation.ANY, AclPermissionType.ANY));
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { wildcard, literalEmpty });
 
@@ -90,13 +90,13 @@ public sealed class PublicAdminDeleteAclsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter alpha = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, "rt-alpha", PatternType.Literal),
+            new ResourcePatternFilter(ResourceType.TOPIC, "rt-alpha", PatternType.LITERAL),
             new AccessControlEntryFilter(
-                "User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+                "User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
         AclBindingFilter beta = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Group, "rt-beta", PatternType.Match),
+            new ResourcePatternFilter(ResourceType.GROUP, "rt-beta", PatternType.MATCH),
             new AccessControlEntryFilter(
-                "User:bob", "10.0.0.7", AclOperation.DescribeConfigs, AclPermissionType.Deny));
+                "User:bob", "10.0.0.7", AclOperation.DESCRIBE_CONFIGS, AclPermissionType.DENY));
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { alpha, beta });
 
@@ -213,7 +213,7 @@ public sealed class PublicAdminDeleteAclsTests
 
     private static AclBindingFilter Filter(string name) =>
         new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Literal),
+            new ResourcePatternFilter(ResourceType.TOPIC, name, PatternType.LITERAL),
             new AccessControlEntryFilter(
-                "User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+                "User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 }

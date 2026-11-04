@@ -23,38 +23,38 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Checks the ACL value types against their Java classes: the enums carry the wire codes, the concrete types reject
-/// null strings and the <c>Any</c> / <c>Match</c> sentinels while the filters accept both, a filter's
+/// null strings and the <c>ANY</c> / <c>MATCH</c> sentinels while the filters accept both, a filter's
 /// <see langword="null"/> (match any) differs from <c>""</c> (the empty name), and equality holds through a dictionary
 /// lookup.
 /// </summary>
 public sealed class PublicAclTypesTests
 {
     [Theory]
-    [InlineData(ResourceType.Unknown, 0)]
-    [InlineData(ResourceType.Any, 1)]
-    [InlineData(ResourceType.Topic, 2)]
-    [InlineData(ResourceType.Group, 3)]
-    [InlineData(ResourceType.Cluster, 4)]
-    [InlineData(ResourceType.TransactionalId, 5)]
-    [InlineData(ResourceType.DelegationToken, 6)]
-    [InlineData(ResourceType.User, 7)]
+    [InlineData(ResourceType.UNKNOWN, 0)]
+    [InlineData(ResourceType.ANY, 1)]
+    [InlineData(ResourceType.TOPIC, 2)]
+    [InlineData(ResourceType.GROUP, 3)]
+    [InlineData(ResourceType.CLUSTER, 4)]
+    [InlineData(ResourceType.TRANSACTIONAL_ID, 5)]
+    [InlineData(ResourceType.DELEGATION_TOKEN, 6)]
+    [InlineData(ResourceType.USER, 7)]
     public void ResourceType_MemberValuesAreJavaWireCodes(ResourceType value, int code) =>
         Assert.Equal(code, (int)value);
 
     [Theory]
-    [InlineData(PatternType.Unknown, 0)]
-    [InlineData(PatternType.Any, 1)]
-    [InlineData(PatternType.Match, 2)]
-    [InlineData(PatternType.Literal, 3)]
-    [InlineData(PatternType.Prefixed, 4)]
+    [InlineData(PatternType.UNKNOWN, 0)]
+    [InlineData(PatternType.ANY, 1)]
+    [InlineData(PatternType.MATCH, 2)]
+    [InlineData(PatternType.LITERAL, 3)]
+    [InlineData(PatternType.PREFIXED, 4)]
     public void PatternType_MemberValuesAreJavaWireCodes(PatternType value, int code) =>
         Assert.Equal(code, (int)value);
 
     [Theory]
-    [InlineData(AclPermissionType.Unknown, 0)]
-    [InlineData(AclPermissionType.Any, 1)]
-    [InlineData(AclPermissionType.Deny, 2)]
-    [InlineData(AclPermissionType.Allow, 3)]
+    [InlineData(AclPermissionType.UNKNOWN, 0)]
+    [InlineData(AclPermissionType.ANY, 1)]
+    [InlineData(AclPermissionType.DENY, 2)]
+    [InlineData(AclPermissionType.ALLOW, 3)]
     public void AclPermissionType_MemberValuesAreJavaWireCodes(AclPermissionType value, int code) =>
         Assert.Equal(code, (int)value);
 
@@ -69,23 +69,23 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void ResourcePattern_ExposesItsComponents()
     {
-        ResourcePattern pattern = new ResourcePattern(ResourceType.Topic, "orders", PatternType.Literal);
+        ResourcePattern pattern = new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL);
 
-        Assert.Equal(ResourceType.Topic, pattern.ResourceType);
+        Assert.Equal(ResourceType.TOPIC, pattern.ResourceType);
         Assert.Equal("orders", pattern.Name);
-        Assert.Equal(PatternType.Literal, pattern.PatternType);
+        Assert.Equal(PatternType.LITERAL, pattern.PatternType);
         Assert.False(pattern.IsUnknown);
     }
 
     [Fact]
     public void ResourcePattern_WildcardResourceIsStar() =>
-        Assert.Equal("*", ResourcePattern.WildcardResource);
+        Assert.Equal("*", ResourcePattern.WILDCARD_RESOURCE);
 
     [Fact]
     public void ResourcePattern_NullName_Throws()
     {
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
-            () => new ResourcePattern(ResourceType.Topic, null!, PatternType.Literal));
+            () => new ResourcePattern(ResourceType.TOPIC, null!, PatternType.LITERAL));
 
         Assert.Equal("name", ex.ParamName);
     }
@@ -94,21 +94,21 @@ public sealed class PublicAclTypesTests
     public void ResourcePattern_AnyResourceType_ThrowsWithJavasMessage()
     {
         ArgumentException ex = Assert.Throws<ArgumentException>(
-            () => new ResourcePattern(ResourceType.Any, "orders", PatternType.Literal));
+            () => new ResourcePattern(ResourceType.ANY, "orders", PatternType.LITERAL));
 
-        Assert.StartsWith("resourceType must not be Any", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(new ArgumentException("resourceType must not be ANY", "resourceType").Message, ex.Message);
         Assert.Equal("resourceType", ex.ParamName);
     }
 
     [Theory]
-    [InlineData(PatternType.Any, "patternType must not be Any")]
-    [InlineData(PatternType.Match, "patternType must not be Match")]
+    [InlineData(PatternType.ANY, "patternType must not be ANY")]
+    [InlineData(PatternType.MATCH, "patternType must not be MATCH")]
     public void ResourcePattern_FilterOnlyPatternType_ThrowsWithJavasMessage(
         PatternType patternType,
         string expected)
     {
         ArgumentException ex = Assert.Throws<ArgumentException>(
-            () => new ResourcePattern(ResourceType.Topic, "orders", patternType));
+            () => new ResourcePattern(ResourceType.TOPIC, "orders", patternType));
 
         Assert.StartsWith(expected, ex.Message, StringComparison.Ordinal);
         Assert.Equal("patternType", ex.ParamName);
@@ -116,55 +116,55 @@ public sealed class PublicAclTypesTests
 
     [Fact]
     public void ResourcePattern_EmptyName_IsAccepted() =>
-        Assert.Equal(string.Empty, new ResourcePattern(ResourceType.Topic, string.Empty, PatternType.Literal).Name);
+        Assert.Equal(string.Empty, new ResourcePattern(ResourceType.TOPIC, string.Empty, PatternType.LITERAL).Name);
 
     [Fact]
     public void ResourcePattern_IsUnknown_TracksEitherComponent()
     {
-        Assert.True(new ResourcePattern(ResourceType.Unknown, "orders", PatternType.Literal).IsUnknown);
-        Assert.True(new ResourcePattern(ResourceType.Topic, "orders", PatternType.Unknown).IsUnknown);
-        Assert.False(new ResourcePattern(ResourceType.Topic, "orders", PatternType.Prefixed).IsUnknown);
+        Assert.True(new ResourcePattern(ResourceType.UNKNOWN, "orders", PatternType.LITERAL).IsUnknown);
+        Assert.True(new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.UNKNOWN).IsUnknown);
+        Assert.False(new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.PREFIXED).IsUnknown);
     }
 
     [Fact]
     public void ResourcePattern_ToFilter_CarriesEveryComponent()
     {
         ResourcePatternFilter filter =
-            new ResourcePattern(ResourceType.Group, "g1", PatternType.Prefixed).ToFilter();
+            new ResourcePattern(ResourceType.GROUP, "g1", PatternType.PREFIXED).ToFilter();
 
-        Assert.Equal(new ResourcePatternFilter(ResourceType.Group, "g1", PatternType.Prefixed), filter);
+        Assert.Equal(new ResourcePatternFilter(ResourceType.GROUP, "g1", PatternType.PREFIXED), filter);
     }
 
     [Fact]
     public void ResourcePattern_ToString_MatchesJava() =>
         Assert.Equal(
-            "ResourcePattern(resourceType=Topic, name=orders, patternType=Literal)",
-            new ResourcePattern(ResourceType.Topic, "orders", PatternType.Literal).ToString());
+            "ResourcePattern(resourceType=TOPIC, name=orders, patternType=LITERAL)",
+            new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL).ToString());
 
     [Fact]
     public void ResourcePatternFilter_AcceptsAnyAndMatchAndNullName()
     {
-        ResourcePatternFilter filter = new ResourcePatternFilter(ResourceType.Any, null, PatternType.Match);
+        ResourcePatternFilter filter = new ResourcePatternFilter(ResourceType.ANY, null, PatternType.MATCH);
 
-        Assert.Equal(ResourceType.Any, filter.ResourceType);
+        Assert.Equal(ResourceType.ANY, filter.ResourceType);
         Assert.Null(filter.Name);
-        Assert.Equal(PatternType.Match, filter.PatternType);
+        Assert.Equal(PatternType.MATCH, filter.PatternType);
     }
 
     [Fact]
     public void ResourcePatternFilter_Any_IsTheMatchEverythingFilter()
     {
-        Assert.Equal(ResourceType.Any, ResourcePatternFilter.Any.ResourceType);
-        Assert.Null(ResourcePatternFilter.Any.Name);
-        Assert.Equal(PatternType.Any, ResourcePatternFilter.Any.PatternType);
+        Assert.Equal(ResourceType.ANY, ResourcePatternFilter.ANY.ResourceType);
+        Assert.Null(ResourcePatternFilter.ANY.Name);
+        Assert.Equal(PatternType.ANY, ResourcePatternFilter.ANY.PatternType);
     }
 
     [Fact]
     public void ResourcePatternFilter_NullName_IsNotEmptyName()
     {
-        ResourcePatternFilter wildcard = new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Literal);
+        ResourcePatternFilter wildcard = new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.LITERAL);
         ResourcePatternFilter empty =
-            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal);
+            new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL);
 
         Assert.NotEqual(wildcard, empty);
         Assert.Null(wildcard.Name);
@@ -178,23 +178,23 @@ public sealed class PublicAclTypesTests
         };
 
         Assert.Equal(2, byFilter.Count);
-        Assert.Equal("wildcard", byFilter[new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Literal)]);
+        Assert.Equal("wildcard", byFilter[new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.LITERAL)]);
         Assert.Equal(
             "empty",
-            byFilter[new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal)]);
+            byFilter[new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL)]);
     }
 
     [Fact]
     public void ResourcePatternFilter_ValueEquality()
     {
-        ResourcePatternFilter a = new ResourcePatternFilter(ResourceType.Topic, "orders", PatternType.Prefixed);
-        ResourcePatternFilter b = new ResourcePatternFilter(ResourceType.Topic, "orders", PatternType.Prefixed);
+        ResourcePatternFilter a = new ResourcePatternFilter(ResourceType.TOPIC, "orders", PatternType.PREFIXED);
+        ResourcePatternFilter b = new ResourcePatternFilter(ResourceType.TOPIC, "orders", PatternType.PREFIXED);
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
-        Assert.NotEqual(a, new ResourcePatternFilter(ResourceType.Group, "orders", PatternType.Prefixed));
-        Assert.NotEqual(a, new ResourcePatternFilter(ResourceType.Topic, "Orders", PatternType.Prefixed));
-        Assert.NotEqual(a, new ResourcePatternFilter(ResourceType.Topic, "orders", PatternType.Literal));
+        Assert.NotEqual(a, new ResourcePatternFilter(ResourceType.GROUP, "orders", PatternType.PREFIXED));
+        Assert.NotEqual(a, new ResourcePatternFilter(ResourceType.TOPIC, "Orders", PatternType.PREFIXED));
+        Assert.NotEqual(a, new ResourcePatternFilter(ResourceType.TOPIC, "orders", PatternType.LITERAL));
         Assert.False(a.Equals("not a filter"));
     }
 
@@ -202,23 +202,23 @@ public sealed class PublicAclTypesTests
     public void ResourcePatternFilter_ToString_MatchesJava()
     {
         Assert.Equal(
-            "ResourcePattern(resourceType=Any, name=<any>, patternType=Any)",
-            ResourcePatternFilter.Any.ToString());
+            "ResourcePattern(resourceType=ANY, name=<any>, patternType=ANY)",
+            ResourcePatternFilter.ANY.ToString());
         Assert.Equal(
-            "ResourcePattern(resourceType=Topic, name=, patternType=Literal)",
-            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal).ToString());
+            "ResourcePattern(resourceType=TOPIC, name=, patternType=LITERAL)",
+            new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL).ToString());
     }
 
     [Fact]
     public void AccessControlEntry_ExposesItsComponents()
     {
         AccessControlEntry entry =
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW);
 
         Assert.Equal("User:alice", entry.Principal);
         Assert.Equal("*", entry.Host);
-        Assert.Equal(AclOperation.Read, entry.Operation);
-        Assert.Equal(AclPermissionType.Allow, entry.PermissionType);
+        Assert.Equal(AclOperation.READ, entry.Operation);
+        Assert.Equal(AclPermissionType.ALLOW, entry.PermissionType);
         Assert.False(entry.IsUnknown);
     }
 
@@ -228,12 +228,12 @@ public sealed class PublicAclTypesTests
         Assert.Equal(
             "principal",
             Assert.Throws<ArgumentNullException>(
-                () => new AccessControlEntry(null!, "*", AclOperation.Read, AclPermissionType.Allow)).ParamName);
+                () => new AccessControlEntry(null!, "*", AclOperation.READ, AclPermissionType.ALLOW)).ParamName);
 
         Assert.Equal(
             "host",
             Assert.Throws<ArgumentNullException>(
-                () => new AccessControlEntry("User:alice", null!, AclOperation.Read, AclPermissionType.Allow))
+                () => new AccessControlEntry("User:alice", null!, AclOperation.READ, AclPermissionType.ALLOW))
                 .ParamName);
     }
 
@@ -241,9 +241,9 @@ public sealed class PublicAclTypesTests
     public void AccessControlEntry_AnyOperation_ThrowsWithJavasMessage()
     {
         ArgumentException ex = Assert.Throws<ArgumentException>(
-            () => new AccessControlEntry("User:alice", "*", AclOperation.Any, AclPermissionType.Allow));
+            () => new AccessControlEntry("User:alice", "*", AclOperation.ANY, AclPermissionType.ALLOW));
 
-        Assert.StartsWith("operation must not be Any", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(new ArgumentException("operation must not be ANY", "operation").Message, ex.Message);
         Assert.Equal("operation", ex.ParamName);
     }
 
@@ -251,9 +251,9 @@ public sealed class PublicAclTypesTests
     public void AccessControlEntry_AnyPermissionType_ThrowsWithJavasMessage()
     {
         ArgumentException ex = Assert.Throws<ArgumentException>(
-            () => new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Any));
+            () => new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ANY));
 
-        Assert.StartsWith("permissionType must not be Any", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(new ArgumentException("permissionType must not be ANY", "permissionType").Message, ex.Message);
         Assert.Equal("permissionType", ex.ParamName);
     }
 
@@ -261,7 +261,7 @@ public sealed class PublicAclTypesTests
     public void AccessControlEntry_EmptyStrings_AreAccepted()
     {
         AccessControlEntry entry = new AccessControlEntry(
-            string.Empty, string.Empty, AclOperation.Describe, AclPermissionType.Deny);
+            string.Empty, string.Empty, AclOperation.DESCRIBE, AclPermissionType.DENY);
 
         Assert.Equal(string.Empty, entry.Principal);
         Assert.Equal(string.Empty, entry.Host);
@@ -270,56 +270,56 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void AccessControlEntry_IsUnknown_TracksEitherEnum()
     {
-        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.Unknown, AclPermissionType.Allow).IsUnknown);
-        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.Read, AclPermissionType.Unknown).IsUnknown);
+        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.UNKNOWN, AclPermissionType.ALLOW).IsUnknown);
+        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.UNKNOWN).IsUnknown);
     }
 
     [Fact]
     public void AccessControlEntry_ToFilter_CarriesEveryComponent()
     {
         AccessControlEntryFilter filter =
-            new AccessControlEntry("User:alice", "10.0.0.1", AclOperation.Write, AclPermissionType.Deny).ToFilter();
+            new AccessControlEntry("User:alice", "10.0.0.1", AclOperation.WRITE, AclPermissionType.DENY).ToFilter();
 
         Assert.Equal(
-            new AccessControlEntryFilter("User:alice", "10.0.0.1", AclOperation.Write, AclPermissionType.Deny),
+            new AccessControlEntryFilter("User:alice", "10.0.0.1", AclOperation.WRITE, AclPermissionType.DENY),
             filter);
     }
 
     [Fact]
     public void AccessControlEntry_ToString_MatchesJava() =>
         Assert.Equal(
-            "(principal=User:alice, host=*, operation=Read, permissionType=Allow)",
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow).ToString());
+            "(principal=User:alice, host=*, operation=READ, permissionType=ALLOW)",
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW).ToString());
 
     [Fact]
     public void AccessControlEntryFilter_AcceptsNullsAndAny()
     {
         AccessControlEntryFilter filter =
-            new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any);
+            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
 
         Assert.Null(filter.Principal);
         Assert.Null(filter.Host);
-        Assert.Equal(AclOperation.Any, filter.Operation);
-        Assert.Equal(AclPermissionType.Any, filter.PermissionType);
+        Assert.Equal(AclOperation.ANY, filter.Operation);
+        Assert.Equal(AclPermissionType.ANY, filter.PermissionType);
     }
 
     [Fact]
     public void AccessControlEntryFilter_Any_IsTheMatchEverythingFilter() =>
         Assert.Equal(
-            new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any),
-            AccessControlEntryFilter.Any);
+            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY),
+            AccessControlEntryFilter.ANY);
 
     [Fact]
     public void AccessControlEntryFilter_NullStrings_AreNotEmptyStrings()
     {
         AccessControlEntryFilter nullPrincipal =
-            new AccessControlEntryFilter(null, "*", AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntryFilter(null, "*", AclOperation.READ, AclPermissionType.ALLOW);
         AccessControlEntryFilter emptyPrincipal =
-            new AccessControlEntryFilter(string.Empty, "*", AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntryFilter(string.Empty, "*", AclOperation.READ, AclPermissionType.ALLOW);
         AccessControlEntryFilter nullHost =
-            new AccessControlEntryFilter("User:a", null, AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntryFilter("User:a", null, AclOperation.READ, AclPermissionType.ALLOW);
         AccessControlEntryFilter emptyHost =
-            new AccessControlEntryFilter("User:a", string.Empty, AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntryFilter("User:a", string.Empty, AclOperation.READ, AclPermissionType.ALLOW);
 
         Assert.NotEqual(nullPrincipal, emptyPrincipal);
         Assert.NotEqual(nullHost, emptyHost);
@@ -335,34 +335,34 @@ public sealed class PublicAclTypesTests
         Assert.Equal(4, byFilter.Count);
         Assert.Equal(
             "empty-principal",
-            byFilter[new AccessControlEntryFilter(string.Empty, "*", AclOperation.Read, AclPermissionType.Allow)]);
+            byFilter[new AccessControlEntryFilter(string.Empty, "*", AclOperation.READ, AclPermissionType.ALLOW)]);
     }
 
     [Fact]
     public void AccessControlEntryFilter_ValueEquality()
     {
         AccessControlEntryFilter a =
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW);
         AccessControlEntryFilter b =
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Allow);
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW);
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
-        Assert.NotEqual(a, new AccessControlEntryFilter("User:bob", "*", AclOperation.Read, AclPermissionType.Allow));
+        Assert.NotEqual(a, new AccessControlEntryFilter("User:bob", "*", AclOperation.READ, AclPermissionType.ALLOW));
         Assert.NotEqual(
             a,
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Write, AclPermissionType.Allow));
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.WRITE, AclPermissionType.ALLOW));
         Assert.NotEqual(
             a,
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Deny));
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.READ, AclPermissionType.DENY));
         Assert.False(a.Equals(42));
     }
 
     [Fact]
     public void AccessControlEntryFilter_ToString_RendersNullAsAny() =>
         Assert.Equal(
-            "(principal=<any>, host=<any>, operation=Any, permissionType=Any)",
-            AccessControlEntryFilter.Any.ToString());
+            "(principal=<any>, host=<any>, operation=ANY, permissionType=ANY)",
+            AccessControlEntryFilter.ANY.ToString());
 
     [Fact]
     public void AclBinding_IsNested_NotFlattened()
@@ -370,12 +370,12 @@ public sealed class PublicAclTypesTests
         AclBinding binding = NewBinding();
 
         Assert.Equal("orders", binding.Pattern.Name);
-        Assert.Equal(ResourceType.Topic, binding.Pattern.ResourceType);
-        Assert.Equal(PatternType.Literal, binding.Pattern.PatternType);
+        Assert.Equal(ResourceType.TOPIC, binding.Pattern.ResourceType);
+        Assert.Equal(PatternType.LITERAL, binding.Pattern.PatternType);
         Assert.Equal("User:alice", binding.Entry.Principal);
         Assert.Equal("*", binding.Entry.Host);
-        Assert.Equal(AclOperation.Read, binding.Entry.Operation);
-        Assert.Equal(AclPermissionType.Allow, binding.Entry.PermissionType);
+        Assert.Equal(AclOperation.READ, binding.Entry.Operation);
+        Assert.Equal(AclPermissionType.ALLOW, binding.Entry.PermissionType);
         Assert.False(binding.IsUnknown);
     }
 
@@ -383,8 +383,8 @@ public sealed class PublicAclTypesTests
     public void AclBinding_NullHalves_Throw()
     {
         AccessControlEntry entry =
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow);
-        ResourcePattern pattern = new ResourcePattern(ResourceType.Topic, "orders", PatternType.Literal);
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW);
+        ResourcePattern pattern = new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL);
 
         Assert.Equal("pattern", Assert.Throws<ArgumentNullException>(() => new AclBinding(null!, entry)).ParamName);
         Assert.Equal("entry", Assert.Throws<ArgumentNullException>(() => new AclBinding(pattern, null!)).ParamName);
@@ -394,12 +394,12 @@ public sealed class PublicAclTypesTests
     public void AclBinding_IsUnknown_PropagatesFromEitherHalf()
     {
         Assert.True(new AclBinding(
-            new ResourcePattern(ResourceType.Unknown, "orders", PatternType.Literal),
-            new AccessControlEntry("User:a", "*", AclOperation.Read, AclPermissionType.Allow)).IsUnknown);
+            new ResourcePattern(ResourceType.UNKNOWN, "orders", PatternType.LITERAL),
+            new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.ALLOW)).IsUnknown);
 
         Assert.True(new AclBinding(
-            new ResourcePattern(ResourceType.Topic, "orders", PatternType.Literal),
-            new AccessControlEntry("User:a", "*", AclOperation.Read, AclPermissionType.Unknown)).IsUnknown);
+            new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL),
+            new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.UNKNOWN)).IsUnknown);
     }
 
     [Fact]
@@ -409,16 +409,16 @@ public sealed class PublicAclTypesTests
 
         Assert.Equal(
             new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Topic, "orders", PatternType.Literal),
-                new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Allow)),
+                new ResourcePatternFilter(ResourceType.TOPIC, "orders", PatternType.LITERAL),
+                new AccessControlEntryFilter("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW)),
             filter);
     }
 
     [Fact]
     public void AclBinding_ToString_MatchesJava() =>
         Assert.Equal(
-            "(pattern=ResourcePattern(resourceType=Topic, name=orders, patternType=Literal), "
-                + "entry=(principal=User:alice, host=*, operation=Read, permissionType=Allow))",
+            "(pattern=ResourcePattern(resourceType=TOPIC, name=orders, patternType=LITERAL), "
+                + "entry=(principal=User:alice, host=*, operation=READ, permissionType=ALLOW))",
             NewBinding().ToString());
 
     [Fact]
@@ -434,8 +434,8 @@ public sealed class PublicAclTypesTests
         Assert.Equal(NewBinding().GetHashCode(), NewBinding().GetHashCode());
 
         AclBinding other = new AclBinding(
-            new ResourcePattern(ResourceType.Topic, "payments", PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, "payments", PatternType.LITERAL),
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 
         Assert.False(byBinding.ContainsKey(other));
         Assert.NotEqual(NewBinding(), other);
@@ -445,11 +445,11 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void AclBindingFilter_Any_IsBothHalvesAny()
     {
-        Assert.Equal(ResourcePatternFilter.Any, AclBindingFilter.Any.PatternFilter);
-        Assert.Equal(AccessControlEntryFilter.Any, AclBindingFilter.Any.EntryFilter);
+        Assert.Equal(ResourcePatternFilter.ANY, AclBindingFilter.ANY.PatternFilter);
+        Assert.Equal(AccessControlEntryFilter.ANY, AclBindingFilter.ANY.EntryFilter);
         Assert.Equal(
-            new AclBindingFilter(ResourcePatternFilter.Any, AccessControlEntryFilter.Any),
-            AclBindingFilter.Any);
+            new AclBindingFilter(ResourcePatternFilter.ANY, AccessControlEntryFilter.ANY),
+            AclBindingFilter.ANY);
     }
 
     [Fact]
@@ -458,37 +458,37 @@ public sealed class PublicAclTypesTests
         Assert.Equal(
             "patternFilter",
             Assert.Throws<ArgumentNullException>(
-                () => new AclBindingFilter(null!, AccessControlEntryFilter.Any)).ParamName);
+                () => new AclBindingFilter(null!, AccessControlEntryFilter.ANY)).ParamName);
 
         Assert.Equal(
             "entryFilter",
             Assert.Throws<ArgumentNullException>(
-                () => new AclBindingFilter(ResourcePatternFilter.Any, null!)).ParamName);
+                () => new AclBindingFilter(ResourcePatternFilter.ANY, null!)).ParamName);
     }
 
     [Fact]
     public void AclBindingFilter_IsUnknown_PropagatesFromEitherHalf()
     {
-        Assert.False(AclBindingFilter.Any.IsUnknown);
+        Assert.False(AclBindingFilter.ANY.IsUnknown);
 
         Assert.True(new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Unknown, null, PatternType.Any),
-            AccessControlEntryFilter.Any).IsUnknown);
+            new ResourcePatternFilter(ResourceType.UNKNOWN, null, PatternType.ANY),
+            AccessControlEntryFilter.ANY).IsUnknown);
 
         Assert.True(new AclBindingFilter(
-            ResourcePatternFilter.Any,
-            new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Unknown)).IsUnknown);
+            ResourcePatternFilter.ANY,
+            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.UNKNOWN)).IsUnknown);
     }
 
     [Fact]
     public void AclBindingFilter_IsUsableAsADictionaryKey_AndKeepsNullApartFromEmpty()
     {
         AclBindingFilter wildcardName = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Literal),
-            AccessControlEntryFilter.Any);
+            new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.LITERAL),
+            AccessControlEntryFilter.ANY);
         AclBindingFilter emptyName = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal),
-            AccessControlEntryFilter.Any);
+            new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL),
+            AccessControlEntryFilter.ANY);
 
         Assert.NotEqual(wildcardName, emptyName);
 
@@ -502,22 +502,22 @@ public sealed class PublicAclTypesTests
         Assert.Equal(
             "wildcard",
             byFilter[new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Literal),
-                AccessControlEntryFilter.Any)]);
+                new ResourcePatternFilter(ResourceType.TOPIC, null, PatternType.LITERAL),
+                AccessControlEntryFilter.ANY)]);
         Assert.Equal(
             "empty",
             byFilter[new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal),
-                AccessControlEntryFilter.Any)]);
+                new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL),
+                AccessControlEntryFilter.ANY)]);
         Assert.False(wildcardName.Equals("not a filter"));
     }
 
     [Fact]
     public void AclBindingFilter_ToString_MatchesJava() =>
         Assert.Equal(
-            "(patternFilter=ResourcePattern(resourceType=Any, name=<any>, patternType=Any), "
-                + "entryFilter=(principal=<any>, host=<any>, operation=Any, permissionType=Any))",
-            AclBindingFilter.Any.ToString());
+            "(patternFilter=ResourcePattern(resourceType=ANY, name=<any>, patternType=ANY), "
+                + "entryFilter=(principal=<any>, host=<any>, operation=ANY, permissionType=ANY))",
+            AclBindingFilter.ANY.ToString());
 
     [Fact]
     public void AclBinding_And_Filter_RoundTripThroughTheirComponents()
@@ -536,6 +536,6 @@ public sealed class PublicAclTypesTests
 
     private static AclBinding NewBinding() =>
         new AclBinding(
-            new ResourcePattern(ResourceType.Topic, "orders", PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL),
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 }

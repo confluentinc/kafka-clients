@@ -58,8 +58,8 @@ public sealed class PublicAdminListGroupsTests
 
         foreach (GroupListing listing in valid)
         {
-            Assert.Equal(GroupType.Consumer, listing.Type);
-            Assert.Equal(GroupState.Stable, listing.GroupState);
+            Assert.Equal(GroupType.CONSUMER, listing.Type);
+            Assert.Equal(GroupState.STABLE, listing.GroupState);
             Assert.Equal(ConsumerProtocol, listing.Protocol);
             Assert.False(listing.IsSimpleConsumerGroup);
         }
@@ -141,9 +141,9 @@ public sealed class PublicAdminListGroupsTests
 
         AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions
         {
-            GroupStates = new[] { GroupState.Stable, GroupState.Empty },
+            GroupStates = new[] { GroupState.STABLE, GroupState.EMPTY },
             ProtocolTypes = new[] { ConsumerProtocol },
-            Types = new[] { GroupType.Consumer },
+            Types = new[] { GroupType.CONSUMER },
             TimeoutMs = 30_000,
         });
 
@@ -208,12 +208,12 @@ public sealed class PublicAdminListGroupsTests
         TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
                 groupIds.ToDictionary(
-                    groupId => new ConfigResource(ConfigResourceType.Group, groupId),
+                    groupId => new ConfigResource(ConfigResourceType.GROUP, groupId),
                     _ => (IReadOnlyCollection<AlterConfigOp>)new[]
                     {
                         new AlterConfigOp(
                             new ConfigEntry("consumer.session.timeout.ms", "45000"),
-                            AlterConfigOpType.Set),
+                            AlterConfigOpType.SET),
                     })).All().Get(),
             s_deadline);
 }

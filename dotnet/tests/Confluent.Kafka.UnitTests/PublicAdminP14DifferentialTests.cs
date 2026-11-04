@@ -101,8 +101,8 @@ public sealed class PublicAdminP14DifferentialTests
         Config syncConfig = Assert.IsType<Config>(await FutureProbe.Of(syncResult.Config("diff-ok")).Outcome());
         Config asyncConfig = Assert.IsType<Config>(await FutureProbe.Of(asyncResult.Config("diff-ok")).Outcome());
         Assert.Equal(Entries(syncConfig), Entries(asyncConfig));
-        Assert.NotEqual((object)Uuid.Zero, await FutureProbe.Of(syncResult.TopicId("diff-ok")).Outcome());
-        Assert.NotEqual((object)Uuid.Zero, await FutureProbe.Of(asyncResult.TopicId("diff-ok")).Outcome());
+        Assert.NotEqual((object)Uuid.ZERO_UUID, await FutureProbe.Of(syncResult.TopicId("diff-ok")).Outcome());
+        Assert.NotEqual((object)Uuid.ZERO_UUID, await FutureProbe.Of(asyncResult.TopicId("diff-ok")).Outcome());
 
         const string TooLarge = "Replication factor: 5 is larger than brokers: 1";
         AssertKafka(
@@ -231,7 +231,7 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal("diff-d", described.Name);
         Assert.False(described.IsInternal);
         Assert.Equal(2, described.Partitions.Count);
-        Assert.NotEqual(Uuid.Zero, described.TopicId);
+        Assert.NotEqual(Uuid.ZERO_UUID, described.TopicId);
 
         const string NotFound = "Topic diff-nope not found.";
         AssertKafka(
@@ -460,18 +460,18 @@ public sealed class PublicAdminP14DifferentialTests
 
         IReadOnlyCollection<ConfigResource> topics = Assert.IsAssignableFrom<IReadOnlyCollection<ConfigResource>>(
             await Agree(
-                FutureProbe.Of(sync.ListConfigResources(new[] { ConfigResourceType.Topic }).All()),
-                FutureProbe.Of(async.ListConfigResources(new[] { ConfigResourceType.Topic }).All()),
+                FutureProbe.Of(sync.ListConfigResources(new[] { ConfigResourceType.TOPIC }).All()),
+                FutureProbe.Of(async.ListConfigResources(new[] { ConfigResourceType.TOPIC }).All()),
                 static outcome => Resources((IReadOnlyCollection<ConfigResource>)outcome)));
-        Assert.Equal(new ConfigResource(ConfigResourceType.Topic, "diff-j"), Assert.Single(topics));
+        Assert.Equal(new ConfigResource(ConfigResourceType.TOPIC, "diff-j"), Assert.Single(topics));
 
         IReadOnlyCollection<ConfigResource> every = Assert.IsAssignableFrom<IReadOnlyCollection<ConfigResource>>(
             await Agree(
                 FutureProbe.Of(sync.ListConfigResources().All()),
                 FutureProbe.Of(async.ListConfigResources().All()),
                 static outcome => Resources((IReadOnlyCollection<ConfigResource>)outcome)));
-        Assert.Contains(new ConfigResource(ConfigResourceType.Topic, "diff-j"), every);
-        Assert.Contains(every, static resource => resource.Type == ConfigResourceType.Broker);
+        Assert.Contains(new ConfigResource(ConfigResourceType.TOPIC, "diff-j"), every);
+        Assert.Contains(every, static resource => resource.Type == ConfigResourceType.BROKER);
     }
 
     [Fact]
@@ -487,10 +487,10 @@ public sealed class PublicAdminP14DifferentialTests
         };
         await Seed(sync, async, topic);
 
-        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, "diff-k");
-        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "diff-k-missing");
-        ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "0");
-        ConfigResource absentBroker = new ConfigResource(ConfigResourceType.Broker, "7");
+        ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, "diff-k");
+        ConfigResource missing = new ConfigResource(ConfigResourceType.TOPIC, "diff-k-missing");
+        ConfigResource broker = new ConfigResource(ConfigResourceType.BROKER, "0");
+        ConfigResource absentBroker = new ConfigResource(ConfigResourceType.BROKER, "7");
         ConfigResource[] request = { present, missing, broker, absentBroker };
 
         DescribeConfigsResult syncResult = sync.DescribeConfigs(request);
@@ -536,9 +536,9 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-l", 1, 1));
 
-        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, "diff-l");
-        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "diff-l-absent");
-        AlterConfigOp[] set = { new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.Set) };
+        ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, "diff-l");
+        ConfigResource missing = new ConfigResource(ConfigResourceType.TOPIC, "diff-l-absent");
+        AlterConfigOp[] set = { new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET) };
         Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> request =
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [present] = set, [missing] = set };
 
@@ -705,7 +705,7 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "diff-p");
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, "diff-p");
         TopicPartitionReplica replica = new TopicPartitionReplica("diff-p", 0, 0);
 
         AssertThrowAlike(() => sync.DescribeConfigs(null!), () => async.DescribeConfigs(null!));
@@ -770,8 +770,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (IReadOnlyCollection<TopicPartition>? selection in selections)
         {
-            ElectLeadersResult syncResult = sync.ElectLeaders(ElectionType.Preferred, selection);
-            AsyncElectLeadersResult asyncResult = async.ElectLeaders(ElectionType.Preferred, selection);
+            ElectLeadersResult syncResult = sync.ElectLeaders(ElectionType.PREFERRED, selection);
+            AsyncElectLeadersResult asyncResult = async.ElectLeaders(ElectionType.PREFERRED, selection);
 
             AssertNotSupported(
                                 NotImplementedYet,
@@ -967,8 +967,8 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(() => sync.ListOffsets(null!), () => async.ListOffsets(null!));
 
         AssertThrowAlike<ArgumentException>(
-            () => sync.ElectLeaders(ElectionType.Preferred, new[] { nullTopic }),
-            () => async.ElectLeaders(ElectionType.Preferred, new[] { nullTopic }));
+            () => sync.ElectLeaders(ElectionType.PREFERRED, new[] { nullTopic }),
+            () => async.ElectLeaders(ElectionType.PREFERRED, new[] { nullTopic }));
         AssertThrowAlike<ArgumentException>(
             () => sync.AlterPartitionReassignments(
                 new Dictionary<TopicPartition, NewPartitionReassignment?> { [nullTopic] = new NewPartitionReassignment(new[] { 0 }) }),
@@ -994,7 +994,7 @@ public sealed class PublicAdminP14DifferentialTests
         ListGroupsResult syncResult = sync.ListGroups();
         AsyncListGroupsResult asyncResult = async.ListGroups();
 
-        const string Seeded = "diff-w-a/Consumer/Stable/consumer,diff-w-b/Consumer/Stable/consumer";
+        const string Seeded = "diff-w-a/CONSUMER/STABLE/consumer,diff-w-b/CONSUMER/STABLE/consumer";
         IReadOnlyCollection<GroupListing> valid = Assert.IsAssignableFrom<IReadOnlyCollection<GroupListing>>(
             await Agree(
                 FutureProbe.Of(syncResult.Valid()),
@@ -1472,7 +1472,7 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ClientQuotaFilter filter = ClientQuotaFilter.ContainsOnly(
-            new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "diff-ai") });
+            new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "diff-ai") });
 
         DescribeClientQuotasResult syncResult = sync.DescribeClientQuotas(filter);
         AsyncDescribeClientQuotasResult asyncResult = async.DescribeClientQuotas(filter);
@@ -1525,7 +1525,7 @@ public sealed class PublicAdminP14DifferentialTests
         AclBindingFilter?[] nullFilter = { AclFilter("diff-ak"), null };
         AclBindingFilter[] nulFilter = { AclFilter("diff\0ak") };
         ClientQuotaFilter nulQuotaFilter = ClientQuotaFilter.ContainsOnly(
-            new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "diff\0ak") });
+            new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "diff\0ak") });
         ClientQuotaAlteration?[] nullAlteration = { QuotaAlteration(QuotaEntity("diff-ak"), "producer_byte_rate", 1d), null };
         ClientQuotaAlteration[] nulAlteration = { QuotaAlteration(QuotaEntity("diff-ak"), "producer\0byte_rate", 1d) };
 
@@ -1597,9 +1597,9 @@ public sealed class PublicAdminP14DifferentialTests
         string[] users = { "diff-am-bob", "diff-am-alice" };
         UserScramCredentialAlteration[] alterations =
         {
-            new UserScramCredentialDeletion(users[0], ScramMechanism.ScramSha256),
-            new UserScramCredentialDeletion(users[1], ScramMechanism.ScramSha512),
-            new UserScramCredentialDeletion(users[0], ScramMechanism.ScramSha512),
+            new UserScramCredentialDeletion(users[0], ScramMechanism.SCRAM_SHA_256),
+            new UserScramCredentialDeletion(users[1], ScramMechanism.SCRAM_SHA_512),
+            new UserScramCredentialDeletion(users[0], ScramMechanism.SCRAM_SHA_512),
         };
 
         AlterUserScramCredentialsResult syncResult = sync.AlterUserScramCredentials(alterations);
@@ -1771,7 +1771,7 @@ public sealed class PublicAdminP14DifferentialTests
         // One key, so the core mock's first-failure-aborts-the-batch is not ordered by its map.
         Dictionary<string, FeatureUpdate> rejected = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
         {
-            ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
+            ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
         };
         UpdateFeaturesResult syncRejected = sync.UpdateFeatures(rejected);
         AsyncUpdateFeaturesResult asyncRejected = async.UpdateFeatures(rejected);
@@ -1788,7 +1788,7 @@ public sealed class PublicAdminP14DifferentialTests
 
         string[] features = { "metadata.version", "group.version" };
         Dictionary<string, FeatureUpdate> accepted = features.ToDictionary(
-            feature => feature, _ => new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade), StringComparer.Ordinal);
+            feature => feature, _ => new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE), StringComparer.Ordinal);
         UpdateFeaturesResult syncAccepted = sync.UpdateFeatures(accepted);
         AsyncUpdateFeaturesResult asyncAccepted = async.UpdateFeatures(accepted);
         Assert.Equal(
@@ -1823,14 +1823,14 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] nulUser = { "diff\0ar" };
         UserScramCredentialAlteration?[] nullAlteration =
-            { new UserScramCredentialDeletion("diff-ar", ScramMechanism.ScramSha256), null };
+            { new UserScramCredentialDeletion("diff-ar", ScramMechanism.SCRAM_SHA_256), null };
         UserScramCredentialAlteration[] nulAlteration =
-            { new UserScramCredentialDeletion("diff\0ar", ScramMechanism.ScramSha256) };
+            { new UserScramCredentialDeletion("diff\0ar", ScramMechanism.SCRAM_SHA_256) };
         Dictionary<string, FeatureUpdate> nullUpdate =
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal) { ["metadata.version"] = null! };
         Dictionary<string, FeatureUpdate> nulFeature = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
         {
-            ["metadata\0version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
+            ["metadata\0version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
         };
         CreateDelegationTokenOptions noRenewers = new CreateDelegationTokenOptions { Renewers = null! };
         CreateDelegationTokenOptions nullRenewer = new CreateDelegationTokenOptions { Renewers = new KafkaPrincipal[] { null! } };
@@ -2000,7 +2000,7 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ListTransactionsOptions filtered = new ListTransactionsOptions
         {
-            FilteredStates = new[] { TransactionState.Ongoing },
+            FilteredStates = new[] { TransactionState.ONGOING },
             FilteredProducerIds = new[] { 7L },
             FilteredDuration = 1_000L,
             FilteredTransactionalIdPattern = "diff-lt-.*",
@@ -2273,10 +2273,10 @@ public sealed class PublicAdminP14DifferentialTests
     private static async Task SeedGroups(MockAdminClient sync, AsyncMockAdminClient async, params string[] groupIds)
     {
         Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> request = groupIds.ToDictionary(
-            static groupId => new ConfigResource(ConfigResourceType.Group, groupId),
+            static groupId => new ConfigResource(ConfigResourceType.GROUP, groupId),
             static _ => (IReadOnlyCollection<AlterConfigOp>)new[]
             {
-                new AlterConfigOp(new ConfigEntry("consumer.session.timeout.ms", "45000"), AlterConfigOpType.Set),
+                new AlterConfigOp(new ConfigEntry("consumer.session.timeout.ms", "45000"), AlterConfigOpType.SET),
             });
         Assert.Same(
             BlockingCall.Returned,
@@ -2322,8 +2322,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         Uuid syncId = Assert.IsType<Uuid>(await FutureProbe.Of(syncCreated.TopicId(topics[0].Name)).Outcome());
         Uuid asyncId = Assert.IsType<Uuid>(await FutureProbe.Of(asyncCreated.TopicId(topics[0].Name)).Outcome());
-        Assert.NotEqual(Uuid.Zero, syncId);
-        Assert.NotEqual(Uuid.Zero, asyncId);
+        Assert.NotEqual(Uuid.ZERO_UUID, syncId);
+        Assert.NotEqual(Uuid.ZERO_UUID, asyncId);
         return (syncId, asyncId);
     }
 
@@ -2339,16 +2339,16 @@ public sealed class PublicAdminP14DifferentialTests
 
     private static AclBinding Acl(string topic, string principal) =>
         new AclBinding(
-            new ResourcePattern(ResourceType.Topic, topic, PatternType.Literal),
-            new AccessControlEntry(principal, "*", AclOperation.Write, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, topic, PatternType.LITERAL),
+            new AccessControlEntry(principal, "*", AclOperation.WRITE, AclPermissionType.ALLOW));
 
     private static AclBindingFilter AclFilter(string topic) =>
         new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, topic, PatternType.Literal),
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Any, AclPermissionType.Any));
+            new ResourcePatternFilter(ResourceType.TOPIC, topic, PatternType.LITERAL),
+            new AccessControlEntryFilter("User:alice", "*", AclOperation.ANY, AclPermissionType.ANY));
 
     private static ClientQuotaEntity QuotaEntity(string? user) =>
-        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = user });
+        new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = user });
 
     private static CreateDelegationTokenOptions Renewers(params string[] names) =>
         new CreateDelegationTokenOptions

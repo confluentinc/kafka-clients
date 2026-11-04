@@ -54,7 +54,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         foreach (IReadOnlyCollection<TopicPartition>? selection in selections)
         {
-            AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, selection);
+            AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.PREFERRED, selection);
 
             NotSupportedException failure = await TestTimeout.Run(
                 () => Assert.ThrowsAsync<NotSupportedException>(() => result.Partitions().Get()), s_deadline);
@@ -67,8 +67,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
     }
 
     [Theory]
-    [InlineData(ElectionType.Preferred)]
-    [InlineData(ElectionType.Unclean)]
+    [InlineData(ElectionType.PREFERRED)]
+    [InlineData(ElectionType.UNCLEAN)]
     public async Task ElectLeaders_AcceptsBothElectionTypes(ElectionType type)
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
@@ -87,7 +87,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
-        AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, null);
+        AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.PREFERRED, null);
 
         Assert.Same(result.Partitions().Get(), result.Partitions().Get());
 
@@ -221,7 +221,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ElectLeaders(ElectionType.Preferred, null));
+        Assert.Throws<ObjectDisposedException>(() => admin.ElectLeaders(ElectionType.PREFERRED, null));
         Assert.Throws<ObjectDisposedException>(() => admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>()));
     }
@@ -235,7 +235,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         await TestTimeout.Run(
             () => Assert.ThrowsAsync<NotSupportedException>(
-                () => admin.ElectLeaders(ElectionType.Preferred, null).Partitions().Get()),
+                () => admin.ElectLeaders(ElectionType.PREFERRED, null).Partitions().Get()),
             s_deadline);
 
         AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(

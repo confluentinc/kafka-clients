@@ -43,7 +43,7 @@ public sealed class TopicDescription
 
     /// <summary>
     /// Creates a description with an empty authorized-operations set and
-    /// <see cref="Uuid.Zero"/> as the topic id — Java's three-argument constructor.
+    /// <see cref="Uuid.ZERO_UUID"/> as the topic id — Java's three-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
     /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
@@ -59,7 +59,7 @@ public sealed class TopicDescription
     }
 
     /// <summary>
-    /// Creates a description with <see cref="Uuid.Zero"/> as the topic id — Java's
+    /// Creates a description with <see cref="Uuid.ZERO_UUID"/> as the topic id — Java's
     /// four-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
@@ -78,7 +78,7 @@ public sealed class TopicDescription
         bool isInternal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations)
-        : this(name, isInternal, partitions, authorizedOperations, Uuid.Zero)
+        : this(name, isInternal, partitions, authorizedOperations, Uuid.ZERO_UUID)
     {
     }
 

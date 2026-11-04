@@ -58,12 +58,12 @@ public sealed class PublicAdminCreateAclsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding alpha = new AclBinding(
-            new ResourcePattern(ResourceType.Topic, "rt-alpha", PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, "rt-alpha", PatternType.LITERAL),
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
         AclBinding beta = new AclBinding(
-            new ResourcePattern(ResourceType.Group, "rt-beta", PatternType.Prefixed),
+            new ResourcePattern(ResourceType.GROUP, "rt-beta", PatternType.PREFIXED),
             new AccessControlEntry(
-                "User:bob", "10.0.0.7", AclOperation.DescribeConfigs, AclPermissionType.Deny));
+                "User:bob", "10.0.0.7", AclOperation.DESCRIBE_CONFIGS, AclPermissionType.DENY));
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { alpha, beta });
 
@@ -184,6 +184,6 @@ public sealed class PublicAdminCreateAclsTests
 
     private static AclBinding Binding(string name) =>
         new AclBinding(
-            new ResourcePattern(ResourceType.Topic, name, PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, name, PatternType.LITERAL),
+            new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 }

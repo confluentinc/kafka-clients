@@ -47,10 +47,10 @@ internal static class TranslateAdmin
     // Case-insensitive, unlike s_transactionStatesByName: GroupState.parse lower-cases its input,
     // TransactionState.parse does not.
     private static readonly Dictionary<string, GroupState> s_groupStatesByName =
-        BuildNameTable<GroupState>();
+        BuildNameTable<GroupState>(GroupStateName);
 
     private static readonly Dictionary<string, GroupType> s_groupTypesByName =
-        BuildNameTable<GroupType>();
+        BuildNameTable<GroupType>(GroupTypeName);
 
     internal static bool SelectsMock(IReadOnlyDictionary<string, string> config)
     {
@@ -446,28 +446,28 @@ internal static class TranslateAdmin
 
     internal static string ConfigSourceName(ConfigEntry.ConfigSource source) => source switch
     {
-        ConfigEntry.ConfigSource.DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
-        ConfigEntry.ConfigSource.DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
-        ConfigEntry.ConfigSource.DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
-        ConfigEntry.ConfigSource.DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
-        ConfigEntry.ConfigSource.DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
-        ConfigEntry.ConfigSource.DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
-        ConfigEntry.ConfigSource.StaticBrokerConfig => "STATIC_BROKER_CONFIG",
-        ConfigEntry.ConfigSource.DefaultConfig => "DEFAULT_CONFIG",
+        ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG => "DYNAMIC_TOPIC_CONFIG",
+        ConfigEntry.ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG => "DYNAMIC_BROKER_LOGGER_CONFIG",
+        ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG => "DYNAMIC_BROKER_CONFIG",
+        ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+        ConfigEntry.ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG => "DYNAMIC_CLIENT_METRICS_CONFIG",
+        ConfigEntry.ConfigSource.DYNAMIC_GROUP_CONFIG => "DYNAMIC_GROUP_CONFIG",
+        ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG => "STATIC_BROKER_CONFIG",
+        ConfigEntry.ConfigSource.DEFAULT_CONFIG => "DEFAULT_CONFIG",
         _ => "UNKNOWN",
     };
 
     internal static string ConfigTypeName(ConfigEntry.ConfigType type) => type switch
     {
-        ConfigEntry.ConfigType.Boolean => "BOOLEAN",
-        ConfigEntry.ConfigType.String => "STRING",
-        ConfigEntry.ConfigType.Int => "INT",
-        ConfigEntry.ConfigType.Short => "SHORT",
-        ConfigEntry.ConfigType.Long => "LONG",
-        ConfigEntry.ConfigType.Double => "DOUBLE",
-        ConfigEntry.ConfigType.List => "LIST",
-        ConfigEntry.ConfigType.Class => "CLASS",
-        ConfigEntry.ConfigType.Password => "PASSWORD",
+        ConfigEntry.ConfigType.BOOLEAN => "BOOLEAN",
+        ConfigEntry.ConfigType.STRING => "STRING",
+        ConfigEntry.ConfigType.INT => "INT",
+        ConfigEntry.ConfigType.SHORT => "SHORT",
+        ConfigEntry.ConfigType.LONG => "LONG",
+        ConfigEntry.ConfigType.DOUBLE => "DOUBLE",
+        ConfigEntry.ConfigType.LIST => "LIST",
+        ConfigEntry.ConfigType.CLASS => "CLASS",
+        ConfigEntry.ConfigType.PASSWORD => "PASSWORD",
         _ => "UNKNOWN",
     };
 
@@ -714,7 +714,7 @@ internal static class TranslateAdmin
         {
             states.Add(s_transactionStatesByName.TryGetValue(name, out TransactionState state)
                 ? state
-                : TransactionState.Unknown);
+                : TransactionState.UNKNOWN);
         }
 
         return states;
@@ -754,10 +754,10 @@ internal static class TranslateAdmin
     }
 
     internal static List<GroupState> GroupStates(IEnumerable<string> names) =>
-        ParseNames(names, s_groupStatesByName, GroupState.Unknown);
+        ParseNames(names, s_groupStatesByName, GroupState.UNKNOWN);
 
     internal static List<GroupType> GroupTypes(IEnumerable<string> names) =>
-        ParseNames(names, s_groupTypesByName, GroupType.Unknown);
+        ParseNames(names, s_groupTypesByName, GroupType.UNKNOWN);
 
     internal static Proto.GroupListing GroupListingToProto(GroupListing listing)
     {
@@ -769,12 +769,12 @@ internal static class TranslateAdmin
         };
         if (listing.Type.HasValue)
         {
-            proto.GroupType = listing.Type.Value.ToString();
+            proto.GroupType = GroupTypeName(listing.Type.Value);
         }
 
         if (listing.GroupState.HasValue)
         {
-            proto.GroupState = listing.GroupState.Value.ToString();
+            proto.GroupState = GroupStateName(listing.GroupState.Value);
         }
 
         return proto;
@@ -836,8 +836,8 @@ internal static class TranslateAdmin
             GroupId = description.GroupId,
             IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
             PartitionAssignor = description.PartitionAssignor,
-            GroupType = description.Type.ToString(),
-            GroupState = description.GroupState.ToString(),
+            GroupType = GroupTypeName(description.Type),
+            GroupState = GroupStateName(description.GroupState),
         };
         foreach (MemberDescription member in description.Members)
         {
@@ -879,7 +879,7 @@ internal static class TranslateAdmin
             Protocol = description.Protocol!,
             ProtocolData = description.ProtocolData,
             IsSimpleConsumerGroup = description.IsSimpleConsumerGroup,
-            State = description.State.ToString(),
+            State = ClassicGroupStateName(description.State),
         };
         foreach (MemberDescription member in description.Members)
         {
@@ -1283,8 +1283,59 @@ internal static class TranslateAdmin
         return map;
     }
 
-    // The enum members are spelled as Java's toString(), so Enum.ToString() is the wire spelling.
-    private static string TransactionStateName(TransactionState state) => state.ToString();
+    // Java's toString() of these four enums is a display name, not the constant name Enum.ToString()
+    // prints; the wire carries Java's toString().
+    internal static string TransactionStateName(TransactionState state) =>
+        state switch
+        {
+            TransactionState.ONGOING => "Ongoing",
+            TransactionState.PREPARE_ABORT => "PrepareAbort",
+            TransactionState.PREPARE_COMMIT => "PrepareCommit",
+            TransactionState.COMPLETE_ABORT => "CompleteAbort",
+            TransactionState.COMPLETE_COMMIT => "CompleteCommit",
+            TransactionState.EMPTY => "Empty",
+            TransactionState.PREPARE_EPOCH_FENCE => "PrepareEpochFence",
+            TransactionState.UNKNOWN => "Unknown",
+            _ => state.ToString(),
+        };
+
+    internal static string GroupStateName(GroupState state) =>
+        state switch
+        {
+            GroupState.UNKNOWN => "Unknown",
+            GroupState.PREPARING_REBALANCE => "PreparingRebalance",
+            GroupState.COMPLETING_REBALANCE => "CompletingRebalance",
+            GroupState.STABLE => "Stable",
+            GroupState.DEAD => "Dead",
+            GroupState.EMPTY => "Empty",
+            GroupState.ASSIGNING => "Assigning",
+            GroupState.RECONCILING => "Reconciling",
+            GroupState.NOT_READY => "NotReady",
+            _ => state.ToString(),
+        };
+
+    internal static string GroupTypeName(GroupType type) =>
+        type switch
+        {
+            GroupType.UNKNOWN => "Unknown",
+            GroupType.CONSUMER => "Consumer",
+            GroupType.CLASSIC => "Classic",
+            GroupType.SHARE => "Share",
+            GroupType.STREAMS => "Streams",
+            _ => type.ToString(),
+        };
+
+    internal static string ClassicGroupStateName(ClassicGroupState state) =>
+        state switch
+        {
+            ClassicGroupState.UNKNOWN => "Unknown",
+            ClassicGroupState.PREPARING_REBALANCE => "PreparingRebalance",
+            ClassicGroupState.COMPLETING_REBALANCE => "CompletingRebalance",
+            ClassicGroupState.STABLE => "Stable",
+            ClassicGroupState.DEAD => "Dead",
+            ClassicGroupState.EMPTY => "Empty",
+            _ => state.ToString(),
+        };
 
     private static Dictionary<string, TransactionState> BuildTransactionStateTable()
     {
@@ -1298,13 +1349,13 @@ internal static class TranslateAdmin
         return table;
     }
 
-    private static Dictionary<string, TEnum> BuildNameTable<TEnum>()
+    private static Dictionary<string, TEnum> BuildNameTable<TEnum>(Func<TEnum, string> name)
         where TEnum : struct, Enum
     {
         Dictionary<string, TEnum> table = new Dictionary<string, TEnum>(StringComparer.OrdinalIgnoreCase);
         foreach (TEnum value in (TEnum[])Enum.GetValues(typeof(TEnum)))
         {
-            table[value.ToString()!] = value;
+            table[name(value)] = value;
         }
 
         return table;

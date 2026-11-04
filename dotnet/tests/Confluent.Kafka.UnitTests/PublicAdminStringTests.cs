@@ -80,12 +80,12 @@ public sealed class PublicAdminStringTests
                     [new TopicPartition(bad, 0)] = RecordsToDelete.BeforeOffset(1),
                 })),
             ["describeConfigs:resourceName"] = ("resources", (admin, bad) =>
-                admin.DescribeConfigs(new[] { new ConfigResource(ConfigResourceType.Topic, bad) })),
+                admin.DescribeConfigs(new[] { new ConfigResource(ConfigResourceType.TOPIC, bad) })),
             ["incrementalAlterConfigs:resourceName"] = ("configs", (admin, bad) =>
                 admin.IncrementalAlterConfigs(new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {
-                    [new ConfigResource(ConfigResourceType.Topic, bad)] =
-                        new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
+                    [new ConfigResource(ConfigResourceType.TOPIC, bad)] =
+                        new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
                 })),
             ["alterReplicaLogDirs:topic"] = ("replicaAssignment", (admin, bad) =>
                 admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>
@@ -127,33 +127,33 @@ public sealed class PublicAdminStringTests
                 admin.DeleteAcls(new[]
                 {
                     new AclBindingFilter(
-                        new ResourcePatternFilter(ResourceType.Topic, bad, PatternType.Literal),
-                        AccessControlEntryFilter.Any),
+                        new ResourcePatternFilter(ResourceType.TOPIC, bad, PatternType.LITERAL),
+                        AccessControlEntryFilter.ANY),
                 })),
             ["deleteAcls:principal"] = ("filters", (admin, bad) =>
                 admin.DeleteAcls(new[]
                 {
                     new AclBindingFilter(
-                        ResourcePatternFilter.Any,
-                        new AccessControlEntryFilter(bad, null, AclOperation.Any, AclPermissionType.Any)),
+                        ResourcePatternFilter.ANY,
+                        new AccessControlEntryFilter(bad, null, AclOperation.ANY, AclPermissionType.ANY)),
                 })),
             ["deleteAcls:host"] = ("filters", (admin, bad) =>
                 admin.DeleteAcls(new[]
                 {
                     new AclBindingFilter(
-                        ResourcePatternFilter.Any,
-                        new AccessControlEntryFilter(null, bad, AclOperation.Any, AclPermissionType.Any)),
+                        ResourcePatternFilter.ANY,
+                        new AccessControlEntryFilter(null, bad, AclOperation.ANY, AclPermissionType.ANY)),
                 })),
             ["alterClientQuotas:entityType"] = ("entries", (admin, bad) =>
                 admin.AlterClientQuotas(new[] { Quota(bad, "alice") })),
             ["alterClientQuotas:entityName"] = ("entries", (admin, bad) =>
-                admin.AlterClientQuotas(new[] { Quota(ClientQuotaEntity.User, bad) })),
+                admin.AlterClientQuotas(new[] { Quota(ClientQuotaEntity.USER, bad) })),
             ["alterUserScramCredentials:user"] = ("alterations", (admin, bad) =>
-                admin.AlterUserScramCredentials(new[] { new UserScramCredentialDeletion(bad, ScramMechanism.ScramSha256) })),
+                admin.AlterUserScramCredentials(new[] { new UserScramCredentialDeletion(bad, ScramMechanism.SCRAM_SHA_256) })),
             ["updateFeatures:featureName"] = ("featureUpdates", (admin, bad) =>
                 admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>
                 {
-                    [bad] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
+                    [bad] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
                 })),
             ["fenceProducers:transactionalId"] = ("transactionalIds", (admin, bad) =>
                 admin.FenceProducers(new[] { bad })),
@@ -179,35 +179,35 @@ public sealed class PublicAdminStringTests
                 })),
 
             ["electLeaders:topic"] = ("partitions", (admin, bad) =>
-                admin.ElectLeaders(ElectionType.Preferred, new[] { new TopicPartition(bad, 0) })),
+                admin.ElectLeaders(ElectionType.PREFERRED, new[] { new TopicPartition(bad, 0) })),
             ["listPartitionReassignments:topic"] = ("partitions", (admin, bad) =>
                 admin.ListPartitionReassignments(new[] { new TopicPartition(bad, 0) })),
 
             ["describeAcls:resourceName"] = ("filter", (admin, bad) =>
                 admin.DescribeAcls(new AclBindingFilter(
-                    new ResourcePatternFilter(ResourceType.Topic, bad, PatternType.Literal),
-                    AccessControlEntryFilter.Any))),
+                    new ResourcePatternFilter(ResourceType.TOPIC, bad, PatternType.LITERAL),
+                    AccessControlEntryFilter.ANY))),
             ["describeAcls:principal"] = ("filter", (admin, bad) =>
                 admin.DescribeAcls(new AclBindingFilter(
-                    ResourcePatternFilter.Any,
-                    new AccessControlEntryFilter(bad, null, AclOperation.Any, AclPermissionType.Any)))),
+                    ResourcePatternFilter.ANY,
+                    new AccessControlEntryFilter(bad, null, AclOperation.ANY, AclPermissionType.ANY)))),
             ["describeAcls:host"] = ("filter", (admin, bad) =>
                 admin.DescribeAcls(new AclBindingFilter(
-                    ResourcePatternFilter.Any,
-                    new AccessControlEntryFilter(null, bad, AclOperation.Any, AclPermissionType.Any)))),
+                    ResourcePatternFilter.ANY,
+                    new AccessControlEntryFilter(null, bad, AclOperation.ANY, AclPermissionType.ANY)))),
 
             ["describeClientQuotas:entityType"] = ("filter", (admin, bad) =>
                 admin.DescribeClientQuotas(
                     ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(bad, "alice") }))),
             ["describeClientQuotas:matchName"] = ("filter", (admin, bad) =>
                 admin.DescribeClientQuotas(
-                    ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, bad) }))),
+                    ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, bad) }))),
 
             ["alterClientQuotas:opKey"] = ("entries", (admin, bad) =>
                 admin.AlterClientQuotas(new[]
                 {
                     new ClientQuotaAlteration(
-                        new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" }),
+                        new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.USER] = "alice" }),
                         new[] { new ClientQuotaAlteration.Op(bad, 1024) }),
                 })),
 
@@ -403,14 +403,14 @@ public sealed class PublicAdminStringTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        _ = admin.DeleteAcls(new[] { new AclBindingFilter(ResourcePatternFilter.Any, AccessControlEntryFilter.Any) });
-        _ = admin.AlterClientQuotas(new[] { Quota(ClientQuotaEntity.User, null) });
+        _ = admin.DeleteAcls(new[] { new AclBindingFilter(ResourcePatternFilter.ANY, AccessControlEntryFilter.ANY) });
+        _ = admin.AlterClientQuotas(new[] { Quota(ClientQuotaEntity.USER, null) });
     }
 
     private static AclBinding Binding(string resourceName, string principal, string host) =>
         new AclBinding(
-            new ResourcePattern(ResourceType.Topic, resourceName, PatternType.Literal),
-            new AccessControlEntry(principal, host, AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePattern(ResourceType.TOPIC, resourceName, PatternType.LITERAL),
+            new AccessControlEntry(principal, host, AclOperation.READ, AclPermissionType.ALLOW));
 
     private static ClientQuotaAlteration Quota(string entityType, string? entityName) =>
         new ClientQuotaAlteration(
@@ -424,8 +424,8 @@ public sealed class PublicAdminStringTests
         string topic, string configName, string configValue) =>
         new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
         {
-            [new ConfigResource(ConfigResourceType.Topic, topic)] =
-                new[] { new AlterConfigOp(new ConfigEntry(configName, configValue), AlterConfigOpType.Set) },
+            [new ConfigResource(ConfigResourceType.TOPIC, topic)] =
+                new[] { new AlterConfigOp(new ConfigEntry(configName, configValue), AlterConfigOpType.SET) },
         };
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(string topic, string metadata) =>

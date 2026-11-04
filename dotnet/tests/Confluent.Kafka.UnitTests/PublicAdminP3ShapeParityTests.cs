@@ -135,12 +135,12 @@ public sealed class PublicAdminP3ShapeParityTests
     }
 
     [Theory]
-    [InlineData(ConfigResourceType.Unknown, 0)]
-    [InlineData(ConfigResourceType.Topic, 2)]
-    [InlineData(ConfigResourceType.Broker, 4)]
-    [InlineData(ConfigResourceType.BrokerLogger, 8)]
-    [InlineData(ConfigResourceType.ClientMetrics, 16)]
-    [InlineData(ConfigResourceType.Group, 32)]
+    [InlineData(ConfigResourceType.UNKNOWN, 0)]
+    [InlineData(ConfigResourceType.TOPIC, 2)]
+    [InlineData(ConfigResourceType.BROKER, 4)]
+    [InlineData(ConfigResourceType.BROKER_LOGGER, 8)]
+    [InlineData(ConfigResourceType.CLIENT_METRICS, 16)]
+    [InlineData(ConfigResourceType.GROUP, 32)]
     public void ConfigResourceType_CarriesJavasIds(ConfigResourceType type, int id)
     {
         Assert.Equal(id, (int)type);
@@ -151,7 +151,7 @@ public sealed class PublicAdminP3ShapeParityTests
     public void ConfigResourceType_HasExactlyJavasSixMembers()
     {
         Assert.Equal(
-            new[] { "Broker", "BrokerLogger", "ClientMetrics", "Group", "Topic", "Unknown" },
+            new[] { "BROKER", "BROKER_LOGGER", "CLIENT_METRICS", "GROUP", "TOPIC", "UNKNOWN" },
             Enum.GetNames(typeof(ConfigResourceType)).OrderBy(name => name, StringComparer.Ordinal));
     }
 
@@ -171,10 +171,10 @@ public sealed class PublicAdminP3ShapeParityTests
             NullableAnnotation.NotAnnotated,
             NullableFlag(typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!));
 
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "t");
-        ConfigResource sameTopic = new ConfigResource(ConfigResourceType.Topic, "t");
-        ConfigResource sameNameOtherType = new ConfigResource(ConfigResourceType.Broker, "t");
-        ConfigResource otherName = new ConfigResource(ConfigResourceType.Topic, "u");
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "t");
+        ConfigResource sameTopic = new ConfigResource(ConfigResourceType.TOPIC, "t");
+        ConfigResource sameNameOtherType = new ConfigResource(ConfigResourceType.BROKER, "t");
+        ConfigResource otherName = new ConfigResource(ConfigResourceType.TOPIC, "u");
 
         Assert.Equal(topic, sameTopic);
         Assert.Equal(topic.GetHashCode(), sameTopic.GetHashCode());
@@ -191,12 +191,11 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Equal(1, byResource[sameTopic]);
 
         // isDefault(): the default resource of a type has an empty name.
-        Assert.True(new ConfigResource(ConfigResourceType.Broker, string.Empty).IsDefault);
+        Assert.True(new ConfigResource(ConfigResourceType.BROKER, string.Empty).IsDefault);
         Assert.False(topic.IsDefault);
 
-        // Java's constant name, not the .NET member name.
         Assert.Equal("ConfigResource(type=TOPIC, name='t')", topic.ToString());
-        Assert.Throws<ArgumentNullException>(() => new ConfigResource(ConfigResourceType.Topic, null!));
+        Assert.Throws<ArgumentNullException>(() => new ConfigResource(ConfigResourceType.TOPIC, null!));
     }
 
     [Theory]
@@ -213,7 +212,7 @@ public sealed class PublicAdminP3ShapeParityTests
 
         ConfigResource resource = new ConfigResource((ConfigResourceType)undefinedId, "x");
 
-        Assert.Equal(ConfigResourceType.Unknown, resource.Type);
+        Assert.Equal(ConfigResourceType.UNKNOWN, resource.Type);
         Assert.Equal("x", resource.Name);
     }
 
@@ -233,7 +232,7 @@ public sealed class PublicAdminP3ShapeParityTests
     public void ConfigResource_AnUndefinedType_EqualsAndRendersAsUnknown()
     {
         ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
-        ConfigResource unknown = new ConfigResource(ConfigResourceType.Unknown, "x");
+        ConfigResource unknown = new ConfigResource(ConfigResourceType.UNKNOWN, "x");
 
         Assert.Equal(unknown, undefined);
         Assert.Equal(unknown.GetHashCode(), undefined.GetHashCode());

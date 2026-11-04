@@ -15,6 +15,7 @@
 using System;
 using System.Globalization;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
@@ -26,7 +27,7 @@ namespace Confluent.Kafka.Admin;
 /// <para>
 /// Java's <c>Optional</c> becomes a C# nullable: <see langword="null"/> in <see cref="Type"/> or
 /// <see cref="GroupState"/> is Java's <c>Optional.empty()</c>, for a broker that did not report
-/// it. It differs from <see cref="GroupType.Unknown"/> and <see cref="GroupState.Unknown"/>, which
+/// it. It differs from <see cref="GroupType.UNKNOWN"/> and <see cref="GroupState.UNKNOWN"/>, which
 /// mean the broker named a value this client does not recognise, as in Java.
 /// </para>
 /// <para>
@@ -89,7 +90,7 @@ public sealed class GroupListing
     /// the caller builds answers as one the client returns; the core's
     /// <c>kafka_admin_GroupListing_is_simple_consumer_group</c> is not used.
     /// </remarks>
-    public bool IsSimpleConsumerGroup => Type == GroupType.Classic && Protocol.Length == 0;
+    public bool IsSimpleConsumerGroup => Type == GroupType.CLASSIC && Protocol.Length == 0;
 
     /// <summary>
     /// Value equality over all four fields — Java's <c>equals</c>.
@@ -125,15 +126,14 @@ public sealed class GroupListing
     /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     /// <remarks>
-    /// The unbalanced quotes around <c>groupId</c> and <c>protocol</c> are Java's, kept as they
-    /// are. An absent type or state renders as <c>none</c>, as Java's <c>orElse("none")</c>.
+    /// An absent type or state renders as <c>none</c>, as Java's <c>orElse("none")</c>.
     /// </remarks>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
-            "(groupId='{0}, type={1}, protocol='{2}, groupState={3})",
+            "(groupId='{0}', type={1}, protocol='{2}', groupState={3})",
             GroupId,
-            Type?.ToString() ?? "none",
+            Type is null ? "none" : GroupMarshal.NameFromType(Type.Value) ?? Type.Value.ToString(),
             Protocol,
-            GroupState?.ToString() ?? "none");
+            GroupState is null ? "none" : GroupMarshal.NameFromState(GroupState.Value) ?? GroupState.Value.ToString());
 }

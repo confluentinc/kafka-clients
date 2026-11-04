@@ -48,13 +48,13 @@ public sealed class ClientQuotaEntity
     }
 
     /// <summary>The <c>user</c> entity type — Java's <c>USER</c>.</summary>
-    public const string User = "user";
+    public const string USER = "user";
 
     /// <summary>The <c>client-id</c> entity type — Java's <c>CLIENT_ID</c>.</summary>
-    public const string ClientId = "client-id";
+    public const string CLIENT_ID = "client-id";
 
     /// <summary>The <c>ip</c> entity type — Java's <c>IP</c>.</summary>
-    public const string Ip = "ip";
+    public const string IP = "ip";
 
     /// <summary>
     /// Entity type to entity name — Java's <c>entries()</c>. A null value names the built-in
@@ -69,9 +69,9 @@ public sealed class ClientQuotaEntity
     /// <param name="entityType">The entity type to check.</param>
     /// <returns>Whether the type is known.</returns>
     public static bool IsValidEntityType(string? entityType) =>
-        string.Equals(entityType, User, StringComparison.Ordinal)
-        || string.Equals(entityType, ClientId, StringComparison.Ordinal)
-        || string.Equals(entityType, Ip, StringComparison.Ordinal);
+        string.Equals(entityType, USER, StringComparison.Ordinal)
+        || string.Equals(entityType, CLIENT_ID, StringComparison.Ordinal)
+        || string.Equals(entityType, IP, StringComparison.Ordinal);
 
     /// <summary>
     /// Value equality over the entries, entry-wise and order-independent — Java's <c>equals</c>.

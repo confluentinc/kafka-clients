@@ -66,9 +66,9 @@ public sealed class PublicSyncConsumerRoundTripTests
         Assert.Equal(value, record.Value);
         Assert.Empty(record.Headers);
         Assert.True(
-            record.TimestampType is TimestampType.NoTimestampType
-                or TimestampType.CreateTime
-                or TimestampType.LogAppendTime);
+            record.TimestampType is TimestampType.NO_TIMESTAMP_TYPE
+                or TimestampType.CREATE_TIME
+                or TimestampType.LOG_APPEND_TIME);
     }
 
     [Fact]

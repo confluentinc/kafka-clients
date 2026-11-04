@@ -44,9 +44,9 @@ public sealed class PublicAsyncConsumerCloseTests
 
     public static IEnumerable<object[]> Operations() => new[]
     {
-        new object[] { GroupMembershipOperation.LeaveGroup },
-        new object[] { GroupMembershipOperation.RemainInGroup },
-        new object[] { GroupMembershipOperation.Default },
+        new object[] { GroupMembershipOperation.LEAVE_GROUP },
+        new object[] { GroupMembershipOperation.REMAIN_IN_GROUP },
+        new object[] { GroupMembershipOperation.DEFAULT },
     };
 
     [Theory]
@@ -70,7 +70,7 @@ public sealed class PublicAsyncConsumerCloseTests
             AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
             AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() =>
             {
-                _ = consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(-1)).WithGroupMembershipOperation(GroupMembershipOperation.LeaveGroup));
+                _ = consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(-1)).WithGroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP));
             }));
 
             Assert.Empty(consumer.Subscription());
@@ -152,7 +152,7 @@ public sealed class PublicAsyncConsumerCloseTests
 
         IAsyncConsumer<byte[], byte[]> third = Create(mock);
         await TestTimeout.DisposeAsync(third);
-        await TestTimeout.Run(() => third.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LeaveGroup)), s_deadline);
+        await TestTimeout.Run(() => third.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP)), s_deadline);
     }
 
     [Fact]

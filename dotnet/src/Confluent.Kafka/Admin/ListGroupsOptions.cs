@@ -126,7 +126,7 @@ public sealed class ListGroupsOptions
     public static ListGroupsOptions ForConsumerGroups() =>
         new ListGroupsOptions
         {
-            Types = new[] { GroupType.Classic, GroupType.Consumer },
+            Types = new[] { GroupType.CLASSIC, GroupType.CONSUMER },
 
             // "consumer" is Java's internal ConsumerProtocol.PROTOCOL_TYPE, inlined.
             ProtocolTypes = new[] { "", "consumer" },
@@ -138,7 +138,7 @@ public sealed class ListGroupsOptions
     /// </summary>
     /// <returns>A new instance filtered to share groups.</returns>
     public static ListGroupsOptions ForShareGroups() =>
-        new ListGroupsOptions { Types = new[] { GroupType.Share } };
+        new ListGroupsOptions { Types = new[] { GroupType.SHARE } };
 
     /// <summary>
     /// Options that return only Kafka Streams groups — Java's <c>forStreamsGroups()</c>,
@@ -146,7 +146,7 @@ public sealed class ListGroupsOptions
     /// </summary>
     /// <returns>A new instance filtered to Kafka Streams groups.</returns>
     public static ListGroupsOptions ForStreamsGroups() =>
-        new ListGroupsOptions { Types = new[] { GroupType.Streams } };
+        new ListGroupsOptions { Types = new[] { GroupType.STREAMS } };
 
     // Immutable, as Java's Set.copyOf: a retained HashSet could be downcast and mutated.
     private static IReadOnlyCollection<T> CopyOf<T>(IReadOnlyCollection<T> value)

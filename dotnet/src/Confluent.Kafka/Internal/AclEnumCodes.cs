@@ -20,20 +20,20 @@ namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// Java's <c>fromCode</c> fallback for the four ACL enums: a defined member is kept, anything else
-/// becomes that enum's <c>Unknown</c>, so the binding keys an ACL answer by the value the core keys
+/// becomes that enum's <c>UNKNOWN</c>, so the binding keys an ACL answer by the value the core keys
 /// it by.
 /// </summary>
 internal static class AclEnumCodes
 {
     internal static AclOperation DefinedOrUnknown(AclOperation value) =>
-        Enum.IsDefined(typeof(AclOperation), value) ? value : AclOperation.Unknown;
+        Enum.IsDefined(typeof(AclOperation), value) ? value : AclOperation.UNKNOWN;
 
     internal static AclPermissionType DefinedOrUnknown(AclPermissionType value) =>
-        Enum.IsDefined(typeof(AclPermissionType), value) ? value : AclPermissionType.Unknown;
+        Enum.IsDefined(typeof(AclPermissionType), value) ? value : AclPermissionType.UNKNOWN;
 
     internal static ResourceType DefinedOrUnknown(ResourceType value) =>
-        Enum.IsDefined(typeof(ResourceType), value) ? value : ResourceType.Unknown;
+        Enum.IsDefined(typeof(ResourceType), value) ? value : ResourceType.UNKNOWN;
 
     internal static PatternType DefinedOrUnknown(PatternType value) =>
-        Enum.IsDefined(typeof(PatternType), value) ? value : PatternType.Unknown;
+        Enum.IsDefined(typeof(PatternType), value) ? value : PatternType.UNKNOWN;
 }

@@ -143,7 +143,7 @@ public sealed class AdminListTransactionsBrokerListingsTests
 
         private static TransactionListing Expected(int broker) =>
             new TransactionListing(
-                "txn-ø-" + broker, 100L + broker, broker == 1 ? TransactionState.Ongoing : TransactionState.PrepareCommit);
+                "txn-ø-" + broker, 100L + broker, broker == 1 ? TransactionState.ONGOING : TransactionState.PREPARE_COMMIT);
 
         private IntPtr ListingOf(int broker)
         {

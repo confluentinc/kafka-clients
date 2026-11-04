@@ -41,29 +41,29 @@ public sealed class AdminConfigsMarshalTests
 
     private static readonly (Func<IntPtr> Singleton, ConfigEntry.ConfigSource Expected)[] s_sources =
     {
-        (() => Singleton(Native.SourceDynamicTopicConfig), ConfigEntry.ConfigSource.DynamicTopicConfig),
-        (() => Singleton(Native.SourceDynamicBrokerLoggerConfig), ConfigEntry.ConfigSource.DynamicBrokerLoggerConfig),
-        (() => Singleton(Native.SourceDynamicBrokerConfig), ConfigEntry.ConfigSource.DynamicBrokerConfig),
-        (() => Singleton(Native.SourceDynamicDefaultBrokerConfig), ConfigEntry.ConfigSource.DynamicDefaultBrokerConfig),
-        (() => Singleton(Native.SourceDynamicClientMetricsConfig), ConfigEntry.ConfigSource.DynamicClientMetricsConfig),
-        (() => Singleton(Native.SourceDynamicGroupConfig), ConfigEntry.ConfigSource.DynamicGroupConfig),
-        (() => Singleton(Native.SourceStaticBrokerConfig), ConfigEntry.ConfigSource.StaticBrokerConfig),
-        (() => Singleton(Native.SourceDefaultConfig), ConfigEntry.ConfigSource.DefaultConfig),
-        (() => Singleton(Native.SourceUnknown), ConfigEntry.ConfigSource.Unknown),
+        (() => Singleton(Native.SourceDynamicTopicConfig), ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG),
+        (() => Singleton(Native.SourceDynamicBrokerLoggerConfig), ConfigEntry.ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG),
+        (() => Singleton(Native.SourceDynamicBrokerConfig), ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG),
+        (() => Singleton(Native.SourceDynamicDefaultBrokerConfig), ConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG),
+        (() => Singleton(Native.SourceDynamicClientMetricsConfig), ConfigEntry.ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG),
+        (() => Singleton(Native.SourceDynamicGroupConfig), ConfigEntry.ConfigSource.DYNAMIC_GROUP_CONFIG),
+        (() => Singleton(Native.SourceStaticBrokerConfig), ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG),
+        (() => Singleton(Native.SourceDefaultConfig), ConfigEntry.ConfigSource.DEFAULT_CONFIG),
+        (() => Singleton(Native.SourceUnknown), ConfigEntry.ConfigSource.UNKNOWN),
     };
 
     private static readonly (Func<IntPtr> Singleton, ConfigEntry.ConfigType Expected)[] s_types =
     {
-        (() => Singleton(Native.TypeUnknown), ConfigEntry.ConfigType.Unknown),
-        (() => Singleton(Native.TypeBoolean), ConfigEntry.ConfigType.Boolean),
-        (() => Singleton(Native.TypeString), ConfigEntry.ConfigType.String),
-        (() => Singleton(Native.TypeInt), ConfigEntry.ConfigType.Int),
-        (() => Singleton(Native.TypeShort), ConfigEntry.ConfigType.Short),
-        (() => Singleton(Native.TypeLong), ConfigEntry.ConfigType.Long),
-        (() => Singleton(Native.TypeDouble), ConfigEntry.ConfigType.Double),
-        (() => Singleton(Native.TypeList), ConfigEntry.ConfigType.List),
-        (() => Singleton(Native.TypeClass), ConfigEntry.ConfigType.Class),
-        (() => Singleton(Native.TypePassword), ConfigEntry.ConfigType.Password),
+        (() => Singleton(Native.TypeUnknown), ConfigEntry.ConfigType.UNKNOWN),
+        (() => Singleton(Native.TypeBoolean), ConfigEntry.ConfigType.BOOLEAN),
+        (() => Singleton(Native.TypeString), ConfigEntry.ConfigType.STRING),
+        (() => Singleton(Native.TypeInt), ConfigEntry.ConfigType.INT),
+        (() => Singleton(Native.TypeShort), ConfigEntry.ConfigType.SHORT),
+        (() => Singleton(Native.TypeLong), ConfigEntry.ConfigType.LONG),
+        (() => Singleton(Native.TypeDouble), ConfigEntry.ConfigType.DOUBLE),
+        (() => Singleton(Native.TypeList), ConfigEntry.ConfigType.LIST),
+        (() => Singleton(Native.TypeClass), ConfigEntry.ConfigType.CLASS),
+        (() => Singleton(Native.TypePassword), ConfigEntry.ConfigType.PASSWORD),
     };
 
     private delegate IntPtr SingletonAccessor(ref IntPtr outErr);
@@ -80,27 +80,27 @@ public sealed class AdminConfigsMarshalTests
 
         ConfigEntry a = Assert.IsType<ConfigEntry>(config.Get("a.name"));
         Assert.Equal("1", a.Value);
-        Assert.Equal(ConfigEntry.ConfigSource.DynamicTopicConfig, a.Source);
+        Assert.Equal(ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG, a.Source);
         Assert.True(a.IsSensitive);
         Assert.False(a.IsReadOnly);
-        Assert.Equal(ConfigEntry.ConfigType.Boolean, a.Type);
+        Assert.Equal(ConfigEntry.ConfigType.BOOLEAN, a.Type);
         Assert.Equal("résumé", a.Documentation);
         Assert.Empty(a.Synonyms);
         Assert.False(a.IsDefault);
 
         ConfigEntry b = Assert.IsType<ConfigEntry>(config.Get("b.name"));
         Assert.Null(b.Value);
-        Assert.Equal(ConfigEntry.ConfigSource.DefaultConfig, b.Source);
+        Assert.Equal(ConfigEntry.ConfigSource.DEFAULT_CONFIG, b.Source);
         Assert.False(b.IsSensitive);
         Assert.True(b.IsReadOnly);
-        Assert.Equal(ConfigEntry.ConfigType.Password, b.Type);
+        Assert.Equal(ConfigEntry.ConfigType.PASSWORD, b.Type);
         Assert.Null(b.Documentation);
         Assert.True(b.IsDefault);
 
         ConfigEntry c = Assert.IsType<ConfigEntry>(config.Get("c.name"));
         Assert.Equal(string.Empty, c.Value);
-        Assert.Equal(ConfigEntry.ConfigSource.Unknown, c.Source);
-        Assert.Equal(ConfigEntry.ConfigType.Unknown, c.Type);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, c.Source);
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, c.Type);
         Assert.Equal(string.Empty, c.Documentation);
     }
 
@@ -154,7 +154,7 @@ public sealed class AdminConfigsMarshalTests
             entry);
         Assert.NotEqual(
             new ConfigEntry(
-                "t", "v", entry.Source, false, false, Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.Unknown, null),
+                "t", "v", entry.Source, false, false, Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.UNKNOWN, null),
             entry);
     }
 
@@ -169,7 +169,7 @@ public sealed class AdminConfigsMarshalTests
             ["retention.ms"] = "604800000",
         });
 
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
+        ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         Config config = await TestTimeout.Run(
             () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values[resource].Get(),
             s_deadline);
@@ -180,8 +180,8 @@ public sealed class AdminConfigsMarshalTests
         Assert.False(cleanup.IsSensitive);
         Assert.False(cleanup.IsReadOnly);
         Assert.Empty(cleanup.Synonyms);
-        Assert.Equal(ConfigEntry.ConfigSource.Unknown, cleanup.Source);
-        Assert.Equal(ConfigEntry.ConfigType.Unknown, cleanup.Type);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, cleanup.Source);
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, cleanup.Type);
         Assert.Null(cleanup.Documentation);
         Assert.Equal("604800000", config.Get("retention.ms")!.Value);
     }
@@ -193,8 +193,8 @@ public sealed class AdminConfigsMarshalTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await CreateTopic(admin, null);
 
-        ConfigResource present = new ConfigResource(ConfigResourceType.Topic, Topic);
-        ConfigResource missing = new ConfigResource(ConfigResourceType.Topic, "cfg-absent-topic");
+        ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, Topic);
+        ConfigResource missing = new ConfigResource(ConfigResourceType.TOPIC, "cfg-absent-topic");
         AsyncDescribeConfigsResult result =
             AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { present, missing }, null));
 
@@ -228,25 +228,25 @@ public sealed class AdminConfigsMarshalTests
     public void ConfigSynonym_CarriesItsThreeFields_AndPreservesANullValue()
     {
         ConfigEntry.ConfigSynonym withValue =
-            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.StaticBrokerConfig);
+            new ConfigEntry.ConfigSynonym("a", "1", ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG);
         Assert.Equal("a", withValue.Name);
         Assert.Equal("1", withValue.Value);
-        Assert.Equal(ConfigEntry.ConfigSource.StaticBrokerConfig, withValue.Source);
+        Assert.Equal(ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG, withValue.Source);
         Assert.Equal("ConfigSynonym(name=a, value=1, source=STATIC_BROKER_CONFIG)", withValue.ToString());
 
         ConfigEntry.ConfigSynonym withNull =
-            new ConfigEntry.ConfigSynonym("a", null, ConfigEntry.ConfigSource.DefaultConfig);
+            new ConfigEntry.ConfigSynonym("a", null, ConfigEntry.ConfigSource.DEFAULT_CONFIG);
         Assert.Null(withNull.Value);
         Assert.NotEqual(withValue, withNull);
 
         ConfigEntry entry = new ConfigEntry(
             "k",
             "v",
-            ConfigEntry.ConfigSource.DynamicTopicConfig,
+            ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG,
             isSensitive: false,
             isReadOnly: false,
             new[] { withValue, withNull },
-            ConfigEntry.ConfigType.String,
+            ConfigEntry.ConfigType.STRING,
             "doc");
         Assert.Equal(new[] { withValue, withNull }, entry.Synonyms);
     }

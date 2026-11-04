@@ -143,7 +143,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         int numPartitions = 0;
         int replicationFactor = 0;
-        Uuid topicId = Uuid.Zero;
+        Uuid topicId = Uuid.ZERO_UUID;
         Config config = default!;
 
         await TestTimeout.Run(async () => numPartitions = await result.NumPartitions(Topic).Get(), s_deadline);
@@ -153,7 +153,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         Assert.Equal(4, numPartitions);
         Assert.Equal(2, replicationFactor);
-        Assert.NotEqual(Uuid.Zero, topicId);
+        Assert.NotEqual(Uuid.ZERO_UUID, topicId);
 
         Assert.Equal(topicId, Uuid.Parse(topicId.ToString()));
 
@@ -504,8 +504,8 @@ public sealed class PublicAdminCreateTopicsTests
 
         ConfigEntry entry = Assert.Single(config.Entries);
         Assert.Equal(new ConfigEntry("cleanup.policy", "compact"), entry);
-        Assert.Equal(ConfigEntry.ConfigSource.Unknown, entry.Source);
-        Assert.Equal(ConfigEntry.ConfigType.Unknown, entry.Type);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, entry.Source);
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, entry.Type);
         Assert.Null(entry.Documentation);
         Assert.Empty(entry.Synonyms);
         Assert.False(entry.IsDefault);

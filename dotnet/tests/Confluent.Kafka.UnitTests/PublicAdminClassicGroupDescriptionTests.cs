@@ -89,7 +89,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     public void SixArgumentConstructor_ForwardsAnEmptySet_NotAbsence()
     {
         var forwarded = new ClassicGroupDescription(
-            "g-1", "consumer", "range", new[] { s_memberOne }, ClassicGroupState.Stable, s_coordinatorNode);
+            "g-1", "consumer", "range", new[] { s_memberOne }, ClassicGroupState.STABLE, s_coordinatorNode);
 
         Assert.NotNull(forwarded.AuthorizedOperations);
         Assert.Empty(forwarded.AuthorizedOperations!);
@@ -106,13 +106,13 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     public void SixArgumentConstructor_PassesItsOwnSixThrough()
     {
         var forwarded = new ClassicGroupDescription(
-            null, null, null, null, ClassicGroupState.Dead, null);
+            null, null, null, null, ClassicGroupState.DEAD, null);
 
         Assert.Equal(string.Empty, forwarded.GroupId);
         Assert.Null(forwarded.Protocol);
         Assert.Equal(string.Empty, forwarded.ProtocolData);
         Assert.Empty(forwarded.Members);
-        Assert.Equal(ClassicGroupState.Dead, forwarded.State);
+        Assert.Equal(ClassicGroupState.DEAD, forwarded.State);
         Assert.Null(forwarded.Coordinator);
     }
 
@@ -139,17 +139,17 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Equal("range", description.ProtocolData);
         Assert.False(description.IsSimpleConsumerGroup);
         Assert.Equal(new[] { s_memberOne, s_memberTwo }, description.Members);
-        Assert.Equal(ClassicGroupState.Stable, description.State);
+        Assert.Equal(ClassicGroupState.STABLE, description.State);
         Assert.Same(s_coordinatorNode, description.Coordinator);
         Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
     }
 
     [Fact]
     public void Constructor_CoalescesTheTwoJavaCoalescesAndNoOthers()
     {
         var description = new ClassicGroupDescription(
-            null, null, null, null, ClassicGroupState.Unknown, null, null);
+            null, null, null, null, ClassicGroupState.UNKNOWN, null, null);
 
         Assert.Equal(string.Empty, description.GroupId);
         Assert.Equal(string.Empty, description.ProtocolData);
@@ -181,7 +181,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     {
         var source = new List<MemberDescription> { s_memberOne };
         var description = new ClassicGroupDescription(
-            "g-1", "consumer", "range", source, ClassicGroupState.Stable, null, null);
+            "g-1", "consumer", "range", source, ClassicGroupState.STABLE, null, null);
 
         source.Add(s_memberTwo);
 
@@ -198,7 +198,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.False(WithProtocol("connect").IsSimpleConsumerGroup);
 
         Assert.True(new ConsumerGroupDescription(
-            "g-1", true, null, "range", GroupType.Classic, GroupState.Empty, null, null, null, null)
+            "g-1", true, null, "range", GroupType.CLASSIC, GroupState.EMPTY, null, null, null, null)
             .IsSimpleConsumerGroup);
     }
 
@@ -223,12 +223,12 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
         ClassicGroupState[] states =
         {
-            ClassicGroupState.Unknown,
-            ClassicGroupState.PreparingRebalance,
-            ClassicGroupState.CompletingRebalance,
-            ClassicGroupState.Stable,
-            ClassicGroupState.Dead,
-            ClassicGroupState.Empty,
+            ClassicGroupState.UNKNOWN,
+            ClassicGroupState.PREPARING_REBALANCE,
+            ClassicGroupState.COMPLETING_REBALANCE,
+            ClassicGroupState.STABLE,
+            ClassicGroupState.DEAD,
+            ClassicGroupState.EMPTY,
         };
 
         foreach (ClassicGroupState state in states)
@@ -239,7 +239,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var undefined = WithState((ClassicGroupState)int.MaxValue);
 
         Assert.Equal((ClassicGroupState)int.MaxValue, undefined.State);
-        Assert.False(undefined.Equals(WithState(ClassicGroupState.Unknown)));
+        Assert.False(undefined.Equals(WithState(ClassicGroupState.UNKNOWN)));
         Assert.Contains("state=Unknown,", undefined.ToString(), StringComparison.Ordinal);
     }
 
@@ -265,10 +265,10 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     public void AuthorizedOperations_CollapseDuplicatesAndKeepFirstSeenOrder()
     {
         var description = WithOperations(
-            new[] { AclOperation.Read, AclOperation.Write, AclOperation.Read });
+            new[] { AclOperation.READ, AclOperation.WRITE, AclOperation.READ });
 
         Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
     }
 
     [Fact]
@@ -302,25 +302,25 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
         Assert.False(description.Equals(Describe(
             "other", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations())));
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations())));
         Assert.False(description.Equals(Describe(
             "g-1", "connect", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations())));
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations())));
         Assert.False(description.Equals(Describe(
             "g-1", "consumer", "uniform", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations())));
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations())));
         Assert.False(description.Equals(Describe(
             "g-1", "consumer", "range", new[] { s_memberOne },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations())));
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations())));
         Assert.False(description.Equals(Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Empty, s_coordinatorNode, Operations())));
+            ClassicGroupState.EMPTY, s_coordinatorNode, Operations())));
         Assert.False(description.Equals(Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, null, Operations())));
+            ClassicGroupState.STABLE, null, Operations())));
         Assert.False(description.Equals(Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, s_coordinatorNode, new[] { AclOperation.Read })));
+            ClassicGroupState.STABLE, s_coordinatorNode, new[] { AclOperation.READ })));
 
         Assert.False(description.Equals(null));
         Assert.False(description.Equals("g-1"));
@@ -333,12 +333,12 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
         var membersReversed = Describe(
             "g-1", "consumer", "range", new[] { s_memberTwo, s_memberOne },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations());
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations());
 
         var operationsReversed = Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, s_coordinatorNode,
-            new[] { AclOperation.Write, AclOperation.Read });
+            ClassicGroupState.STABLE, s_coordinatorNode,
+            new[] { AclOperation.WRITE, AclOperation.READ });
 
         Assert.False(description.Equals(membersReversed));
 
@@ -351,7 +351,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     {
         var description = Describe(
             "g-1", "consumer", "range", new[] { s_memberOne },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations());
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations());
 
         Assert.Equal(
             "(groupId=g-1, protocol='consumer', protocolData=range, members="
@@ -359,21 +359,21 @@ public sealed class PublicAdminClassicGroupDescriptionTests
             + "assignment=(topicPartitions=), targetAssignment=Optional.empty, "
             + "memberEpoch=null, upgraded=null)"
             + ", state=Stable, coordinator=broker-1:9092 (id: 7 rack: r-1 isFenced: false), "
-            + "authorizedOperations=[Read, Write])",
+            + "authorizedOperations=[READ, WRITE])",
             description.ToString());
 
         Assert.Equal(
             "(groupId=, protocol='null', protocolData=, members=, state=Unknown, "
             + "coordinator=null, authorizedOperations=null)",
             new ClassicGroupDescription(
-                null, null, null, null, ClassicGroupState.Unknown, null, null).ToString());
+                null, null, null, null, ClassicGroupState.UNKNOWN, null, null).ToString());
     }
 
     [Fact]
     public void ToString_QuotesTheProtocolAndNotTheProtocolData()
     {
         var description = Describe(
-            "g-1", "same", "same", null, ClassicGroupState.PreparingRebalance, null, null);
+            "g-1", "same", "same", null, ClassicGroupState.PREPARING_REBALANCE, null, null);
 
         Assert.Equal(
             "(groupId=g-1, protocol='same', protocolData=same, members=, "
@@ -386,23 +386,23 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     {
         var description = Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, null, null);
+            ClassicGroupState.STABLE, null, null);
 
         Assert.Contains("upgraded=null),(memberId=m-2,", description.ToString(), StringComparison.Ordinal);
     }
 
     private static AclOperation[] Operations() =>
-        new[] { AclOperation.Read, AclOperation.Write };
+        new[] { AclOperation.READ, AclOperation.WRITE };
 
     private static ClassicGroupDescription Canonical() =>
         Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations());
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations());
 
     private static ClassicGroupDescription WithProtocol(string? protocol) =>
         Describe(
             "g-1", protocol, "range", new[] { s_memberOne },
-            ClassicGroupState.Stable, s_coordinatorNode, Operations());
+            ClassicGroupState.STABLE, s_coordinatorNode, Operations());
 
     private static ClassicGroupDescription WithState(ClassicGroupState state) =>
         Describe(
@@ -412,12 +412,12 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     private static ClassicGroupDescription WithOperations(IEnumerable<AclOperation>? operations) =>
         Describe(
             "g-1", "consumer", "range", new[] { s_memberOne },
-            ClassicGroupState.Stable, s_coordinatorNode, operations);
+            ClassicGroupState.STABLE, s_coordinatorNode, operations);
 
     private static ClassicGroupDescription WithCoordinator(Node? coordinator) =>
         Describe(
             "g-1", "consumer", "range", new[] { s_memberOne, s_memberTwo },
-            ClassicGroupState.Stable, coordinator, Operations());
+            ClassicGroupState.STABLE, coordinator, Operations());
 
     private static ClassicGroupDescription Describe(
         string? groupId,

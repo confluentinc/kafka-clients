@@ -122,7 +122,7 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         int numPartitions = 0;
         int replicationFactor = 0;
-        Uuid reportedId = Uuid.Zero;
+        Uuid reportedId = Uuid.ZERO_UUID;
         await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("t").Get(), s_deadline);
         await TestTimeout.Run(async () => replicationFactor = await result.ReplicationFactor("t").Get(), s_deadline);
         await TestTimeout.Run(async () => reportedId = await result.TopicId("t").Get(), s_deadline);
@@ -379,7 +379,7 @@ public sealed class PublicAdminTopicResultConstructionTests
     }
 
     private static CreateTopicsResult.TopicMetadataAndConfig Metadata(int numPartitions) =>
-        new CreateTopicsResult.TopicMetadataAndConfig(Uuid.Zero, numPartitions, 1, new Config(Array.Empty<ConfigEntry>()));
+        new CreateTopicsResult.TopicMetadataAndConfig(Uuid.ZERO_UUID, numPartitions, 1, new Config(Array.Empty<ConfigEntry>()));
 
     private static void AssertOnlyInternalConstructor(Type type, params (Type Type, string Name, byte Flag)[] expected)
     {

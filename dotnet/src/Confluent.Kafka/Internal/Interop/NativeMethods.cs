@@ -906,6 +906,12 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_timestamp_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern long RecordMetadataTimestamp(IntPtr metadata, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_serialized_key_size_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int RecordMetadataSerializedKeySize(IntPtr metadata, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_serialized_value_size_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int RecordMetadataSerializedValueSize(IntPtr metadata, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_with_auto_complete_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockProducerWithAutoComplete(sbyte autoComplete, ref IntPtr outErr);
 

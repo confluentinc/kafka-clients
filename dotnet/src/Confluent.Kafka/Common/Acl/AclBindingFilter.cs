@@ -35,8 +35,8 @@ namespace Confluent.Kafka.Common.Acl;
 public sealed class AclBindingFilter
 {
     /// <summary>A filter matching every ACL binding — Java's <c>ANY</c>.</summary>
-    public static AclBindingFilter Any { get; } =
-        new AclBindingFilter(ResourcePatternFilter.Any, AccessControlEntryFilter.Any);
+    public static AclBindingFilter ANY { get; } =
+        new AclBindingFilter(ResourcePatternFilter.ANY, AccessControlEntryFilter.ANY);
 
     /// <summary>Creates a binding filter — Java's constructor.</summary>
     /// <param name="patternFilter">The resource pattern filter.</param>
@@ -57,7 +57,7 @@ public sealed class AclBindingFilter
     public AccessControlEntryFilter EntryFilter { get; }
 
     /// <summary>
-    /// Whether either half has an <c>Unknown</c> component — Java's <c>isUnknown()</c>.
+    /// Whether either half has an <c>UNKNOWN</c> component — Java's <c>isUnknown()</c>.
     /// </summary>
     public bool IsUnknown => PatternFilter.IsUnknown || EntryFilter.IsUnknown;
 
@@ -83,9 +83,7 @@ public sealed class AclBindingFilter
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c>, with the enums' .NET names,
-    /// as in <see cref="ResourcePatternFilter.ToString"/> and
-    /// <see cref="AccessControlEntryFilter.ToString"/>.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

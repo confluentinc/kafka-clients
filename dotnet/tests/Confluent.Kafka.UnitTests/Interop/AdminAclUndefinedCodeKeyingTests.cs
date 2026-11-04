@@ -141,24 +141,24 @@ public sealed class AdminAclUndefinedCodeKeyingTests
     private static AclBinding Binding(Column column, int code) =>
         new AclBinding(
             new ResourcePattern(
-                column == Column.ResourceType ? (ResourceType)code : ResourceType.Topic,
+                column == Column.ResourceType ? (ResourceType)code : ResourceType.TOPIC,
                 "undefined-code-acl",
-                column == Column.PatternType ? (PatternType)code : PatternType.Literal),
+                column == Column.PatternType ? (PatternType)code : PatternType.LITERAL),
             new AccessControlEntry(
                 "User:alice",
                 "*",
-                column == Column.Operation ? (AclOperation)code : AclOperation.Read,
-                column == Column.PermissionType ? (AclPermissionType)code : AclPermissionType.Allow));
+                column == Column.Operation ? (AclOperation)code : AclOperation.READ,
+                column == Column.PermissionType ? (AclPermissionType)code : AclPermissionType.ALLOW));
 
     private static AclBindingFilter Filter(Column column, int code) =>
         new AclBindingFilter(
             new ResourcePatternFilter(
-                column == Column.ResourceType ? (ResourceType)code : ResourceType.Topic,
+                column == Column.ResourceType ? (ResourceType)code : ResourceType.TOPIC,
                 "undefined-code-acl",
-                column == Column.PatternType ? (PatternType)code : PatternType.Literal),
+                column == Column.PatternType ? (PatternType)code : PatternType.LITERAL),
             new AccessControlEntryFilter(
                 "User:alice",
                 "*",
-                column == Column.Operation ? (AclOperation)code : AclOperation.Read,
-                column == Column.PermissionType ? (AclPermissionType)code : AclPermissionType.Allow));
+                column == Column.Operation ? (AclOperation)code : AclOperation.READ,
+                column == Column.PermissionType ? (AclPermissionType)code : AclPermissionType.ALLOW));
 }

@@ -79,12 +79,12 @@ internal sealed partial class NativeAdminClient
         EnterUse();
         try
         {
-            if (electionType != ElectionType.Preferred && electionType != ElectionType.Unclean)
+            if (electionType != ElectionType.PREFERRED && electionType != ElectionType.UNCLEAN)
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(electionType),
                     electionType,
-                    "The election type must be ElectionType.Preferred or ElectionType.Unclean.");
+                    "The election type must be ElectionType.PREFERRED or ElectionType.UNCLEAN.");
             }
 
             IntPtr nativeElectionType = NativeElectionType(electionType);
@@ -115,7 +115,7 @@ internal sealed partial class NativeAdminClient
     internal static IntPtr NativeElectionType(ElectionType electionType)
     {
         IntPtr outErr = IntPtr.Zero;
-        IntPtr native = electionType == ElectionType.Preferred
+        IntPtr native = electionType == ElectionType.PREFERRED
             ? NativeMethods.ElectionTypePreferred(ref outErr)
             : NativeMethods.ElectionTypeUnclean(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);

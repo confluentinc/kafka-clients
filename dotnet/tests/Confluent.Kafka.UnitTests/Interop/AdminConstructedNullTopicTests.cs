@@ -182,7 +182,7 @@ public sealed class AdminConstructedNullTopicTests
         TopicPartition[] partitions = { NullTopic(constructed) };
 
         AssertRejected(
-            Assert.Throws<ArgumentException>(() => admin.ElectLeaders(ElectionType.Preferred, partitions, null)),
+            Assert.Throws<ArgumentException>(() => admin.ElectLeaders(ElectionType.PREFERRED, partitions, null)),
             "partitions",
             Message);
         AssertRejected(

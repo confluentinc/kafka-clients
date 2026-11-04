@@ -22,29 +22,29 @@ namespace Confluent.Kafka.Common.Resource;
 public enum ResourceType
 {
     /// <summary>A resource type this client does not recognize — Java's <c>UNKNOWN</c> (code 0).</summary>
-    Unknown = 0,
+    UNKNOWN = 0,
 
     /// <summary>
     /// In a filter, matches any resource type — Java's <c>ANY</c> (code 1). Rejected by
     /// <see cref="ResourcePattern"/>'s constructor; legal on <see cref="ResourcePatternFilter"/>.
     /// </summary>
-    Any = 1,
+    ANY = 1,
 
     /// <summary>A topic — Java's <c>TOPIC</c> (code 2).</summary>
-    Topic = 2,
+    TOPIC = 2,
 
     /// <summary>A consumer group — Java's <c>GROUP</c> (code 3).</summary>
-    Group = 3,
+    GROUP = 3,
 
     /// <summary>The cluster — Java's <c>CLUSTER</c> (code 4).</summary>
-    Cluster = 4,
+    CLUSTER = 4,
 
     /// <summary>A transactional id — Java's <c>TRANSACTIONAL_ID</c> (code 5).</summary>
-    TransactionalId = 5,
+    TRANSACTIONAL_ID = 5,
 
     /// <summary>A delegation token — Java's <c>DELEGATION_TOKEN</c> (code 6).</summary>
-    DelegationToken = 6,
+    DELEGATION_TOKEN = 6,
 
     /// <summary>A user — Java's <c>USER</c> (code 7).</summary>
-    User = 7,
+    USER = 7,
 }

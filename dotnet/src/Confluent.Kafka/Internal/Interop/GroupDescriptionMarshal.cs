@@ -96,8 +96,8 @@ internal static class GroupDescriptionMarshal
             isSimple != 0,
             memberDescriptions,
             Utf8Marshal.PtrToString(assignor),
-            GroupMarshal.TypeFrom(type) ?? GroupType.Unknown,
-            GroupMarshal.StateFrom(state) ?? GroupState.Unknown,
+            GroupMarshal.TypeFrom(type) ?? GroupType.UNKNOWN,
+            GroupMarshal.StateFrom(state) ?? GroupState.UNKNOWN,
             NodeMarshal.CopyOut(coordinator),
             authorizedOperations,
             OptionalEpoch(groupEpoch),
@@ -127,7 +127,7 @@ internal static class GroupDescriptionMarshal
             Utf8Marshal.PtrToString(protocol) ?? string.Empty,
             Utf8Marshal.PtrToString(protocolData) ?? string.Empty,
             memberDescriptions,
-            GroupMarshal.ClassicStateFrom(state) ?? ClassicGroupState.Unknown,
+            GroupMarshal.ClassicStateFrom(state) ?? ClassicGroupState.UNKNOWN,
             NodeMarshal.CopyOut(coordinator),
             AuthorizedOperationsMarshal.CopyOutAndDestroy(operations));
     }

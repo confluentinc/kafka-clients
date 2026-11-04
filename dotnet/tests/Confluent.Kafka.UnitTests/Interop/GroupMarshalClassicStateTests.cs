@@ -32,12 +32,12 @@ public sealed class GroupMarshalClassicStateTests
 {
     private static readonly (ClassicGroupState State, string Name, string ConstantName)[] s_javaConstants =
     {
-        (ClassicGroupState.Unknown, "Unknown", "UNKNOWN"),
-        (ClassicGroupState.PreparingRebalance, "PreparingRebalance", "PREPARING_REBALANCE"),
-        (ClassicGroupState.CompletingRebalance, "CompletingRebalance", "COMPLETING_REBALANCE"),
-        (ClassicGroupState.Stable, "Stable", "STABLE"),
-        (ClassicGroupState.Dead, "Dead", "DEAD"),
-        (ClassicGroupState.Empty, "Empty", "EMPTY"),
+        (ClassicGroupState.UNKNOWN, "Unknown", "UNKNOWN"),
+        (ClassicGroupState.PREPARING_REBALANCE, "PreparingRebalance", "PREPARING_REBALANCE"),
+        (ClassicGroupState.COMPLETING_REBALANCE, "CompletingRebalance", "COMPLETING_REBALANCE"),
+        (ClassicGroupState.STABLE, "Stable", "STABLE"),
+        (ClassicGroupState.DEAD, "Dead", "DEAD"),
+        (ClassicGroupState.EMPTY, "Empty", "EMPTY"),
     };
 
     private static readonly Native.Singleton[] s_singletons =
@@ -58,9 +58,9 @@ public sealed class GroupMarshalClassicStateTests
         string[] names = Enum.GetNames(typeof(ClassicGroupState));
 
         Assert.Equal(s_javaConstants.Select(c => c.State).ToArray(), declared);
-        Assert.DoesNotContain("Assigning", names);
-        Assert.DoesNotContain("Reconciling", names);
-        Assert.DoesNotContain("NotReady", names);
+        Assert.DoesNotContain("ASSIGNING", names);
+        Assert.DoesNotContain("RECONCILING", names);
+        Assert.DoesNotContain("NOT_READY", names);
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public sealed class GroupMarshalClassicStateTests
     [InlineData("COMPLETINGREBALANCE")]
     public void TheCoresParse_DecodesRegardlessOfCasing(string name)
     {
-        Assert.Equal(ClassicGroupState.CompletingRebalance, GroupMarshal.ClassicStateFrom(Parse(name)));
+        Assert.Equal(ClassicGroupState.COMPLETING_REBALANCE, GroupMarshal.ClassicStateFrom(Parse(name)));
     }
 
     [Theory]
@@ -102,7 +102,7 @@ public sealed class GroupMarshalClassicStateTests
     [InlineData("")]
     public void AnUnrecognisedName_DecodesToUnknown(string name)
     {
-        Assert.Equal(ClassicGroupState.Unknown, GroupMarshal.ClassicStateFrom(Parse(name)));
+        Assert.Equal(ClassicGroupState.UNKNOWN, GroupMarshal.ClassicStateFrom(Parse(name)));
     }
 
     [Fact]
@@ -111,7 +111,7 @@ public sealed class GroupMarshalClassicStateTests
         ClassicGroupState? decoded = GroupMarshal.ClassicStateFrom(IntPtr.Zero);
 
         Assert.Null(decoded);
-        Assert.NotEqual(ClassicGroupState.Unknown, decoded);
+        Assert.NotEqual(ClassicGroupState.UNKNOWN, decoded);
     }
 
     [Fact]

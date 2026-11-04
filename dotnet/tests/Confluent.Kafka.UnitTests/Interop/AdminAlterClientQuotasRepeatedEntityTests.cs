@@ -105,7 +105,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
         new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal)
             {
-                [ClientQuotaEntity.User] = user,
+                [ClientQuotaEntity.USER] = user,
             });
 
     private static ClientQuotaEntity EmptyEntity() =>

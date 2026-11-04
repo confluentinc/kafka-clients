@@ -109,8 +109,8 @@ public sealed class AdminP4SubmitArgumentTests
     }
 
     [Theory]
-    [InlineData(ElectionType.Preferred, 0)]
-    [InlineData(ElectionType.Unclean, 1)]
+    [InlineData(ElectionType.PREFERRED, 0)]
+    [InlineData(ElectionType.UNCLEAN, 1)]
     public void ElectLeaders_TheElectionType_ReachesTheCore_AsItsJavaValue(ElectionType electionType, int expectedValue)
     {
         IntPtr native = NativeAdminClient.NativeElectionType(electionType);
@@ -140,7 +140,7 @@ public sealed class AdminP4SubmitArgumentTests
         Assert.Equal(
             "partitions",
             Assert.Throws<ArgumentException>(
-                () => admin.ElectLeaders(ElectionType.Preferred, new[] { default(TopicPartition) }, options: null))
+                () => admin.ElectLeaders(ElectionType.PREFERRED, new[] { default(TopicPartition) }, options: null))
                 .ParamName);
         Assert.Equal(
             "reassignments",

@@ -26,7 +26,7 @@ internal static class UuidMarshal
     {
         if (uuid == IntPtr.Zero)
         {
-            return Uuid.Zero;
+            return Uuid.ZERO_UUID;
         }
 
         IntPtr outErr = IntPtr.Zero;
@@ -41,7 +41,7 @@ internal static class UuidMarshal
     {
         if (uuid == IntPtr.Zero)
         {
-            return Uuid.Zero;
+            return Uuid.ZERO_UUID;
         }
 
         try

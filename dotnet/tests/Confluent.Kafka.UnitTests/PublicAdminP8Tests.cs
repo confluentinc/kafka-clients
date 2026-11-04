@@ -478,7 +478,7 @@ public sealed class PublicAdminP8Tests
         AsyncListTransactionsResult result = admin.ListTransactions(
             new ListTransactionsOptions
             {
-                FilteredStates = new[] { TransactionState.Ongoing, TransactionState.PrepareAbort },
+                FilteredStates = new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT },
                 FilteredProducerIds = new[] { 11L, 22L, 33L },
                 FilteredDuration = 60_000L,
                 FilteredTransactionalIdPattern = "txn-.*",

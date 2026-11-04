@@ -43,11 +43,11 @@ public sealed class ConfigEntry
         : this(
             name,
             value,
-            ConfigSource.Unknown,
+            ConfigSource.UNKNOWN,
             isSensitive: false,
             isReadOnly: false,
             synonyms: Array.Empty<ConfigSynonym>(),
-            type: ConfigType.Unknown,
+            type: ConfigType.UNKNOWN,
             documentation: null)
     {
     }
@@ -60,7 +60,7 @@ public sealed class ConfigEntry
     /// </summary>
     /// <remarks>
     /// <see cref="IsDefault"/> is not a parameter, as in Java: it derives from
-    /// <paramref name="source"/> (<see cref="ConfigSource.DefaultConfig"/> → true). Recorded
+    /// <paramref name="source"/> (<see cref="ConfigSource.DEFAULT_CONFIG"/> → true). Recorded
     /// deviations: a null <paramref name="synonyms"/> or a null synonym element is rejected, where
     /// Java stores it, because <see cref="Synonyms"/> is non-nullable and
     /// <see cref="Equals(object?)"/>, <see cref="GetHashCode"/> and <see cref="ToString"/> read every
@@ -119,7 +119,7 @@ public sealed class ConfigEntry
     /// Whether the value is the broker default (Java's <c>isDefault()</c>), derived from
     /// <see cref="Source"/> as Java derives it.
     /// </summary>
-    public bool IsDefault => Source == ConfigSource.DefaultConfig;
+    public bool IsDefault => Source == ConfigSource.DEFAULT_CONFIG;
 
     /// <summary>
     /// Whether the value is sensitive, in which case the broker redacts it (Java's
@@ -240,30 +240,30 @@ public sealed class ConfigEntry
 
     private static string JavaName(ConfigSource source) => source switch
     {
-        ConfigSource.DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
-        ConfigSource.DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
-        ConfigSource.DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
-        ConfigSource.DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
-        ConfigSource.DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
-        ConfigSource.DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
-        ConfigSource.StaticBrokerConfig => "STATIC_BROKER_CONFIG",
-        ConfigSource.DefaultConfig => "DEFAULT_CONFIG",
-        ConfigSource.Unknown => "UNKNOWN",
+        ConfigSource.DYNAMIC_TOPIC_CONFIG => "DYNAMIC_TOPIC_CONFIG",
+        ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG => "DYNAMIC_BROKER_LOGGER_CONFIG",
+        ConfigSource.DYNAMIC_BROKER_CONFIG => "DYNAMIC_BROKER_CONFIG",
+        ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+        ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG => "DYNAMIC_CLIENT_METRICS_CONFIG",
+        ConfigSource.DYNAMIC_GROUP_CONFIG => "DYNAMIC_GROUP_CONFIG",
+        ConfigSource.STATIC_BROKER_CONFIG => "STATIC_BROKER_CONFIG",
+        ConfigSource.DEFAULT_CONFIG => "DEFAULT_CONFIG",
+        ConfigSource.UNKNOWN => "UNKNOWN",
         _ => ((int)source).ToString(CultureInfo.InvariantCulture),
     };
 
     private static string JavaName(ConfigType type) => type switch
     {
-        ConfigType.Unknown => "UNKNOWN",
-        ConfigType.Boolean => "BOOLEAN",
-        ConfigType.String => "STRING",
-        ConfigType.Int => "INT",
-        ConfigType.Short => "SHORT",
-        ConfigType.Long => "LONG",
-        ConfigType.Double => "DOUBLE",
-        ConfigType.List => "LIST",
-        ConfigType.Class => "CLASS",
-        ConfigType.Password => "PASSWORD",
+        ConfigType.UNKNOWN => "UNKNOWN",
+        ConfigType.BOOLEAN => "BOOLEAN",
+        ConfigType.STRING => "STRING",
+        ConfigType.INT => "INT",
+        ConfigType.SHORT => "SHORT",
+        ConfigType.LONG => "LONG",
+        ConfigType.DOUBLE => "DOUBLE",
+        ConfigType.LIST => "LIST",
+        ConfigType.CLASS => "CLASS",
+        ConfigType.PASSWORD => "PASSWORD",
         _ => ((int)type).ToString(CultureInfo.InvariantCulture),
     };
 
@@ -318,34 +318,34 @@ public sealed class ConfigEntry
     public enum ConfigType
     {
         /// <summary>Java's <c>UNKNOWN</c> — also where an unrecognised name lands.</summary>
-        Unknown,
+        UNKNOWN,
 
         /// <summary>Java's <c>BOOLEAN</c>.</summary>
-        Boolean,
+        BOOLEAN,
 
         /// <summary>Java's <c>STRING</c>.</summary>
-        String,
+        STRING,
 
         /// <summary>Java's <c>INT</c>.</summary>
-        Int,
+        INT,
 
         /// <summary>Java's <c>SHORT</c>.</summary>
-        Short,
+        SHORT,
 
         /// <summary>Java's <c>LONG</c>.</summary>
-        Long,
+        LONG,
 
         /// <summary>Java's <c>DOUBLE</c>.</summary>
-        Double,
+        DOUBLE,
 
         /// <summary>Java's <c>LIST</c>.</summary>
-        List,
+        LIST,
 
         /// <summary>Java's <c>CLASS</c>.</summary>
-        Class,
+        CLASS,
 
         /// <summary>Java's <c>PASSWORD</c>.</summary>
-        Password,
+        PASSWORD,
     }
 
     /// <summary>
@@ -358,34 +358,34 @@ public sealed class ConfigEntry
     public enum ConfigSource
     {
         /// <summary>Java's <c>DYNAMIC_TOPIC_CONFIG</c> — set for a specific topic.</summary>
-        DynamicTopicConfig,
+        DYNAMIC_TOPIC_CONFIG,
 
         /// <summary>Java's <c>DYNAMIC_BROKER_LOGGER_CONFIG</c> — set for a specific broker's logger.</summary>
-        DynamicBrokerLoggerConfig,
+        DYNAMIC_BROKER_LOGGER_CONFIG,
 
         /// <summary>Java's <c>DYNAMIC_BROKER_CONFIG</c> — set for a specific broker.</summary>
-        DynamicBrokerConfig,
+        DYNAMIC_BROKER_CONFIG,
 
         /// <summary>Java's <c>DYNAMIC_DEFAULT_BROKER_CONFIG</c> — the cluster-wide broker default.</summary>
-        DynamicDefaultBrokerConfig,
+        DYNAMIC_DEFAULT_BROKER_CONFIG,
 
         /// <summary>Java's <c>DYNAMIC_CLIENT_METRICS_CONFIG</c> — a client-metrics subscription config.</summary>
-        DynamicClientMetricsConfig,
+        DYNAMIC_CLIENT_METRICS_CONFIG,
 
         /// <summary>Java's <c>DYNAMIC_GROUP_CONFIG</c> — set for a specific group.</summary>
-        DynamicGroupConfig,
+        DYNAMIC_GROUP_CONFIG,
 
         /// <summary>Java's <c>STATIC_BROKER_CONFIG</c> — supplied as broker properties at start-up.</summary>
-        StaticBrokerConfig,
+        STATIC_BROKER_CONFIG,
 
         /// <summary>
         /// Java's <c>DEFAULT_CONFIG</c> — the built-in default. This is the one member
         /// <see cref="ConfigEntry.IsDefault"/> tests for.
         /// </summary>
-        DefaultConfig,
+        DEFAULT_CONFIG,
 
         /// <summary>Java's <c>UNKNOWN</c> — also where an unrecognised name lands.</summary>
-        Unknown,
+        UNKNOWN,
     }
 
     /// <summary>

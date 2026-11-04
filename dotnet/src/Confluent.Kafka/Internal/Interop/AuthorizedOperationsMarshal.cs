@@ -92,7 +92,7 @@ internal static class AuthorizedOperationsMarshal
     }
 
     internal static AclOperation FromCode(int code) =>
-        code >= (int)AclOperation.Unknown && code <= (int)AclOperation.TwoPhaseCommit
+        code >= (int)AclOperation.UNKNOWN && code <= (int)AclOperation.TWO_PHASE_COMMIT
             ? (AclOperation)code
-            : AclOperation.Unknown;
+            : AclOperation.UNKNOWN;
 }

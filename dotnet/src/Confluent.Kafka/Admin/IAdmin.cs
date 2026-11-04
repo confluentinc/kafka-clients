@@ -378,7 +378,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="configs">
     /// Resource → the operations to apply to it, in order. ⚠ An
-    /// <see cref="AlterConfigOpType.Delete"/> whose
+    /// <see cref="AlterConfigOpType.DELETE"/> whose
     /// <see cref="ConfigEntry.Value"/> is <see langword="null"/> is a <b>real request</b>
     /// and the null reaches the broker as a null; it is not the same as an empty string.
     /// </param>
@@ -398,7 +398,7 @@ public interface IAdmin : IDisposable
     /// <paramref name="configs"/> contains a null resource, a null operation collection, or
     /// a null operation, or a resource name, a config name or a config value containing a NUL
     /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks). A null
-    /// config value (<see cref="AlterConfigOpType.Delete"/>'s) is <em>not</em> rejected.
+    /// config value (<see cref="AlterConfigOpType.DELETE"/>'s) is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.IncrementalAlterConfigs"/>
@@ -504,8 +504,8 @@ public interface IAdmin : IDisposable
     /// itself fails only when the election could not be run at all.
     /// </returns>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="electionType"/> is not one of <see cref="ElectionType.Preferred"/>
-    /// / <see cref="ElectionType.Unclean"/> — a value Java's enum parameter cannot
+    /// <paramref name="electionType"/> is not one of <see cref="ElectionType.PREFERRED"/>
+    /// / <see cref="ElectionType.UNCLEAN"/> — a value Java's enum parameter cannot
     /// express, but a C# cast can.
     /// </exception>
     /// <exception cref="ArgumentException">
@@ -708,7 +708,7 @@ public interface IAdmin : IDisposable
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
     /// <see cref="ListOffsetsOptions.IsolationLevel"/>
-    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadUncommitted"/>.
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>.
     /// </param>
     /// <returns>
     /// One future per partition, each carrying that partition's own
@@ -724,8 +724,8 @@ public interface IAdmin : IDisposable
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.IsolationLevel</c> is not one of
-    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadUncommitted"/> /
-    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadCommitted"/> — a value Java's enum
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/> /
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_COMMITTED"/> — a value Java's enum
     /// parameter cannot express, but a C# cast can.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
@@ -978,9 +978,9 @@ public interface IAdmin : IDisposable
     /// The ACL bindings to create. Duplicates collapse, because Java keys its result on a
     /// map. <see cref="ResourcePattern"/> and <see cref="AccessControlEntry"/> reject the ANY
     /// and MATCH values at construction. Those constructors also store an enum value that is
-    /// not a defined member as <c>Unknown</c>, as Java's <c>fromCode</c> does, so two bindings
+    /// not a defined member as <c>UNKNOWN</c>, as Java's <c>fromCode</c> does, so two bindings
     /// that differ only in such values are duplicates. A binding with an
-    /// <c>Unknown</c> field still constructs, and fails its own future, as in Java.
+    /// <c>UNKNOWN</c> field still constructs, and fails its own future, as in Java.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1011,7 +1011,7 @@ public interface IAdmin : IDisposable
     /// The filters to apply. Duplicates collapse, because Java keys its result on a map. A
     /// <see langword="null"/> name, principal or host matches <em>any</em> value, and is
     /// distinct from <c>""</c>, which filters on the literal empty string. The filter
-    /// constructors store an enum value that is not a defined member as <c>Unknown</c>, as
+    /// constructors store an enum value that is not a defined member as <c>UNKNOWN</c>, as
     /// Java's <c>fromCode</c> does, so two filters that differ only in such values are
     /// duplicates.
     /// </param>

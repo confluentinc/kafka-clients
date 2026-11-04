@@ -18,6 +18,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
+using Confluent.Kafka.Producer;
 using Xunit;
 
 using Proto = Confluent.Kafka.Test;
@@ -26,7 +27,8 @@ namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
 /// <see cref="Translate.ToProto"/>'s wire code for each exception type, Python's
-/// <c>_kafka_error_to_proto</c> by type (<c>dotnet/CLAUDE.md</c> §7.6).
+/// <c>_kafka_error_to_proto</c> by type (<c>dotnet/CLAUDE.md</c> §7.6), and the record metadata a send returns,
+/// as Python's <c>_record_metadata_to_proto</c> sends it.
 /// </summary>
 public sealed class TranslateTests
 {
@@ -102,6 +104,22 @@ public sealed class TranslateTests
 
         Assert.Equal(-4, proto.Code);
         Assert.Equal("dotnet server: FormatException: not a number", proto.Message);
+    }
+
+    [Fact]
+    public void ARecordMetadata_IsSentWithItsSerializedSizes()
+    {
+        RecordMetadata metadata =
+            new RecordMetadata(new TopicPartition("orders", 4), 40L, 2, 1_700_000_000_000L, 3, 5);
+
+        Proto.RecordMetadata proto = Translate.MetadataToProto(metadata);
+
+        Assert.Equal(42L, proto.Offset);
+        Assert.Equal(1_700_000_000_000L, proto.Timestamp);
+        Assert.Equal(3, proto.SerializedKeySize);
+        Assert.Equal(5, proto.SerializedValueSize);
+        Assert.Equal("orders", proto.Topic);
+        Assert.Equal(4, proto.Partition);
     }
 
     private static void AssertBare(Exception error, int code) => AssertBare(error, code, error.Message);

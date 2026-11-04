@@ -73,7 +73,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         TopicListing a = map["p2b-list-a"];
         Assert.Equal("p2b-list-a", a.Name);
         Assert.False(a.IsInternal);
-        Assert.NotEqual(Uuid.Zero, a.TopicId);
+        Assert.NotEqual(Uuid.ZERO_UUID, a.TopicId);
     }
 
     [Fact]

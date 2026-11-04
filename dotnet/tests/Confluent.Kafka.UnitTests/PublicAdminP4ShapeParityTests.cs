@@ -149,8 +149,8 @@ public sealed class PublicAdminP4ShapeParityTests
     }
 
     [Theory]
-    [InlineData(ElectionType.Preferred, 0)]
-    [InlineData(ElectionType.Unclean, 1)]
+    [InlineData(ElectionType.PREFERRED, 0)]
+    [InlineData(ElectionType.UNCLEAN, 1)]
     public void ElectionType_CarriesJavasValues(ElectionType type, int value)
     {
         Assert.Equal(value, (int)type);
@@ -161,7 +161,7 @@ public sealed class PublicAdminP4ShapeParityTests
     public void ElectionType_HasExactlyJavasTwoMembers()
     {
         Assert.Equal(
-            new[] { "Preferred", "Unclean" },
+            new[] { "PREFERRED", "UNCLEAN" },
             Enum.GetNames(typeof(ElectionType)).OrderBy(name => name, StringComparer.Ordinal));
     }
 

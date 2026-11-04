@@ -48,7 +48,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         TopicDescription described = await TestTimeout.Run(() => byName.TopicNameValues![Topic].Get(), s_deadline);
 
         Uuid topicId = described.TopicId;
-        Assert.NotEqual(Uuid.Zero, topicId);
+        Assert.NotEqual(Uuid.ZERO_UUID, topicId);
 
         AsyncDescribeTopicsResult byId = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId }));
         Assert.True(byId.TopicIdValues!.ContainsKey(topicId));

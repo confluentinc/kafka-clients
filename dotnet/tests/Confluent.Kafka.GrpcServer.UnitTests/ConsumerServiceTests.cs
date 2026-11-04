@@ -250,9 +250,9 @@ public sealed class ConsumerServiceTests
     }
 
     [Theory]
-    [InlineData("LEAVE_GROUP", GroupMembershipOperation.LeaveGroup)]
-    [InlineData("REMAIN_IN_GROUP", GroupMembershipOperation.RemainInGroup)]
-    [InlineData("DEFAULT", GroupMembershipOperation.Default)]
+    [InlineData("LEAVE_GROUP", GroupMembershipOperation.LEAVE_GROUP)]
+    [InlineData("REMAIN_IN_GROUP", GroupMembershipOperation.REMAIN_IN_GROUP)]
+    [InlineData("DEFAULT", GroupMembershipOperation.DEFAULT)]
     public void CloseOptionsFromProto_NamesTheOperationAndTakesAPresentTimeout(string name, GroupMembershipOperation operation)
     {
         CloseOptions timed = Assert.IsType<CloseOptions>(Translate.CloseOptionsFromProto(

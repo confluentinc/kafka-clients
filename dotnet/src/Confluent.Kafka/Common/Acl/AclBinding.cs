@@ -47,7 +47,7 @@ public sealed class AclBinding
     public AccessControlEntry Entry { get; }
 
     /// <summary>
-    /// Whether either half has an <c>Unknown</c> component — Java's <c>isUnknown()</c>.
+    /// Whether either half has an <c>UNKNOWN</c> component — Java's <c>isUnknown()</c>.
     /// </summary>
     public bool IsUnknown => Pattern.IsUnknown || Entry.IsUnknown;
 
@@ -77,8 +77,7 @@ public sealed class AclBinding
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c>, with the enums' .NET names,
-    /// as in <see cref="ResourcePattern.ToString"/> and <see cref="AccessControlEntry.ToString"/>.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

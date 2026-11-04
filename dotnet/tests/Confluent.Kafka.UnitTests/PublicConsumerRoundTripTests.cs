@@ -69,9 +69,9 @@ public sealed class PublicConsumerRoundTripTests
         Assert.Equal(value, record.Value);
         Assert.Empty(record.Headers);
         Assert.True(
-            record.TimestampType is TimestampType.NoTimestampType
-                or TimestampType.CreateTime
-                or TimestampType.LogAppendTime);
+            record.TimestampType is TimestampType.NO_TIMESTAMP_TYPE
+                or TimestampType.CREATE_TIME
+                or TimestampType.LOG_APPEND_TIME);
     }
 
     [Fact]
@@ -248,9 +248,9 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task TimestampType_MapsAllThreeValues()
     {
-        Assert.Equal(-1, (int)TimestampType.NoTimestampType);
-        Assert.Equal(0, (int)TimestampType.CreateTime);
-        Assert.Equal(1, (int)TimestampType.LogAppendTime);
+        Assert.Equal(-1, (int)TimestampType.NO_TIMESTAMP_TYPE);
+        Assert.Equal(0, (int)TimestampType.CREATE_TIME);
+        Assert.Equal(1, (int)TimestampType.LOG_APPEND_TIME);
 
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);

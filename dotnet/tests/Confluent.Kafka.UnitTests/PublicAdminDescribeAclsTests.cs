@@ -94,8 +94,8 @@ public sealed class PublicAdminDescribeAclsTests
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(
             new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Any, null, PatternType.Any),
-                new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any)));
+                new ResourcePatternFilter(ResourceType.ANY, null, PatternType.ANY),
+                new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY)));
 
         NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
@@ -132,7 +132,7 @@ public sealed class PublicAdminDescribeAclsTests
 
     private static AclBindingFilter Filter(string name) =>
         new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Literal),
+            new ResourcePatternFilter(ResourceType.TOPIC, name, PatternType.LITERAL),
             new AccessControlEntryFilter(
-                "User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+                "User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW));
 }

@@ -22,23 +22,23 @@ namespace Confluent.Kafka.Common.Resource;
 public enum PatternType
 {
     /// <summary>A pattern type this client does not recognize — Java's <c>UNKNOWN</c> (code 0).</summary>
-    Unknown = 0,
+    UNKNOWN = 0,
 
     /// <summary>
     /// In a filter, matches any pattern type — Java's <c>ANY</c> (code 1). Rejected by
     /// <see cref="ResourcePattern"/>'s constructor; legal on <see cref="ResourcePatternFilter"/>.
     /// </summary>
-    Any = 1,
+    ANY = 1,
 
     /// <summary>
     /// In a filter, matches every pattern that would itself match the supplied name —
-    /// Java's <c>MATCH</c> (code 2). Filter-only, like <see cref="Any"/>.
+    /// Java's <c>MATCH</c> (code 2). Filter-only, like <see cref="ANY"/>.
     /// </summary>
-    Match = 2,
+    MATCH = 2,
 
     /// <summary>The name is matched literally — Java's <c>LITERAL</c> (code 3).</summary>
-    Literal = 3,
+    LITERAL = 3,
 
     /// <summary>The name is a prefix — Java's <c>PREFIXED</c> (code 4).</summary>
-    Prefixed = 4,
+    PREFIXED = 4,
 }

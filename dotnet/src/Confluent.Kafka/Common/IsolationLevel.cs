@@ -18,12 +18,16 @@ namespace Confluent.Kafka.Common;
 /// The isolation of a read, Java's <c>IsolationLevel</c>, used by
 /// <see cref="Admin.ListOffsetsOptions.IsolationLevel"/>.
 /// </summary>
-/// <remarks>Each value is Java's <c>IsolationLevel.id()</c>, which the C ABI takes unchanged.</remarks>
+/// <remarks>
+/// Each value is Java's <c>IsolationLevel.id()</c>, which the C ABI takes unchanged.
+/// <c>ToString()</c> gives the Java constant name (<c>READ_COMMITTED</c>), not Java's
+/// <c>toString()</c> text (<c>"read_committed"</c>): a recorded deviation.
+/// </remarks>
 public enum IsolationLevel
 {
     /// <summary>Read every record, including those of open transactions: Java's <c>READ_UNCOMMITTED</c>.</summary>
-    ReadUncommitted = 0,
+    READ_UNCOMMITTED = 0,
 
     /// <summary>Read only the records of committed transactions: Java's <c>READ_COMMITTED</c>.</summary>
-    ReadCommitted = 1,
+    READ_COMMITTED = 1,
 }

@@ -66,7 +66,8 @@ public interface IDeliveryCallback
     /// </summary>
     /// <param name="metadata">
     /// The record's metadata. Never <see langword="null"/>: on failure it is Java's placeholder, the
-    /// record's topic and partition (or <c>-1</c>), with <c>-1</c> for offset and timestamp.
+    /// record's topic and partition (or <c>-1</c>), with <c>-1</c> for the offset, the timestamp and the serialized
+    /// sizes.
     /// </param>
     /// <param name="exception">
     /// <see langword="null"/> on success; otherwise the exception the record's future fails with, the same

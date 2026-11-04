@@ -40,8 +40,8 @@ public sealed class AdminP7SubmitArgumentTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     [Theory]
-    [InlineData(ScramMechanism.ScramSha256)]
-    [InlineData(ScramMechanism.ScramSha512)]
+    [InlineData(ScramMechanism.SCRAM_SHA_256)]
+    [InlineData(ScramMechanism.SCRAM_SHA_512)]
     public void Upsertion_CarriesTheUserTheCredentialInfoAndThePasswordVerbatim(ScramMechanism mechanism) =>
         ReadUpsertion(
             new UserScramCredentialUpsertion(
@@ -77,8 +77,8 @@ public sealed class AdminP7SubmitArgumentTests
             native => Assert.Empty(ReadBytes(native, Native.UpsertionPassword)));
 
     [Theory]
-    [InlineData(ScramMechanism.ScramSha256)]
-    [InlineData(ScramMechanism.ScramSha512)]
+    [InlineData(ScramMechanism.SCRAM_SHA_256)]
+    [InlineData(ScramMechanism.SCRAM_SHA_512)]
     public void Deletion_CarriesTheUserAndTheMechanism(ScramMechanism mechanism)
     {
         IntPtr native = UserScramCredentialMarshal.NewDeletion(new UserScramCredentialDeletion("ålice", mechanism));
@@ -98,7 +98,7 @@ public sealed class AdminP7SubmitArgumentTests
     {
         AssertAlteration(Upsert("upserted"), AlterationUpsertion, "upserted");
         AssertAlteration(
-            new UserScramCredentialDeletion("deleted", ScramMechanism.ScramSha512), AlterationDeletion, "deleted");
+            new UserScramCredentialDeletion("deleted", ScramMechanism.SCRAM_SHA_512), AlterationDeletion, "deleted");
     }
 
     [Fact]
@@ -111,7 +111,7 @@ public sealed class AdminP7SubmitArgumentTests
             {
                 Upsert("dup"),
                 Upsert("dup"),
-                new UserScramCredentialDeletion("other", ScramMechanism.ScramSha256),
+                new UserScramCredentialDeletion("other", ScramMechanism.SCRAM_SHA_256),
             });
 
         Assert.Equal(new[] { "dup", "other" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
@@ -478,11 +478,11 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     [Theory]
-    [InlineData((short)3, FeatureUpdate.UpgradeType.Upgrade, 1)]
-    [InlineData((short)2, FeatureUpdate.UpgradeType.SafeDowngrade, 2)]
-    [InlineData((short)0, FeatureUpdate.UpgradeType.UnsafeDowngrade, 3)]
-    [InlineData(short.MaxValue, FeatureUpdate.UpgradeType.Upgrade, 1)]
-    [InlineData((short)1, FeatureUpdate.UpgradeType.Unknown, 0)]
+    [InlineData((short)3, FeatureUpdate.UpgradeType.UPGRADE, 1)]
+    [InlineData((short)2, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE, 2)]
+    [InlineData((short)0, FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE, 3)]
+    [InlineData(short.MaxValue, FeatureUpdate.UpgradeType.UPGRADE, 1)]
+    [InlineData((short)1, FeatureUpdate.UpgradeType.UNKNOWN, 0)]
     public void FeatureUpdate_CrossesItsLevelAndItsUpgradeTypeCode(
         short maxVersionLevel, FeatureUpdate.UpgradeType upgradeType, int expectedCode) =>
         Assert.Equal(
@@ -528,7 +528,7 @@ public sealed class AdminP7SubmitArgumentTests
     private static UserScramCredentialUpsertion Upsert(string user, byte[]? password = null, byte[]? salt = null) =>
         new UserScramCredentialUpsertion(
             user,
-            new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096),
+            new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
             password ?? new byte[] { 1, 2, 3 },
             salt);
 

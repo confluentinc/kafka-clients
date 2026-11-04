@@ -154,8 +154,8 @@ public sealed class PublicAdminAlterClientQuotasTests
         ClientQuotaEntity alpha = new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal)
             {
-                [ClientQuotaEntity.User] = "alice",
-                [ClientQuotaEntity.ClientId] = "app-1",
+                [ClientQuotaEntity.USER] = "alice",
+                [ClientQuotaEntity.CLIENT_ID] = "app-1",
             });
         ClientQuotaEntity beta = Entity("bob");
 
@@ -239,7 +239,7 @@ public sealed class PublicAdminAlterClientQuotasTests
             admin.AlterClientQuotas(new[] { Alteration("用户-café", 1d) });
 
         ClientQuotaEntity key = Assert.Single(result.Values).Key;
-        Assert.Equal("用户-café", key.Entries[ClientQuotaEntity.User]);
+        Assert.Equal("用户-café", key.Entries[ClientQuotaEntity.USER]);
         Assert.Equal(Entity("用户-café"), key);
 
         await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
@@ -328,7 +328,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal)
             {
-                [ClientQuotaEntity.User] = user,
+                [ClientQuotaEntity.USER] = user,
             });
 
     private static ClientQuotaEntity EmptyEntity() =>

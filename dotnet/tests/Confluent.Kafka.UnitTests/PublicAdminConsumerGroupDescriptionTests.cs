@@ -104,11 +104,11 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.False(description.IsSimpleConsumerGroup);
         Assert.Equal(new[] { s_memberOne, s_memberTwo }, description.Members);
         Assert.Equal("range", description.PartitionAssignor);
-        Assert.Equal(GroupType.Consumer, description.Type);
-        Assert.Equal(GroupState.Stable, description.GroupState);
+        Assert.Equal(GroupType.CONSUMER, description.Type);
+        Assert.Equal(GroupState.STABLE, description.GroupState);
         Assert.Same(s_coordinatorNode, description.Coordinator);
         Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
         Assert.Equal(7, description.GroupEpoch);
         Assert.Equal(9, description.TargetAssignmentEpoch);
     }
@@ -117,7 +117,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     public void Constructor_CoalescesTheThreeJavaCoalescesAndNoOthers()
     {
         var description = new ConsumerGroupDescription(
-            null, false, null, null, GroupType.Unknown, GroupState.Unknown, null, null, null, null);
+            null, false, null, null, GroupType.UNKNOWN, GroupState.UNKNOWN, null, null, null, null);
 
         Assert.Equal(string.Empty, description.GroupId);
         Assert.Empty(description.Members);
@@ -134,7 +134,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     {
         var source = new List<MemberDescription> { s_memberOne };
         var description = new ConsumerGroupDescription(
-            "g-1", false, source, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
+            "g-1", false, source, "range", GroupType.CONSUMER, GroupState.STABLE, null, null, null, null);
 
         source.Add(s_memberTwo);
 
@@ -174,10 +174,10 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     public void AuthorizedOperations_CollapseDuplicatesAndKeepFirstSeenOrder()
     {
         var description = WithOperations(
-            new[] { AclOperation.Read, AclOperation.Write, AclOperation.Read });
+            new[] { AclOperation.READ, AclOperation.WRITE, AclOperation.READ });
 
         Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
     }
 
     [Fact]
@@ -230,35 +230,35 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(Canonical().GetHashCode(), description.GetHashCode());
 
         Assert.False(description.Equals(Describe(
-            "other", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9)));
+            "other", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", true, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9)));
+            "g-1", true, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9)));
+            "g-1", false, new[] { s_memberOne }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "uniform", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "uniform", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Classic,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CLASSIC,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Empty, s_coordinatorNode, Operations(), 7, 9)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.EMPTY, s_coordinatorNode, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, null, Operations(), 7, 9)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, null, Operations(), 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, new[] { AclOperation.Read }, 7, 9)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, new[] { AclOperation.READ }, 7, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 8, 9)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 8, 9)));
         Assert.False(description.Equals(Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 10)));
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 10)));
 
         Assert.False(description.Equals(null));
         Assert.False(description.Equals("g-1"));
@@ -270,12 +270,12 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         var description = Canonical();
 
         var membersReversed = Describe(
-            "g-1", false, new[] { s_memberTwo, s_memberOne }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9);
+            "g-1", false, new[] { s_memberTwo, s_memberOne }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9);
 
         var operationsReversed = Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, new[] { AclOperation.Write, AclOperation.Read }, 7, 9);
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, new[] { AclOperation.WRITE, AclOperation.READ }, 7, 9);
 
         Assert.False(description.Equals(membersReversed));
 
@@ -287,7 +287,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     public void ToString_MirrorsJavasRendering()
     {
         var description = Describe(
-            "g-1", false, new[] { s_memberOne }, "range", GroupType.Consumer, GroupState.Stable,
+            "g-1", false, new[] { s_memberOne }, "range", GroupType.CONSUMER, GroupState.STABLE,
             s_coordinatorNode, Operations(), 7, 9);
 
         Assert.Equal(
@@ -296,7 +296,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             + "assignment=(topicPartitions=), targetAssignment=Optional.empty, "
             + "memberEpoch=null, upgraded=null)"
             + ", partitionAssignor=range, type=Consumer, groupState=Stable, "
-            + "coordinator=broker-1:9092 (id: 7 rack: r-1 isFenced: false), authorizedOperations=[Read, Write], "
+            + "coordinator=broker-1:9092 (id: 7 rack: r-1 isFenced: false), authorizedOperations=[READ, WRITE], "
             + "groupEpoch=7, targetAssignmentEpoch=9)",
             description.ToString());
 
@@ -305,7 +305,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             + "type=Unknown, groupState=Unknown, coordinator=null, authorizedOperations=null, "
             + "groupEpoch=null, targetAssignmentEpoch=null)",
             new ConsumerGroupDescription(
-                null, false, null, null, GroupType.Unknown, GroupState.Unknown, null, null, null, null)
+                null, false, null, null, GroupType.UNKNOWN, GroupState.UNKNOWN, null, null, null, null)
                 .ToString());
     }
 
@@ -313,34 +313,34 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     public void ToString_SpellsASimpleGroupTheJavaWay()
     {
         var description = Describe(
-            "g-1", true, null, "range", GroupType.Classic, GroupState.Empty, null, null, null, null);
+            "g-1", true, null, "range", GroupType.CLASSIC, GroupState.EMPTY, null, null, null, null);
 
         Assert.Contains("isSimpleConsumerGroup=true,", description.ToString(), StringComparison.Ordinal);
         Assert.Contains("type=Classic, groupState=Empty,", description.ToString(), StringComparison.Ordinal);
     }
 
     private static AclOperation[] Operations() =>
-        new[] { AclOperation.Read, AclOperation.Write };
+        new[] { AclOperation.READ, AclOperation.WRITE };
 
     private static ConsumerGroupDescription Canonical() =>
         Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, s_coordinatorNode, Operations(), 7, 9);
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9);
 
     private static ConsumerGroupDescription WithOperations(IEnumerable<AclOperation>? operations) =>
         Describe(
-            "g-1", false, new[] { s_memberOne }, "range", GroupType.Consumer, GroupState.Stable,
+            "g-1", false, new[] { s_memberOne }, "range", GroupType.CONSUMER, GroupState.STABLE,
             s_coordinatorNode, operations, 7, 9);
 
     private static ConsumerGroupDescription WithEpochs(int? groupEpoch, int? targetAssignmentEpoch) =>
         Describe(
-            "g-1", false, new[] { s_memberOne }, "range", GroupType.Consumer, GroupState.Stable,
+            "g-1", false, new[] { s_memberOne }, "range", GroupType.CONSUMER, GroupState.STABLE,
             s_coordinatorNode, Operations(), groupEpoch, targetAssignmentEpoch);
 
     private static ConsumerGroupDescription WithCoordinator(Node? coordinator) =>
         Describe(
-            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
-            GroupState.Stable, coordinator, Operations(), 7, 9);
+            "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
+            GroupState.STABLE, coordinator, Operations(), 7, 9);
 
     private static ConsumerGroupDescription Describe(
         string? groupId,

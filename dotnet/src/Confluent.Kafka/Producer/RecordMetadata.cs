@@ -12,42 +12,100 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Globalization;
+
+using Confluent.Kafka.Common;
 
 namespace Confluent.Kafka.Producer;
 
 /// <summary>
-/// The metadata of a record the cluster acknowledged, Java's <c>org.apache.kafka.clients.producer.RecordMetadata</c>.
-/// On a failed delivery an <see cref="IDeliveryCallback"/> receives Java's placeholder instead.
+/// The metadata for a record that has been acknowledged by the server, Java's
+/// <c>org.apache.kafka.clients.producer.RecordMetadata</c>. On a failed delivery an <see cref="IDeliveryCallback"/>
+/// receives Java's placeholder instead.
 /// </summary>
 public sealed class RecordMetadata
 {
-    internal RecordMetadata(string topic, int partition, long offset, long timestamp)
+    /// <summary>Partition value for record without partition assigned.</summary>
+    public const int UNKNOWN_PARTITION = -1;
+
+    private const long InvalidOffset = -1L;
+    private const long NoTimestamp = -1L;
+
+    private readonly TopicPartition? _topicPartition;
+
+    /// <summary>Creates a new instance with the provided parameters.</summary>
+    /// <param name="topicPartition">
+    /// The topic and partition the record was sent to, stored as given. When it is <see langword="null"/>,
+    /// <see cref="Topic"/>, <see cref="Partition"/> and <see cref="ToString"/> throw.
+    /// </param>
+    /// <param name="baseOffset">The offset of the record's batch, or -1 if it is unknown.</param>
+    /// <param name="batchIndex">The record's index in its batch; ignored when <paramref name="baseOffset"/> is -1.</param>
+    /// <param name="timestamp">The record's timestamp, or -1 if it has none.</param>
+    /// <param name="serializedKeySize">The size of the serialized key in bytes, or -1 if the key is null.</param>
+    /// <param name="serializedValueSize">The size of the serialized value in bytes, or -1 if the value is null.</param>
+    public RecordMetadata(
+        TopicPartition? topicPartition,
+        long baseOffset,
+        int batchIndex,
+        long timestamp,
+        int serializedKeySize,
+        int serializedValueSize)
     {
-        Topic = topic;
-        Partition = partition;
-        Offset = offset;
+        _topicPartition = topicPartition;
+        Offset = baseOffset == InvalidOffset ? baseOffset : baseOffset + batchIndex;
         Timestamp = timestamp;
+        SerializedKeySize = serializedKeySize;
+        SerializedValueSize = serializedValueSize;
     }
 
-    /// <summary>The topic the record was published to.</summary>
-    public string Topic { get; }
+    internal RecordMetadata(
+        TopicPartition topicPartition,
+        long offset,
+        long timestamp,
+        int serializedKeySize,
+        int serializedValueSize)
+    {
+        _topicPartition = topicPartition;
+        Offset = offset;
+        Timestamp = timestamp;
+        SerializedKeySize = serializedKeySize;
+        SerializedValueSize = serializedValueSize;
+    }
 
-    /// <summary>The partition the record was published to.</summary>
-    public int Partition { get; }
+    /// <summary>Indicates whether the record metadata includes the offset.</summary>
+    public bool HasOffset => Offset != InvalidOffset;
 
-    /// <summary>The offset the record was assigned in its partition.</summary>
+    /// <summary>The offset of the record in the topic/partition, or -1 if <see cref="HasOffset"/> is false.</summary>
     public long Offset { get; }
 
-    /// <summary>The record's timestamp in milliseconds since epoch.</summary>
+    /// <summary>Indicates whether the record metadata includes the timestamp.</summary>
+    public bool HasTimestamp => Timestamp != NoTimestamp;
+
+    /// <summary>
+    /// The timestamp of the record in the topic/partition, or -1 if <see cref="HasTimestamp"/> is false.
+    /// </summary>
     public long Timestamp { get; }
 
+    /// <summary>The size of the serialized, uncompressed key in bytes. If key is null, the size is -1.</summary>
+    public int SerializedKeySize { get; }
+
+    /// <summary>The size of the serialized, uncompressed value in bytes. If value is null, the size is -1.</summary>
+    public int SerializedValueSize { get; }
+
+    /// <summary>The topic the record was appended to.</summary>
+    /// <exception cref="InvalidOperationException">The instance was constructed with a null topic partition.</exception>
+    public string Topic => StoredTopicPartition().Topic;
+
+    /// <summary>The partition the record was sent to.</summary>
+    /// <exception cref="InvalidOperationException">The instance was constructed with a null topic partition.</exception>
+    public int Partition => StoredTopicPartition().Partition;
+
     /// <inheritdoc/>
+    /// <exception cref="InvalidOperationException">The instance was constructed with a null topic partition.</exception>
     public override string ToString() =>
-        string.Format(
-            CultureInfo.InvariantCulture,
-            "{0}-{1}@{2}",
-            Topic,
-            Partition,
-            Offset);
+        StoredTopicPartition().ToString() + "@" + Offset.ToString(CultureInfo.InvariantCulture);
+
+    private TopicPartition StoredTopicPartition() =>
+        _topicPartition ?? throw new InvalidOperationException("topicPartition must not be null");
 }

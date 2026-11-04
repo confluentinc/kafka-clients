@@ -28,7 +28,7 @@ public sealed class ListOffsetsOptions
 {
     private int? _timeoutMs;
 
-    private IsolationLevel _isolationLevel = IsolationLevel.ReadUncommitted;
+    private IsolationLevel _isolationLevel = IsolationLevel.READ_UNCOMMITTED;
 
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
     public int? TimeoutMs
@@ -43,7 +43,7 @@ public sealed class ListOffsetsOptions
 
     /// <summary>
     /// The read isolation the query observes — Java's <c>isolationLevel()</c>. Defaults to
-    /// <see cref="Confluent.Kafka.Common.IsolationLevel.ReadUncommitted"/>, as Java's does.
+    /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>, as Java's does.
     /// </summary>
     public IsolationLevel IsolationLevel
     {

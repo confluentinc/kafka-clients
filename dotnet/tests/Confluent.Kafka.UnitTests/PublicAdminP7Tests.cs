@@ -186,8 +186,8 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["metadata.version"] = new FeatureUpdate(9, FeatureUpdate.UpgradeType.Upgrade),
-                ["group.version"] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.Upgrade),
+                ["metadata.version"] = new FeatureUpdate(9, FeatureUpdate.UpgradeType.UPGRADE),
+                ["group.version"] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.UPGRADE),
             });
 
         Assert.Equal(
@@ -237,7 +237,7 @@ public sealed class PublicAdminP7Tests
             () => admin.UpdateFeatures(
                 new FeatureUpdateEntries(
                     new KeyValuePair<string, FeatureUpdate>(
-                        null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade)))));
+                        null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE)))));
 
         Assert.Equal("featureUpdates", thrown.ParamName);
         Assert.StartsWith("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
@@ -258,7 +258,7 @@ public sealed class PublicAdminP7Tests
             () => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
                 {
-                    [feature] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
+                    [feature] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
                 }));
 
         Assert.Contains("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
@@ -273,7 +273,7 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["a b"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
+                ["a b"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
             });
 
         Assert.Equal(new[] { "a b" }, result.Values.Keys);
@@ -292,7 +292,7 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                [feature] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
+                [feature] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
             });
 
         Assert.Equal(new[] { feature }, result.Values.Keys);
@@ -308,8 +308,8 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["metadata.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
-                ["group.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
+                ["metadata.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                ["group.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
             });
 
         Assert.Equal(
@@ -358,7 +358,7 @@ public sealed class PublicAdminP7Tests
 
         NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
             () => admin.AlterUserScramCredentials(
-                new[] { new UserScramCredentialDeletion("alice", ScramMechanism.ScramSha256) }).All().Get());
+                new[] { new UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256) }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
     }
@@ -412,7 +412,7 @@ public sealed class PublicAdminP7Tests
 
         UserScramCredentialUpsertion upsertion = new UserScramCredentialUpsertion(
             "alice",
-            new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096),
+            new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096),
             System.Text.Encoding.UTF8.GetBytes(Password),
             System.Text.Encoding.UTF8.GetBytes(Salt));
 
@@ -421,7 +421,7 @@ public sealed class PublicAdminP7Tests
 
         ArgumentNullException thrown = Assert.Throws<ArgumentNullException>(
             () => new UserScramCredentialUpsertion(
-                "alice", new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096), (byte[])null!));
+                "alice", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), (byte[])null!));
         Assert.DoesNotContain(Password, thrown.Message, StringComparison.Ordinal);
     }
 
@@ -466,7 +466,7 @@ public sealed class PublicAdminP7Tests
     public void FeatureUpdate_RejectsADowngradeWithoutADowngradeType()
     {
         ArgumentException thrown = Assert.Throws<ArgumentException>(
-            () => new FeatureUpdate(0, FeatureUpdate.UpgradeType.Upgrade));
+            () => new FeatureUpdate(0, FeatureUpdate.UpgradeType.UPGRADE));
 
         Assert.Contains(
             "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the "
@@ -479,20 +479,20 @@ public sealed class PublicAdminP7Tests
     public void FeatureUpdate_RejectsANegativeLevel()
     {
         ArgumentException thrown = Assert.Throws<ArgumentException>(
-            () => new FeatureUpdate(-1, FeatureUpdate.UpgradeType.SafeDowngrade));
+            () => new FeatureUpdate(-1, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE));
 
         Assert.Contains("Cannot specify a negative version level.", thrown.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public void FeatureUpdate_AcceptsADeletion() =>
-        Assert.Equal(0, new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade).MaxVersionLevel);
+        Assert.Equal(0, new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE).MaxVersionLevel);
 
     [Theory]
-    [InlineData(FeatureUpdate.UpgradeType.Unknown, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
-    [InlineData(FeatureUpdate.UpgradeType.Upgrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
-    [InlineData(FeatureUpdate.UpgradeType.SafeDowngrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
-    [InlineData(FeatureUpdate.UpgradeType.UnsafeDowngrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
+    [InlineData(FeatureUpdate.UpgradeType.UNKNOWN, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
+    [InlineData(FeatureUpdate.UpgradeType.UPGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
+    [InlineData(FeatureUpdate.UpgradeType.SAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
+    [InlineData(FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
     [InlineData((FeatureUpdate.UpgradeType)9, "FeatureUpdate{maxVersionLevel:1, upgradeType:9}")]
     public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(FeatureUpdate.UpgradeType type, string expected) =>
         Assert.Equal(expected, new FeatureUpdate(1, type).ToString());
@@ -526,11 +526,11 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void ScramMechanism_RoundTripsItsName()
     {
-        Assert.Equal("SCRAM-SHA-256", ScramMechanism.ScramSha256.MechanismName());
-        Assert.Equal("SCRAM-SHA-512", ScramMechanism.ScramSha512.MechanismName());
-        Assert.Equal(ScramMechanism.ScramSha512, ScramMechanisms.FromMechanismName("SCRAM-SHA-512"));
-        Assert.Equal(ScramMechanism.Unknown, ScramMechanisms.FromMechanismName("SCRAM-SHA-1"));
-        Assert.Equal(ScramMechanism.Unknown, ScramMechanisms.FromType(99));
+        Assert.Equal("SCRAM-SHA-256", ScramMechanism.SCRAM_SHA_256.MechanismName());
+        Assert.Equal("SCRAM-SHA-512", ScramMechanism.SCRAM_SHA_512.MechanismName());
+        Assert.Equal(ScramMechanism.SCRAM_SHA_512, ScramMechanisms.FromMechanismName("SCRAM-SHA-512"));
+        Assert.Equal(ScramMechanism.UNKNOWN, ScramMechanisms.FromMechanismName("SCRAM-SHA-1"));
+        Assert.Equal(ScramMechanism.UNKNOWN, ScramMechanisms.FromType(99));
     }
 
     private static void AssertTokenNotFound(KafkaException failure)

@@ -33,22 +33,22 @@ public enum ConfigResourceType
     /// <summary>
     /// A resource type this client does not recognize — Java's <c>UNKNOWN</c> (id 0).
     /// </summary>
-    Unknown = 0,
+    UNKNOWN = 0,
 
     /// <summary>A topic's configuration — Java's <c>TOPIC</c> (id 2).</summary>
-    Topic = 2,
+    TOPIC = 2,
 
     /// <summary>A broker's configuration — Java's <c>BROKER</c> (id 4).</summary>
-    Broker = 4,
+    BROKER = 4,
 
     /// <summary>A broker's logger levels — Java's <c>BROKER_LOGGER</c> (id 8).</summary>
-    BrokerLogger = 8,
+    BROKER_LOGGER = 8,
 
     /// <summary>
     /// A client-metrics subscription — Java's <c>CLIENT_METRICS</c> (id 16).
     /// </summary>
-    ClientMetrics = 16,
+    CLIENT_METRICS = 16,
 
     /// <summary>A consumer group's configuration — Java's <c>GROUP</c> (id 32).</summary>
-    Group = 32,
+    GROUP = 32,
 }

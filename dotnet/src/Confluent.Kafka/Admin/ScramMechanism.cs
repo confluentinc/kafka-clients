@@ -26,13 +26,13 @@ namespace Confluent.Kafka.Admin;
 public enum ScramMechanism : byte
 {
     /// <summary>An unrecognized mechanism — Java's <c>UNKNOWN</c>.</summary>
-    Unknown = 0,
+    UNKNOWN = 0,
 
     /// <summary><c>SCRAM-SHA-256</c> — Java's <c>SCRAM_SHA_256</c>.</summary>
-    ScramSha256 = 1,
+    SCRAM_SHA_256 = 1,
 
     /// <summary><c>SCRAM-SHA-512</c> — Java's <c>SCRAM_SHA_512</c>.</summary>
-    ScramSha512 = 2,
+    SCRAM_SHA_512 = 2,
 }
 
 /// <summary>
@@ -50,35 +50,35 @@ public static class ScramMechanisms
     public static string MechanismName(this ScramMechanism mechanism) =>
         mechanism switch
         {
-            ScramMechanism.ScramSha256 => "SCRAM-SHA-256",
-            ScramMechanism.ScramSha512 => "SCRAM-SHA-512",
+            ScramMechanism.SCRAM_SHA_256 => "SCRAM-SHA-256",
+            ScramMechanism.SCRAM_SHA_512 => "SCRAM-SHA-512",
             _ => "UNKNOWN",
         };
 
     /// <summary>
     /// The mechanism for a type code — Java's <c>fromType(byte)</c>. Falls back to
-    /// <see cref="ScramMechanism.Unknown"/>; never throws.
+    /// <see cref="ScramMechanism.UNKNOWN"/>; never throws.
     /// </summary>
     /// <param name="type">The type code.</param>
     /// <returns>The mechanism.</returns>
     public static ScramMechanism FromType(byte type) =>
         type switch
         {
-            1 => ScramMechanism.ScramSha256,
-            2 => ScramMechanism.ScramSha512,
-            _ => ScramMechanism.Unknown,
+            1 => ScramMechanism.SCRAM_SHA_256,
+            2 => ScramMechanism.SCRAM_SHA_512,
+            _ => ScramMechanism.UNKNOWN,
         };
 
     /// <summary>
     /// The mechanism for a SASL mechanism name — Java's <c>fromMechanismName(String)</c>. Falls
-    /// back to <see cref="ScramMechanism.Unknown"/>; never throws.
+    /// back to <see cref="ScramMechanism.UNKNOWN"/>; never throws.
     /// </summary>
     /// <param name="mechanismName">The mechanism name.</param>
     /// <returns>The mechanism.</returns>
     public static ScramMechanism FromMechanismName(string mechanismName) =>
         string.Equals(mechanismName, "SCRAM-SHA-256", StringComparison.Ordinal)
-            ? ScramMechanism.ScramSha256
+            ? ScramMechanism.SCRAM_SHA_256
             : string.Equals(mechanismName, "SCRAM-SHA-512", StringComparison.Ordinal)
-                ? ScramMechanism.ScramSha512
-                : ScramMechanism.Unknown;
+                ? ScramMechanism.SCRAM_SHA_512
+                : ScramMechanism.UNKNOWN;
 }

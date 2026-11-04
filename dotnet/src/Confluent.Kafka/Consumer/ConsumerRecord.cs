@@ -37,7 +37,7 @@ namespace Confluent.Kafka.Consumer;
 public sealed class ConsumerRecord<TKey, TValue>
 {
     /// <summary>The timestamp of a record with no timestamp, Java's <c>NO_TIMESTAMP</c>.</summary>
-    public const long NoTimestamp = -1;
+    public const long NO_TIMESTAMP = -1;
 
     internal ConsumerRecord(
         string topic,
@@ -76,7 +76,7 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>
     /// The record timestamp in milliseconds since the epoch, or
-    /// <see cref="NoTimestamp"/> (<c>-1</c>) when absent.
+    /// <see cref="NO_TIMESTAMP"/> (<c>-1</c>) when absent.
     /// </summary>
     public long Timestamp { get; }
 

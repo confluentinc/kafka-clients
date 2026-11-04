@@ -37,8 +37,8 @@ namespace Confluent.Kafka.Admin;
 /// </para>
 /// <para>
 /// <see cref="GroupEpoch"/> and <see cref="TargetAssignmentEpoch"/> are set for a
-/// <see cref="GroupType.Consumer"/> group and <see langword="null"/>, Java's empty
-/// <c>Optional</c>, for a <see cref="GroupType.Classic"/> one.
+/// <see cref="GroupType.CONSUMER"/> group and <see langword="null"/>, Java's empty
+/// <c>Optional</c>, for a <see cref="GroupType.CLASSIC"/> one.
 /// </para>
 /// <para>
 /// Null arguments are coalesced as in Java: <see cref="GroupId"/> and
@@ -133,12 +133,12 @@ public sealed class ConsumerGroupDescription
 
     /// <summary>
     /// The group type (or the protocol) of this consumer group — Java's <c>type()</c>. It
-    /// defaults to <see cref="GroupType.Classic"/> if not provided by the server.
+    /// defaults to <see cref="GroupType.CLASSIC"/> if not provided by the server.
     /// </summary>
     public GroupType Type { get; }
 
     /// <summary>
-    /// The group state, or <see cref="Confluent.Kafka.Common.GroupState.Unknown"/> if the state is
+    /// The group state, or <see cref="Confluent.Kafka.Common.GroupState.UNKNOWN"/> if the state is
     /// too new for this client to parse — Java's <c>groupState()</c>.
     /// </summary>
     public GroupState GroupState { get; }
@@ -227,11 +227,6 @@ public sealed class ConsumerGroupDescription
 
     /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
-    /// <remarks>
-    /// The authorized operations render with their C# member names (<c>[Read, Write]</c> where Java
-    /// prints <c>[READ, WRITE]</c>), as <see cref="TopicDescription.ToString"/> renders them: a
-    /// recorded deviation.
-    /// </remarks>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,

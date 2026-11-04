@@ -67,8 +67,8 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
             ArgumentException thrown = Assert.Throws<ArgumentException>(() => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>
                 {
-                    ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
-                    [name] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
+                    ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    [name] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
                 },
                 options: null));
 
@@ -91,8 +91,8 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         Dictionary<string, FeatureUpdate> updates =
             new Dictionary<string, FeatureUpdate>(ReferenceComparer.Instance)
             {
-                [first] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
-                [second] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.Upgrade),
+                [first] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                [second] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.UPGRADE),
             };
         Assert.Equal(2, updates.Count);
 

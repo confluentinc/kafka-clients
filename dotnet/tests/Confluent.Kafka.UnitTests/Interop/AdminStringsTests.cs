@@ -173,7 +173,7 @@ public sealed class AdminStringsTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         try
         {
-            ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "b5-configs");
+            ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "b5-configs");
             await TestTimeout.Run(
                 () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("b5-configs", 1, 1) }, null)).All().Get(),
                 s_deadline);
@@ -324,11 +324,11 @@ public sealed class AdminStringsTests
         ConfigResource resource, string name, string value) =>
         new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
         {
-            [resource] = new[] { new AlterConfigOp(new ConfigEntry(name, value), AlterConfigOpType.Set) },
+            [resource] = new[] { new AlterConfigOp(new ConfigEntry(name, value), AlterConfigOpType.SET) },
         };
 
     private static ClientQuotaFilter UserFilter(string name) =>
-        ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, name) });
+        ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, name) });
 
     private static Task<long> EarliestOffset(NativeAdminClient admin, TopicPartition partition) =>
         Task.FromResult(admin

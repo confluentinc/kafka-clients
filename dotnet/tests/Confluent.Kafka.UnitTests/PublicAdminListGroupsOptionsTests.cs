@@ -82,7 +82,7 @@ public sealed class PublicAdminListGroupsOptionsTests
         ListGroupsOptions options = ListGroupsOptions.ForConsumerGroups();
 
         Assert.Equal(
-            new[] { GroupType.Consumer, GroupType.Classic }.OrderBy(type => type),
+            new[] { GroupType.CONSUMER, GroupType.CLASSIC }.OrderBy(type => type),
             options.Types.OrderBy(type => type));
 
         // The empty string is a member, not a placeholder: the protocol type of a classic group that uses none.
@@ -98,13 +98,13 @@ public sealed class PublicAdminListGroupsOptionsTests
     public void ForShareAndStreamsGroups_SetTheTypeFilterOnly()
     {
         ListGroupsOptions share = ListGroupsOptions.ForShareGroups();
-        Assert.Equal(new[] { GroupType.Share }, share.Types);
+        Assert.Equal(new[] { GroupType.SHARE }, share.Types);
         Assert.Empty(share.ProtocolTypes);
         Assert.Empty(share.GroupStates);
         Assert.Null(share.TimeoutMs);
 
         ListGroupsOptions streams = ListGroupsOptions.ForStreamsGroups();
-        Assert.Equal(new[] { GroupType.Streams }, streams.Types);
+        Assert.Equal(new[] { GroupType.STREAMS }, streams.Types);
         Assert.Empty(streams.ProtocolTypes);
         Assert.Empty(streams.GroupStates);
         Assert.Null(streams.TimeoutMs);
@@ -127,7 +127,7 @@ public sealed class PublicAdminListGroupsOptionsTests
     public void Filters_NormalizeNullAndEmptyToTheEmptySet()
     {
         ListGroupsOptions options = ListGroupsOptions.ForConsumerGroups();
-        options.GroupStates = new[] { GroupState.Stable };
+        options.GroupStates = new[] { GroupState.STABLE };
 
         options.GroupStates = Array.Empty<GroupState>();
         options.Types = Array.Empty<GroupType>();
@@ -137,8 +137,8 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Empty(options.Types);
         Assert.Empty(options.ProtocolTypes);
 
-        options.GroupStates = new[] { GroupState.Stable };
-        options.Types = new[] { GroupType.Consumer };
+        options.GroupStates = new[] { GroupState.STABLE };
+        options.Types = new[] { GroupType.CONSUMER };
         options.ProtocolTypes = new[] { "consumer" };
 
         options.GroupStates = null!;
@@ -153,8 +153,8 @@ public sealed class PublicAdminListGroupsOptionsTests
     [Fact]
     public void Filters_StoreADeduplicatedDefensiveCopy()
     {
-        List<GroupState> states = new List<GroupState> { GroupState.Stable, GroupState.Stable, GroupState.Empty };
-        List<GroupType> types = new List<GroupType> { GroupType.Consumer, GroupType.Consumer };
+        List<GroupState> states = new List<GroupState> { GroupState.STABLE, GroupState.STABLE, GroupState.EMPTY };
+        List<GroupType> types = new List<GroupType> { GroupType.CONSUMER, GroupType.CONSUMER };
         List<string> protocolTypes = new List<string> { "consumer", "consumer", "" };
 
         ListGroupsOptions options = new ListGroupsOptions
@@ -165,21 +165,21 @@ public sealed class PublicAdminListGroupsOptionsTests
         };
 
         Assert.Equal(
-            new[] { GroupState.Stable, GroupState.Empty }.OrderBy(state => state),
+            new[] { GroupState.STABLE, GroupState.EMPTY }.OrderBy(state => state),
             options.GroupStates.OrderBy(state => state));
-        Assert.Equal(new[] { GroupType.Consumer }, options.Types);
+        Assert.Equal(new[] { GroupType.CONSUMER }, options.Types);
         Assert.Equal(
             new[] { "", "consumer" }.OrderBy(protocolType => protocolType, StringComparer.Ordinal),
             options.ProtocolTypes.OrderBy(protocolType => protocolType, StringComparer.Ordinal));
 
-        states.Add(GroupState.Dead);
-        types.Add(GroupType.Share);
+        states.Add(GroupState.DEAD);
+        types.Add(GroupType.SHARE);
         protocolTypes.Add("share");
 
         Assert.Equal(
-            new[] { GroupState.Stable, GroupState.Empty }.OrderBy(state => state),
+            new[] { GroupState.STABLE, GroupState.EMPTY }.OrderBy(state => state),
             options.GroupStates.OrderBy(state => state));
-        Assert.Equal(new[] { GroupType.Consumer }, options.Types);
+        Assert.Equal(new[] { GroupType.CONSUMER }, options.Types);
         Assert.Equal(
             new[] { "", "consumer" }.OrderBy(protocolType => protocolType, StringComparer.Ordinal),
             options.ProtocolTypes.OrderBy(protocolType => protocolType, StringComparer.Ordinal));
@@ -190,12 +190,12 @@ public sealed class PublicAdminListGroupsOptionsTests
     {
         ListGroupsOptions options = new ListGroupsOptions
         {
-            GroupStates = new[] { GroupState.Stable },
-            Types = new[] { GroupType.Consumer },
+            GroupStates = new[] { GroupState.STABLE },
+            Types = new[] { GroupType.CONSUMER },
             ProtocolTypes = new[] { "consumer" },
         };
 
-        Assert.Throws<NotSupportedException>(() => ((IList<GroupState>)options.GroupStates).Add(GroupState.Dead));
+        Assert.Throws<NotSupportedException>(() => ((IList<GroupState>)options.GroupStates).Add(GroupState.DEAD));
         Assert.Throws<NotSupportedException>(() => ((IList<GroupType>)options.Types).Clear());
         Assert.Throws<NotSupportedException>(() => ((IList<string>)options.ProtocolTypes).Add("share"));
     }

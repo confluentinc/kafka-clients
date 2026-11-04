@@ -38,13 +38,13 @@ public sealed class MockAdminClient : IAdmin
     /// <summary>
     /// The cluster id of a mock whose <see cref="Builder"/> sets none, Java's <c>MockAdminClient.DEFAULT_CLUSTER_ID</c>.
     /// </summary>
-    public const string DefaultClusterId = "I4ZmrWqfT2e-upky_4fdPA";
+    public const string DEFAULT_CLUSTER_ID = "I4ZmrWqfT2e-upky_4fdPA";
 
     /// <summary>
     /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
     /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    public static IReadOnlyList<string> DefaultLogDirs { get; } = new ReadOnlyCollection<string>(new[] { "/tmp/kafka-logs" });
+    public static IReadOnlyList<string> DEFAULT_LOG_DIRS { get; } = new ReadOnlyCollection<string>(new[] { "/tmp/kafka-logs" });
 
     private readonly NativeAdminClient _native;
 

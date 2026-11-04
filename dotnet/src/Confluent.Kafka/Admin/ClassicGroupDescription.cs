@@ -164,7 +164,7 @@ public sealed class ClassicGroupDescription
     public IReadOnlyCollection<MemberDescription> Members => _members;
 
     /// <summary>
-    /// The classic group state, or <see cref="ClassicGroupState.Unknown"/> if the state is
+    /// The classic group state, or <see cref="ClassicGroupState.UNKNOWN"/> if the state is
     /// too new for this client to parse — Java's <c>state()</c>.
     /// </summary>
     public ClassicGroupState State { get; }
@@ -235,11 +235,6 @@ public sealed class ClassicGroupDescription
 
     /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
-    /// <remarks>
-    /// The authorized operations render with their C# member names (<c>[Read, Write]</c> where Java
-    /// prints <c>[READ, WRITE]</c>), as <see cref="TopicDescription.ToString"/> and
-    /// <see cref="ConsumerGroupDescription.ToString"/> render them: a recorded deviation.
-    /// </remarks>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,

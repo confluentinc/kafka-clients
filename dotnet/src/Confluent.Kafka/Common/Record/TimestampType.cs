@@ -20,14 +20,18 @@ namespace Confluent.Kafka.Common.Record;
 /// The kind of a <see cref="ConsumerRecord{TKey, TValue}"/>'s timestamp, Java's <c>TimestampType</c>, each
 /// value its Java id.
 /// </summary>
+/// <remarks>
+/// <c>ToString()</c> gives the Java constant name (<c>CREATE_TIME</c>), not Java's <c>toString()</c>
+/// text (<c>"CreateTime"</c>): a recorded deviation.
+/// </remarks>
 public enum TimestampType
 {
     /// <summary>No timestamp: Java's <c>NO_TIMESTAMP_TYPE</c>.</summary>
-    NoTimestampType = -1,
+    NO_TIMESTAMP_TYPE = -1,
 
     /// <summary>The time the record was produced: Java's <c>CREATE_TIME</c>.</summary>
-    CreateTime = 0,
+    CREATE_TIME = 0,
 
     /// <summary>The time the broker appended the record to the log: Java's <c>LOG_APPEND_TIME</c>.</summary>
-    LogAppendTime = 1,
+    LOG_APPEND_TIME = 1,
 }

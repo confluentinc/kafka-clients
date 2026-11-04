@@ -210,9 +210,9 @@ public sealed class PublicAdminP7ShapeParityTests
     public void Salt_IsNullableOnTheUpsertion()
     {
         UserScramCredentialUpsertion generated = new UserScramCredentialUpsertion(
-            "u", new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096), new byte[] { 1 }, null);
+            "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 }, null);
         UserScramCredentialUpsertion literal = new UserScramCredentialUpsertion(
-            "u", new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096), new byte[] { 1 },
+            "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 },
             Array.Empty<byte>());
 
         Assert.Null(generated.Salt);
@@ -277,7 +277,7 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(typeof(FeatureUpdate), typeof(FeatureUpdate.UpgradeType).DeclaringType);
         Assert.Equal(
-            new[] { "Unknown", "Upgrade", "SafeDowngrade", "UnsafeDowngrade" },
+            new[] { "UNKNOWN", "UPGRADE", "SAFE_DOWNGRADE", "UNSAFE_DOWNGRADE" },
             Enum.GetValues(typeof(FeatureUpdate.UpgradeType))
                 .Cast<FeatureUpdate.UpgradeType>()
                 .OrderBy(value => (int)value)

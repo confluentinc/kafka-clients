@@ -37,11 +37,11 @@ public enum ElectionType
     /// Elect the preferred replica — the first replica in the partition's assignment —
     /// as leader. Java's <c>PREFERRED</c> (value 0).
     /// </summary>
-    Preferred = 0,
+    PREFERRED = 0,
 
     /// <summary>
     /// Elect any in-sync-or-not replica as leader, accepting possible data loss. Java's
     /// <c>UNCLEAN</c> (value 1).
     /// </summary>
-    Unclean = 1,
+    UNCLEAN = 1,
 }

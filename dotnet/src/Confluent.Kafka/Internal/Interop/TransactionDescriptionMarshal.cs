@@ -72,14 +72,14 @@ internal static class TransactionDescriptionMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return id switch
         {
-            0 => TransactionState.Ongoing,
-            1 => TransactionState.PrepareAbort,
-            2 => TransactionState.PrepareCommit,
-            3 => TransactionState.CompleteAbort,
-            4 => TransactionState.CompleteCommit,
-            5 => TransactionState.Empty,
-            6 => TransactionState.PrepareEpochFence,
-            _ => TransactionState.Unknown,
+            0 => TransactionState.ONGOING,
+            1 => TransactionState.PREPARE_ABORT,
+            2 => TransactionState.PREPARE_COMMIT,
+            3 => TransactionState.COMPLETE_ABORT,
+            4 => TransactionState.COMPLETE_COMMIT,
+            5 => TransactionState.EMPTY,
+            6 => TransactionState.PREPARE_EPOCH_FENCE,
+            _ => TransactionState.UNKNOWN,
         };
     }
 }

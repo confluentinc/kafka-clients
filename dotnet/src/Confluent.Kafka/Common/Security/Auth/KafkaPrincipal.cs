@@ -28,10 +28,10 @@ namespace Confluent.Kafka.Common.Security.Auth;
 public sealed class KafkaPrincipal
 {
     /// <summary>The <c>"User"</c> principal type — Java's <c>USER_TYPE</c>.</summary>
-    public const string UserType = "User";
+    public const string USER_TYPE = "User";
 
     /// <summary>Creates a principal that was not token-authenticated — Java's two-argument constructor.</summary>
-    /// <param name="principalType">The principal type, e.g. <see cref="UserType"/>.</param>
+    /// <param name="principalType">The principal type, e.g. <see cref="USER_TYPE"/>.</param>
     /// <param name="name">The principal name.</param>
     /// <exception cref="ArgumentNullException">Either argument is null.</exception>
     public KafkaPrincipal(string principalType, string name)
@@ -40,7 +40,7 @@ public sealed class KafkaPrincipal
     }
 
     /// <summary>Creates a principal — Java's three-argument constructor.</summary>
-    /// <param name="principalType">The principal type, e.g. <see cref="UserType"/>.</param>
+    /// <param name="principalType">The principal type, e.g. <see cref="USER_TYPE"/>.</param>
     /// <param name="name">The principal name.</param>
     /// <param name="tokenAuthenticated">Whether the principal was authenticated by a delegation token.</param>
     /// <exception cref="ArgumentNullException">
@@ -55,7 +55,7 @@ public sealed class KafkaPrincipal
     }
 
     /// <summary>The anonymous principal — Java's <c>ANONYMOUS</c>.</summary>
-    public static KafkaPrincipal Anonymous { get; } = new KafkaPrincipal(UserType, "ANONYMOUS");
+    public static KafkaPrincipal ANONYMOUS { get; } = new KafkaPrincipal(USER_TYPE, "ANONYMOUS");
 
     /// <summary>The principal type — Java's <c>getPrincipalType()</c>.</summary>
     public string PrincipalType { get; }

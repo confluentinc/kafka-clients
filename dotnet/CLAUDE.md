@@ -209,10 +209,17 @@ public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V
 }
 
 public sealed class RecordMetadata {            // NON-generic (no K/V on the ack); getters → properties
+    public const int UNKNOWN_PARTITION = -1;
+    public RecordMetadata(TopicPartition? topicPartition, long baseOffset, int batchIndex, long timestamp,
+        int serializedKeySize, int serializedValueSize);   // Java's; offset = baseOffset + batchIndex unless -1
+    public bool HasOffset { get; }
+    public long Offset { get; }
+    public bool HasTimestamp { get; }
+    public long Timestamp { get; }
+    public int SerializedKeySize { get; }
+    public int SerializedValueSize { get; }
     public string Topic { get; }
     public int Partition { get; }
-    public long Offset { get; }
-    public long Timestamp { get; }
 }
 
 public class KafkaException : Exception {        // flat, for now (§4, ffi §A5)
@@ -294,7 +301,7 @@ can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **
 longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
 `kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
 `send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10):
-`ProducerRecord.headers()`, `RecordMetadata`'s serialized-size / `has*` accessors,
+`ProducerRecord.headers()`,
 and `MockProducer.history()` (Java returns the full record list; the ABI gives
 only a count, hence `HistoryCount()` — a **method**, not a property, per the FDG
 precedent that `Assignment()`/`Subscription()`/`Paused()` are methods (each does a
@@ -617,6 +624,7 @@ its C# realization, and where the enforcing rule lives.
 | `Callback` (producer, `send(record, Callback)`) | `IDeliveryCallback` — **sync `void`** `OnCompletion(metadata, exception)`; passed to the second `Send(record, callback)` overload on **both** producer interfaces, which still returns the `KafkaFuture<RecordMetadata>` / `ValueTask<AsyncKafkaFuture<RecordMetadata>>` (M14/P1 — **shipped**); on `IAsyncProducer` also `IAsyncDeliveryCallback` — `Task OnCompletion(metadata, exception)`, passed to a third `Send(record, callback)` overload (M19/P1) | ⚠ **not the caller's task** — one ABI `Callback_t` per record (ffi §A6, decision 10). It fires on the producer's completion thread, on both surfaces, **before** the record's future completes (decision 36), with **non-null** `-1` placeholder metadata on failure; `exception` is `Exception?` (ledger 33). See the §4 **delivery-callback divergence**; ffi §A6/§A7 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling | §4 |
+| a `public static final` field or an enum constant (`UNKNOWN_PARTITION`, `ResourceType.ANY`) | Java's own name and spelling: `RecordMetadata.UNKNOWN_PARTITION`, `Uuid.ZERO_UUID`, `ResourceType.ANY`; numeric values unchanged. A member with no Java constant behind it keeps .NET casing (`ClientQuotaMatchType`, `Serdes`). A C# enum's `ToString()` prints the Java constant; where Java's enum overrides `toString()` (`GroupState`, `ClassicGroupState`, `GroupType`, `TransactionState`, `TimestampType`, `IsolationLevel`) the text the binding prints or sends is Java's, from an internal map, and the enum's own `ToString()` is a recorded deviation | ledger 285 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
@@ -1212,7 +1220,8 @@ Never build .NET before Rust — the native won't exist.
 | Format (C#) | `dotnet format` |
 
 **C# style** — code follows the dotnet/runtime coding style, pinned in a
-checked-in `.editorconfig` (`_camelCase`/`s_` fields, PascalCase, Allman braces,
+checked-in `.editorconfig` (`_camelCase`/`s_` fields, PascalCase, Java's names for
+the constants and enum members of §3's idiom map (ledger 285), Allman braces,
 `System.*` usings first, `I`-prefix per CA1715) and enforced by `dotnet format` +
 `<EnforceCodeStyleInBuild>` analyzers. This is code hygiene only — it does not
 touch the public Java shape (§3/§4).

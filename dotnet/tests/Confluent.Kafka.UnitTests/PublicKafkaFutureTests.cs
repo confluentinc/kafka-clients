@@ -662,7 +662,8 @@ public sealed class PublicKafkaFutureTests
         }
     }
 
-    private static RecordMetadata NewMetadata() => new RecordMetadata("future-topic", 3, 42L, 1_700_000_000_000L);
+    private static RecordMetadata NewMetadata() =>
+        new RecordMetadata(new TopicPartition("future-topic", 3), 42L, 0, 1_700_000_000_000L, -1, -1);
 
     private static string Signature(MethodInfo method) =>
         method.ReturnType + " " + method.Name + "("

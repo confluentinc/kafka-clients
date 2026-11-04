@@ -72,7 +72,7 @@ public sealed class AdminP9PerKeyStage2Tests
         AsyncCreateTopicsResult created =
             AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, null));
         Uuid id = await TestTimeout.Run(() => created.TopicId("cp3-by-id").Get(), s_deadline);
-        Assert.NotEqual(Uuid.Zero, id);
+        Assert.NotEqual(Uuid.ZERO_UUID, id);
 
         AsyncDescribeTopicsResult result =
             AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null));
@@ -92,9 +92,9 @@ public sealed class AdminP9PerKeyStage2Tests
             () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, null)).All().Get(),
             s_deadline);
 
-        ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "cp3-cfg");
-        ConfigResource broker = new ConfigResource(ConfigResourceType.Broker, "0");
-        ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "cp3-cfg-absent");
+        ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "cp3-cfg");
+        ConfigResource broker = new ConfigResource(ConfigResourceType.BROKER, "0");
+        ConfigResource absent = new ConfigResource(ConfigResourceType.TOPIC, "cp3-cfg-absent");
 
         AsyncDescribeConfigsResult result =
             AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic, broker, absent }, options: null));
@@ -228,7 +228,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     List<ConfigResource> resources = new List<ConfigResource>(keys.Length);
                     foreach (string key in keys)
                     {
-                        resources.Add(new ConfigResource(ConfigResourceType.Topic, key));
+                        resources.Add(new ConfigResource(ConfigResourceType.TOPIC, key));
                     }
 
                     AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(resources, options: null));

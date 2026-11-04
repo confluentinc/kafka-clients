@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Common.Acl;
 /// </summary>
 /// <remarks>
 /// A concrete entry: <see cref="Principal"/> and <see cref="Host"/> are never null, and
-/// <see cref="AclOperation.Any"/> and <see cref="AclPermissionType.Any"/> are rejected, as in
+/// <see cref="AclOperation.ANY"/> and <see cref="AclPermissionType.ANY"/> are rejected, as in
 /// Java; <see cref="AccessControlEntryFilter"/> takes them. <see cref="Operation"/> and
 /// <see cref="PermissionType"/> only ever hold a defined member, as a Java entry does.
 /// </remarks>
@@ -35,21 +35,21 @@ public sealed class AccessControlEntry
     /// <param name="principal">The principal, e.g. <c>User:alice</c>.</param>
     /// <param name="host">The host, or <c>*</c> for all hosts.</param>
     /// <param name="operation">
-    /// The operation; <see cref="AclOperation.Any"/> is rejected. A value that is not a defined
-    /// member is stored as <see cref="AclOperation.Unknown"/>, as Java's <c>fromCode</c> maps a code
+    /// The operation; <see cref="AclOperation.ANY"/> is rejected. A value that is not a defined
+    /// member is stored as <see cref="AclOperation.UNKNOWN"/>, as Java's <c>fromCode</c> maps a code
     /// it has no member for.
     /// </param>
     /// <param name="permissionType">
-    /// The permission type; <see cref="AclPermissionType.Any"/> is rejected. A value that is not a
-    /// defined member is stored as <see cref="AclPermissionType.Unknown"/>, as Java's
+    /// The permission type; <see cref="AclPermissionType.ANY"/> is rejected. A value that is not a
+    /// defined member is stored as <see cref="AclPermissionType.UNKNOWN"/>, as Java's
     /// <c>fromCode</c> maps it.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="principal"/> or <paramref name="host"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="operation"/> is <see cref="AclOperation.Any"/>, or
-    /// <paramref name="permissionType"/> is <see cref="AclPermissionType.Any"/>.
+    /// <paramref name="operation"/> is <see cref="AclOperation.ANY"/>, or
+    /// <paramref name="permissionType"/> is <see cref="AclPermissionType.ANY"/>.
     /// </exception>
     public AccessControlEntry(string principal, string host, AclOperation operation, AclPermissionType permissionType)
     {
@@ -59,15 +59,14 @@ public sealed class AccessControlEntry
         operation = AclEnumCodes.DefinedOrUnknown(operation);
         permissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
 
-        if (operation == AclOperation.Any)
+        if (operation == AclOperation.ANY)
         {
-            // Java's message, with the C# member name.
-            throw new ArgumentException("operation must not be Any", nameof(operation));
+            throw new ArgumentException("operation must not be ANY", nameof(operation));
         }
 
-        if (permissionType == AclPermissionType.Any)
+        if (permissionType == AclPermissionType.ANY)
         {
-            throw new ArgumentException("permissionType must not be Any", nameof(permissionType));
+            throw new ArgumentException("permissionType must not be ANY", nameof(permissionType));
         }
 
         Operation = operation;
@@ -81,21 +80,21 @@ public sealed class AccessControlEntry
     public string Host { get; }
 
     /// <summary>
-    /// The operation; never <see cref="AclOperation.Any"/> — Java's <c>operation()</c>.
+    /// The operation; never <see cref="AclOperation.ANY"/> — Java's <c>operation()</c>.
     /// </summary>
     public AclOperation Operation { get; }
 
     /// <summary>
-    /// The permission type; never <see cref="AclPermissionType.Any"/> — Java's
+    /// The permission type; never <see cref="AclPermissionType.ANY"/> — Java's
     /// <c>permissionType()</c>.
     /// </summary>
     public AclPermissionType PermissionType { get; }
 
     /// <summary>
-    /// Whether the operation or permission type is <c>Unknown</c> — Java's <c>isUnknown()</c>.
+    /// Whether the operation or permission type is <c>UNKNOWN</c> — Java's <c>isUnknown()</c>.
     /// </summary>
     public bool IsUnknown =>
-        Operation == AclOperation.Unknown || PermissionType == AclPermissionType.Unknown;
+        Operation == AclOperation.UNKNOWN || PermissionType == AclPermissionType.UNKNOWN;
 
     /// <summary>A filter matching only this entry — Java's <c>toFilter()</c>.</summary>
     /// <returns>The filter.</returns>
@@ -128,9 +127,7 @@ public sealed class AccessControlEntry
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c>. The operation and
-    /// permission type print with their .NET names (<c>Read</c>, <c>Allow</c>), where Java prints
-    /// its constants (<c>READ</c>, <c>ALLOW</c>).
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

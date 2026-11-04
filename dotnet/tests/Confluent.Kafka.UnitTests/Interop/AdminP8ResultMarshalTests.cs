@@ -31,14 +31,14 @@ public sealed class AdminP8ResultMarshalTests
     // Asserted against Java's toString() spelling, not the C# identifier: a rename would change the wire format
     // without failing to compile.
     [Theory]
-    [InlineData(TransactionState.Ongoing, "Ongoing")]
-    [InlineData(TransactionState.PrepareAbort, "PrepareAbort")]
-    [InlineData(TransactionState.PrepareCommit, "PrepareCommit")]
-    [InlineData(TransactionState.CompleteAbort, "CompleteAbort")]
-    [InlineData(TransactionState.CompleteCommit, "CompleteCommit")]
-    [InlineData(TransactionState.Empty, "Empty")]
-    [InlineData(TransactionState.PrepareEpochFence, "PrepareEpochFence")]
-    [InlineData(TransactionState.Unknown, "Unknown")]
+    [InlineData(TransactionState.ONGOING, "Ongoing")]
+    [InlineData(TransactionState.PREPARE_ABORT, "PrepareAbort")]
+    [InlineData(TransactionState.PREPARE_COMMIT, "PrepareCommit")]
+    [InlineData(TransactionState.COMPLETE_ABORT, "CompleteAbort")]
+    [InlineData(TransactionState.COMPLETE_COMMIT, "CompleteCommit")]
+    [InlineData(TransactionState.EMPTY, "Empty")]
+    [InlineData(TransactionState.PREPARE_EPOCH_FENCE, "PrepareEpochFence")]
+    [InlineData(TransactionState.UNKNOWN, "Unknown")]
     public void TransactionState_RoundTripsThroughItsWireName(TransactionState state, string wireName)
     {
         Assert.Equal(wireName, TransactionMarshal.WireName(state));

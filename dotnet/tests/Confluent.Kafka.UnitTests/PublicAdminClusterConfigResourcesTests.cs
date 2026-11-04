@@ -128,15 +128,15 @@ public sealed class PublicAdminClusterConfigResourcesTests
             () => admin.CreateTopics(new[] { new NewTopic("p3-topic", 1, 1) }).All().Get(), s_deadline);
 
         IReadOnlyCollection<ConfigResource> topics = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.Topic }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.TOPIC }).All().Get(), s_deadline);
         Assert.Equal(
-            new ConfigResource(ConfigResourceType.Topic, "p3-topic"),
+            new ConfigResource(ConfigResourceType.TOPIC, "p3-topic"),
             Assert.Single(topics));
 
         IReadOnlyCollection<ConfigResource> brokers = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.Broker }).All().Get(), s_deadline);
-        Assert.DoesNotContain(brokers, resource => resource.Type == ConfigResourceType.Topic);
-        Assert.Contains(brokers, resource => resource.Type == ConfigResourceType.Broker);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }).All().Get(), s_deadline);
+        Assert.DoesNotContain(brokers, resource => resource.Type == ConfigResourceType.TOPIC);
+        Assert.Contains(brokers, resource => resource.Type == ConfigResourceType.BROKER);
     }
 
     [Fact]
@@ -146,10 +146,10 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> once = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.Broker }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }).All().Get(), s_deadline);
         IReadOnlyCollection<ConfigResource> repeated = await TestTimeout.Run(
             () => admin.ListConfigResources(
-                new[] { ConfigResourceType.Broker, ConfigResourceType.Broker, ConfigResourceType.Broker }).All().Get(),
+                new[] { ConfigResourceType.BROKER, ConfigResourceType.BROKER, ConfigResourceType.BROKER }).All().Get(),
             s_deadline);
 
         Assert.Equal(once, repeated);

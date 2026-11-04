@@ -56,10 +56,10 @@ public class RecordDeserializationException : SerializationException
     public enum DeserializationExceptionOrigin
     {
         /// <summary>The key.</summary>
-        Key,
+        KEY,
 
         /// <summary>The value.</summary>
-        Value,
+        VALUE,
     }
 
     /// <summary>Whether the key or the value failed, or <see langword="null"/> when the constructor was given none.</summary>

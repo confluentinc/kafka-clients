@@ -24,7 +24,7 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 /// <remarks>
 /// Each mapping is an explicit switch, never a cast, so the C and C# orders cannot drift apart. An unknown C id
-/// decodes to <c>Unknown</c>, as Java's <c>parse</c> does, and a null singleton, Java's <c>Optional.empty()</c>,
+/// decodes to <c>UNKNOWN</c>, as Java's <c>parse</c> does, and a null singleton, Java's <c>Optional.empty()</c>,
 /// to <see langword="null"/>.
 /// </remarks>
 internal static class GroupMarshal
@@ -41,11 +41,11 @@ internal static class GroupMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return id switch
         {
-            1 => GroupType.Consumer,
-            2 => GroupType.Classic,
-            3 => GroupType.Share,
-            4 => GroupType.Streams,
-            _ => GroupType.Unknown,
+            1 => GroupType.CONSUMER,
+            2 => GroupType.CLASSIC,
+            3 => GroupType.SHARE,
+            4 => GroupType.STREAMS,
+            _ => GroupType.UNKNOWN,
         };
     }
 
@@ -61,15 +61,15 @@ internal static class GroupMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return id switch
         {
-            1 => GroupState.PreparingRebalance,
-            2 => GroupState.CompletingRebalance,
-            3 => GroupState.Stable,
-            4 => GroupState.Dead,
-            5 => GroupState.Empty,
-            6 => GroupState.Assigning,
-            7 => GroupState.Reconciling,
-            8 => GroupState.NotReady,
-            _ => GroupState.Unknown,
+            1 => GroupState.PREPARING_REBALANCE,
+            2 => GroupState.COMPLETING_REBALANCE,
+            3 => GroupState.STABLE,
+            4 => GroupState.DEAD,
+            5 => GroupState.EMPTY,
+            6 => GroupState.ASSIGNING,
+            7 => GroupState.RECONCILING,
+            8 => GroupState.NOT_READY,
+            _ => GroupState.UNKNOWN,
         };
     }
 
@@ -85,12 +85,12 @@ internal static class GroupMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return id switch
         {
-            1 => ClassicGroupState.PreparingRebalance,
-            2 => ClassicGroupState.CompletingRebalance,
-            3 => ClassicGroupState.Stable,
-            4 => ClassicGroupState.Dead,
-            5 => ClassicGroupState.Empty,
-            _ => ClassicGroupState.Unknown,
+            1 => ClassicGroupState.PREPARING_REBALANCE,
+            2 => ClassicGroupState.COMPLETING_REBALANCE,
+            3 => ClassicGroupState.STABLE,
+            4 => ClassicGroupState.DEAD,
+            5 => ClassicGroupState.EMPTY,
+            _ => ClassicGroupState.UNKNOWN,
         };
     }
 
@@ -99,11 +99,11 @@ internal static class GroupMarshal
         IntPtr outErr = IntPtr.Zero;
         IntPtr singleton = type switch
         {
-            GroupType.Unknown => NativeMethods.GroupTypeUnknown(ref outErr),
-            GroupType.Consumer => NativeMethods.GroupTypeConsumer(ref outErr),
-            GroupType.Classic => NativeMethods.GroupTypeClassic(ref outErr),
-            GroupType.Share => NativeMethods.GroupTypeShare(ref outErr),
-            GroupType.Streams => NativeMethods.GroupTypeStreams(ref outErr),
+            GroupType.UNKNOWN => NativeMethods.GroupTypeUnknown(ref outErr),
+            GroupType.CONSUMER => NativeMethods.GroupTypeConsumer(ref outErr),
+            GroupType.CLASSIC => NativeMethods.GroupTypeClassic(ref outErr),
+            GroupType.SHARE => NativeMethods.GroupTypeShare(ref outErr),
+            GroupType.STREAMS => NativeMethods.GroupTypeStreams(ref outErr),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Not a defined GroupType member."),
         };
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -115,15 +115,15 @@ internal static class GroupMarshal
         IntPtr outErr = IntPtr.Zero;
         IntPtr singleton = state switch
         {
-            GroupState.Unknown => NativeMethods.GroupStateUnknown(ref outErr),
-            GroupState.PreparingRebalance => NativeMethods.GroupStatePreparingRebalance(ref outErr),
-            GroupState.CompletingRebalance => NativeMethods.GroupStateCompletingRebalance(ref outErr),
-            GroupState.Stable => NativeMethods.GroupStateStable(ref outErr),
-            GroupState.Dead => NativeMethods.GroupStateDead(ref outErr),
-            GroupState.Empty => NativeMethods.GroupStateEmpty(ref outErr),
-            GroupState.Assigning => NativeMethods.GroupStateAssigning(ref outErr),
-            GroupState.Reconciling => NativeMethods.GroupStateReconciling(ref outErr),
-            GroupState.NotReady => NativeMethods.GroupStateNotReady(ref outErr),
+            GroupState.UNKNOWN => NativeMethods.GroupStateUnknown(ref outErr),
+            GroupState.PREPARING_REBALANCE => NativeMethods.GroupStatePreparingRebalance(ref outErr),
+            GroupState.COMPLETING_REBALANCE => NativeMethods.GroupStateCompletingRebalance(ref outErr),
+            GroupState.STABLE => NativeMethods.GroupStateStable(ref outErr),
+            GroupState.DEAD => NativeMethods.GroupStateDead(ref outErr),
+            GroupState.EMPTY => NativeMethods.GroupStateEmpty(ref outErr),
+            GroupState.ASSIGNING => NativeMethods.GroupStateAssigning(ref outErr),
+            GroupState.RECONCILING => NativeMethods.GroupStateReconciling(ref outErr),
+            GroupState.NOT_READY => NativeMethods.GroupStateNotReady(ref outErr),
             _ => throw new ArgumentOutOfRangeException(nameof(state), state, "Not a defined GroupState member."),
         };
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -133,38 +133,38 @@ internal static class GroupMarshal
     internal static string? NameFromType(GroupType type) =>
         type switch
         {
-            GroupType.Unknown => "Unknown",
-            GroupType.Consumer => "Consumer",
-            GroupType.Classic => "Classic",
-            GroupType.Share => "Share",
-            GroupType.Streams => "Streams",
+            GroupType.UNKNOWN => "Unknown",
+            GroupType.CONSUMER => "Consumer",
+            GroupType.CLASSIC => "Classic",
+            GroupType.SHARE => "Share",
+            GroupType.STREAMS => "Streams",
             _ => null,
         };
 
     internal static string? NameFromState(GroupState state) =>
         state switch
         {
-            GroupState.Unknown => "Unknown",
-            GroupState.PreparingRebalance => "PreparingRebalance",
-            GroupState.CompletingRebalance => "CompletingRebalance",
-            GroupState.Stable => "Stable",
-            GroupState.Dead => "Dead",
-            GroupState.Empty => "Empty",
-            GroupState.Assigning => "Assigning",
-            GroupState.Reconciling => "Reconciling",
-            GroupState.NotReady => "NotReady",
+            GroupState.UNKNOWN => "Unknown",
+            GroupState.PREPARING_REBALANCE => "PreparingRebalance",
+            GroupState.COMPLETING_REBALANCE => "CompletingRebalance",
+            GroupState.STABLE => "Stable",
+            GroupState.DEAD => "Dead",
+            GroupState.EMPTY => "Empty",
+            GroupState.ASSIGNING => "Assigning",
+            GroupState.RECONCILING => "Reconciling",
+            GroupState.NOT_READY => "NotReady",
             _ => null,
         };
 
     internal static string? NameFromClassicState(ClassicGroupState state) =>
         state switch
         {
-            ClassicGroupState.Unknown => "Unknown",
-            ClassicGroupState.PreparingRebalance => "PreparingRebalance",
-            ClassicGroupState.CompletingRebalance => "CompletingRebalance",
-            ClassicGroupState.Stable => "Stable",
-            ClassicGroupState.Dead => "Dead",
-            ClassicGroupState.Empty => "Empty",
+            ClassicGroupState.UNKNOWN => "Unknown",
+            ClassicGroupState.PREPARING_REBALANCE => "PreparingRebalance",
+            ClassicGroupState.COMPLETING_REBALANCE => "CompletingRebalance",
+            ClassicGroupState.STABLE => "Stable",
+            ClassicGroupState.DEAD => "Dead",
+            ClassicGroupState.EMPTY => "Empty",
             _ => null,
         };
 }

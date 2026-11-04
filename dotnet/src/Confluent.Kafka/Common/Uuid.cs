@@ -33,7 +33,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     private const int MaxTextLength = 24;
 
     private static readonly ReadOnlyCollection<Uuid> s_reserved =
-        new ReadOnlyCollection<Uuid>(new[] { Zero, One });
+        new ReadOnlyCollection<Uuid>(new[] { ZERO_UUID, ONE_UUID });
 
     private static readonly Func<Uuid> s_unsafeRandomUuid = UnsafeRandomUuid;
 
@@ -45,19 +45,19 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     }
 
     /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>
-    public static Uuid Zero => default;
+    public static Uuid ZERO_UUID => default;
 
     /// <summary>The id <c>(0, 1)</c>, Java's <c>Uuid.ONE_UUID</c>.</summary>
-    public static Uuid One => new Uuid(0L, 1L);
+    public static Uuid ONE_UUID => new Uuid(0L, 1L);
 
-    /// <summary>The id of the KRaft metadata topic, <see cref="One"/>: Java's <c>Uuid.METADATA_TOPIC_ID</c>.</summary>
-    public static Uuid MetadataTopicId => One;
+    /// <summary>The id of the KRaft metadata topic, <see cref="ONE_UUID"/>: Java's <c>Uuid.METADATA_TOPIC_ID</c>.</summary>
+    public static Uuid METADATA_TOPIC_ID => ONE_UUID;
 
     /// <summary>
-    /// The ids <see cref="RandomUuid()"/> never returns, <see cref="Zero"/> and <see cref="One"/>: Java's
+    /// The ids <see cref="RandomUuid()"/> never returns, <see cref="ZERO_UUID"/> and <see cref="ONE_UUID"/>: Java's
     /// <c>Uuid.RESERVED</c>.
     /// </summary>
-    public static IReadOnlyCollection<Uuid> Reserved => s_reserved;
+    public static IReadOnlyCollection<Uuid> RESERVED => s_reserved;
 
     /// <summary>The high 64 bits.</summary>
     public long MostSignificantBits { get; }
@@ -124,14 +124,14 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     }
 
     /// <summary>
-    /// Parses as <see cref="Parse(string)"/> does, but returns <see langword="false"/>, with <see cref="Zero"/>,
+    /// Parses as <see cref="Parse(string)"/> does, but returns <see langword="false"/>, with <see cref="ZERO_UUID"/>,
     /// instead of throwing.
     /// </summary>
     public static bool TryParse(string? value, out Uuid result)
     {
         if (value is null || value.Length > MaxTextLength)
         {
-            result = Zero;
+            result = ZERO_UUID;
             return false;
         }
 
@@ -142,13 +142,13 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
         }
         catch (FormatException)
         {
-            result = Zero;
+            result = ZERO_UUID;
             return false;
         }
 
         if (bytes.Length != ByteCount)
         {
-            result = Zero;
+            result = ZERO_UUID;
             return false;
         }
 

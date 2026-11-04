@@ -124,7 +124,7 @@ public sealed class PublicAdminP2bShapeParityTests
             "(name=t, topicId=" + listing.TopicId + ", internal=false)",
             new TopicListing("t", new Uuid(1L, 2L), isInternal: false).ToString());
 
-        Assert.Throws<ArgumentNullException>(() => new TopicListing(null!, Uuid.Zero, false));
+        Assert.Throws<ArgumentNullException>(() => new TopicListing(null!, Uuid.ZERO_UUID, false));
     }
 
     [Fact]

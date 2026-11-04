@@ -99,10 +99,10 @@ public sealed class PublicAdminDescribeClientQuotasTests
         ClientQuotaFilterComponent component = matchType switch
         {
             ClientQuotaMatchType.Exact =>
-                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
+                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.USER, "alice"),
             ClientQuotaMatchType.Default =>
-                ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User),
-            _ => ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User),
+                ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.USER),
+            _ => ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER),
         };
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(

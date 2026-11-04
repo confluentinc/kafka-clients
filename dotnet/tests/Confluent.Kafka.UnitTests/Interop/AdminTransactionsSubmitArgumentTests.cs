@@ -208,14 +208,14 @@ public sealed class AdminTransactionsSubmitArgumentTests
         ListTransactionsReadBack read = ReadBack(
             new ListTransactionsOptions
             {
-                FilteredStates = new[] { TransactionState.PrepareAbort, TransactionState.Ongoing },
+                FilteredStates = new[] { TransactionState.PREPARE_ABORT, TransactionState.ONGOING },
                 FilteredProducerIds = new[] { 33L, 11L, 22L },
                 FilteredDuration = 60_000L,
                 FilteredTransactionalIdPattern = "txn-.*",
                 TimeoutMs = 400,
             });
 
-        Assert.Equal(new[] { TransactionState.Ongoing, TransactionState.PrepareAbort }, read.States.OrderBy(state => state));
+        Assert.Equal(new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT }, read.States.OrderBy(state => state));
         Assert.Equal(new[] { 11L, 22L, 33L }, read.ProducerIds.OrderBy(id => id));
         Assert.Equal(60_000L, read.DurationMs);
         Assert.Equal("txn-.*", read.Pattern);
@@ -261,16 +261,16 @@ public sealed class AdminTransactionsSubmitArgumentTests
     {
         ListTransactionsOptions options = new ListTransactionsOptions
         {
-            FilteredStates = new[] { TransactionState.Ongoing },
+            FilteredStates = new[] { TransactionState.ONGOING },
             FilteredProducerIds = new[] { 1L },
             TimeoutMs = 10,
         };
-        options.FilteredStates = new[] { TransactionState.Empty };
+        options.FilteredStates = new[] { TransactionState.EMPTY };
         options.FilteredProducerIds = Array.Empty<long>();
 
         ListTransactionsReadBack read = ReadBack(options);
 
-        Assert.Equal(new[] { TransactionState.Empty }, read.States);
+        Assert.Equal(new[] { TransactionState.EMPTY }, read.States);
         Assert.Empty(read.ProducerIds);
         Assert.Equal(10, read.TimeoutMs);
         Assert.Equal(

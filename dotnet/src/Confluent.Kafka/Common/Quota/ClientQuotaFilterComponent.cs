@@ -47,7 +47,7 @@ public sealed class ClientQuotaFilterComponent
     /// <summary>
     /// A component matching <paramref name="entityName"/> exactly — Java's <c>ofEntity</c>.
     /// </summary>
-    /// <param name="entityType">The entity type, e.g. <see cref="ClientQuotaEntity.User"/>.</param>
+    /// <param name="entityType">The entity type, e.g. <see cref="ClientQuotaEntity.USER"/>.</param>
     /// <param name="entityName">The entity name matched exactly.</param>
     /// <returns>The component.</returns>
     /// <exception cref="ArgumentNullException">

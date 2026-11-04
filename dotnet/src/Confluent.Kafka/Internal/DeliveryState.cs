@@ -270,7 +270,7 @@ internal class DeliveryState
         catch (Exception unreadable)
         {
             // The callback still runs once, with Java's placeholder; a failed record keeps its own error.
-            _delivered = new RecordMetadata(_topic, _partition, -1L, -1L);
+            _delivered = new RecordMetadata(new TopicPartition(_topic, _partition), -1L, -1L, -1, -1);
             _failure ??= unreadable;
         }
 

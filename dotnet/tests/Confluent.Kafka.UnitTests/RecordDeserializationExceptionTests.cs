@@ -36,22 +36,22 @@ public sealed class RecordDeserializationExceptionTests
     {
         InvalidOperationException cause = new InvalidOperationException("bad");
         RecordDeserializationException e = new RecordDeserializationException(
-            Origin.Value,
+            Origin.VALUE,
             s_tp,
             offset: 7,
             timestamp: 10,
-            TimestampType.CreateTime,
+            TimestampType.CREATE_TIME,
             new byte[] { (byte)'k' },
             new byte[] { (byte)'v' },
             new Headers(new[] { new Header("h", new byte[] { (byte)'1' }) }),
             "m",
             cause);
 
-        Assert.Equal(Origin.Value, e.Origin);
+        Assert.Equal(Origin.VALUE, e.Origin);
         Assert.Equal(s_tp, e.TopicPartition);
         Assert.Equal(7L, e.Offset);
         Assert.Equal(10L, e.Timestamp);
-        Assert.Equal(TimestampType.CreateTime, e.TimestampType);
+        Assert.Equal(TimestampType.CREATE_TIME, e.TimestampType);
         Assert.Equal(new byte[] { (byte)'k' }, e.KeyBuffer);
         Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer);
         Header header = Assert.Single(e.Headers!);
@@ -70,7 +70,7 @@ public sealed class RecordDeserializationExceptionTests
             s_tp,
             offset: 2,
             timestamp: -1,
-            TimestampType.NoTimestampType,
+            TimestampType.NO_TIMESTAMP_TYPE,
             keyBuffer: null,
             valueBuffer: null,
             headers: null,
@@ -88,7 +88,7 @@ public sealed class RecordDeserializationExceptionTests
     public void ARecordWithoutAKey_KeepsTheValueBuffer()
     {
         RecordDeserializationException e = new RecordDeserializationException(
-            Origin.Key, s_tp, 3, 1, TimestampType.CreateTime, null, new byte[] { (byte)'v' }, Headers.Empty, "m", null);
+            Origin.KEY, s_tp, 3, 1, TimestampType.CREATE_TIME, null, new byte[] { (byte)'v' }, Headers.Empty, "m", null);
 
         Assert.Null(e.KeyBuffer);
         Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer);
@@ -99,7 +99,7 @@ public sealed class RecordDeserializationExceptionTests
     {
         Headers headers = new Headers(new[] { new Header("a", null) });
         RecordDeserializationException e = new RecordDeserializationException(
-            Origin.Key, s_tp, 0, 0, TimestampType.CreateTime, null, null, headers, "m", null);
+            Origin.KEY, s_tp, 0, 0, TimestampType.CREATE_TIME, null, null, headers, "m", null);
 
         Assert.Same(headers, e.Headers);
     }
@@ -108,7 +108,7 @@ public sealed class RecordDeserializationExceptionTests
     public void ItIsASerializationException()
     {
         RecordDeserializationException e = new RecordDeserializationException(
-            Origin.Key, s_tp, 0, 0, TimestampType.CreateTime, null, null, null, "m", null);
+            Origin.KEY, s_tp, 0, 0, TimestampType.CREATE_TIME, null, null, null, "m", null);
 
         Assert.IsAssignableFrom<SerializationException>(e);
         Assert.IsAssignableFrom<KafkaException>(e);
@@ -119,7 +119,7 @@ public sealed class RecordDeserializationExceptionTests
     public void TheOrigin_IsNestedWithJavasMembersInOrder()
     {
         Assert.Equal(typeof(RecordDeserializationException), typeof(Origin).DeclaringType);
-        Assert.Equal(new[] { "Key", "Value" }, Enum.GetNames(typeof(Origin)));
+        Assert.Equal(new[] { "KEY", "VALUE" }, Enum.GetNames(typeof(Origin)));
         Assert.Equal(new[] { 0, 1 }, Enum.GetValues(typeof(Origin)).Cast<int>().ToArray());
     }
 

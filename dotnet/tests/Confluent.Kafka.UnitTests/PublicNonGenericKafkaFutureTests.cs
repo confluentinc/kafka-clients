@@ -198,7 +198,8 @@ public sealed class PublicNonGenericKafkaFutureTests
 
         KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: true);
         Assert.True(outcome == "result"
-            ? source.Complete(new RecordMetadata("erasure-topic", 0, 1L, 1_700_000_000_000L))
+            ? source.Complete(
+                new RecordMetadata(new TopicPartition("erasure-topic", 0), 1L, 0, 1_700_000_000_000L, -1, -1))
             : source.CompleteWithError(cause));
 
         Assert.True(typed.IsDone);

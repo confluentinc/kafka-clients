@@ -46,7 +46,7 @@ public sealed class PublicAdminParityLowsTests
             typeof(AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>));
 
         ClientQuotaEntity entity = new ClientQuotaEntity(
-            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = "alice" });
+            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = "alice" });
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> quotas =
             new Dictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>
             {
@@ -75,9 +75,9 @@ public sealed class PublicAdminParityLowsTests
             typeof(AsyncAlterClientQuotasResult), typeof(IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture>));
 
         ClientQuotaEntity alice = new ClientQuotaEntity(
-            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = "alice" });
+            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = "alice" });
         ClientQuotaEntity bob = new ClientQuotaEntity(
-            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = "bob" });
+            new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = "bob" });
         KafkaException failure = new KafkaException("bob failed");
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> futures = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>
         {
