@@ -154,7 +154,7 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Java member: `org.apache.kafka.common.Cluster#Cluster(String,Collection,Collection,Set,Set,Set,Node,Map)`
    - Contract change: a `NULL` value in `topic_ids` panics with `LocalNullPointerError` (`id must not be null`), where Java's constructor stores the `null` id (and maps the `null` id to the topic name in `topicNames`).
    - Why: Java's client builds a `Cluster`'s topic ids only from a metadata response, whose `TopicId` is non-nullable (`Uuid.ZERO_UUID` when the broker has none); Rust's `Cluster` takes `HashMap<String, Uuid>` and `topic_id` returns a `Uuid` unwrapped, so it has no value for a `null` id; reading `NULL` as `Uuid.ZERO_UUID` would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
-   - Accepted:
+   - Accepted: 2026-11-03 Emanuele Sabellico
 1. `kafka_admin_TopicListing_new`
    - Java member: `org.apache.kafka.clients.admin.TopicListing#TopicListing`
    - Contract change: a `NULL` `name`, `topic_id` panic with `LocalNullPointerError` (`<param> must not be null`), where Java's constructor stores `null`.
