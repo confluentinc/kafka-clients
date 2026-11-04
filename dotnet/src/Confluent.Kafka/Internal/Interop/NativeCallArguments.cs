@@ -186,18 +186,18 @@ internal sealed class NativeCallArguments : IDisposable
         IntPtr replicas = NodeList(info.Replicas);
         IntPtr isr = NodeList(info.InSyncReplicas);
         IntPtr outErr = IntPtr.Zero;
-        IntPtr handle = info.Elr is null && info.LastKnownElr is null
-            ? NativeMethods.TopicPartitionInfoNew(info.Partition, leader, replicas, isr, ref outErr)
-            : NativeMethods.TopicPartitionInfoWithElrLastKnownElr(
+        // Java's four-argument TopicPartitionInfo constructor leaves both lists null, and
+        // the .NET class has both lists or neither; null lists are that constructor.
+        IntPtr handle = info.Elr is { } elr && info.LastKnownElr is { } lastKnownElr
+            ? NativeMethods.TopicPartitionInfoWithElrLastKnownElr(
                 info.Partition,
                 leader,
                 replicas,
                 isr,
-                // The core takes both lists; a missing one is the empty list Java's
-                // four-argument TopicPartitionInfo constructor passes.
-                info.Elr is null ? List() : NodeList(info.Elr),
-                info.LastKnownElr is null ? List() : NodeList(info.LastKnownElr),
-                ref outErr);
+                NodeList(elr),
+                NodeList(lastKnownElr),
+                ref outErr)
+            : NativeMethods.TopicPartitionInfoNew(info.Partition, leader, replicas, isr, ref outErr);
         return Track(handle, Kind.TopicPartitionInfo, ref outErr);
     }
 
