@@ -34,14 +34,17 @@ const LICENSE_END = 'limitations under the License.\n';
 
 /**
  * A copy of the client's lib/, src/, tsconfig.json, CLAUDE.md (whose rule
- * sentence check-no-todo exempts), lint-baseline.txt and Java index
- * (build/java-index.json, which `make test-lint` writes first).
+ * sentence check-no-todo exempts), lint-baseline.txt, Java index
+ * (build/java-index.json, which `make test-lint` writes first) and bindings
+ * header.
  */
 function realCopy() {
   const root = project({});
   for (const rel of ['lib', 'src', 'tsconfig.json', 'CLAUDE.md', 'lint-baseline.txt']) copy(ROOT, root, rel);
   fs.mkdirSync(path.join(root, 'build'));
   copy(ROOT, root, 'build/java-index.json');
+  // The bindings header, where the lint helper looks for it.
+  fs.copyFileSync(require('../../scripts/header').headerPath(), path.join(root, 'confluent_kafka_bindings.h'));
   return root;
 }
 
@@ -147,6 +150,72 @@ MUTATIONS.push(
     rules: ['check-java-members', 'check-java-completeness'],
     what: 'an isX method turned into a property without its is',
     apply: (root) => edit(root, 'lib/common/kafka_future.ts', 'isDone(): boolean {', 'get done(): boolean {'),
+  },
+  {
+    rule: 'check-waiting-call-promise',
+    what: 'flush returning void',
+    apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '  flush(): Promise<void> {', '  flush(): void {'),
+  },
+  {
+    rule: 'check-overload-shape',
+    what: 'a ProducerRecordOptions key renamed',
+    apply: (root) => edit(root, 'lib/producer/producer_record.ts', '  key?: Data | null | undefined;', '  recordKey?: Data | null | undefined;'),
+  },
+  {
+    rule: 'check-overload-shape',
+    what: 'ProducerRecordOptions.topic made optional',
+    apply: (root) => edit(root, 'lib/producer/producer_record.ts', '  topic: string;\n', '  topic?: string;\n'),
+  },
+  {
+    rule: 'check-overload-shape',
+    what: 'close({timeout}) instead of timeoutMs',
+    apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '  timeoutMs?: number | undefined;', '  timeout?: number | undefined;'),
+  },
+  {
+    // The registry misses a use, flush's native path no longer resolves, and
+    // so its Promise is no waiting call's.
+    rules: ['check-type-mapping', 'check-waiting-call-promise', 'check-native-registry'],
+    what: 'a registration removed from addon.c',
+    apply: (root) =>
+      edit(root, 'src/addon.c', '        {"producerFlush", NULL, js_producer_flush, NULL, NULL, NULL, napi_default, NULL},\n', ''),
+  },
+  {
+    rule: 'check-native-registry',
+    what: 'a second import of the loader',
+    apply: (root) =>
+      edit(root, 'lib/producer/kafka_producer.ts', "import native = require('../_native');", "import native = require('../_native');\nimport { ADDON_FILE } from '../_native_loader';\nvoid ADDON_FILE;"),
+  },
+  {
+    rule: 'check-type-mapping',
+    what: 'a getter of another type than Java\'s',
+    apply: (root) => edit(root, 'lib/producer/record_metadata.ts', 'get offset(): number {', 'get offset(): string {'),
+  },
+  {
+    rule: 'check-waiting-call-promise',
+    what: 'flush returning void, its native call in a module helper',
+    apply: (root) => {
+      edit(root, 'lib/producer/kafka_producer.ts', '  flush(): Promise<void> {', '  flush(): void {\n    flushVia(this.#handle);\n  }\n\n  private oldFlush(): Promise<void> {');
+      fs.appendFileSync(
+        path.join(root, 'lib/producer/kafka_producer.ts'),
+        '\nfunction flushVia(handle: ProducerHandle): void {\n  native.producerFlush(handle, () => undefined);\n}\n',
+      );
+    },
+  },
+  {
+    rule: 'check-waiting-call-promise',
+    what: 'flush returning void, its native call through an alias of the handle',
+    apply: (root) =>
+      edit(
+        root,
+        'lib/producer/kafka_producer.ts',
+        '  flush(): Promise<void> {',
+        '  flush(): void {\n    const n = native;\n    n.producerFlush(this.#handle, () => undefined);\n  }\n\n  private oldFlush(): Promise<void> {',
+      ),
+  },
+  {
+    rule: 'check-type-mapping',
+    what: 'a non-blocking method returning a Promise',
+    apply: (root) => edit(root, 'lib/common/kafka_future.ts', 'isDone(): boolean {', 'isDone(): Promise<boolean> {'),
   },
   {
     rule: 'check-java-tags',

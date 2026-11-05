@@ -43,11 +43,12 @@ process.on('exit', () => {
   for (const dir of made) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** A new temporary directory holding `files` (relative path to text); returns its path. */
+/** A new temporary directory holding `files` (relative path to text; `undefined` leaves one out); returns its path. */
 function project(files) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'js-lint-'));
   made.push(root);
   for (const [rel, text] of Object.entries(files)) {
+    if (text === undefined) continue;
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
     fs.writeFileSync(path.join(root, rel), text);
   }

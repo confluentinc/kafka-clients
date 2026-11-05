@@ -44,6 +44,10 @@ const RULES = [
   require('./lint/rules/no_deprecated_translation'),
   require('./lint/rules/getters_readonly'),
   require('./lint/rules/java_tags'),
+  require('./lint/rules/overload_shape'),
+  require('./lint/rules/type_mapping'),
+  require('./lint/rules/waiting_call_promise'),
+  require('./lint/rules/native_registry'),
 ];
 
 /** The baseline file, relative to the client's directory. */

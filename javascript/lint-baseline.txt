@@ -34,3 +34,11 @@ missing clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
 # layout").
 missing clients.producer.RecordMetadata#RecordMetadata
 
+
+# check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
+# KafkaFuture.get: only get(); get(long, TimeUnit) is not translated yet.
+not-options KafkaFuture.get
+# KafkaProducer's constructor takes the configuration alone: JavaScript has no
+# serializers (a string is encoded as Java's StringSerializer would,
+# javascript/CLAUDE.md rule 8), and a Map and Properties are one configs type.
+not-options KafkaProducer.constructor

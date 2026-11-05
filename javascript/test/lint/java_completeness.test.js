@@ -41,7 +41,7 @@ test('a member, the constructor and a constant left out are each a finding', () 
     fixture({
       'lib/producer/rec.ts': LIB['lib/producer/rec.ts']
         .replace('  static readonly UNKNOWN: number = -1;\n', '')
-        .replace('  constructor(topic: string) { void topic; }\n', '  private constructor() {}\n')
+        .replace('  constructor(options: { p0: string; p1?: number }) { void options; }\n', '  private constructor() {}\n')
         .replace('  get size(): number { return 0; }\n', ''),
       'lib/producer/producer_config.ts': 'export class ProducerConfig {}\n',
       'lib/common/header/header.ts': 'export type Header = { readonly key: string };\n',
@@ -60,7 +60,7 @@ test('a member, the constructor and a constant left out are each a finding', () 
 
 test('the baseline lists what is not translated yet', () => {
   const root = fixture({
-    'lib/producer/rec.ts': LIB['lib/producer/rec.ts'].replace('  close(): void {}\n', ''),
+    'lib/producer/rec.ts': LIB['lib/producer/rec.ts'].replace('  close(options?: { p0Ms?: number }): void { void options; }\n', ''),
     'lint-baseline.txt': '# not yet\nmissing clients.producer.Rec#close\n',
   });
   assert.equal(lint(root, [RULE]).status, 0);

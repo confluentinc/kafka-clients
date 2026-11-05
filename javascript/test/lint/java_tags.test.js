@@ -58,7 +58,7 @@ test('each finding kind, with its exact text', () => {
       'lib/common/future.ts': '/** @java org.apache.kafka.clients.producer.Rec */\nexport class Future {}\n',
       'lib/producer/rec.ts': LIB['lib/producer/rec.ts']
         .replace('get topic()', '/** @jsOnly Mine. */\n  get topic()')
-        .replace('close(): void {}', '/** @java org.apache.kafka.clients.producer.Rec#close */\n  close(): void {}')
+        .replace('close(options?:', '/** @java org.apache.kafka.clients.producer.Rec#close */\n  close(options?:')
         .replace('extra(): void {}', '/** @java org.apache.kafka.clients.producer.Rec#hidden */\n  extra(): void {}')
         .replace('flush(): void {}', '/** @java org.apache.kafka.clients.producer.Rec#vanish */\n  flush(): void {}'),
     }),

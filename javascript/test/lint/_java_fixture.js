@@ -25,7 +25,8 @@ function method(name, params = [], extra = {}) {
     name,
     params,
     param_names: params.map((_, i) => `p${i}`),
-    return_type: 'void',
+    // The type the tests of the type rule give it; none (as a constructor has) otherwise.
+    return_type: null,
     visibility: 'public',
     static: false,
     default: false,
@@ -134,7 +135,7 @@ const CLASSES = [
   javaClass('clients.producer.Pkg', { overloads: [method('Pkg', [], { visibility: 'package-private' })] }),
   javaClass('common.errors.FooException'),
   javaClass('common.header.Header', { kind: 'interface', overloads: [method('key'), method('value')] }),
-  javaClass('common.Future', { abstract: true, overloads: [method('Future'), method('get')] }),
+  javaClass('common.Future', { abstract: true, overloads: [method('Future'), method('get', [], { return_type: 'Object' })] }),
   javaClass('clients.producer.Legacy', { kind: 'interface', deprecated: true, overloads: [method('stop')] }),
   javaClass('clients.producer.Stopper', { supertypes: ['Legacy'], overloads: [method('start')] }),
   javaClass('clients.producer.Proto', {
@@ -147,13 +148,13 @@ const CLASSES = [
 const LIB = {
   'lib/producer/rec.ts': `export class Rec {
   static readonly UNKNOWN: number = -1;
-  constructor(topic: string) { void topic; }
+  constructor(options: { p0: string; p1?: number }) { void options; }
   get topic(): string { return ''; }
   get offset(): number { return 0; }
   get size(): number { return 0; }
   get isOpen(): boolean { return true; }
   get hasKey(): boolean { return false; }
-  close(): void {}
+  close(options?: { p0Ms?: number }): void { void options; }
   flush(): void {}
   extra(): void {}
   toString(): string { return ''; }
@@ -180,7 +181,7 @@ const LIB = {
 `,
   'lib/producer/callback.ts': 'export type Callback = (metadata: unknown) => void;\n',
   'lib/common/header/header.ts': 'export interface Header {\n  readonly key: string;\n  value(): unknown;\n}\n',
-  'lib/common/future.ts': 'export class Future {\n  private constructor() {}\n  get(): Promise<unknown> { return Promise.resolve(null); }\n}\n',
+  'lib/common/future.ts': 'export class Future {\n  private constructor() {}\n  get(): unknown { return null; }\n}\n',
   'lib/common/errors/foo_error.ts': `export class FooError extends Error {
   readonly code!: number;
   readonly retriable!: boolean;
