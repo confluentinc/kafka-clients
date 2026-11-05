@@ -247,6 +247,6 @@ public sealed class SerdesTests
         Assert.IsAssignableFrom<KafkaException>(ex);
 
         Assert.Equal(-15, ex.Code);
-        Assert.False(ex.IsRetriable);
+        Assert.False(ex is Common.Errors.RetriableException);
     }
 }

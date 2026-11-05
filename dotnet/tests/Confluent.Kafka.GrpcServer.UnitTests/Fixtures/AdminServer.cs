@@ -14,8 +14,11 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
+
+using Confluent.Kafka.Admin;
 
 using Xunit;
 
@@ -70,6 +73,18 @@ internal sealed class AdminServer : IDisposable
     {
         FieldInfo admins = _servicer.GetType().GetField("_admins", BindingFlags.NonPublic | BindingFlags.Instance)!;
         return ((IDictionary)admins.GetValue(_servicer)!)[adminId]!;
+    }
+
+    /// <summary>Makes the admin client's <c>ListGroups</c> answer <paramref name="valid"/> and
+    /// <paramref name="errors"/>.</summary>
+    internal void OverrideListGroups(
+        ulong adminId,
+        IReadOnlyCollection<GroupListing> valid,
+        IReadOnlyCollection<Exception> errors)
+    {
+        FieldInfo admins = _servicer.GetType().GetField("_admins", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        IDictionary byId = (IDictionary)admins.GetValue(_servicer)!;
+        byId[adminId] = ListGroupsOverride.Wrap(byId[adminId]!, valid, errors);
     }
 
     public void Dispose()

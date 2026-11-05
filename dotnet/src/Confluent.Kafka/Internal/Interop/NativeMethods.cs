@@ -40,9 +40,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_Error_source_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorSource(IntPtr error, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_is_retriable_error_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern sbyte ErrorIsRetriableError(IntPtr error, ref IntPtr outErr);
-
     [DllImport(DllName, EntryPoint = "kafka_common_Error_is_api_error_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern sbyte ErrorIsApiError(IntPtr error, ref IntPtr outErr);
 
@@ -63,6 +60,9 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_common_Error_local_concurrent_modification_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorLocalConcurrentModification(IntPtr message, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Error_local_unsupported_operation_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ErrorLocalUnsupportedOperation(IntPtr message, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_common_Error_local_timeout_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ErrorLocalTimeout(IntPtr message, ref IntPtr outErr);
@@ -92,7 +92,7 @@ internal static partial class NativeMethods
     {
         IntPtr outErr = IntPtr.Zero;
         int code = ErrorEnum(error, ref outErr);
-        KafkaException.ThrowIfFailed(ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
         return code;
     }
 
@@ -100,7 +100,7 @@ internal static partial class NativeMethods
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr message = ErrorMessage(error, ref outErr);
-        KafkaException.ThrowIfFailed(ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
         return message;
     }
 

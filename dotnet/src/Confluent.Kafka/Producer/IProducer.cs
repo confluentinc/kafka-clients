@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -64,7 +65,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
     KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record);
@@ -89,7 +90,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
     KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback);
@@ -99,7 +100,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// delivery callback has run (Java <c>flush()</c>). A <c>Send</c> still waiting for metadata or buffer
     /// memory on another thread is not waited for.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a flush failure.</exception>
     void Flush();
 
@@ -111,7 +112,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <param name="topic">The topic whose partition metadata to read.</param>
     /// <returns>The topic's partitions (empty on a <see cref="MockProducer{TKey, TValue}"/>).</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 
@@ -121,7 +122,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// snapshot.
     /// </summary>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 
     /// <summary>

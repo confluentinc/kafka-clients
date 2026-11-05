@@ -93,7 +93,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<string> topics,
         CancellationToken cancellationToken = default)
     {
-        string[] snapshot = SnapshotTopics(topics);
+        string[] snapshot = CheckAfterAcquire(() => SnapshotTopics(topics));
         RefuseInsideACallback();
         return Finish(
             Submit(
@@ -112,16 +112,7 @@ internal sealed partial class NativeConsumer
         IConsumerRebalanceListener listener,
         CancellationToken cancellationToken = default)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
-        if (listener is null)
-        {
-            throw new ArgumentNullException(nameof(listener));
-        }
-
+        RequireListener(listener);
         return SubscribeWithRegistration(
             topics, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
     }
@@ -131,16 +122,7 @@ internal sealed partial class NativeConsumer
         IAsyncConsumerRebalanceListener listener,
         CancellationToken cancellationToken = default)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
-        if (listener is null)
-        {
-            throw new ArgumentNullException(nameof(listener));
-        }
-
+        RequireListener(listener);
         return SubscribeWithRegistration(
             topics, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
     }
@@ -156,7 +138,7 @@ internal sealed partial class NativeConsumer
         Func<ListenerRegistration> root,
         CancellationToken cancellationToken)
     {
-        string[] snapshot = SnapshotTopics(topics);
+        string[] snapshot = CheckAfterAcquire(() => SnapshotTopics(topics));
         RefuseInsideACallback();
         ListenerRegistration? registration = null;
         ConsumerCompletion<bool> completion;
@@ -235,7 +217,7 @@ internal sealed partial class NativeConsumer
     internal Task AssignWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
-        RunPartitions(SnapshotPartitions(partitions), NativeMethods.ConsumerAssignCb, AsyncOperation.Assign, cancellationToken);
+        RunPartitions(CheckAfterAcquire(() => SnapshotAssignPartitions(partitions)), NativeMethods.ConsumerAssignCb, AsyncOperation.Assign, cancellationToken);
 
     internal Task PauseWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
@@ -261,7 +243,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            CheckWhenOpen(() => SnapshotPartitions(partitions)),
+            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
             NativeMethods.ConsumerSeekToBeginningCb,
             AsyncOperation.SeekToBeginning,
             cancellationToken,
@@ -271,7 +253,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            CheckWhenOpen(() => SnapshotPartitions(partitions)),
+            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
             NativeMethods.ConsumerSeekToEndCb,
             AsyncOperation.SeekToEnd,
             cancellationToken,

@@ -23,6 +23,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Confluent.Kafka.UnitTests.Interop;
 
@@ -117,7 +118,7 @@ public sealed class PublicProducerSendWithCallbackTests
             PublicProducerFirstStageTests.CloseTheCore(producer);
 
             (callback, Exception? refused) = SendRefused(producer);
-            InvalidOperationException closed = Assert.IsType<InvalidOperationException>(refused);
+            IllegalStateException closed = Assert.IsType<IllegalStateException>(refused);
             Assert.Equal("Cannot perform operation after producer has been closed", closed.Message);
 
             AssertAlive(callback, "the state of a refused send was released before the destroy");
@@ -277,7 +278,7 @@ public sealed class PublicProducerSendWithCallbackTests
 
         KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(failure);
         Assert.Equal(7, timeout.Code);
-        Assert.True(timeout.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(timeout);
         Assert.Equal($"Topic {topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
 
         await Task.Delay(s_settle);

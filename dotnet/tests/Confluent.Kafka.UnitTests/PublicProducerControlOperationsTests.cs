@@ -20,11 +20,14 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -61,7 +64,7 @@ public sealed class PublicProducerControlOperationsTests
             Assert.False(send.IsCompleted, "Flush waited for the send in progress");
 
             KafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => send, Deadline);
-            AssertMetadataTimeout(Assert.Throws<KafkaException>(() => future.Get(Deadline)), topic, maxBlockMs, callback);
+            AssertMetadataTimeout(Assert.Throws<KafkaTimeoutException>(() => future.Get(Deadline)), topic, maxBlockMs, callback);
         }
         else
         {
@@ -76,7 +79,7 @@ public sealed class PublicProducerControlOperationsTests
 
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage, Deadline);
             AssertMetadataTimeout(
-                await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => future.Get(), Deadline)),
+                await Assert.ThrowsAsync<KafkaTimeoutException>(() => TestTimeout.Run(() => future.Get(), Deadline)),
                 topic,
                 maxBlockMs,
                 callback);
@@ -119,7 +122,7 @@ public sealed class PublicProducerControlOperationsTests
 
             elapsed.Stop();
             failed = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => send, Deadline));
-            Assert.Throws<ObjectDisposedException>(() => producer.Send(Record(topic)));
+            Assert.Throws<IllegalStateException>(() => producer.Send(Record(topic)));
         }
         else
         {
@@ -133,7 +136,7 @@ public sealed class PublicProducerControlOperationsTests
             await TestTimeout.Run(() => timed ? producer.Close(TimeSpan.FromSeconds(1)) : producer.Close(), Deadline);
             elapsed.Stop();
             failed = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => stage, Deadline));
-            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record(topic)); });
+            Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(topic)); });
         }
 
         Assert.Equal(ClosedWhileSending, failed.Message);

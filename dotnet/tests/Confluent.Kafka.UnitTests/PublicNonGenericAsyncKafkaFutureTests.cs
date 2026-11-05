@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 
 using Confluent.Kafka.Producer;
@@ -313,12 +314,12 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         });
         Exception? seenFailure = null;
         AsyncKafkaFuture after = failingFuture.WhenComplete(error => seenFailure = error);
-        KafkaException cause = new KafkaException(36, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
         Assert.False(ran);
-        Assert.Same(cause, await Assert.ThrowsAsync<KafkaException>(() => skipped.Get()));
+        Assert.Same(cause, await Assert.ThrowsAsync<TopicExistsException>(() => skipped.Get()));
         Assert.Same(cause, seenFailure);
-        Assert.Same(cause, await Assert.ThrowsAsync<KafkaException>(() => after.Get()));
+        Assert.Same(cause, await Assert.ThrowsAsync<TopicExistsException>(() => after.Get()));
     }
 
     [Fact]
@@ -328,7 +329,7 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         AsyncKafkaFuture future = new AsyncKafkaFuture(impl);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
-        await Assert.ThrowsAsync<TimeoutException>(() => future.Get(TimeSpan.Zero));
+        await Assert.ThrowsAsync<System.TimeoutException>(() => future.Get(TimeSpan.Zero));
         future.GetNow();
         Assert.Same(future.Get(), future.ToCompletionStage());
         Task waiting = future.Get(cancellation.Token);
@@ -379,11 +380,11 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         KafkaFutureImpl<int> second = new KafkaFutureImpl<int>();
         AsyncKafkaFuture<int>[] oneType = { new AsyncKafkaFuture<int>(first), new AsyncKafkaFuture<int>(second) };
         AsyncKafkaFuture all = AsyncKafkaFuture.AllOf(oneType);
-        KafkaException cause = new KafkaException(36, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(first.CompleteWithError(cause));
         Assert.False(all.IsDone);
         Assert.True(second.Complete(2));
-        Assert.Same(cause, await Assert.ThrowsAsync<KafkaException>(() => all.Get()));
+        Assert.Same(cause, await Assert.ThrowsAsync<TopicExistsException>(() => all.Get()));
         Assert.True(all.IsCompletedExceptionally);
         Assert.False(all.IsCancelled);
 
@@ -499,9 +500,9 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
 
     private static async Task AssertTimesOut(Task wait)
     {
-        TimeoutException thrown = await Assert.ThrowsAsync<TimeoutException>(
+        System.TimeoutException thrown = await Assert.ThrowsAsync<System.TimeoutException>(
             () => TestTimeout.Run(() => wait, BlockingCall.Deadline));
-        Assert.Equal(new TimeoutException().Message, thrown.Message);
+        Assert.Equal(new System.TimeoutException().Message, thrown.Message);
     }
 
     private static async Task AssertCanceledBy(CancellationToken token, Task wait)

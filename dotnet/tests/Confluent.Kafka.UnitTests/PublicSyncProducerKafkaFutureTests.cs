@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -268,21 +269,19 @@ public sealed class PublicSyncProducerKafkaFutureTests
     }
 
     [Fact]
-    public void SendAfterDispose_ThrowsObjectDisposed_AndStartsNoPump()
+    public void SendAfterDispose_ThrowsIllegalState_AndStartsNoPump()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        ObjectDisposedException plain = Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
-        ObjectDisposedException withCallback =
-            Assert.Throws<ObjectDisposedException>(() => producer.Send(Record(), callback));
+        IllegalStateException plain = Assert.Throws<IllegalStateException>(() => producer.Send(Record()));
+        IllegalStateException withCallback =
+            Assert.Throws<IllegalStateException>(() => producer.Send(Record(), callback));
 
-        string expected = new ObjectDisposedException(nameof(NativeProducer)).Message;
-        Assert.Equal(expected, plain.Message);
-        Assert.Equal(expected, withCallback.Message);
-        Assert.Equal(nameof(NativeProducer), plain.ObjectName);
+        Assert.Equal("MockProducer is already closed.", plain.Message);
+        Assert.Equal("MockProducer is already closed.", withCallback.Message);
 
         Assert.Equal(0, callback.Count);
     }
@@ -294,12 +293,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
         // interleavings.
         const int Iterations = 200;
 
-        // A Send past the closed check when Dispose released the handle is refused by the marshaller's
-        // DangerousAddRef; the expected text is read from a released handle on the runtime under test.
-        string releasedHandle = ReleasedSafeProducerHandleMessage();
         int sent = 0;
-        int disposed = 0;
-        int coreClosed = 0;
+        int closed = 0;
 
         for (int i = 0; i < Iterations; i++)
         {
@@ -322,20 +317,11 @@ public sealed class PublicSyncProducerKafkaFutureTests
                     {
                         future = producer.Send(Record());
                     }
-                    catch (ObjectDisposedException exception)
+                    catch (IllegalStateException exception)
                     {
-                        // The closed check (NativeProducer) or the marshaller's refusal of the released handle.
-                        Assert.True(
-                            exception.Message == new ObjectDisposedException(nameof(NativeProducer)).Message
-                                || exception.Message == releasedHandle,
-                            $"unexpected ObjectDisposedException message: {exception.Message}");
-                        return "disposed";
-                    }
-                    catch (InvalidOperationException exception)
-                    {
-                        // Past the closed check, but the core was closed when the record reached it.
+                        // The closed check, or the core, closed when the record reached it: one class and message.
                         Assert.Equal("MockProducer is already closed.", exception.Message);
-                        return "core-closed";
+                        return "closed";
                     }
 
                     // Accepted: the future resolves; it never strands.
@@ -369,18 +355,15 @@ public sealed class PublicSyncProducerKafkaFutureTests
                 case "sent":
                     sent++;
                     break;
-                case "disposed":
-                    disposed++;
-                    break;
                 default:
-                    coreClosed++;
+                    closed++;
                     break;
             }
 
         }
 
         _output.WriteLine(
-            $"C11 outcomes over {Iterations} iterations: sent={sent}, disposed={disposed}, core-closed={coreClosed}");
+            $"C11 outcomes over {Iterations} iterations: sent={sent}, closed={closed}");
     }
 
     [Fact]
@@ -447,39 +430,6 @@ public sealed class PublicSyncProducerKafkaFutureTests
         }
 
         throw new XunitException("expected the call to throw");
-    }
-
-    // The message DangerousAddRef throws for a released SafeHandle on this runtime. The probe is created at
-    // IntPtr.Zero, so its Dispose never reaches ReleaseHandle and makes no native call.
-    private static string ReleasedSafeProducerHandleMessage()
-    {
-        System.Runtime.InteropServices.SafeHandle handle =
-            new Confluent.Kafka.Internal.Interop.SafeMockProducerHandle(IntPtr.Zero, IntPtr.Zero);
-        if (!handle.IsInvalid)
-        {
-            handle.SetHandleAsInvalid();
-            throw new InvalidOperationException("the probe SafeProducerHandle was created valid");
-        }
-
-        handle.Dispose();
-        bool added = false;
-        try
-        {
-            handle.DangerousAddRef(ref added);
-        }
-        catch (ObjectDisposedException exception)
-        {
-            return exception.Message;
-        }
-        finally
-        {
-            if (added)
-            {
-                handle.DangerousRelease();
-            }
-        }
-
-        throw new InvalidOperationException("a released SafeProducerHandle accepted DangerousAddRef");
     }
 
     /// <summary>Records each invocation's arguments and the thread it ran on. Asserts nothing itself.</summary>

@@ -18,6 +18,8 @@ using System.Threading;
 using Confluent.Kafka.Common;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -72,7 +74,7 @@ internal sealed class BlockingCall
 
     internal static KafkaException AssertThrew(object? outcome, int code, string message)
     {
-        KafkaException failure = Assert.IsType<KafkaException>(outcome);
+        KafkaTimeoutException failure = Assert.IsType<KafkaTimeoutException>(outcome);
         Assert.Equal(code, failure.Code);
         Assert.Equal(message, failure.Message);
         return failure;

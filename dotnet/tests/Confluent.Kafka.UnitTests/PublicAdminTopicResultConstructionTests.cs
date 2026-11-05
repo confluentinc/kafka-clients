@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -95,7 +96,7 @@ public sealed class PublicAdminTopicResultConstructionTests
             (() => _ = new DescribeTopicsResult(null, null), BothNull),
         })
         {
-            ArgumentException failure = Assert.Throws<ArgumentException>(construct);
+            IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(construct);
             Assert.Null(failure.ParamName);
             Assert.Equal(message, failure.Message);
         }
@@ -337,11 +338,10 @@ public sealed class PublicAdminTopicResultConstructionTests
     }
 
     [Fact]
-    public void TopicMetadataAndConfig_FromAnError_EveryAccessorKeepsTheStoredIdentity()
+    public void TopicMetadataAndConfig_FromAnError_EveryAccessorThrowsTheStoredException()
     {
-        const int Code = 7;
         const string Message = "Topic metadata unavailable: request timed out.";
-        KafkaException stored = new KafkaException(Code, Message, isRetriable: true);
+        Common.Errors.TimeoutException stored = new Common.Errors.TimeoutException(Message);
         CreateTopicsResult.TopicMetadataAndConfig metadata = new CreateTopicsResult.TopicMetadataAndConfig(stored);
 
         Assert.False(metadata.HasMetadata);
@@ -356,12 +356,9 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         foreach ((string name, Action call) in accessors)
         {
-            KafkaException thrown = Assert.Throws<KafkaException>(call);
-            Assert.True(Code == thrown.Code, name);
-            Assert.True(thrown.IsRetriable, name);
+            Common.Errors.TimeoutException thrown = Assert.Throws<Common.Errors.TimeoutException>(call);
+            Assert.True(ReferenceEquals(stored, thrown), name);
             Assert.Equal(Message, thrown.Message);
-            Assert.Same(stored, thrown.InnerException);
-            Assert.NotSame(stored, thrown);
         }
     }
 

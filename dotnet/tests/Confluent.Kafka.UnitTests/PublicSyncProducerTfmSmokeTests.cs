@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -82,9 +83,9 @@ public sealed class PublicSyncProducerTfmSmokeTests
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Get());
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "tfm-error", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => sendTask, s_deadline));
+        await Assert.ThrowsAsync<CorruptRecordException>(() => TestTimeout.Run(() => sendTask, s_deadline));
     }
 
     [Fact]
@@ -107,7 +108,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         {
             if (sw.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "No pending send registered to drive within the deadline — treated as a hang.");
             }
 

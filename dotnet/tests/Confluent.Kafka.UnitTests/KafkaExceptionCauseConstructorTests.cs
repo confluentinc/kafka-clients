@@ -58,7 +58,7 @@ public sealed class KafkaExceptionCauseConstructorTests
         Assert.Equal("System.InvalidOperationException: the cause: café", exception.Message);
         Assert.Same(cause, exception.InnerException);
         Assert.Equal(ExpectedCode(type), exception.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.False(exception is Common.Errors.RetriableException);
     }
 
     [Theory]
@@ -74,7 +74,7 @@ public sealed class KafkaExceptionCauseConstructorTests
         Assert.Equal("System.Exception: ", exception.Message);
         Assert.Same(cause, exception.InnerException);
         Assert.Equal(ExpectedCode(type), exception.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.False(exception is Common.Errors.RetriableException);
     }
 
     [Theory]
@@ -90,7 +90,7 @@ public sealed class KafkaExceptionCauseConstructorTests
         Assert.Equal("Confluent.Kafka.Common.KafkaException", exception.Message);
         Assert.Same(cause, exception.InnerException);
         Assert.Equal(ExpectedCode(type), exception.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.False(exception is Common.Errors.RetriableException);
     }
 
     [Theory]
@@ -122,7 +122,7 @@ public sealed class KafkaExceptionCauseConstructorTests
         Assert.Null(exception.InnerException);
         Assert.Equal(ExpectedCode(type), exception.Code);
         Assert.Equal(ExpectedCode(type), parameterless.Code);
-        Assert.False(exception.IsRetriable);
+        Assert.False(exception is Common.Errors.RetriableException);
     }
 
     /// <summary>

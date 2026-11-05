@@ -25,6 +25,8 @@ using Confluent.Kafka.Internal;
 using Confluent.Kafka.Producer;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -379,9 +381,9 @@ public sealed class PublicAsyncKafkaFutureTests
 
         KafkaFutureImpl<RecordMetadata> failing = new KafkaFutureImpl<RecordMetadata>();
         AsyncKafkaFuture erasedFailure = new AsyncKafkaFuture<RecordMetadata>(failing);
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
-        Assert.Same(cause, Assert.Throws<KafkaException>(() => erasedFailure.GetNow()));
+        Assert.Same(cause, Assert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
         Assert.True(erasedFailure.IsCompletedExceptionally);
     }
 

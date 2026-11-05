@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -146,7 +147,7 @@ public sealed class PublicConsumerListenerLifetimeTests
     private static WeakReference FailToSubscribeAFreshListener(Subject consumer)
     {
         Listener listener = new Listener(failure: null);
-        InvalidOperationException refused = Assert.Throws<InvalidOperationException>(() => consumer.Subscribe(listener));
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(listener));
         Assert.Equal(MutuallyExclusive, refused.Message);
         return new WeakReference(listener);
     }

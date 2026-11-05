@@ -23,6 +23,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -93,7 +94,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = Send(producer, WithCallback, Record(), callback, CancellationToken.None); });
 
         Assert.Equal(0, callback.Count);
@@ -147,7 +148,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = producer.SendViaPump(SerializedRecord(), callback: null); });
     }
 

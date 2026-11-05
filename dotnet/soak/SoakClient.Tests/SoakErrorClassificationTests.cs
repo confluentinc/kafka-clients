@@ -14,6 +14,7 @@
 
 using System;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.Soak.Tests;
@@ -47,10 +48,18 @@ public sealed class SoakErrorClassificationTests
     }
 
     [Fact]
-    public void ErrorIsRetriableIsFalseForANonKafkaException()
+    public void ErrorIsRetriableIsFalseForANonRetriableClass()
     {
         Assert.False(SoakClient.ErrorIsRetriable(new InvalidOperationException("no such property")));
-        Assert.False(SoakClient.ErrorIsRetriable(new KafkaException("not flagged retriable")));
+        Assert.False(SoakClient.ErrorIsRetriable(new KafkaException("not a retriable class")));
+        Assert.False(SoakClient.ErrorIsRetriable(new TopicAuthorizationException("not retriable")));
+    }
+
+    [Fact]
+    public void ErrorIsRetriableIsTrueForARetriableClassAndItsSubclasses()
+    {
+        Assert.True(SoakClient.ErrorIsRetriable(new NetworkException("a disconnect")));
+        Assert.True(SoakClient.ErrorIsRetriable(new NotCoordinatorException("coordinator moved")));
     }
 
     [Theory]

@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -49,7 +50,7 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// <c>group.protocol</c> is <c>classic</c>, which this client does not support; <c>classic</c> is
     /// also the default when the key is unset.
     /// </exception>

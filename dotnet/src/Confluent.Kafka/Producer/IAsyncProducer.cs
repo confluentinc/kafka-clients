@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -101,7 +102,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -135,7 +136,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IDeliveryCallback callback,
@@ -218,7 +219,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// closes fails with the <see cref="KafkaException"/> "Producer closed while send in progress", or
     /// with <see cref="OperationCanceledException"/> if its token has fired. A <c>Send</c> whose record
     /// the close has not yet handed to the producer when the timeout expires fails as a send after close
-    /// does, with <see cref="InvalidOperationException"/>. Neither record's delivery callback runs.
+    /// does, with <see cref="IllegalStateException"/>. Neither record's delivery callback runs.
     /// </remarks>
     /// <returns>A task that completes when the close resolves, or faults with a <see cref="KafkaException"/>.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative, on <c>AsyncKafkaProducer</c>.</exception>
@@ -243,6 +244,6 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// empty snapshot.
     /// </summary>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 }

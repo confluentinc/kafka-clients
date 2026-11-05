@@ -17,10 +17,14 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Requests;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
 
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 using Proto = Confluent.Kafka.Test;
 
 namespace Confluent.Kafka.GrpcServer;
@@ -101,26 +105,37 @@ internal static class Translate
     internal static Proto.CurrentLagResponse CurrentLagResponse(long? lag) =>
         lag.HasValue ? new Proto.CurrentLagResponse { Lag = lag.Value } : new Proto.CurrentLagResponse();
 
-    private const int LocalIllegalStateCode = -4;
+    private const int LocalConcurrentModificationCode = -2;
 
     private const int LocalIllegalArgumentCode = -3;
 
+    private const int LocalIllegalStateCode = -4;
+
     private const int LocalTimeoutCode = -5;
+
+    private const int CorrelationIdMismatchCode = -24;
 
     private const int LocalUnsupportedOperationCode = -31;
 
     private const int RequestTimedOutCode = 7;
 
-    // By type, as Python's _kafka_error_to_proto: ArgumentNullException is Python's TypeError,
-    // which has no FFI id, so it takes the server-made -4 fallback rather than -3.
+    // By type, as Python's _kafka_error_to_proto sends each class's _ffi_id: a Java-named class with an
+    // id, or CorrelationIdMismatchException, sends its id; a KafkaException its Code; a .NET-only
+    // ArgumentException precondition -3. Any other exception has no id, Python's TypeError
+    // (ArgumentNullException) and the Java-named classes without one included, and takes the
+    // server-made -4 fallback.
     internal static Proto.KafkaError ToProto(Exception error) => error switch
     {
+        CorrelationIdMismatchException => Coded(CorrelationIdMismatchCode, error),
+        ConcurrentModificationException => Coded(LocalConcurrentModificationCode, error),
+        IllegalArgumentException => Coded(LocalIllegalArgumentCode, error),
+        IllegalStateException => Coded(LocalIllegalStateCode, error),
+        JavaTimeoutException => Coded(LocalTimeoutCode, error),
+        UnsupportedOperationException => Coded(LocalUnsupportedOperationCode, error),
         KafkaException ke => Coded(ke.Code, ke),
         ArgumentNullException => ServerMade(error),
+        IndexOutOfBoundsException => ServerMade(error),
         ArgumentException => Coded(LocalIllegalArgumentCode, error),
-        InvalidOperationException => Coded(LocalIllegalStateCode, error),
-        System.TimeoutException => Coded(LocalTimeoutCode, error),
-        NotSupportedException => Coded(LocalUnsupportedOperationCode, error),
         _ => ServerMade(error),
     };
 
@@ -147,7 +162,6 @@ internal static class Translate
         {
             ArgumentOutOfRangeException e => new ArgumentOutOfRangeException(e.ParamName, e.ActualValue, string.Empty).Message,
             ArgumentException e => new ArgumentException(string.Empty, e.ParamName).Message,
-            ObjectDisposedException e => new ObjectDisposedException(e.ObjectName, string.Empty).Message,
             _ => string.Empty,
         };
 

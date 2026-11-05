@@ -24,6 +24,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -227,7 +228,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             }
         });
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "ordering-throw", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("ordering-throw")));
         await TestTimeout.Run(() => sendTask, s_deadline);
 
         Assert.True(invokedAtThrow, "the delivery callback had not run when the blocking Get threw");
@@ -249,9 +250,9 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 3), callback);
 
         // Code 2 = CorruptMessage, which the core classifies retriable / non-fatal.
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "boom-delivery", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("boom-delivery")));
 
-        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => WithTimeout(sendTask));
+        CorruptRecordException thrown = await Assert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
@@ -264,10 +265,10 @@ public sealed class PublicProducerDeliveryCallbackTests
         Assert.Equal(-1L, completion.Metadata.Timestamp);
 
         // The callback gets the send's own exception: the same code, message and flags.
-        KafkaException delivered = Assert.IsType<KafkaException>(completion.Exception);
+        CorruptRecordException delivered = Assert.IsType<CorruptRecordException>(completion.Exception);
         Assert.Equal(2, delivered.Code);
         Assert.Contains("boom-delivery", delivered.Message, StringComparison.Ordinal);
-        Assert.True(delivered.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(delivered);
         Assert.Equal(thrown.Code, delivered.Code);
         Assert.Equal(thrown.Message, delivered.Message);
     }
@@ -286,8 +287,8 @@ public sealed class PublicProducerDeliveryCallbackTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v")), callback);
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "no-partition", isRetriable: true)));
-        await Assert.ThrowsAsync<KafkaException>(() => WithTimeout(sendTask));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("no-partition")));
+        await Assert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
@@ -306,7 +307,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
         Exception injected = kind == KafkaError
-            ? new KafkaException(2, "the injected instance", isRetriable: true)
+            ? new Common.Errors.CorruptRecordException("the injected instance")
             : new InjectedException("the injected instance");
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -332,7 +333,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
-        Assert.Throws<ObjectDisposedException>(() => producer.SendInline(
+        Assert.Throws<IllegalStateException>(() => producer.SendInline(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
 
         Assert.Empty(callback.Completions);

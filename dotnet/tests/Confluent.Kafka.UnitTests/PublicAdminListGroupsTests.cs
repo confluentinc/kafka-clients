@@ -21,6 +21,7 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -48,7 +49,7 @@ public sealed class PublicAdminListGroupsTests
 
         IReadOnlyCollection<GroupListing> valid =
             await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
-        IReadOnlyCollection<KafkaException> errors =
+        IReadOnlyCollection<Exception> errors =
             await TestTimeout.Run(() => result.Errors().Get(), s_deadline);
 
         Assert.Equal(
@@ -201,7 +202,7 @@ public sealed class PublicAdminListGroupsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ListGroups());
+        Assert.Throws<IllegalStateException>(() => admin.ListGroups());
     }
 
     private static Task SeedGroups(AsyncMockAdminClient admin, params string[] groupIds) =>

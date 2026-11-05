@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 
 namespace Confluent.Kafka.Internal.Interop;
 
@@ -90,9 +91,9 @@ internal static class LogDirMarshal
         IntPtr borrowedError = NativeMethods.LogDirDescriptionErrorOf(description, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        // A directory error that is not a Kafka error fails the broker's future, as Python's conversion raises it.
+        // A directory error that is not an ApiException, the class Java's field holds, fails the broker's future.
         Exception? error = KafkaException.FromFfiError(borrowedError, owned: false);
-        if (error is not null and not KafkaException)
+        if (error is not null and not ApiException)
         {
             throw error;
         }
@@ -104,14 +105,15 @@ internal static class LogDirMarshal
         bool isCordoned = NativeMethods.LogDirDescriptionIsCordonedOf(description, ref outErr) != 0;
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return new LogDirDescription(
-            (KafkaException?)error, CopyOutReplicaInfos(description), totalBytes, usableBytes, isCordoned);
+            (ApiException?)error, CopyOutReplicaInfos(description), totalBytes, usableBytes, isCordoned);
     }
 
     internal static DescribeReplicaLogDirsResult.ReplicaLogDirInfo CopyOutReplicaLogDirInfo(IntPtr info)
     {
         if (info == IntPtr.Zero)
         {
-            throw new KafkaException("The describeReplicaLogDirs future delivered no log-directory information.");
+            // Python's binding reads missing log-directory information as None, so the future completes with null.
+            return null!;
         }
 
         IntPtr outErr = IntPtr.Zero;

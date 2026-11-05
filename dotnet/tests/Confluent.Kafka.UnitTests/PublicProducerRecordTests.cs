@@ -18,6 +18,7 @@ using System.Globalization;
 using System.Text;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -38,63 +39,51 @@ public sealed class PublicProducerRecordTests
         "Invalid partition: -1. Partition number should always be non-negative or null.";
 
     [Fact]
-    public void Ctor_NullTopic_ThrowsArgumentNull()
+    public void Ctor_NullTopic_ThrowsIllegalArgumentWithJavasMessage()
     {
-        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new ProducerRecord<byte[], byte[]>(null!, Encoding.UTF8.GetBytes("v")));
-        Assert.Equal("topic", ex.ParamName);
-        Assert.Equal(NullTopic, WithoutDotNetSuffix(ex));
+        Assert.Equal(NullTopic, ex.Message);
     }
 
     [Fact]
-    public void Ctor_NegativePartition_ThrowsArgumentOutOfRange()
+    public void Ctor_NegativePartition_ThrowsIllegalArgumentWithJavasMessage()
     {
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: -1));
-        AssertOutOfRange(ex, "partition", -1, NegativePartition);
+        Assert.Equal(NegativePartition, ex.Message);
     }
 
     [Fact]
     public void InvalidRecords()
     {
-        ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
+        IllegalArgumentException nullTopic = Assert.Throws<IllegalArgumentException>(
             () => new ProducerRecord<string, int>(null!, 1, "key", partition: 0));
-        Assert.Equal("topic", nullTopic.ParamName);
-        Assert.Equal(NullTopic, WithoutDotNetSuffix(nullTopic));
+        Assert.Equal(NullTopic, nullTopic.Message);
 
-        AssertOutOfRange(
-            Assert.Throws<ArgumentOutOfRangeException>(
-                () => new ProducerRecord<string, int>("test", 1, "key", partition: 0, timestamp: -1L)),
-            "timestamp",
-            -1L,
-            NegativeTimestamp);
+        IllegalArgumentException negativeTimestamp = Assert.Throws<IllegalArgumentException>(
+            () => new ProducerRecord<string, int>("test", 1, "key", partition: 0, timestamp: -1L));
+        Assert.Equal(NegativeTimestamp, negativeTimestamp.Message);
 
-        AssertOutOfRange(
-            Assert.Throws<ArgumentOutOfRangeException>(
-                () => new ProducerRecord<string, int>("test", 1, "key", partition: -1)),
-            "partition",
-            -1,
-            NegativePartition);
+        IllegalArgumentException negativePartition = Assert.Throws<IllegalArgumentException>(
+            () => new ProducerRecord<string, int>("test", 1, "key", partition: -1));
+        Assert.Equal(NegativePartition, negativePartition.Message);
     }
 
     [Fact]
     public void Ctor_NegativeTimestampAndPartition_ReportsTheTimestamp()
     {
-        AssertOutOfRange(
-            Assert.Throws<ArgumentOutOfRangeException>(
-                () => new ProducerRecord<string, int>("test", 1, "key", partition: -1, timestamp: -1L)),
-            "timestamp",
-            -1L,
-            NegativeTimestamp);
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
+            () => new ProducerRecord<string, int>("test", 1, "key", partition: -1, timestamp: -1L));
+        Assert.Equal(NegativeTimestamp, ex.Message);
     }
 
     [Fact]
     public void Ctor_NullTopicWithANegativeTimestampAndPartition_ReportsTheTopic()
     {
-        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new ProducerRecord<string, int>(null!, 1, "key", partition: -1, timestamp: -1L));
-        Assert.Equal("topic", ex.ParamName);
-        Assert.Equal(NullTopic, WithoutDotNetSuffix(ex));
+        Assert.Equal(NullTopic, ex.Message);
     }
 
     [Fact]
@@ -116,18 +105,14 @@ public sealed class PublicProducerRecordTests
         CultureInfo.CurrentCulture = tilde;
         try
         {
-            AssertOutOfRange(
-                Assert.Throws<ArgumentOutOfRangeException>(
-                    () => new ProducerRecord<string, int>("test", 1, "key", timestamp: -7L)),
-                "timestamp",
-                -7L,
-                "Invalid timestamp: -7. Timestamp should always be non-negative or null.");
-            AssertOutOfRange(
-                Assert.Throws<ArgumentOutOfRangeException>(
-                    () => new ProducerRecord<string, int>("test", 1, "key", partition: -7)),
-                "partition",
-                -7,
-                "Invalid partition: -7. Partition number should always be non-negative or null.");
+            Assert.Equal(
+                "Invalid timestamp: -7. Timestamp should always be non-negative or null.",
+                Assert.Throws<IllegalArgumentException>(
+                    () => new ProducerRecord<string, int>("test", 1, "key", timestamp: -7L)).Message);
+            Assert.Equal(
+                "Invalid partition: -7. Partition number should always be non-negative or null.",
+                Assert.Throws<IllegalArgumentException>(
+                    () => new ProducerRecord<string, int>("test", 1, "key", partition: -7)).Message);
         }
         finally
         {
@@ -328,22 +313,18 @@ public sealed class PublicProducerRecordTests
         Assert.Equal("headers", nullHeader.ParamName);
         Assert.Equal("Header cannot be null.", WithoutDotNetSuffix(nullHeader));
 
-        ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
+        IllegalArgumentException nullTopic = Assert.Throws<IllegalArgumentException>(
             () => new ProducerRecord<string, string>(null!, "v", headers: withNull));
-        Assert.Equal("topic", nullTopic.ParamName);
+        Assert.Equal(NullTopic, nullTopic.Message);
 
-        AssertOutOfRange(
-            Assert.Throws<ArgumentOutOfRangeException>(
-                () => new ProducerRecord<string, string>("t", "v", timestamp: -1L, headers: withNull)),
-            "timestamp",
-            -1L,
-            NegativeTimestamp);
-        AssertOutOfRange(
-            Assert.Throws<ArgumentOutOfRangeException>(
-                () => new ProducerRecord<string, string>("t", "v", partition: -1, headers: withNull)),
-            "partition",
-            -1,
-            NegativePartition);
+        Assert.Equal(
+            NegativeTimestamp,
+            Assert.Throws<IllegalArgumentException>(
+                () => new ProducerRecord<string, string>("t", "v", timestamp: -1L, headers: withNull)).Message);
+        Assert.Equal(
+            NegativePartition,
+            Assert.Throws<IllegalArgumentException>(
+                () => new ProducerRecord<string, string>("t", "v", partition: -1, headers: withNull)).Message);
     }
 
     [Fact]
@@ -391,21 +372,11 @@ public sealed class PublicProducerRecordTests
         return keys;
     }
 
-    private static void AssertOutOfRange(
-        ArgumentOutOfRangeException ex, string paramName, object actualValue, string message)
-    {
-        Assert.Equal(paramName, ex.ParamName);
-        Assert.Equal(actualValue, ex.ActualValue);
-        Assert.Equal(message, WithoutDotNetSuffix(ex));
-    }
-
-    // The message without what .NET appends to it (the parameter name and the actual value), read from a probe of
-    // the same type, so it matches this runtime and culture.
+    // The message without what .NET appends to it (the parameter name), read from a probe of the same type, so it
+    // matches this runtime and culture.
     private static string WithoutDotNetSuffix(ArgumentException ex)
     {
-        string suffix = ex is ArgumentOutOfRangeException outOfRange
-            ? new ArgumentOutOfRangeException(outOfRange.ParamName, outOfRange.ActualValue, string.Empty).Message
-            : new ArgumentException(string.Empty, ex.ParamName).Message;
+        string suffix = new ArgumentException(string.Empty, ex.ParamName).Message;
         Assert.EndsWith(suffix, ex.Message, StringComparison.Ordinal);
         return ex.Message.Substring(0, ex.Message.Length - suffix.Length);
     }

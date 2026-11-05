@@ -21,13 +21,17 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -87,7 +91,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                 Assert.False(future.IsDone);
 
                 gate.SetResult(true);
-                KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(future.Get()));
+                KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(future.Get()));
                 Assert.True(await Within(endedWhenTheFutureCompleted.Task), "the future completed before the callback's task ended");
                 Assert.Equal(7, failure.Code);
                 Assert.Equal(MetadataTimeout(topic, MaxBlockMs), failure.Message);
@@ -127,7 +131,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                 gate.SetResult(true);
                 for (int i = 0; i < futures.Length; i++)
                 {
-                    KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(futures[i].Get()));
+                    KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(futures[i].Get()));
                     Assert.Equal(MetadataTimeout(topics[i], MaxBlockMs), failure.Message);
                     Assert.Same(failure, callbacks[i].Delivered);
                     Assert.Equal(1, callbacks[i].Calls);
@@ -179,7 +183,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                     Snapshot(events));
                 for (int i = 0; i < futures.Length; i++)
                 {
-                    KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(futures[i].Get()));
+                    KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(futures[i].Get()));
                     Assert.Equal(MetadataTimeout(topics[i], MaxBlockMs), failure.Message);
                 }
 
@@ -219,7 +223,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         await WithProducer(async producer =>
         {
             AsyncKafkaFuture<RecordMetadata> future = await FirstStage(producer.Send(Record(topic), callback));
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(future.Get()));
+            KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(future.Get()));
             Assert.Equal(7, failure.Code);
             Assert.Equal(MetadataTimeout(topic, MaxBlockMs), failure.Message);
             Assert.False(future.IsCancelled);
@@ -301,7 +305,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         KafkaException error = Assert.IsType<KafkaException>(refused);
         Assert.Equal(FlushMessage, error.Message);
         Assert.Equal(-1, error.Code);
-        Assert.False(error.IsRetriable);
+        Assert.False(error is Common.Errors.RetriableException);
     }
 
     [Theory]
@@ -358,7 +362,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
             await Within(callback.WhenEnded);
             (int _, string? destroyThread) = Assert.Single(destroys.Destroys());
             Assert.Equal(NativeProducer.PumpThreadName, destroyThread);
-            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record(Topic("async-after-close"))); });
+            Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(Topic("async-after-close"))); });
         });
 
         Assert.True(returnedCompleted, "Close from the callback did not return a completed close");
@@ -448,10 +452,10 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
             later.SetResult(futures[1]);
             await Within(first.WhenEnded);
-            Assert.IsType<TimeoutException>(timedOut);
+            Assert.IsType<System.TimeoutException>(timedOut);
             Assert.InRange(waitedMs, LaterWaitMs - 50, (long)Deadline.TotalMilliseconds);
 
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(futures[1].Get()));
+            KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(futures[1].Get()));
             Assert.Equal(MetadataTimeout(laterTopic, MaxBlockMs), failure.Message);
             if (laterCallback == AsyncKind)
             {
@@ -488,7 +492,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                 Assert.False(future.IsCancelled);
 
                 gate.SetResult(true);
-                KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(future.Get()));
+                KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(future.Get()));
                 Assert.Equal(MetadataTimeout(topic, MaxBlockMs), failure.Message);
                 Assert.Same(failure, callback.Delivered);
                 Assert.Equal(1, callback.Calls);
@@ -529,7 +533,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
                 gate.SetResult(true);
                 Assert.Equal(NativeProducer.PumpThreadName, await Within(appliedOn.Task));
-                Assert.Equal(7, (await Assert.ThrowsAsync<KafkaException>(() => Within(offset.Get()))).Code);
+                Assert.Equal(7, (await Assert.ThrowsAsync<KafkaTimeoutException>(() => Within(offset.Get()))).Code);
             },
             gate);
     }
@@ -542,11 +546,11 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         AsyncKafkaFuture<RecordMetadata> future =
             await FirstStage(producer.Send(Record(Topic("async-error-next")), callback));
-        KafkaException injected = new KafkaException(2, "the injected instance", isRetriable: true);
+        KafkaException injected = new Common.Errors.CorruptRecordException("the injected instance");
 
         Assert.True(producer.ErrorNext(injected));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Within(future.Get()));
+        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(() => Within(future.Get()));
         Assert.Same(injected, failure);
         await Within(callback.WhenEnded);
         Assert.Same(injected, callback.Delivered);

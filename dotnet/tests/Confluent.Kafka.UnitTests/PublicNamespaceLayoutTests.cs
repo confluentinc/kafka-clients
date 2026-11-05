@@ -506,20 +506,20 @@ public sealed class PublicNamespaceLayoutTests
         return pairName.Substring(0, pairName.Length - pair.Length) + row.DotNet;
     }
 
-    private static Type Exported(string fullName)
+    internal static Type Exported(string fullName)
     {
         Type? type = s_exported.SingleOrDefault(candidate => candidate.FullName == fullName);
         Assert.True(type is not null, $"{fullName} is not an exported type.");
         return type!;
     }
 
-    private static string JavaPackage(string java) =>
+    internal static string JavaPackage(string java) =>
         string.Join(".", java.Split('.').TakeWhile(segment => char.IsLower(segment[0])));
 
     private static string[] JavaClassLevels(string java) =>
         java.Split('.').SkipWhile(segment => char.IsLower(segment[0])).ToArray();
 
-    private static string NamespaceOf(string javaPackage)
+    internal static string NamespaceOf(string javaPackage)
     {
         string below = javaPackage.StartsWith(JdkPrefix, StringComparison.Ordinal)
             ? javaPackage
@@ -533,7 +533,7 @@ public sealed class PublicNamespaceLayoutTests
             + string.Join(".", below.Split('.').Select(segment => char.ToUpperInvariant(segment[0]) + segment.Substring(1)));
     }
 
-    private static string KafkaSourceRoot() =>
+    internal static string KafkaSourceRoot() =>
         typeof(PublicNamespaceLayoutTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
             .Single(attribute => attribute.Key == "KafkaSourceRoot").Value!;
 }

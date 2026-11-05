@@ -112,7 +112,6 @@ public sealed class RecordDeserializationExceptionTests
 
         Assert.IsAssignableFrom<SerializationException>(e);
         Assert.IsAssignableFrom<KafkaException>(e);
-        Assert.False(e.IsRetriable);
     }
 
     [Fact]

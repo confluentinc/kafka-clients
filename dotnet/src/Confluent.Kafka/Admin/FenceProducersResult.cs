@@ -19,6 +19,7 @@ using System.Globalization;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -72,10 +73,9 @@ public sealed class FenceProducersResult
     /// </summary>
     /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
     /// <returns>A new future over that id's producer id.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> was not included in the request — Java's
-    /// <c>IllegalArgumentException</c>, thrown synchronously as Java's is.
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="transactionalId"/> was not included in the request, or is null, thrown synchronously
+    /// with Java's message, as Java's is.
     /// </exception>
     public KafkaFuture<long> ProducerId(string transactionalId) =>
         new KafkaFuture<long>(Find(_futures, transactionalId).ThenApply(static value => value.ProducerId));
@@ -86,9 +86,8 @@ public sealed class FenceProducersResult
     /// </summary>
     /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
     /// <returns>A new future over that id's epoch.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> was not included in the request — see
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="transactionalId"/> was not included in the request, or is null — see
     /// <see cref="ProducerId"/>.
     /// </exception>
     public KafkaFuture<short> EpochId(string transactionalId) =>
@@ -109,18 +108,10 @@ public sealed class FenceProducersResult
     internal static KafkaFutureImpl<ProducerIdAndEpoch> Find(
         IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, string transactionalId)
     {
-        if (transactionalId is null)
-        {
-            throw new ArgumentNullException(nameof(transactionalId));
-        }
-
-        return futures.TryGetValue(transactionalId, out KafkaFutureImpl<ProducerIdAndEpoch>? future)
+        // Java's map holds no null key, so a null id was not requested either.
+        return transactionalId is not null && futures.TryGetValue(transactionalId, out KafkaFutureImpl<ProducerIdAndEpoch>? future)
             ? future
-            : throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "TransactionalId `{0}` was not included in the request",
-                    transactionalId),
-                nameof(transactionalId));
+            : throw new IllegalArgumentException(
+                "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");
     }
 }

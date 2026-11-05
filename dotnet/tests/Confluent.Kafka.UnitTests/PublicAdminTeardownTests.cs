@@ -20,18 +20,22 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Admin construction and teardown as a user drives it: close before destroy, idempotent
-/// disposal, and a clear <see cref="ObjectDisposedException"/> afterwards. Every wait is
+/// disposal, and a clear <see cref="IllegalStateException"/> afterwards. Every wait is
 /// bounded by <see cref="TestTimeout"/>, so a teardown that hangs fails the run instead
 /// of blocking it.
 /// </summary>
 public sealed class PublicAdminTeardownTests
 {
+    private const string ClosedAdminMessage = "Cannot accept new calls when AdminClient is closing.";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly IReadOnlyDictionary<string, string> s_unreachable =
@@ -82,17 +86,14 @@ public sealed class PublicAdminTeardownTests
     {
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        string expected = new ArgumentOutOfRangeException("timeout", "The timeout cannot be negative.").Message;
-
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(
             () => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); });
-        Assert.Equal("timeout", failure.ParamName);
-        Assert.Equal(expected, failure.Message);
+        Assert.Equal("The timeout cannot be negative.", failure.Message);
 
         await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
         Assert.Equal(
-            expected,
-            Assert.Throws<ArgumentOutOfRangeException>(() => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); }).Message);
+            "The timeout cannot be negative.",
+            Assert.Throws<IllegalArgumentException>(() => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); }).Message);
     }
 
     [Fact]
@@ -110,8 +111,8 @@ public sealed class PublicAdminTeardownTests
 
         await TestTimeout.DisposeAsync(admin);
         Assert.Equal(
-            nameof(MockAdminClient),
-            Assert.Throws<ObjectDisposedException>(() => admin.ListTopics()).ObjectName);
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => admin.ListTopics()).Message);
     }
 
     [Fact]
@@ -121,7 +122,7 @@ public sealed class PublicAdminTeardownTests
 
         TestTimeout.Run(admin.Close, s_deadline);
         TestTimeout.Run(admin.Close, s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
         TestTimeout.Run(admin.Dispose, s_deadline);
     }
 
@@ -132,7 +133,7 @@ public sealed class PublicAdminTeardownTests
 
         await TestTimeout.Run(() => admin.Close(), s_deadline);
         await TestTimeout.Run(() => admin.Close(CancellationToken.None), s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
         await TestTimeout.DisposeAsync(admin);
     }
 
@@ -147,13 +148,13 @@ public sealed class PublicAdminTeardownTests
         Assert.Throws<OperationCanceledException>(() => { _ = admin.Close(TimeSpan.Zero, cancelled.Token); });
 
         await TestTimeout.Run(() => admin.Close(), s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
     }
 
     [Fact]
     public void SaslPlaintextWithoutAMechanism_FailsWithTheCoresConfigError()
     {
-        KafkaException failure = Assert.Throws<KafkaException>(() => new KafkaAdminClient(
+        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["bootstrap.servers"] = "127.0.0.1:1",
@@ -167,30 +168,30 @@ public sealed class PublicAdminTeardownTests
     }
 
     [Fact]
-    public void CallAfterDispose_ThrowsObjectDisposed()
+    public void CallAfterDispose_ThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.CreateTopics(new[] { new NewTopic("after-dispose", 1, 1) }));
     }
 
     [Fact]
-    public void X9_CallAfterDispose_NamesThePublicType()
+    public void X9_CallAfterDispose_ThrowsTheClosedAdminClientsIllegalState()
     {
         MockAdminClient mock = MockAdminClient.Create().Build();
         TestTimeout.Run(mock.Dispose, s_deadline);
         Assert.Equal(
-            nameof(MockAdminClient),
-            Assert.Throws<ObjectDisposedException>(() => mock.ListTopics()).ObjectName);
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => mock.ListTopics()).Message);
 
         KafkaAdminClient real = new KafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
         TestTimeout.Run(real.Dispose, s_deadline);
         Assert.Equal(
-            nameof(KafkaAdminClient),
-            Assert.Throws<ObjectDisposedException>(() => real.ListTopics()).ObjectName);
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => real.ListTopics()).Message);
     }
 
     [Fact]
