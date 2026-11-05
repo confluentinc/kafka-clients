@@ -93,3 +93,11 @@ semaphore:
           required: true
           default_value: master
           description: The branch to bump and the PR's base.
+    - name: javascript-post-install
+      branch: master
+      pipeline_file: .semaphore/javascript-post-install.yml
+      description: Check a version of the Node.js client after it was published to npmjs.com by hand (javascript/release/README.txt). It checks that the registry has @confluentinc/kafka-javascript and its three platform packages at JAVASCRIPT_VERSION under the preview dist-tag, with tarballs matching the registry's integrity and passing the package checks, then installs the package from npmjs.com into an empty project and runs the smoke program on Linux amd64 and arm64 (almalinux 8 and 9, rockylinux 9, debian bookworm and trixie, ubuntu 20.04, 22.04 and 24.04) and macOS arm64, with Node.js 18, 20, 22 and 24. It reads the registry anonymously and publishes nothing.
+      parameters:
+        - name: JAVASCRIPT_VERSION
+          required: true
+          description: The published version to check, X.Y.Z or X.Y.Z-alpha.N, X.Y.Z-beta.N, X.Y.Z-dev.N, X.Y.Z-rc.N (e.g. "4.4.0-beta.2").
