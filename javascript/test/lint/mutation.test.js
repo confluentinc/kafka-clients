@@ -109,7 +109,13 @@ MUTATIONS.push(
     // A Java getter turned into a method: J2 finds no Java `getOffset`, and J3 misses `offset`.
     rules: ['check-java-members', 'check-java-completeness'],
     what: 'the offset getter renamed to a getOffset method',
-    apply: (root) => edit(root, 'lib/producer/record_metadata.ts', 'get offset(): number {', 'getOffset(): number {'),
+    apply: (root) =>
+      edit(
+        root,
+        'lib/producer/record_metadata.ts',
+        '  /** The offset of the record in the topic/partition, or -1 if hasOffset is false. */\n  get offset(): number {',
+        '  /**\n   * The offset of the record.\n   *\n   * @returns the offset\n   */\n  getOffset(): number {',
+      ),
   },
   {
     rule: 'check-getters-readonly',
@@ -119,7 +125,7 @@ MUTATIONS.push(
   {
     rule: 'check-public-audience',
     what: 'an export translating an internal, non-Public Java class',
-    apply: (root) => add(root, 'lib/producer/internals/txn_partition_entry.ts', 'export class TxnPartitionEntry {}\n'),
+    apply: (root) => add(root, 'lib/producer/internals/txn_partition_entry.ts', '/** An entry. */\nexport class TxnPartitionEntry {}\n'),
   },
   {
     rule: 'check-no-deprecated-translation',
@@ -129,7 +135,7 @@ MUTATIONS.push(
         root,
         'lib/producer/producer_config.ts',
         'export class ProducerConfig {',
-        "export class ProducerConfig {\n  static readonly PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG: string = 'x';",
+        "export class ProducerConfig {\n  /** Deprecated. */\n  static readonly PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG: string = 'x';",
       ),
   },
   {
@@ -140,7 +146,7 @@ MUTATIONS.push(
   {
     rule: 'check-java-name',
     what: 'an export naming no Java class',
-    apply: (root) => add(root, 'lib/producer/record_meta.ts', 'export class RecordMeta {}\n'),
+    apply: (root) => add(root, 'lib/producer/record_meta.ts', '/** Metadata. */\nexport class RecordMeta {}\n'),
   },
   {
     // J2 reports the static-ness, and J3 no longer counts the static forId as translated.
@@ -152,7 +158,11 @@ MUTATIONS.push(
     // `is` stays: a `done` property is no translation of isDone().
     rules: ['check-java-members', 'check-java-completeness'],
     what: 'an isX method turned into a property without its is',
-    apply: (root) => edit(root, 'lib/common/kafka_future.ts', 'isDone(): boolean {', 'get done(): boolean {'),
+    apply: (root) => {
+      edit(root, 'lib/common/kafka_future.ts', 'isDone(): boolean {', 'get done(): boolean {');
+      // A getter needs no @returns: its D2 baseline line goes with it.
+      edit(root, 'lint-baseline.txt', 'returns-missing KafkaFuture.isDone\n', '');
+    },
   },
   {
     rule: 'check-waiting-call-promise',
@@ -288,6 +298,36 @@ MUTATIONS.push(
     rule: 'check-single-drainer',
     what: 'the producer destroyed in its close completion',
     apply: (root) => edit(root, 'src/producer.c', '    p->close_error = error;\n', '    p->close_error = error;\n    producer_destroy(env, p);\n'),
+  },
+  {
+    rule: 'check-tsdoc-tags',
+    what: 'a @param dropped',
+    apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '   * @param record - The record to send\n', ''),
+  },
+  {
+    rule: 'check-tsdoc-tags',
+    what: 'a JSDoc type on a @param',
+    apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '@param record - The record to send', '@param {ProducerRecord} record - The record to send'),
+  },
+  {
+    rule: 'check-tsdoc-tags',
+    what: 'a @throws Java declares dropped',
+    apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '   * @throws `IllegalStateError` when the producer is closed\n', ''),
+  },
+  {
+    rule: 'check-tsdoc-tags',
+    what: "a Callback parameter's @param dropped",
+    apply: (root) => edit(root, 'lib/producer/callback.ts', /\n \* @param error - [^\n]*/.exec(fs.readFileSync(path.join(root, 'lib/producer/callback.ts'), 'utf8'))[0], ''),
+  },
+  {
+    rule: 'check-tsdoc-present',
+    what: 'a class doc emptied',
+    apply: (root) => edit(root, 'lib/producer/record_metadata.ts', /\/\*\*[^]*?\*\/\nexport class RecordMetadata/.exec(fs.readFileSync(path.join(root, 'lib/producer/record_metadata.ts'), 'utf8'))[0], '/** */\nexport class RecordMetadata'),
+  },
+  {
+    rule: 'check-tsdoc-present',
+    what: "a public getter's TSDoc dropped",
+    apply: (root) => edit(root, 'lib/producer/record_metadata.ts', '  /** The topic the record was appended to */\n', ''),
   },
   {
     rule: 'check-java-tags',

@@ -42,3 +42,36 @@ not-options KafkaFuture.get
 # serializers (a string is encoded as Java's StringSerializer would,
 # javascript/CLAUDE.md rule 8), and a Map and Properties are one configs type.
 not-options KafkaProducer.constructor
+
+
+# check-tsdoc-present (D1): items with no TSDoc comment, left for a writer to
+# document (PLAN.md §8 decision 15: the rule does not write prose).
+# SslClientAuth's constants: Java's enum constants have no Javadoc.
+# ProducerRecord.toString, RecordMetadata.toString: Java's overrides have no
+# Javadoc.
+doc-missing SslClientAuth.REQUIRED
+doc-missing SslClientAuth.REQUESTED
+doc-missing SslClientAuth.NONE
+doc-missing ProducerRecord.toString
+doc-missing RecordMetadata.toString
+
+
+# check-tsdoc-tags (D2): tags whose text Java does not give, so writing them
+# needs judgement (PLAN.md §8 decision 15).
+# SslClientAuth, SecurityProtocol, KafkaFuture: Java has no @param / @return
+# text for these members (no Javadoc, or a description without block tags).
+param-missing SslClientAuth.forConfig/key
+returns-missing SslClientAuth.forConfig
+returns-missing SslClientAuth.toString
+returns-missing KafkaFuture.isDone
+returns-missing KafkaFuture.isCompletedExceptionally
+returns-missing KafkaFuture.isCancelled
+param-missing KafkaFuture.cancel/mayInterruptIfRunning
+returns-missing KafkaFuture.cancel
+returns-missing SecurityProtocol.values
+returns-missing SecurityProtocol.names
+param-missing SecurityProtocol.forId/id
+returns-missing SecurityProtocol.forId
+param-missing SecurityProtocol.forName/name
+returns-missing SecurityProtocol.forName
+returns-missing SecurityProtocol.toString

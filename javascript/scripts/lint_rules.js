@@ -56,6 +56,8 @@ const RULES = [
   require('./lint/rules/ownership'),
   require('./lint/rules/zero_copy'),
   require('./lint/rules/no_binding_queue'),
+  require('./lint/rules/tsdoc_present'),
+  require('./lint/rules/tsdoc_tags'),
 ];
 
 /** The baseline file, relative to the client's directory. */
