@@ -120,6 +120,9 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
 
+        // As Java's doSend, the headers turn read-only once the serializers ran; the mocks leave them writable.
+        record.Headers.SetReadOnly();
+
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }
 

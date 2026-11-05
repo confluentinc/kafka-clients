@@ -41,8 +41,8 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
     private const int KeySize = 16;
     private const int ValueSize = 64;
 
-    // The owned copies per record (key, value, the ConsumerRecord and its list slot), at about twice their measured
-    // size, so a new per-record copy fails the budget. The topic has its own budget test.
+    // Under twice the owned copies per record, measured at 256 B (key, value, the ConsumerRecord, its Headers (32 B)
+    // and its list slot), so a new per-record copy of that size fails the budget. The topic has its own budget test.
     private const long PerRecordBudgetBytes = 448;
 
     [Fact]

@@ -316,7 +316,21 @@ internal static class Translate
         byte[]? value = proto.HasValue ? proto.Value.ToByteArray() : null;
         int? partition = proto.HasPartition ? proto.Partition : (int?)null;
         long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
-        return new ProducerRecord<byte[], byte[]>(proto.Topic, value, key, partition, timestamp);
+
+        // The headers are sent, as C's server sends them; Python's drops them. A proto header's value is never null, so
+        // an empty value is sent empty.
+        Header[]? headers = null;
+        if (proto.Headers.Count > 0)
+        {
+            headers = new Header[proto.Headers.Count];
+            for (int i = 0; i < headers.Length; i++)
+            {
+                Proto.Header header = proto.Headers[i];
+                headers[i] = new Header(header.Key, header.Value.ToByteArray());
+            }
+        }
+
+        return new ProducerRecord<byte[], byte[]>(proto.Topic, value, key, partition, timestamp, headers);
     }
 
     internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata
