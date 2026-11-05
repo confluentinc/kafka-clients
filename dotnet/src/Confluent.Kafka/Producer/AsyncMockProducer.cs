@@ -125,8 +125,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
 
+        // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
-            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
+            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: false);
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }

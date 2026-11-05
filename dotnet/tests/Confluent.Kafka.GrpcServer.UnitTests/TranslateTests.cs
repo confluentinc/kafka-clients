@@ -77,6 +77,10 @@ public sealed class TranslateTests
         AssertBare(new UnsupportedOperationException("Not implemented yet"), -31);
 
     [Fact]
+    public void ASubclassOfAJavaNamedClass_IsItsNearestId() =>
+        AssertBare(new DerivedIllegalStateException("derived"), -4);
+
+    [Fact]
     public void AKafkaExceptionSubclass_KeepsItsCodeAndMessage()
     {
         SerializationException error = new SerializationException("bad payload");
@@ -202,6 +206,14 @@ public sealed class TranslateTests
     };
 
     private static void AssertBare(Exception error, int code) => AssertBare(error, code, error.Message);
+
+    private sealed class DerivedIllegalStateException : IllegalStateException
+    {
+        public DerivedIllegalStateException(string message)
+            : base(message)
+        {
+        }
+    }
 
     private static void AssertBare(Exception error, int code, string message)
     {

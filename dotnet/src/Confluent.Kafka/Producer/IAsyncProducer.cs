@@ -42,6 +42,16 @@ namespace Confluent.Kafka.Producer;
 /// </code>
 /// </para>
 /// <para>
+/// On <see cref="AsyncKafkaProducer{TKey, TValue}"/>, a serializer that throws an <see cref="ApiException"/> fails
+/// the record, as Java's <c>doSend</c> does: <c>Send</c> calls the delivery callback, if any, once on the caller's
+/// thread, with metadata whose offset is <c>-1</c> and that exception, and completes the first stage with a future
+/// that fails with it, after an <see cref="IAsyncDeliveryCallback"/>'s task has ended. An
+/// <see cref="InvalidCastException"/> is wrapped in a <see cref="SerializationException"/>, and any other throw
+/// leaves <c>Send</c> unchanged, as does a delivery callback's own throw on that path. On
+/// <see cref="AsyncMockProducer{TKey, TValue}"/>, every serializer throw leaves <c>Send</c> unchanged, as Java's
+/// <c>MockProducer</c> lets it.
+/// </para>
+/// <para>
 /// Records reach the producer in <c>Send</c> order only when each first stage is awaited before the next
 /// <c>Send</c>, as Java's blocking <c>send</c> makes its caller wait. Without that await, a record the
 /// producer takes at once can overtake one that is still waiting.
@@ -101,7 +111,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
+    /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value (thrown synchronously); any other
+    /// serializer throw except an <see cref="ApiException"/>, and every serializer throw on
+    /// <c>AsyncMockProducer</c>, is rethrown unchanged (see the type's remarks).</exception>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
 
@@ -135,7 +148,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
+    /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value (thrown synchronously); any other
+    /// serializer throw except an <see cref="ApiException"/>, and every serializer throw on
+    /// <c>AsyncMockProducer</c>, is rethrown unchanged (see the type's remarks).</exception>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
@@ -163,8 +179,11 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <c>null</c>.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged (thrown synchronously).</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value (thrown synchronously); any other
+    /// serializer throw except an <see cref="ApiException"/>, and every serializer throw on
+    /// <c>AsyncMockProducer</c>, is rethrown unchanged (see the type's remarks).</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
         IAsyncDeliveryCallback callback,

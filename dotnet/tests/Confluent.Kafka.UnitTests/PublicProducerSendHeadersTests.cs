@@ -92,7 +92,7 @@ public sealed class PublicProducerSendHeadersTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
 
-        Assert.Throws<SerializationException>(() => producer.Send(record));
+        Assert.Throws<ThrowingSerializer<string>.BoomException>(() => producer.Send(record));
 
         AssertWritable(record);
     }
@@ -105,7 +105,7 @@ public sealed class PublicProducerSendHeadersTests
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
-        Assert.Throws<SerializationException>(() => { _ = producer.Send(record); });
+        Assert.Throws<ThrowingSerializer<string>.BoomException>(() => { _ = producer.Send(record); });
 
         AssertWritable(record);
     }

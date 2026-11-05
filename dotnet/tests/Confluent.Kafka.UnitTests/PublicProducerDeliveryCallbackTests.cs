@@ -344,18 +344,17 @@ public sealed class PublicProducerDeliveryCallbackTests
     [InlineData(Async)]
     public void NoCallback_OnSynchronousThrow_SerializerThrows(string flavor)
     {
-        // Java's doSend rethrows a SerializationException without running the callback.
+        // Java's doSend rethrows a serializer's throw that is not an ApiException without running the callback.
         ThrowingSerializer<byte[]> throwing = new ThrowingSerializer<byte[]>();
         Flavor producer = Flavor.Create(flavor, valueSerializer: throwing);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
 
-        SerializationException error = Assert.Throws<SerializationException>(() => producer.SendInline(
-            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
+        ThrowingSerializer<byte[]>.BoomException error = Assert.Throws<ThrowingSerializer<byte[]>.BoomException>(
+            () => producer.SendInline(
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback));
 
-        Assert.Contains("value", error.Message, StringComparison.Ordinal);
-        Assert.Contains(Topic, error.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<byte[]>.BoomException>(error.InnerException);
+        Assert.Same(throwing.LastThrown, error);
         Assert.Equal(1, throwing.InvocationCount);
         Assert.Empty(callback.Completions);
     }
