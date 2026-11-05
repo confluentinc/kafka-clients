@@ -1,0 +1,6 @@
+# Findings of the Node.js client's rule linter not burnt down yet
+# (node scripts/lint_rules.js; design/current/javascript-rule-linter/PLAN.md).
+# One `<kind> <subject>` per line, or `prefix:<p>` to waive every finding whose
+# subject starts with `p`. A line matching no finding any more is itself a
+# finding: delete it. See everything with
+# `node scripts/lint_rules.js --no-baseline`.
