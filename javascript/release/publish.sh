@@ -141,7 +141,8 @@ else
     for i in "${pending[@]}"; do
         otp=""
         while [ -z "$otp" ]; do
-            read -r -p "One-time password for ${names[$i]}@$version: " otp < /dev/tty
+            read -r -p "One-time password for ${names[$i]}@$version: " otp < /dev/tty \
+                || die "cannot read a one-time password: run ./publish.sh in a terminal"
         done
         npm publish "${tarballs[$i]}" --access public --tag "$DIST_TAG" --otp "$otp" --registry "$REGISTRY" \
             || die "npm publish of ${tarballs[$i]} failed; rerun ./publish.sh, which skips what is already published"
