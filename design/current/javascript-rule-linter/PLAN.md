@@ -32,7 +32,7 @@ Command: `make -C javascript lint-rules`, which runs
 | `test/unit/_config.test.js`, `producer_config.test.js` | config type checks and the constants against Java's literals |
 | `cargo xtask check-generated` | generated `.ts` files are current, none missing, none orphaned |
 
-These keep running. The linter adds what they do not cover. Open decision 3 is whether
+These keep running. The linter adds what they do not cover. Open decision 9 is whether
 the static tests later move into the runner.
 
 ## 3. Architecture
@@ -93,7 +93,15 @@ keeps Java's names, so the mapping can be derived:
 - **Files:** `lib/<pkg>/<snake>.ts` maps to Java class `<pkg>.<Pascal>`. `clients.` is
   dropped from the package, and `java.*` packages map to the root.
 - **Methods:** a method has its Java method's name.
-- **Getters:** a getter property `x` maps to Java `x()` or `getX()`; `isX` / `hasX` stay.
+- **Getters:** a getter property `x` maps to Java `x()` or `getX()`; `isX` / `hasX` stay
+  (a property `isX` maps to `isX()`, never a property `x`).
+- **Static-ness:** a member maps only to a Java member of its own static-ness; a mismatch is
+  J2's `static-mismatch`.
+- **Exports:** a public module's exports are the type checker's (`export` declarations,
+  `export { X }` re-exports, `export declare` ones). J1 asks a function or constant export
+  for `@jsOnly` (`jsonly-required`) and reports an enum or namespace export (`export-form`).
+- **Shapes:** an exported interface or object type mapped to a Java class (`Header`) goes
+  through J2 and J3 as a class does: its property and method signatures are its members.
 - **Constants:** a `static readonly X` maps to Java `public static final X`.
 - **Constructors:** the constructor maps to Java's constructors.
 
@@ -104,11 +112,34 @@ Two TSDoc tags cover the exceptions. A tag that exempts nothing is a finding.
   `rust-only`.
 - `@java <fqn>[#member]`: where the convention does not find the Java item, e.g. the
   `Header` type maps to `org.apache.kafka.common.header.Header`.
+- `check-java-tags` reports a tag that is malformed or not needed: an `@jsOnly` with no
+  reason, or on an item the convention maps; an `@java` naming no indexed class, a member
+  its class does not declare, what the convention already finds, or another class or
+  member than the one the convention finds (`java-remap`); both tags on one item.
+
+Three kinds of Java class map differently, by one allowance each in
+`scripts/lint/java_ts.js`, never by per-file tags (the files are generated):
+
+- **Errors** (`lib/_error_registry.ts`, javascript/CLAUDE.md "Errors"): their Java class is
+  the registry's; they are exempt from J4's audience rule; their members are the fixed set
+  (`name`, `code`, `errorName`, `retriable`, `apiError`, `message`, `cause`), which J8 also
+  allows as data properties; J3 asks nothing of them.
+- **Config classes** (`ProducerConfig`, `SslConfigs`, `SaslConfigs`, `SecurityConfig`): J3
+  asks for their non-deprecated `public static final` constants only.
+- **Function types** (`Callback`): mapped by J1, no member rule applies.
+
+J3 also leaves out the members `java.lang.Enum` gives every enum (`values`, `valueOf`,
+`name`, `ordinal`), which J2 still maps, and on an enum J2 maps `toString` to
+`java.lang.Enum#toString` when the enum declares none. J3 does not ask for the constructor
+of an abstract Java class, which only a subclass calls. J5 also reports a member a
+deprecated Java supertype declares.
 
 ### 3.5 The runner
 
 - **Rule modules:** `scripts/lint_rules.js` plus one module per rule in
-  `scripts/lint/rules/`. Each exports `{ name, check(ctx) -> { findings, checked }, hint }`.
+  `scripts/lint/rules/`. Each exports `{ name, kinds, needs, check(ctx) -> { findings,
+  checked }, hint }`: `kinds` are its finding kinds, unique across rules, so a line of the
+  shared baseline belongs to one rule.
 - **Context:** the TS program, the Java index, the C sources and the header, loaded once.
 - **Failure modes:** a missing `kafka/`, header or `java-index.json` fails the run with a
   reason. A rule that checks 0 items fails too, so a rule cannot pass by checking nothing
@@ -128,7 +159,8 @@ and what already covers part of it.
 **J1 `check-java-name`** (JS "Files and layout", root §2)
 - Every exported class, interface or type of a public module maps, by 3.4, to a Java class
   of its folder's package, unless it is tagged.
-- The file name is `snake_case(class)`, and each file holds one public Java type.
+- The file name is `snake_case(class)`, and each file holds one public Java type, except
+  `Header` beside `ProducerRecord` in `producer_record.ts` (decision 5).
 - An `Exception` class is named `…Error`.
 - Example: `lib/producer/record_meta.ts: exports RecordMetadata (clients.producer.RecordMetadata); the file must be record_metadata.ts`.
 - Already covered: `layout.test.js` checks the snake_case form, and `_errors.test.js`
@@ -144,10 +176,13 @@ and what already covers part of it.
 
 **J3 `check-java-completeness`** (DoD #2)
 - Every public, non-deprecated Java constructor, method and constant of a translated class
-  is present, or appears in the baseline as `missing <Class>#<member>`.
+  is present, or appears in the baseline as `missing <Class>#<member>`, `<Class>` the Java
+  class below `org.apache.kafka.` (`clients.producer.KafkaProducer#initTransactions`), one
+  line per Java name (its overloads collapse).
 - Today the baseline holds `KafkaProducer`'s transaction methods, `partitionsFor`,
   `metrics`, `clientInstanceId` and the metric-subscription methods. They are burned down
-  as they are translated. See open decision 4.
+  as they are translated. See decision 4; `equals` / `hashCode` are never asked for
+  (decision 6).
 
 **J4 `check-public-audience`** (root §2, §3)
 - An exported class must be `@InterfaceAudience.Public` in Kafka 4.4, and not in an
@@ -167,7 +202,7 @@ and what already covers part of it.
 - No two TS members map to one Java name.
 - A Java overload set with more than one form is one function taking one options object.
   Its property names must equal the union of the Java overloads' parameter names, with a
-  `Duration x` becoming `xMs` (open decision 9).
+  `Duration x` becoming `xMs` (decision 8: milliseconds, `xMs: number`).
 - A property is required exactly when every Java overload has it.
 - Example: `ProducerRecordOptions.ts: no ProducerRecord constructor names it (topic, partition, timestamp, key, value, headers)`.
 - Example: `ProducerRecordOptions.value is optional but every Java constructor takes value`.
@@ -182,7 +217,7 @@ Each parameter, return and property type follows one table:
 | `boolean` | `boolean` |
 | `String` | `string` |
 | key/value `K` / `V` | `Data \| null` |
-| `Duration` | `number` (milliseconds) |
+| `Duration` | `number` (milliseconds), the name taking `Ms` (decision 8) |
 | `Future<T>` | `KafkaFuture<T>` |
 | a value that can be `null` | `T \| null` |
 | `void` of a blocking method | `Promise<void>` |
@@ -193,7 +228,10 @@ needs the return and field types from 3.1.
 **J8 `check-getters-readonly`** (JS "Java getters are read-only properties", root §3 no public field)
 - Every public property of an exported class is a `get` accessor with no `set`, or a
   `static readonly`.
-- There are no public mutable fields.
+- There are no public mutable fields. A `readonly` instance data property is a finding
+  too (`readonly-field`): TypeScript's `readonly` is gone at run time. Except (decision 7):
+  one translating a Java `public final` instance field, or an enum's `name`, on a class
+  whose constructor runs `Object.freeze(this);` at its top level.
 
 ### A — async shape and the native registry
 
@@ -240,7 +278,7 @@ needs the return and field types from 3.1.
 **N5 `check-completion-order`** (JS rule 6)
 - In each delivery-completion function the calls appear in this order: user callback,
   then future completion, then `__set_callback_result_err`, each at one call site.
-- The check is lexical, not path-sensitive. Open decision 6 covers what it cannot see.
+- The check is lexical, not path-sensitive. Open decision 11 covers what it cannot see.
 
 **N6 `check-ownership`** (JS rule 9)
 - Every handle type `src/` receives as owned (from a `_new`, from `out_err`, from a `_cb`
@@ -248,12 +286,12 @@ needs the return and field types from 3.1.
 - The borrowed error and metadata a delivery callback receives are never passed to a
   `_destroy` in that function.
 
-**N7 `check-zero-copy`** (JS rule 8) *(heuristic; open decision 6)*
+**N7 `check-zero-copy`** (JS rule 8) *(heuristic; open decision 11)*
 - On the send path (`record.c`, `producer.c`), the key and value cross through
   `napi_get_buffer_info` / `napi_get_typedarray_info` into a `kafka_Bytes_t`.
 - There is no `memcpy`, `malloc` or `napi_create_buffer_copy` on them.
 
-**N8 `check-no-binding-queue`** (JS rule 7) *(heuristic; open decision 6)*
+**N8 `check-no-binding-queue`** (JS rule 7) *(heuristic; open decision 11)*
 - There is no mutex outside `callback_queue.c`, and no array, queue or cap of records in
   `lib/producer/`.
 
@@ -268,13 +306,13 @@ needs the return and field types from 3.1.
   every class named this way exists in `lib/`.
 - No JSDoc type annotations (`@param {string}`) in `lib/`.
 
-**D3 `check-tsdoc-size`** *(open decision 5)*
+**D3 `check-tsdoc-size`** *(open decision 10)*
 - The doc is at most 150% of the Javadoc's word count, measured with the same
   `javadoc.rs` count, which reaches JS through `java-index.json`.
 - `words` in `java-index.json` counts a Javadoc as written. A Javadoc that only points
   elsewhere (`@see KafkaConsumer#commitSync()`, `See {@link KafkaProducer#close()}`)
   counts its pointer, where `check-api-docs` measures the Javadoc pointed to
-  (documentation.md §4). If decision 5 keeps D3, P5 adds the followed count.
+  (documentation.md §4). If decision 10 keeps D3, P5 adds the followed count.
 
 **D4 `check-java-line`** (documentation.md §7)
 - No comment in `lib/`, `src/`, `test/`, `scripts/`, `tools/` or the gRPC harness
@@ -357,8 +395,8 @@ Each phase runs the Actor / Critic loop of `.claude/rules/agent-roles.md`. Commi
 | P1 | `cargo xtask java-index --json` (+ return and field types in `java.rs`), runner, baseline, `c_source.js`, H1–H3, D4 | runner green on the tree; fixture tests for each |
 | P2 | J1, J2, J4, J5, J8; J3 with its baseline | as above, plus the mutation cases for these rules |
 | P3 | J6, J7, A1, A2 | as above |
-| P4 | N1–N6 (N7, N8 only if decision 6 says so) | as above |
-| P5 | D1, D2 (D3 if decision 5 says so) | as above |
+| P4 | N1–N6 (N7, N8 only if decision 11 says so) | as above |
+| P5 | D1, D2 (D3 if decision 10 says so) | as above |
 | P6 | `make -C javascript lint-rules`, `verify-javascript`, Semaphore; a proposal of "(checked by `check-…`)" references for `javascript/CLAUDE.md`, for the user to apply | CI runs it |
 
 ## 8. Decisions
@@ -374,13 +412,27 @@ Answered 2026-11-05:
    `javascript/CLAUDE.md` ("Apache Kafka 4.3.1") is proposed to the user, not applied.
 4. **J3 completeness:** enforced now; the untranslated members go in
    `javascript/lint-baseline.txt`.
+5. **`Header` beside `ProducerRecord`:** a stated exception (the user adds the sentence
+   to `javascript/CLAUDE.md` "Files and layout"). J1 allows exactly the type `Header` in
+   `lib/producer/producer_record.ts`, beside `ProducerRecord`; any other second type
+   there, or `Header` beside another type elsewhere, is a finding.
+6. **`equals` / `hashCode`:** not translated in JavaScript; J3 never asks for them.
+7. **A Java `public final` instance field** may be a `readonly` property of a frozen
+   object: J8 accepts a `readonly` instance data property when the Java class (or a
+   supertype) declares a public final instance field of that name and the constructor
+   runs `Object.freeze(this);` as a top-level statement of its body (not under a
+   condition, not in an inner function). When a name is both a public final field and a
+   getter method (`SecurityProtocol`'s `name`), the field wins. Extended the same day: on
+   a class translating a Java enum, the property `name` translating
+   `java.lang.Enum#name()` passes on the same terms (`SslClientAuth.name`). Any other
+   one translating a Java getter method stays a `readonly-field`.
+8. **`Duration` naming** (for P3): a Java `Duration x` parameter or option becomes
+   `xMs: number` (milliseconds), which J6 and J7 check.
 
 Still open, to be asked when their phase starts:
 
-5. **Runner versus tests** (P6): should `layout.test.js` and `header_conformance.test.js`
+9. **Runner versus tests** (P6): should `layout.test.js` and `header_conformance.test.js`
    move into the runner?
-6. **Doc depth** (P5): the 150% size rule and the `WARNING` / `doc-contract-changes.md`
+10. **Doc depth** (P5): the 150% size rule and the `WARNING` / `doc-contract-changes.md`
    flow for JS (D3)?
-7. **Heuristic rules** (P4): N7, N8, and the lexical limits of N5.
-8. **`Duration` naming** (P3): `x: Duration` → `xMs` as a written JS rule, which J6 and
-   J7 need.
+11. **Heuristic rules** (P4): N7, N8, and the lexical limits of N5.
