@@ -788,7 +788,9 @@ single most likely place to introduce a leak or a UAF.
   plain `Consumer_commit_async_offsets`** (phase-6 notes item 4). So
   `CommitAsync(offsets)` **without** a callback must pass a no-op trampoline that
   still frees both handles — C's `discard_commit_complete` (`server.cc:370-380`).
-  Passing `null` would be UB.
+  Passing `null` would be UB. (Since the FFI NULL-precondition rule, a `NULL`
+  `callback` is refused instead: the core reports `LocalNullPointerError`, id -32,
+  which .NET throws as `ArgumentNullException`.)
 - Both functions take a separate `user_data_destroy` hook
   (`Option<extern "C" fn(*mut c_void)>`), which **may run on any thread**
   (`:3838-3840`).

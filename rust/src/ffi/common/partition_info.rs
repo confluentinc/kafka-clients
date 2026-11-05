@@ -21,6 +21,7 @@
 //! handle. The replica lists are `java.util.List<Node>`s and cross as owned
 //! `kafka_List_t`s of node copies.
 
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::PartitionInfo;
@@ -28,9 +29,7 @@ use crate::ffi::common::node::{
     NodeInner, kafka_common_Node_t, list_nodes, node_list, optional_node, optional_node_ptr,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
-};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`PartitionInfo`].
 #[repr(C)]
@@ -78,13 +77,16 @@ pub(crate) fn box_partition_info(info: PartitionInfo) -> *mut kafka_common_Parti
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle, alive for `'a`.
-pub(crate) unsafe fn partition_info_ref<'a>(info: *const kafka_common_PartitionInfo_t) -> &'a PartitionInfo {
+pub(crate) unsafe fn partition_info_ref<'a>(
+    info: *const kafka_common_PartitionInfo_t,
+    param: &'static str,
+) -> &'a PartitionInfo {
     // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle alive for
     // `'a`, so it points at a live `PartitionInfoInner`: the `Box::into_raw` of
     // `box_partition_info`, or one a `kafka_common_Cluster_t` stores and hands out through
     // `PartitionInfoInner::as_ptr`, which lives as long as that cluster. No call mutates a
     // `PartitionInfoInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(info as *const PartitionInfoInner) }.info()
+    unsafe { require_ref::<_, PartitionInfoInner>(info, param) }.info()
 }
 
 /// What a handle points at.
@@ -92,13 +94,13 @@ pub(crate) unsafe fn partition_info_ref<'a>(info: *const kafka_common_PartitionI
 /// # Safety
 ///
 /// `info` must be a valid partition-info handle, alive for `'a`.
-unsafe fn inner_ref<'a>(info: *const kafka_common_PartitionInfo_t) -> &'a PartitionInfoInner {
+unsafe fn inner_ref<'a>(info: *const kafka_common_PartitionInfo_t, param: &'static str) -> &'a PartitionInfoInner {
     // SAFETY: Per this function's `# Safety`, `info` is a valid partition-info handle alive for
     // `'a`, so it points at a live `PartitionInfoInner`: the `Box::into_raw` of
     // `box_partition_info`, or one a `kafka_common_Cluster_t` stores and hands out through
     // `PartitionInfoInner::as_ptr`, which lives as long as that cluster. No call mutates a
     // `PartitionInfoInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(info as *const PartitionInfoInner) }
+    unsafe { require_ref::<_, PartitionInfoInner>(info, param) }
 }
 
 /// Hands copies of `infos` to C as an owned list of
@@ -112,26 +114,31 @@ pub(crate) fn partition_info_list(infos: &[PartitionInfo]) -> *mut kafka_List_t 
 }
 
 /// Reads a list of `const kafka_common_PartitionInfo_t *` into owned copies;
-/// null reads as empty.
+/// `NULL` panics.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are partition-info
 /// handles.
-pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t) -> Vec<PartitionInfo> {
+pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t, param: &'static str) -> Vec<PartitionInfo> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a partition-info
-        // handle, as `partition_info_ref` requires; the value is cloned, so the borrow lasts for
-        // this call only.
-        .map(|&element| unsafe { partition_info_ref(element as *const kafka_common_PartitionInfo_t) }.clone())
+        .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a partition-info
+            // handle, as `partition_info_ref` requires; the value is cloned, so the borrow lasts for
+            // this call only.
+            unsafe { partition_info_ref(require_element(element, param) as *const kafka_common_PartitionInfo_t, param) }
+                .clone()
+        })
         .collect()
 }
 
 /// Creates a partition info with no offline replicas.
+///
+/// WARNING: `NULL` `topic`, `replicas`, `in_sync_replicas` panic; Java stores `null`.
 ///
 /// # Parameters
 ///
@@ -141,10 +148,16 @@ pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t) -> Vec<Part
 /// - `replicas` - the replicas, preferred replica first
 /// - `in_sync_replicas` - the in-sync replicas
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
+/// - `LocalNullPointerError` if `replicas` is `NULL`
+/// - `LocalNullPointerError` if `in_sync_replicas` is `NULL`
+///
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string, `leader` `NULL` or a valid
-/// node handle, and each list `NULL` or a valid list of node handles; all are copied. The
+/// node handle, and each list a valid list of node handles; all are copied. The
 /// returned handle is owned, freed with `kafka_common_PartitionInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -157,25 +170,27 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
 ) -> *mut kafka_common_PartitionInfo_t {
     box_partition_info(PartitionInfo::new(
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(topic) },
+        unsafe { require_str(topic, "topic") },
         partition,
         // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
         // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
         unsafe { optional_node(leader) },
-        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list of node
+        // SAFETY: Per this function's `# Safety`, `replicas` is a valid list of node
         // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
-        unsafe { list_nodes(replicas) },
-        // SAFETY: Per this function's `# Safety`, `in_sync_replicas` is null or a valid list of
+        unsafe { list_nodes(replicas, "replicas") },
+        // SAFETY: Per this function's `# Safety`, `in_sync_replicas` is a valid list of
         // node handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
-        unsafe { list_nodes(in_sync_replicas) },
+        unsafe { list_nodes(in_sync_replicas, "in_sync_replicas") },
     ))
 }
 
 /// Creates a partition info.
+///
+/// WARNING: `NULL` `topic`, `replicas`, `in_sync_replicas`, `offline_replicas` panic; Java stores `null`.
 ///
 /// # Parameters
 ///
@@ -186,10 +201,17 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
 /// - `in_sync_replicas` - the in-sync replicas
 /// - `offline_replicas` - the offline replicas
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
+/// - `LocalNullPointerError` if `replicas` is `NULL`
+/// - `LocalNullPointerError` if `in_sync_replicas` is `NULL`
+/// - `LocalNullPointerError` if `offline_replicas` is `NULL`
+///
 /// # Safety
 ///
-/// As `kafka_common_PartitionInfo_new`, plus `offline_replicas` `NULL` or a
-/// valid list of node handles.
+/// As `kafka_common_PartitionInfo_new`, plus `offline_replicas` a valid
+/// list of node handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_with_offline_replicas(
@@ -202,25 +224,25 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_with_offline_replicas(
 ) -> *mut kafka_common_PartitionInfo_t {
     box_partition_info(PartitionInfo::with_offline_replicas(
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(topic) },
+        unsafe { require_str(topic, "topic") },
         partition,
         // SAFETY: Per this function's `# Safety`, `leader` is null or a valid node handle, as
         // `optional_node` requires; the node is cloned, so nothing borrows it after this call.
         unsafe { optional_node(leader) },
-        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list of node
+        // SAFETY: Per this function's `# Safety`, `replicas` is a valid list of node
         // handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
-        unsafe { list_nodes(replicas) },
-        // SAFETY: Per this function's `# Safety`, `in_sync_replicas` is null or a valid list of
+        unsafe { list_nodes(replicas, "replicas") },
+        // SAFETY: Per this function's `# Safety`, `in_sync_replicas` is a valid list of
         // node handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
-        unsafe { list_nodes(in_sync_replicas) },
-        // SAFETY: Per this function's `# Safety`, `offline_replicas` is null or a valid list of
+        unsafe { list_nodes(in_sync_replicas, "in_sync_replicas") },
+        // SAFETY: Per this function's `# Safety`, `offline_replicas` is a valid list of
         // node handles, as `list_nodes` requires; the nodes are cloned, so nothing borrows the list
         // after this call.
-        unsafe { list_nodes(offline_replicas) },
+        unsafe { list_nodes(offline_replicas, "offline_replicas") },
     ))
 }
 
@@ -236,7 +258,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(self_: *const kafka_co
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `inner_ref` requires. The string returned is the inner's own `topic_c`, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle, valid until it is destroyed".
-    unsafe { inner_ref(self_) }.topic_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.topic_c.as_ptr()
 }
 
 /// Returns the partition id.
@@ -249,7 +271,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(self_: *const kafka_co
 pub unsafe extern "C" fn kafka_common_PartitionInfo_partition(self_: *const kafka_common_PartitionInfo_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `partition_info_ref` requires; the reference is used only within this call.
-    unsafe { partition_info_ref(self_) }.partition()
+    unsafe { partition_info_ref(self_, "self_") }.partition()
 }
 
 /// Returns the node currently acting as a leader for this partition or `NULL` if there is no leader
@@ -266,7 +288,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `inner_ref` requires. The node returned is the inner's own cached `leader`, so it lives as
     // long as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.leader_ptr()
+    unsafe { inner_ref(self_, "self_") }.leader_ptr()
 }
 
 /// Returns the complete set of replicas for this partition regardless of whether they are alive or up-to-date.
@@ -284,7 +306,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_replicas(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `partition_info_ref` requires; the nodes are cloned into the owned list returned, so the
     // borrow lasts for this call only.
-    node_list(unsafe { partition_info_ref(self_) }.replicas())
+    node_list(unsafe { partition_info_ref(self_, "self_") }.replicas())
 }
 
 /// Returns the subset of the replicas that are in sync, that is caught-up to the leader and ready to take over as
@@ -302,7 +324,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replicas(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `partition_info_ref` requires; the nodes are cloned into the owned list returned, so the
     // borrow lasts for this call only.
-    node_list(unsafe { partition_info_ref(self_) }.in_sync_replicas())
+    node_list(unsafe { partition_info_ref(self_, "self_") }.in_sync_replicas())
 }
 
 /// Returns the subset of the replicas that are offline
@@ -319,7 +341,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replicas(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `partition_info_ref` requires; the nodes are cloned into the owned list returned, so the
     // borrow lasts for this call only.
-    node_list(unsafe { partition_info_ref(self_) }.offline_replicas())
+    node_list(unsafe { partition_info_ref(self_, "self_") }.offline_replicas())
 }
 
 /// Returns `Partition(topic = <topic>, partition = <partition>, leader = <leader id or none>,
@@ -337,7 +359,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-info handle, as
     // `partition_info_ref` requires; the reference is used only within this call, and the text is
     // copied into an owned string.
-    into_c_string(&unsafe { partition_info_ref(self_) }.to_string())
+    into_c_string(&unsafe { partition_info_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned partition-info handle. Null is a no-op; a handle borrowed
@@ -424,7 +446,7 @@ mod tests {
         unsafe {
             assert!(kafka_common_PartitionInfo_leader(kafka_List_get(list, 0) as *const _).is_null());
             assert!(!kafka_common_PartitionInfo_leader(kafka_List_get(list, 1) as *const _).is_null());
-            let copies = list_partition_infos(list);
+            let copies = list_partition_infos(list, "value");
             assert_eq!(copies.len(), 2);
             assert!(
                 copies

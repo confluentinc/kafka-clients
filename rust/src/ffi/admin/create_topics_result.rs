@@ -15,6 +15,7 @@
 //! C bindings for `org.apache.kafka.clients.admin.CreateTopicsResult` and
 //! its nested `CreateTopicsResult.TopicMetadataAndConfig`.
 
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::{CreateTopicsResult, TopicMetadataAndConfig};
@@ -26,7 +27,7 @@ use crate::ffi::common::uuid::{box_uuid, kafka_common_Uuid_destroy, kafka_common
 use crate::ffi::common::{kafka_common_Error_t, take_error};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{c_str_to_string, kafka_Map_t};
+use crate::ffi::util::kafka_Map_t;
 
 // ---------------------------------------------------------------------------
 // CreateTopicsResult.TopicMetadataAndConfig
@@ -55,6 +56,7 @@ pub(crate) fn box_topic_metadata_and_config(
 /// `'a`.
 pub(crate) unsafe fn topic_metadata_and_config_ref<'a>(
     value: *const kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t,
+    param: &'static str,
 ) -> &'a TopicMetadataAndConfig {
     // SAFETY: Per this function's `# Safety`, `value` is a valid handle kept alive for `'a`. Every
     // `kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t` is the `Box::into_raw` of a
@@ -62,7 +64,7 @@ pub(crate) unsafe fn topic_metadata_and_config_ref<'a>(
     // so it points at a live `TopicMetadataAndConfig`. Nothing takes a `&mut` to it: only the
     // destroy takes the box back, and its `# Safety` excludes any other use at the same time or
     // afterwards.
-    unsafe { &*(value as *const TopicMetadataAndConfig) }
+    unsafe { require_ref::<_, TopicMetadataAndConfig>(value, param) }
 }
 
 /// Creates a successful metadata-and-config holder.
@@ -90,12 +92,12 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     box_topic_metadata_and_config(TopicMetadataAndConfig::new(
         // SAFETY: Per this function's `# Safety`, `topic_id` is a valid uuid handle, as `uuid_of`
         // requires; the uuid is copied out.
-        unsafe { uuid_of(topic_id) },
+        unsafe { uuid_of(topic_id, "topic_id") },
         num_partitions,
         replication_factor,
         // SAFETY: Per this function's `# Safety`, `config` is a valid config handle, as
         // `config_ref` requires; the borrow ends with the `clone`.
-        unsafe { config_ref(config) }.clone(),
+        unsafe { config_ref(config, "config") }.clone(),
     ))
 }
 
@@ -144,7 +146,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
     // as `topic_metadata_and_config_ref` requires, and `out_err` as `deliver_value`
     // requires.
-    unsafe { deliver_value(topic_metadata_and_config_ref(self_).topic_id(), out_err, box_uuid) }
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_, "self_").topic_id(), out_err, box_uuid) }
 }
 
 /// Returns the number of partitions, or -1 with the stored error in `*out_err`.
@@ -166,7 +168,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
     // as `topic_metadata_and_config_ref` requires, and `out_err` as
     // `deliver_value` requires.
-    unsafe { deliver_value(topic_metadata_and_config_ref(self_).num_partitions(), out_err, |n| n) }
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_, "self_").num_partitions(), out_err, |n| n) }
 }
 
 /// Returns the replication factor, or -1 with the stored error in `*out_err`.
@@ -188,7 +190,13 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_r
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
     // as `topic_metadata_and_config_ref` requires, and `out_err` as
     // `deliver_value` requires.
-    unsafe { deliver_value(topic_metadata_and_config_ref(self_).replication_factor(), out_err, |n| n) }
+    unsafe {
+        deliver_value(
+            topic_metadata_and_config_ref(self_, "self_").replication_factor(),
+            out_err,
+            |n| n,
+        )
+    }
 }
 
 /// Returns the topic config, or `NULL` with the stored error in `*out_err`.
@@ -211,7 +219,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_c
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, kept alive for this call,
     // as `topic_metadata_and_config_ref` requires, and `out_err` as `deliver_value`
     // requires.
-    unsafe { deliver_value(topic_metadata_and_config_ref(self_).config(), out_err, box_config) }
+    unsafe { deliver_value(topic_metadata_and_config_ref(self_, "self_").config(), out_err, box_config) }
 }
 
 /// Frees a handle; `NULL` is a no-op.
@@ -258,12 +266,15 @@ pub(crate) fn box_create_topics_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_CreateTopicsResult_t) -> &'a ResultHandle<CreateTopicsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_CreateTopicsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<CreateTopicsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_CreateTopicsResult_t` is built by
     // `box_result::<CreateTopicsResult, _>` (in `box_create_topics_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Frees a `kafka_common_Uuid_t *` a future delivered.
@@ -294,8 +305,8 @@ where
     T: Clone + Send + Sync + 'static,
 {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into a `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into a `String`.
+    let topic = unsafe { require_str(topic, "topic") };
     if h.result.values().contains_key(&topic) {
         get(&h.result, &topic)
     } else {
@@ -326,7 +337,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let values = h.result.values();
     h.ctx.string_keyed_future_map(values.iter(), FutureCtx::void_future)
 }
@@ -349,7 +360,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 
@@ -385,7 +396,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
     // borrows the live result handle `self_`, as `topic_future` requires.
     let future = unsafe { topic_future(h, topic, CreateTopicsResult::config) };
@@ -429,7 +440,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
     // borrows the live result handle `self_`, as `topic_future` requires.
     let future: KafkaFuture<Uuid> = unsafe { topic_future(h, topic, CreateTopicsResult::topic_id) };
@@ -472,7 +483,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_num_partitions(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
         // borrows the live result handle `self_`, as `topic_future` requires.
@@ -509,7 +520,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx
         // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, and `h`
         // borrows the live result handle `self_`, as `topic_future` requires.

@@ -125,9 +125,11 @@ def test_subscribe_null_listener(kind: str) -> None:
     # org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener),
     # #subscribe(Collection,ConsumerRebalanceListener)).
     async def body(c: Any, call: Callable[..., Any]) -> None:
-        await raises(IllegalArgumentError, "RebalanceListener cannot be None",
+        # The core's text keeps Java's "null"; the mocks' Python text spells it None.
+        message = f"RebalanceListener cannot be {'null' if kind in FFI else 'None'}"
+        await raises(IllegalArgumentError, message,
                lambda: call("subscribe", topics=["t"], callback=None))
-        await raises(IllegalArgumentError, "RebalanceListener cannot be None",
+        await raises(IllegalArgumentError, message,
                lambda: call("subscribe", pattern=SubscriptionPattern(pattern="t.*"),
                             callback=None))
         assert c.subscription() == set()
@@ -139,9 +141,9 @@ def test_subscribe_null_topics(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
         # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#subscribeInternal(Collection,Optional)'s check
         if kind in FFI:
-            await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be None",
+            await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be null",
                    lambda: call("subscribe", topics=None))
-            await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be None",
+            await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be null",
                    lambda: call("subscribe", topics=None, callback=_Listener()))
         else:  # the mock's new HashSet<>(null)
             await raises(TypeError, "topics must not be None", lambda: call("subscribe", topics=None))
@@ -151,7 +153,7 @@ def test_subscribe_null_topics(kind: str) -> None:
 @pytest.mark.parametrize("kind", KINDS)
 def test_subscribe_null_pattern(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
-        message = ("Topic pattern to subscribe to cannot be None" if kind in FFI
+        message = ("Topic pattern to subscribe to cannot be null" if kind in FFI
                    # org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern)
                    else "Topic pattern cannot be None")
         await raises(IllegalArgumentError, message, lambda: call("subscribe", pattern=None))
@@ -163,7 +165,7 @@ def test_subscribe_null_pattern(kind: str) -> None:
 @pytest.mark.parametrize("kind", KINDS)
 def test_subscribe_listener_check_precedes_the_null_collection(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
-        await raises(IllegalArgumentError, "RebalanceListener cannot be None",
+        await raises(IllegalArgumentError, f"RebalanceListener cannot be {'null' if kind in FFI else 'None'}",
                lambda: call("subscribe", topics=None, callback=None))
     run(kind, body)
 
@@ -173,7 +175,7 @@ def test_subscribe_null_collection_before_the_group_check(kind: str) -> None:
     # Order: the Python null check runs before the core's group check, where
     # Java's subscribeInternal checks the group first (accepted, CLAUDE.md Order).
     async def body(c: Any, call: Callable[..., Any]) -> None:
-        await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be None",
+        await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be null",
                lambda: call("subscribe", topics=None))
         await raises(InvalidGroupIdError, str(_group_message()), lambda: call("subscribe", topics=["t"]))
     run(kind, body, NO_GROUP)
@@ -363,11 +365,14 @@ def test_partitions_for_null_arguments(kind: str) -> None:
 @pytest.mark.parametrize("kind", KINDS)
 def test_offset_lookups_null_arguments(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
+        # The core's Java texts (Objects.requireNonNull in AsyncKafkaConsumer#beginningOrEndOffset and
+        # #offsetsForTimes), null spelled None; the mocks' Python text names the parameter.
+        message = "Partitions cannot be None" if kind in FFI else "partitions must not be None"
         for name in ("beginning_offsets", "end_offsets"):
-            await raises(TypeError, "partitions must not be None", lambda name=name: call(
+            await raises(TypeError, message, lambda name=name: call(
                 name, partitions=None))
         if kind in FFI:
-            await raises(TypeError, "timestamps_to_search must not be None",
+            await raises(TypeError, "Timestamps to search cannot be None",
                    lambda: call("offsets_for_times", timestamps_to_search=None))
             for name in ("beginning_offsets", "end_offsets"):
                 await raises(TypeError, "timeout must not be None", lambda name=name: call(
@@ -399,9 +404,9 @@ def test_current_lag_null_partition(kind: str) -> None:
 def test_partition_collections_null(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
         if kind in FFI:
-            await raises(IllegalArgumentError, "Topic partitions collection to assign to cannot be None",
+            await raises(IllegalArgumentError, "Topic partitions collection to assign to cannot be null",
                    lambda: call("assign", partitions=None))
-            await raises(IllegalArgumentError, "Partitions collection cannot be None",
+            await raises(IllegalArgumentError, "Partitions collection cannot be null",
                    lambda: call("seek_to_beginning", partitions=None))
         else:  # the mock's new HashSet<>(null), requestOffsetReset(null)
             await raises(TypeError, "partitions must not be None", lambda: call("assign", partitions=None))
@@ -409,8 +414,10 @@ def test_partition_collections_null(kind: str) -> None:
                    lambda: call("seek_to_beginning", partitions=None))
             await raises(TypeError, "partitions must not be None",
                    lambda: call("seek_to_end", partitions=None))
-        await raises(TypeError, "partitions must not be None", lambda: call("pause", partitions=None))
-        await raises(TypeError, "partitions must not be None", lambda: call("resume", partitions=None))
+        for name in ("pause", "resume"):
+            # AsyncKafkaConsumer#pause / #resume's Objects.requireNonNull text in the core.
+            message = f"The partitions to {name} must be nonnull" if kind in FFI else "partitions must not be None"
+            await raises(TypeError, message, lambda name=name: call(name, partitions=None))
     run(kind, body)
 
 

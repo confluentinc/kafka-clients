@@ -24,7 +24,8 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::common::Error;
 use crate::ffi::common::{fail_with, kafka_common_Error_t};
-use crate::ffi::util::{box_string_list, c_str_to_string, kafka_List_t};
+use crate::ffi::precondition::require_str;
+use crate::ffi::util::{box_string_list, c_str_to_option, kafka_List_t};
 
 /// The NUL-terminated copies of the strings a configuration handle lent out,
 /// one per key, kept so the pointers live as long as the handle, as a Rust
@@ -55,17 +56,20 @@ impl LentStrings {
 ///
 /// # Safety
 ///
-/// `key` must be a valid NUL-terminated string, `out_value` valid for a
-/// write and `out_err` a valid slot pointing at null.
+/// `key` must be NULL or a valid NUL-terminated string, `out_value` valid
+/// for a write and `out_err` a valid slot pointing at null.
 pub(crate) unsafe fn get_scalar<T>(
     key: *const c_char,
     out_value: *mut T,
     out_err: *mut *mut kafka_common_Error_t,
     get: impl FnOnce(&str) -> Result<Option<T>, Error>,
 ) -> i8 {
-    // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let key = unsafe { c_str_to_string(key) };
+    // SAFETY: Per this function's `# Safety`, `key` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`.
+    let Some(key) = (unsafe { c_str_to_option(key) }) else {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, unknown_null_key()) };
+    };
     match get(&key) {
         Ok(Some(value)) => {
             // SAFETY: Per this function's `# Safety`, `out_value` is valid for a write.
@@ -83,17 +87,20 @@ pub(crate) unsafe fn get_scalar<T>(
 ///
 /// # Safety
 ///
-/// `key` must be a valid NUL-terminated string and `out_err` a valid slot
-/// pointing at null.
+/// `key` must be NULL or a valid NUL-terminated string and `out_err` a
+/// valid slot pointing at null.
 pub(crate) unsafe fn get_string<'a>(
     strings: &LentStrings,
     key: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
     get: impl FnOnce(&str) -> Result<Option<&'a str>, Error>,
 ) -> *const c_char {
-    // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let key = unsafe { c_str_to_string(key) };
+    // SAFETY: Per this function's `# Safety`, `key` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`.
+    let Some(key) = (unsafe { c_str_to_option(key) }) else {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, unknown_null_key()) };
+    };
     match get(&key) {
         Ok(Some(value)) => strings.lend(key, value),
         Ok(None) => std::ptr::null(),
@@ -108,16 +115,19 @@ pub(crate) unsafe fn get_string<'a>(
 ///
 /// # Safety
 ///
-/// `key` must be a valid NUL-terminated string and `out_err` a valid slot
-/// pointing at null.
+/// `key` must be NULL or a valid NUL-terminated string and `out_err` a
+/// valid slot pointing at null.
 pub(crate) unsafe fn get_list<'a>(
     key: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
     get: impl FnOnce(&str) -> Result<Option<&'a [String]>, Error>,
 ) -> *mut kafka_List_t {
-    // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let key = unsafe { c_str_to_string(key) };
+    // SAFETY: Per this function's `# Safety`, `key` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`.
+    let Some(key) = (unsafe { c_str_to_option(key) }) else {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, unknown_null_key()) };
+    };
     match get(&key) {
         Ok(Some(values)) => box_string_list(values),
         Ok(None) => std::ptr::null_mut(),
@@ -126,13 +136,35 @@ pub(crate) unsafe fn get_list<'a>(
     }
 }
 
-/// An `ignore` export.
+/// Java's `AbstractConfig.get(null)`: `values` has no `null` key, so the
+/// getter throws its `ConfigException` for a missing key, printing `null`.
+fn unknown_null_key() -> Error {
+    Error::config_message("Unknown configuration 'null'")
+}
+
+/// An `ignore` export. A NULL `key` panics with Java's `NullPointerException`
+/// (`used.add(null)` on a concurrent set).
 ///
 /// # Safety
 ///
-/// `key` must be a valid NUL-terminated string.
+/// `key` must be NULL or a valid NUL-terminated string.
 pub(crate) unsafe fn ignore(key: *const c_char, ignore: impl FnOnce(&str)) {
-    // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    ignore(&unsafe { c_str_to_string(key) });
+    // SAFETY: Per this function's `# Safety`, `key` is NULL or a valid NUL-terminated string, as
+    // `require_str` requires; it is copied into an owned `String`.
+    ignore(&unsafe { require_str(key, "key") });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::precondition::caught;
+
+    /// Java's `ignore(null)` throws `NullPointerException` from `used.add(null)`.
+    #[test]
+    fn ignore_rejects_a_null_key() {
+        // SAFETY: Test code: the NULL key is the case under test; `ignore` panics before reading it.
+        let error = caught(|| unsafe { ignore(std::ptr::null(), |_| unreachable!()) });
+        assert!(error.is_local_null_pointer_error(), "{error:?}");
+        assert_eq!(error.message(), "key must not be null");
+    }
 }

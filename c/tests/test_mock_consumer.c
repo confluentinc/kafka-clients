@@ -1516,8 +1516,10 @@ static void test_metrics_stats_and_assignor_to_string_follow_java(void) {
     assert_owned_string(empty_rate, kafka_common_metrics_stats_SimpleRate_to_string(simple));
     kafka_common_metrics_stats_SimpleRate_destroy(simple);
 
-    kafka_common_MetricName_t *rate_name = kafka_common_MetricName_new("rate", "g", "d", NULL);
-    kafka_common_MetricName_t *total_name = kafka_common_MetricName_new("total", "g", "d", NULL);
+    kafka_Map_t *no_tags = kafka_Map_new();
+    kafka_common_MetricName_t *rate_name = kafka_common_MetricName_new("rate", "g", "d", no_tags);
+    kafka_common_MetricName_t *total_name = kafka_common_MetricName_new("total", "g", "d", no_tags);
+    kafka_Map_destroy(no_tags);
     kafka_common_metrics_stats_Meter_t *meter = kafka_common_metrics_stats_Meter_new(rate_name, total_name);
     assert_owned_string("Meter(rate=Rate(unit=SECONDS, stat=SampledStat(initialValue=0.0, current=0, samples=[])), "
                         "total=CumulativeSum(total=0.0), "

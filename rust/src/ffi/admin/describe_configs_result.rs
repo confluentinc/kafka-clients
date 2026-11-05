@@ -49,12 +49,15 @@ pub(crate) fn box_describe_configs_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DescribeConfigsResult_t) -> &'a ResultHandle<DescribeConfigsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DescribeConfigsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DescribeConfigsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeConfigsResult_t` is built by
     // `box_result::<DescribeConfigsResult, _>` (in `box_describe_configs_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// The C shape of `all()`'s value: an owned map, sorted by the resource's
@@ -97,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&ConfigResource, &KafkaFuture<Config>)> = h.result.values().iter().collect();
     entries.sort_by_cached_key(|(resource, _)| resource.to_string());
     h.ctx.keyed_future_map(
@@ -134,7 +137,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `box_configs` makes through `box_map`,
     // and the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.

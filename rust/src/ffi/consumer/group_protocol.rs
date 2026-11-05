@@ -26,7 +26,8 @@ use crate::consumer::GroupProtocol;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupProtocol`] singleton.
 #[repr(C)]
@@ -40,6 +41,14 @@ pub struct kafka_consumer_GroupProtocol_t {
 pub enum kafka_consumer_GroupProtocol_e {
     kafka_consumer_GroupProtocol_CLASSIC,
     kafka_consumer_GroupProtocol_CONSUMER,
+}
+
+/// The value an `_err` twin returning [`kafka_consumer_GroupProtocol_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_consumer_GroupProtocol_e {
+    fn fail() -> Self {
+        Self::kafka_consumer_GroupProtocol_CLASSIC
+    }
 }
 
 /// One static instance per value, indexed by [`kafka_consumer_GroupProtocol_e`].
@@ -67,11 +76,11 @@ pub(crate) fn singleton(protocol: GroupProtocol) -> *const kafka_consumer_GroupP
 /// # Safety
 ///
 /// `protocol` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t) -> GroupProtocol {
+pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t, param: &'static str) -> GroupProtocol {
     // SAFETY: Per this function's `# Safety`, `protocol` is a singleton returned by this module,
     // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
     // a live, initialised `GroupProtocol`, which is `Copy` and read out here.
-    unsafe { *(protocol as *const GroupProtocol) }
+    *unsafe { require_ref::<_, GroupProtocol>(protocol, param) }
 }
 
 /// Returns `GroupProtocol.CLASSIC`, a static singleton never freed.
@@ -90,21 +99,17 @@ pub extern "C" fn kafka_consumer_GroupProtocol_consumer() -> *const kafka_consum
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_consumer_GroupProtocol_CLASSIC`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_consumer_GroupProtocol_e::kafka_consumer_GroupProtocol_CLASSIC)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
     self_: *const kafka_consumer_GroupProtocol_t,
 ) -> kafka_consumer_GroupProtocol_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// String representation of the group protocol.
@@ -125,7 +130,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the pointer returned is into the `static`
     // `NAMES`, never freed.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Case-insensitive group protocol lookup by string name.
@@ -153,8 +158,8 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const kafka_consumer_GroupProtocol_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    match GroupProtocol::of(&unsafe { c_str_to_string(name) }) {
+    // `require_str` requires; it is copied into an owned `String`.
+    match GroupProtocol::of(&unsafe { require_str(name, "name") }) {
         Ok(protocol) => singleton(protocol),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -178,7 +183,7 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its text copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -231,7 +236,7 @@ mod tests {
         assert!(out.is_null());
         // SAFETY: Test code: `error` is the owned error just returned (non-null, asserted above),
         // destroyed only after `inner`'s last use.
-        let inner = unsafe { error_ref(error) };
+        let inner = unsafe { error_ref(error, "error") };
         assert!(inner.error.is_local_illegal_argument_error());
         assert_eq!(
             inner.error.message(),

@@ -96,12 +96,15 @@ pub(crate) fn box_elect_leaders_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_ElectLeadersResult_t) -> &'a ResultHandle<ElectLeadersResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_ElectLeadersResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<ElectLeadersResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_ElectLeadersResult_t` is built by
     // `box_result::<ElectLeadersResult, _>` (in `box_elect_leaders_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Get a future for the topic partitions for which a leader election was attempted. If the election
@@ -127,7 +130,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_partitions(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `partitions_map` makes through `box_map`,
     // and the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.
@@ -153,7 +156,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

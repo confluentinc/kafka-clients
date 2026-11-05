@@ -17,6 +17,7 @@
 //! `Map<TopicPartition, OffsetAndMetadata>` conversions the commit and
 //! `committed` paths share.
 
+use crate::ffi::precondition::{require_element, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -29,7 +30,7 @@ use crate::ffi::common::topic_partition::{
     topic_partition_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_Map_t, map_entries};
+use crate::ffi::util::{box_map, c_str_to_string, destroy_boxed, into_c_string, kafka_Map_t};
 
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
@@ -64,12 +65,13 @@ pub(crate) fn box_offset_and_metadata(oam: OffsetAndMetadata) -> *mut kafka_cons
 /// `oam` must be a valid offset-and-metadata handle, kept alive for `'a`.
 pub(crate) unsafe fn offset_and_metadata_ref<'a>(
     oam: *const kafka_consumer_OffsetAndMetadata_t,
+    param: &'static str,
 ) -> &'a OffsetAndMetadata {
     // SAFETY: Per this function's `# Safety`, `oam` is a valid offset-and-metadata handle kept
     // alive for `'a`: a `Box<OffsetAndMetadataInner>` from `box_offset_and_metadata`, the only
     // place handles are made, owned by the caller or by a container, and never mutated, so the
     // shared reference is to a live value.
-    &unsafe { &*(oam as *const OffsetAndMetadataInner) }.oam
+    &unsafe { require_ref::<_, OffsetAndMetadataInner>(oam, param) }.oam
 }
 
 /// Hands a Java `Map<TopicPartition, OffsetAndMetadata>` to C as an owned
@@ -125,28 +127,37 @@ pub(crate) fn nullable_offset_and_metadata_map(
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` keys and
-/// `const kafka_consumer_OffsetAndMetadata_t *` values; null reads as empty.
+/// `const kafka_consumer_OffsetAndMetadata_t *` values; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `map` must be null or a valid map whose keys are topic-partition handles
 /// and whose values are offset-and-metadata handles, and no other call may
 /// mutate it during this one.
-pub(crate) unsafe fn map_offset_and_metadata(map: *const kafka_Map_t) -> HashMap<TopicPartition, OffsetAndMetadata> {
+pub(crate) unsafe fn map_offset_and_metadata(
+    map: *const kafka_Map_t,
+    param: &'static str,
+) -> HashMap<TopicPartition, OffsetAndMetadata> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map that no other call
-    // mutates during this one, as `map_entries` requires; the entries are read only within this
+    // mutates during this one, as `require_map` requires; the entries are read only within this
     // expression.
-    unsafe { map_entries(map) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key of `map` is a topic-partition
             // handle, live during the call, as `topic_partition_ref` requires; the reference is
             // only cloned.
-            let tp = unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone();
+            let tp = unsafe {
+                topic_partition_ref(require_element(k, param) as *const kafka_common_TopicPartition_t, param)
+            }
+            .clone();
             // SAFETY: Per this function's `# Safety`, every value of `map` is an
             // offset-and-metadata handle, live during the call, as `offset_and_metadata_ref`
             // requires; the reference is only cloned.
-            let oam = unsafe { offset_and_metadata_ref(v as *const kafka_consumer_OffsetAndMetadata_t) }.clone();
+            let oam = unsafe {
+                offset_and_metadata_ref(require_element(v, param) as *const kafka_consumer_OffsetAndMetadata_t, param)
+            }
+            .clone();
             (tp, oam)
         })
         .collect()
@@ -298,7 +309,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_metadata_ref` requires.
-    into_c_string(&unsafe { offset_and_metadata_ref(self_) }.to_string())
+    into_c_string(&unsafe { offset_and_metadata_ref(self_, "self_") }.to_string())
 }
 
 /// `offset()`.
@@ -317,7 +328,7 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_metadata_ref` requires.
-    unsafe { offset_and_metadata_ref(self_) }.offset()
+    unsafe { offset_and_metadata_ref(self_, "self_") }.offset()
 }
 
 /// `metadata()`: the commit metadata, empty when none.
@@ -339,12 +350,12 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a
     // `Box<OffsetAndMetadataInner>` from `box_offset_and_metadata`, never mutated; the pointer
     // returned borrows its `metadata_c`, valid until the handle is freed, as the rustdoc states.
-    unsafe { &*(self_ as *const OffsetAndMetadataInner) }.metadata_c.as_ptr()
+    unsafe { require_ref::<_, OffsetAndMetadataInner>(self_, "self_") }
+        .metadata_c
+        .as_ptr()
 }
 
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
-///
-/// A caught Rust panic returns -2, which is no leader epoch: Java's `leaderEpoch()` answers a negative one as `Optional.empty()`.
 ///
 /// # Returns
 ///
@@ -353,14 +364,14 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_leader_epoch(
     self_: *const kafka_consumer_OffsetAndMetadata_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `offset_and_metadata_ref` requires.
-    unsafe { offset_and_metadata_ref(self_) }.leader_epoch().unwrap_or(-1)
+    unsafe { offset_and_metadata_ref(self_, "self_") }.leader_epoch().unwrap_or(-1)
 }
 
 /// Frees an owned handle; a null pointer is a no-op. A handle borrowed from
@@ -443,7 +454,7 @@ mod tests {
         assert!(!error.is_null());
         assert!(oam.is_null());
         // SAFETY: Test code: `error` is the owned error just stored (non-null, asserted above).
-        assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
+        assert!(unsafe { error_ref(error, "error") }.error.is_local_illegal_argument_error());
         // SAFETY: Test code: `error` is the owned error stored above, destroyed once.
         unsafe { kafka_common_Error_destroy(error) };
     }
@@ -458,11 +469,11 @@ mod tests {
         // SAFETY: Test code: `c_map` is the live map `offset_and_metadata_map` just built.
         assert_eq!(unsafe { kafka_Map_size(c_map) }, 3);
         // SAFETY: Test code: `c_map` is live and not mutated while its entries are read.
-        let keys: Vec<_> = unsafe { map_entries(c_map) }
+        let keys: Vec<_> = unsafe { require_map(c_map, "c_map") }
             .iter()
             // SAFETY: Test code: every key of `c_map` is a live topic-partition handle the map
             // owns.
-            .map(|&(k, _)| unsafe { topic_partition_ref(k as *const _) }.clone())
+            .map(|&(k, _)| unsafe { topic_partition_ref(k as *const _, "value") }.clone())
             .collect();
         assert_eq!(
             keys,
@@ -474,7 +485,7 @@ mod tests {
         );
         // SAFETY: Test code: `c_map` is a live map of topic-partition to offset-and-metadata
         // handles, not mutated during the call.
-        assert_eq!(unsafe { map_offset_and_metadata(c_map) }, map);
+        assert_eq!(unsafe { map_offset_and_metadata(c_map, "c_map") }, map);
         // SAFETY: Test code: `c_map` is the map built above, destroyed once.
         unsafe { kafka_Map_destroy(c_map) };
     }
@@ -491,12 +502,12 @@ mod tests {
         // SAFETY: Test code: `c_map` is the live map just built, not mutated while its entries
         // are read; every key is a live topic-partition handle and every non-null value a live
         // offset-and-metadata handle the map owns.
-        let entries: Vec<_> = unsafe { map_entries(c_map) }
+        let entries: Vec<_> = unsafe { require_map(c_map, "c_map") }
             .iter()
             .map(|&(k, v)| unsafe {
                 (
-                    topic_partition_ref(k as *const _).clone(),
-                    (!v.is_null()).then(|| offset_and_metadata_ref(v as *const _).offset()),
+                    topic_partition_ref(k as *const _, "value").clone(),
+                    (!v.is_null()).then(|| offset_and_metadata_ref(v as *const _, "value").offset()),
                 )
             })
             .collect();

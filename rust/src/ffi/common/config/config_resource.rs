@@ -20,12 +20,14 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::config::ConfigResource;
 use crate::common::config::config_resource::Type;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // ConfigResource.Type
@@ -53,6 +55,14 @@ pub enum kafka_common_config_ConfigResource_Type_e {
     kafka_common_config_ConfigResource_Type_TOPIC,
     /// `Type::Unknown`: Java's `UNKNOWN`.
     kafka_common_config_ConfigResource_Type_UNKNOWN,
+}
+
+/// The value an `_err` twin returning [`kafka_common_config_ConfigResource_Type_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_config_ConfigResource_Type_e {
+    fn fail() -> Self {
+        Self::kafka_common_config_ConfigResource_Type_UNKNOWN
+    }
 }
 
 /// One static instance per value, indexed by
@@ -93,11 +103,11 @@ pub(crate) fn type_singleton(value: Type) -> *const kafka_common_config_ConfigRe
 /// # Safety
 ///
 /// `value` must be a singleton returned by this module.
-pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Type_t) -> Type {
+pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Type_t, param: &'static str) -> Type {
     // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `TYPES` array (`type_singleton`), so it points at a
     // live, initialised `Type`, which is `Copy` and read out here.
-    unsafe { *(value as *const Type) }
+    *unsafe { require_ref::<_, Type>(value, param) }
 }
 
 /// Returns `ConfigResource.Type.GROUP`, a static singleton never freed.
@@ -147,19 +157,17 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_unknown() -> *const ka
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_config_ConfigResource_Type_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_config_ConfigResource_Type_e::kafka_common_config_ConfigResource_Type_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
     self_: *const kafka_common_config_ConfigResource_Type_t,
 ) -> kafka_common_config_ConfigResource_Type_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `type_of` requires; the value is copied out.
-    type_enum_of(unsafe { type_of(self_) })
+    type_enum_of(unsafe { type_of(self_, "self_") })
 }
 
 /// Returns the constant's name, as Java's inherited `Enum.toString()`.
@@ -175,25 +183,22 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `type_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { type_of(self_) }.to_string())
+    into_c_string(&unsafe { type_of(self_, "self_") }.to_string())
 }
 
 /// Returns the type's wire-protocol byte.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_id(
     self_: *const kafka_common_config_ConfigResource_Type_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `type_of` requires; the value is copied out.
-    unsafe { type_of(self_) }.id()
+    unsafe { type_of(self_, "self_") }.id()
 }
 
 /// Returns the type for a wire-protocol byte.
@@ -242,12 +247,15 @@ impl ConfigResourceInner {
 /// # Safety
 ///
 /// `resource` must be a valid config-resource handle, alive for `'a`.
-unsafe fn inner_ref<'a>(resource: *const kafka_common_config_ConfigResource_t) -> &'a ConfigResourceInner {
+unsafe fn inner_ref<'a>(
+    resource: *const kafka_common_config_ConfigResource_t,
+    param: &'static str,
+) -> &'a ConfigResourceInner {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle alive
     // for `'a`, so it points at a live `ConfigResourceInner`, the `Box::into_raw` of
     // `box_config_resource` (no view of this type is handed out). Nothing mutates a
     // `ConfigResourceInner` while a handle to it exists, so the shared reference is sound for `'a`.
-    unsafe { &*(resource as *const ConfigResourceInner) }
+    unsafe { require_ref::<_, ConfigResourceInner>(resource, param) }
 }
 
 /// The resource behind a handle.
@@ -257,10 +265,11 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_config_ConfigResource_t) -
 /// `resource` must be a valid config-resource handle, alive for `'a`.
 pub(crate) unsafe fn config_resource_ref<'a>(
     resource: *const kafka_common_config_ConfigResource_t,
+    param: &'static str,
 ) -> &'a ConfigResource {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid config-resource handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(resource) }.resource
+    &unsafe { inner_ref(resource, param) }.resource
 }
 
 /// Frees a `kafka_common_config_ConfigResource_t *` element of an owned
@@ -285,8 +294,8 @@ pub(crate) unsafe fn config_resource_key_eq(a: *mut c_void, b: *mut c_void) -> b
     // SAFETY: Per this function's `# Safety`, `a` and `b` are valid config-resource handles, alive
     // for this call, as `config_resource_ref` requires; both borrows end with the comparison.
     unsafe {
-        config_resource_ref(a as *const kafka_common_config_ConfigResource_t)
-            == config_resource_ref(b as *const kafka_common_config_ConfigResource_t)
+        config_resource_ref(a as *const kafka_common_config_ConfigResource_t, "a")
+            == config_resource_ref(b as *const kafka_common_config_ConfigResource_t, "b")
     }
 }
 
@@ -303,6 +312,11 @@ pub(crate) fn box_config_resource(resource: ConfigResource) -> *mut kafka_common
 /// - `resource_type` - a non-`NULL` resource type
 /// - `name` - a non-`NULL` resource name
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("name should not be null") if `name` is `NULL`.
+/// - `LocalNullPointerError` ("type should not be null") if `resource_type` is `NULL`.
+///
 /// # Safety
 ///
 /// `resource_type` must be a type singleton and `name` a valid NUL-terminated string, copied. The
@@ -313,13 +327,17 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
     resource_type: *const kafka_common_config_ConfigResource_Type_t,
     name: *const c_char,
 ) -> *mut kafka_common_config_ConfigResource_t {
+    if resource_type.is_null() {
+        fail(Error::local_null_pointer("type should not be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `resource_type` is a type singleton, as `type_of`
     // requires, and its value is copied out; `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows either
+    // `require_str` requires, and is copied into an owned `String`. Nothing borrows either
     // argument after this call.
-    box_config_resource(ConfigResource::new(unsafe { type_of(resource_type) }, unsafe {
-        c_str_to_string(name)
-    }))
+    box_config_resource(ConfigResource::new(
+        unsafe { type_of(resource_type, "resource_type") },
+        unsafe { require_str_or(name, "name", || Error::local_null_pointer("name should not be null")) },
+    ))
 }
 
 /// Return the resource type.
@@ -339,7 +357,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `config_resource_ref` requires; the value is copied out and mapped to its static singleton,
     // so the borrow lasts for this call only.
-    type_singleton(unsafe { config_resource_ref(self_) }.r#type())
+    type_singleton(unsafe { config_resource_ref(self_, "self_") }.r#type())
 }
 
 /// Return the resource name.
@@ -360,7 +378,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// Returns 1 if this is the default resource of a resource type, else 0.
@@ -376,7 +394,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `config_resource_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { config_resource_ref(self_) }.is_default())
+    i8::from(unsafe { config_resource_ref(self_, "self_") }.is_default())
 }
 
 /// Returns the text form of the resource.
@@ -393,7 +411,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-resource handle, as
     // `config_resource_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { config_resource_ref(self_) }.to_string())
+    into_c_string(&unsafe { config_resource_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned config-resource handle; null is a no-op.
@@ -428,7 +446,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `type_singleton`, which
             // points into the static `TYPES` array and is never freed.
             unsafe {
-                assert_eq!(type_of(handle), value);
+                assert_eq!(type_of(handle, "value"), value);
                 assert_eq!(kafka_common_config_ConfigResource_Type__enum(handle) as usize, index);
                 assert_eq!(kafka_common_config_ConfigResource_Type_id(handle), value.id());
                 assert_eq!(kafka_common_config_ConfigResource_Type_for_id(value.id()), handle);
@@ -472,7 +490,7 @@ mod tests {
             let topic =
                 kafka_common_config_ConfigResource_new(kafka_common_config_ConfigResource_Type_topic(), name.as_ptr());
             assert_eq!(
-                *config_resource_ref(topic),
+                *config_resource_ref(topic, "topic"),
                 ConfigResource::new(Type::Topic, "orders".to_string())
             );
             assert_eq!(
@@ -499,6 +517,27 @@ mod tests {
             assert_eq!(kafka_common_config_ConfigResource_is_default(default_broker), 1);
             kafka_common_config_ConfigResource_destroy(default_broker);
             kafka_common_config_ConfigResource_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: each call gets one `NULL` argument, the other valid (a type
+        // singleton or a string literal), and a valid `err` slot pointing at null; `stored` frees
+        // the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_config_ConfigResource_new_err(std::ptr::null(), c"t".as_ptr(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "type should not be null");
+
+            let mut err = std::ptr::null_mut();
+            let topic = kafka_common_config_ConfigResource_Type_topic();
+            assert!(kafka_common_config_ConfigResource_new_err(topic, std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "name should not be null");
         }
     }
 }

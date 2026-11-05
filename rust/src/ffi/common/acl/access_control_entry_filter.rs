@@ -16,6 +16,7 @@
 //! `org.apache.kafka.common.acl.AccessControlEntryFilter` (CLAUDE.md §4). A
 //! null principal or host is Java's null: "matches any".
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 use std::ptr;
 
@@ -65,6 +66,7 @@ impl AccessControlEntryFilterInner {
 /// `filter` must be a valid access-control-entry-filter handle, alive for `'a`.
 unsafe fn inner_ref<'a>(
     filter: *const kafka_common_acl_AccessControlEntryFilter_t,
+    param: &'static str,
 ) -> &'a AccessControlEntryFilterInner {
     // SAFETY: Per this function's `# Safety`, `filter` is a valid access-control-entry-filter
     // handle alive for `'a`, so it points at a live `AccessControlEntryFilterInner`: the
@@ -72,7 +74,7 @@ unsafe fn inner_ref<'a>(
     // out a view on, which lives as long as that parent. Nothing mutates an
     // `AccessControlEntryFilterInner` while a handle to it exists, so the shared reference is sound
     // for `'a`.
-    unsafe { &*(filter as *const AccessControlEntryFilterInner) }
+    unsafe { require_ref::<_, AccessControlEntryFilterInner>(filter, param) }
 }
 
 /// The filter behind a handle.
@@ -82,10 +84,11 @@ unsafe fn inner_ref<'a>(
 /// `filter` must be a valid access-control-entry-filter handle, alive for `'a`.
 pub(crate) unsafe fn access_control_entry_filter_ref<'a>(
     filter: *const kafka_common_acl_AccessControlEntryFilter_t,
+    param: &'static str,
 ) -> &'a AccessControlEntryFilter {
     // SAFETY: Per this function's `# Safety`, `filter` is a valid access-control-entry-filter
     // handle, as `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(filter) }.filter
+    &unsafe { inner_ref(filter, param) }.filter
 }
 
 /// Hands `filter` to C as an owned handle, freed with
@@ -131,11 +134,11 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_new(
         // SAFETY: Per this function's `# Safety`, `operation` is a singleton of its enum, i.e. one
         // returned by the `acl_operation` module, as `operation_of` (`acl_operation::value_of`)
         // requires; the value is copied out.
-        unsafe { operation_of(operation) },
+        unsafe { operation_of(operation, "operation") },
         // SAFETY: Per this function's `# Safety`, `permission_type` is a singleton of its enum,
         // i.e. one returned by the `acl_permission_type` module, as `permission_type_of`
         // (`acl_permission_type::value_of`) requires; the value is copied out.
-        unsafe { permission_type_of(permission_type) },
+        unsafe { permission_type_of(permission_type, "permission_type") },
     ))
 }
 
@@ -169,7 +172,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_principal(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `inner_ref` requires; the string returned is the handle's own C string, so it
     // lives as long as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }
+    unsafe { inner_ref(self_, "self_") }
         .principal_c
         .as_ref()
         .map_or(ptr::null(), |s| s.as_ptr())
@@ -189,7 +192,10 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_host(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `inner_ref` requires; the string returned is the handle's own C string, so it
     // lives as long as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.host_c.as_ref().map_or(ptr::null(), |s| s.as_ptr())
+    unsafe { inner_ref(self_, "self_") }
+        .host_c
+        .as_ref()
+        .map_or(ptr::null(), |s| s.as_ptr())
 }
 
 /// Returns the AclOperation.
@@ -206,7 +212,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_operation(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `access_control_entry_filter_ref` requires; the value is copied out and mapped to
     // its static singleton, so the borrow lasts for this call only.
-    operation_singleton(unsafe { access_control_entry_filter_ref(self_) }.operation())
+    operation_singleton(unsafe { access_control_entry_filter_ref(self_, "self_") }.operation())
 }
 
 /// Returns the AclPermissionType.
@@ -223,7 +229,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_permission_ty
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `access_control_entry_filter_ref` requires; the value is copied out and mapped to
     // its static singleton, so the borrow lasts for this call only.
-    permission_type_singleton(unsafe { access_control_entry_filter_ref(self_) }.permission_type())
+    permission_type_singleton(unsafe { access_control_entry_filter_ref(self_, "self_") }.permission_type())
 }
 
 /// Returns 1 if there are any UNKNOWN components, else 0.
@@ -239,7 +245,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_is_unknown(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `access_control_entry_filter_ref` requires; the reference is used only within this
     // call.
-    i8::from(unsafe { access_control_entry_filter_ref(self_) }.is_unknown())
+    i8::from(unsafe { access_control_entry_filter_ref(self_, "self_") }.is_unknown())
 }
 
 /// Returns 1 if this filter matches the given AccessControlEntry, else 0.
@@ -261,7 +267,10 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter handle
     // and `other` a valid access-control-entry handle, as `access_control_entry_filter_ref` and
     // `access_control_entry_ref` require. Both borrows last for this call only.
-    i8::from(unsafe { access_control_entry_filter_ref(self_) }.matches(unsafe { access_control_entry_ref(other) }))
+    i8::from(
+        unsafe { access_control_entry_filter_ref(self_, "self_") }
+            .matches(unsafe { access_control_entry_ref(other, "other") }),
+    )
 }
 
 /// Returns 1 if this filter could only match one ACE -- in other words, if
@@ -278,7 +287,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches_at_mo
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `access_control_entry_filter_ref` requires; the reference is used only within this
     // call.
-    i8::from(unsafe { access_control_entry_filter_ref(self_) }.matches_at_most_one())
+    i8::from(unsafe { access_control_entry_filter_ref(self_, "self_") }.matches_at_most_one())
 }
 
 /// Returns a string describing an ANY or UNKNOWN field, or `NULL` if there is
@@ -296,7 +305,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_find_indefini
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `access_control_entry_filter_ref` requires; the result is copied into an owned
     // value before return, so the borrow lasts for this call only.
-    unsafe { access_control_entry_filter_ref(self_) }
+    unsafe { access_control_entry_filter_ref(self_, "self_") }
         .find_indefinite_field()
         .map_or(ptr::null_mut(), |field| into_c_string(&field))
 }
@@ -315,7 +324,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid access-control-entry-filter
     // handle, as `access_control_entry_filter_ref` requires; the result is copied into an owned
     // value before return, so the borrow lasts for this call only.
-    into_c_string(&unsafe { access_control_entry_filter_ref(self_) }.to_string())
+    into_c_string(&unsafe { access_control_entry_filter_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned filter handle. Null is a no-op; the filter borrowed from
@@ -371,7 +380,7 @@ mod tests {
                 kafka_common_acl_AclPermissionType_any(),
             );
             assert_eq!(
-                *access_control_entry_filter_ref(filter),
+                *access_control_entry_filter_ref(filter, "filter"),
                 AccessControlEntryFilter::new(
                     Some("User:alice".into()),
                     None,
@@ -400,19 +409,21 @@ mod tests {
             let field = kafka_common_acl_AccessControlEntryFilter_find_indefinite_field(filter);
             assert_eq!(
                 CStr::from_ptr(field).to_str().unwrap(),
-                access_control_entry_filter_ref(filter).find_indefinite_field().unwrap()
+                access_control_entry_filter_ref(filter, "filter")
+                    .find_indefinite_field()
+                    .unwrap()
             );
             kafka_string_destroy(field);
             let s = kafka_common_acl_AccessControlEntryFilter_to_string(filter);
             assert_eq!(
                 CStr::from_ptr(s).to_str().unwrap(),
-                access_control_entry_filter_ref(filter).to_string()
+                access_control_entry_filter_ref(filter, "filter").to_string()
             );
             kafka_string_destroy(s);
             kafka_common_acl_AccessControlEntryFilter_destroy(filter);
 
             let any = kafka_common_acl_AccessControlEntryFilter_any();
-            assert_eq!(*access_control_entry_filter_ref(any), AccessControlEntryFilter::any());
+            assert_eq!(*access_control_entry_filter_ref(any, "any"), AccessControlEntryFilter::any());
             assert!(kafka_common_acl_AccessControlEntryFilter_principal(any).is_null());
             assert_eq!(
                 kafka_common_acl_AccessControlEntryFilter_operation(any),

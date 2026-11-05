@@ -837,6 +837,47 @@ def test_from_ffi_error_unknown_id_is_the_base(monkeypatch: pytest.MonkeyPatch) 
     assert type(err) is KafkaError and str(err) == "some message"
 
 
+def _rust_only_ids() -> list[str]:
+    """The generator's ``RUST_ONLY_IDS``: FFI ids with no Java class."""
+    text = (_REPO_ROOT / "rust/xtask/src/error_hierarchy.rs").read_text()
+    body = text[text.index("const RUST_ONLY_IDS"):]
+    return re.findall(r'"([A-Z0-9_]+)"', body[:body.index(";")])
+
+
+def test_every_enum_id_is_a_bridge_row_or_rust_only() -> None:
+    bridged = set(_bridge())
+    rust_only = set(_rust_only_ids())
+    assert rust_only == {"LOCAL_CALLBACK", "LOCAL_NULL_POINTER"}
+    assert not bridged & rust_only
+    for constant in _ffi_enum():
+        assert constant == "NONE" or constant in bridged or constant in rust_only, constant
+
+
+def test_local_null_pointer_is_python_type_error() -> None:
+    # Java's NullPointerException has no class: the core's LOCAL_NULL_POINTER
+    # is Python's own TypeError (Types).
+    assert errmod.LOCAL_NULL_POINTER == _ffi_enum()["LOCAL_NULL_POINTER"] == -32
+    assert class_for_ffi_id(errmod.LOCAL_NULL_POINTER) is TypeError
+    assert all(cls.__dict__.get("_ffi_id") != errmod.LOCAL_NULL_POINTER
+               for cls in errmod.error_classes())
+
+
+def test_from_ffi_error_null_pointer_is_a_type_error_spelling_none(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        -32, "topic must not be null",
+        source={1: (TopicAuthorizationError._ffi_id, "inner")}))
+    err = from_ffi_error(0)
+    assert type(err) is TypeError
+    assert str(err) == "topic must not be None"
+    assert isinstance(err.__cause__, TopicAuthorizationError)
+    # Only the whole word: a name holding "null" keeps it.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(-32, "nullable_topic cannot be null."))
+    assert str(from_ffi_error(0)) == "nullable_topic cannot be None."
+    err = from_borrowed_ffi_error((-32, "Topic cannot be null.", False, False, None, False, None))
+    assert type(err) is TypeError and str(err) == "Topic cannot be None."
+
+
 def test_from_ffi_error_minus_one_is_unknown_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(errmod, "_lib", _fake_lib(-1, "boom"))
     assert type(from_ffi_error(0)) is UnknownServerError

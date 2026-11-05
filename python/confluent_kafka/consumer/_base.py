@@ -131,53 +131,24 @@ def _construct_failure(exc: Exception) -> BaseException:
     return KafkaError(message="Failed to construct kafka consumer", cause=exc)
 CONCURRENT_MESSAGE = "KafkaConsumer is not safe for multi-threaded access."
 
-# The null checks of AsyncKafkaConsumer on an argument the FFI takes as a list
-# or a map, so a None cannot cross it (CLAUDE.md, Python Binding Conventions,
-# Implementation over the FFI, exception 4): pause / resume
-# (Objects.requireNonNull), offsetsForTimes, the private
-# seek(Collection, AutoOffsetResetStrategy) of seekToBeginning / seekToEnd, the
-# private beginningOrEndOffset, and the nulls committed and partitionsFor
-# dereference without a check; with whether Java checks before acquire()
-# (only the private seek does). assign's is _assign_partitions. Java's
-# NullPointerException is Python's TypeError naming the parameter, and Java's
-# "null" reads "None" (CLAUDE.md, Python Binding Conventions, Types).
+# The null checks of AsyncKafkaConsumer the binding still makes, on an argument
+# that does not cross the FFI as one value (CLAUDE.md, Python Binding
+# Conventions, Implementation over the FFI, exception 4): commit's offsets map,
+# whose absence the FFI's commit form reads as "the consumed offsets", and
+# seek's OffsetAndMetadata, which crosses as its fields; with whether Java
+# checks before acquire(). Every other null argument crosses the FFI as NULL,
+# which answers with Java's own error and message. Java's NullPointerException
+# is Python's TypeError naming the parameter (CLAUDE.md, Python Binding
+# Conventions, Types).
 _NULL_ARGUMENT: dict[str, tuple[type[TypeError] | type[IllegalArgumentError], str, bool]] = {
-    "pause": (TypeError, "partitions must not be None", False),
-    "resume": (TypeError, "partitions must not be None", False),
-    "offsets_for_times": (TypeError, "timestamps_to_search must not be None", False),
-    "seek_to_beginning": (IllegalArgumentError, "Partitions collection cannot be None", True),
-    "seek_to_end": (IllegalArgumentError, "Partitions collection cannot be None", True),
-    "beginning_offsets": (TypeError, "partitions must not be None", False),
-    "end_offsets": (TypeError, "partitions must not be None", False),
-    # Java dereferences these with no check of its own: committed's
-    # partitions.isEmpty() and TopicMetadataEvent's Objects.requireNonNull(topic).
-    "committed": (TypeError, "partitions must not be None", False),
-    "partitions_for": (TypeError, "topic must not be None", False),
-    # subscribe(topics / pattern, listener): the listener's check
-    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer
-    # #subscribe(Collection,ConsumerRebalanceListener),
-    # #subscribe(SubscriptionPattern,ConsumerRebalanceListener)) precedes
-    # subscribeInternal / subscribeToRegex, the topics' and the pattern's follow
-    # acquireAndEnsureOpen() (#subscribeInternal(Collection,Optional),
-    # #subscribeToRegex).
-    "subscribe_callback": (IllegalArgumentError, "RebalanceListener cannot be None", True),
-    "subscribe_topics": (IllegalArgumentError,
-                         "Topic collection to subscribe to cannot be None", False),
-    "subscribe_pattern": (IllegalArgumentError,
-                          "Topic pattern to subscribe to cannot be None", False),
     # Java's commitSync(Map) / commitAsync(Map, callback) copy the map before
     # acquire() (new HashMap<>(offsets),
     # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer
     # #commitAsync(Map,OffsetCommitCallback), #commitSync(Map));
     # seek(tp, OffsetAndMetadata) reads offsetAndMetadata.offset() first
-    # (#seek(TopicPartition,OffsetAndMetadata)); close(CloseOptions) reads
-    # option.timeout() first (#close(CloseOptions)).
+    # (#seek(TopicPartition,OffsetAndMetadata)).
     "offsets": (TypeError, "offsets must not be None", True),
     "offset_and_metadata": (TypeError, "offset_and_metadata must not be None", True),
-    "option": (TypeError, "option must not be None", True),
-    # currentLag: Objects.requireNonNull(partition) in
-    # org.apache.kafka.clients.consumer.internals.events.CurrentLagEvent#CurrentLagEvent.
-    "current_lag": (TypeError, "topic_partition must not be None", False),
 }
 
 # Java's AsyncKafkaConsumer.position() message for a partition not assigned.
@@ -254,6 +225,17 @@ ABANDONED_CALL_END_S = 5.0
 _OPEN = "open"
 _CLOSING = "closing"
 _CLOSED = "closed"
+
+
+def _lag_partition(partition: TopicPartition | None) -> tuple[str | None, int]:
+    """``current_lag``'s partition as the FFI's ``(topic, partition)``: a
+    ``None`` partition as a ``None`` topic, which the extension passes as a
+    ``NULL`` partition, answered by the core with Java's error; a ``None`` topic
+    of a partition as ``""``."""
+    if partition is None:
+        return None, 0
+    topic = partition.topic()
+    return ("" if topic is None else topic), partition.partition()
 
 
 def _lag_or_none(lag: tuple[int, int]) -> int | None:
@@ -392,18 +374,25 @@ def overload_timeout_ms(timeout: Duration, *, timer: bool) -> int:
 _BLANK_TOPIC_PARTITION = TopicPartition(topic="", partition=0)
 
 
-def blank_null_topics(topics: Iterable[str]) -> list[str]:
+def blank_null_topics(topics: Iterable[str] | None) -> list[str] | None:
     """``subscribe(topics)``'s topics for the FFI, a ``None`` topic as ``""``
     (Java: ``isBlank(topic)`` → "Topic collection to subscribe to cannot
-    contain null or empty topic"). A ``str`` is refused (``reject_str``)."""
+    contain null or empty topic"); a ``None`` collection stays ``None``, which
+    the FFI answers with Java's error. A ``str`` is refused (``reject_str``)."""
     reject_str("topics", topics)
+    if topics is None:
+        return None
     return ["" if topic is None else topic for topic in topics]
 
 
-def blank_null_topic_partitions(partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
+def blank_null_topic_partitions(partitions: Iterable[TopicPartition] | None
+                                ) -> list[TopicPartition] | None:
     """``assign(partitions)``'s partitions for the FFI, a ``None`` partition or
     topic as a blank topic (Java: ``isBlank(tp != null ? tp.topic() : null)`` →
-    "Topic partitions to assign to cannot have null or empty topic")."""
+    "Topic partitions to assign to cannot have null or empty topic"); a ``None``
+    collection stays ``None``, which the FFI answers with Java's error."""
+    if partitions is None:
+        return None
     return [_BLANK_TOPIC_PARTITION if tp is None or tp.topic() is None else tp
             for tp in partitions]
 
@@ -1452,16 +1441,17 @@ class _ConsumerState:
 
         return self._value_spec(_lib.Consumer_poll_cb, convert, timeout_ms, wakeable=True)
 
-    def _subscribe_topics_spec(self, topics: list[str],
-                               listener: ConsumerRebalanceListener | None
-                               ) -> tuple[Any, Any, Any, bool]:
+    def _subscribe_topics_spec(self, topics: list[str] | None,
+                               listener: ConsumerRebalanceListener | None,
+                               has_listener: bool) -> tuple[Any, Any, Any, bool]:
         return self._void_spec(_lib.Consumer_subscribe_cb, topics,
-                               self._listener_adapter(listener))
+                               self._listener_adapter(listener), has_listener)
 
-    def _subscribe_pattern_spec(self, pattern: str, listener: ConsumerRebalanceListener | None
-                                ) -> tuple[Any, Any, Any, bool]:
+    def _subscribe_pattern_spec(self, pattern: str | None,
+                                listener: ConsumerRebalanceListener | None,
+                                has_listener: bool) -> tuple[Any, Any, Any, bool]:
         return self._void_spec(_lib.Consumer_subscribe_pattern_cb, pattern,
-                               self._listener_adapter(listener))
+                               self._listener_adapter(listener), has_listener)
 
     def _seek_spec(self, partition: TopicPartition, offset: int | None,
                    offset_and_metadata: OffsetAndMetadata | None) -> tuple[Any, Any, Any, bool]:
@@ -1491,32 +1481,33 @@ class _ConsumerState:
         return self._value_spec(_lib.Consumer_position_cb, int, partition.topic(),
                                 partition.partition(), timeout_ms, wakeable=True)
 
-    def _current_lag_spec(self, topic_partition: TopicPartition) -> tuple[Any, Any, Any, bool]:
+    def _current_lag_spec(self, topic_partition: TopicPartition | None
+                          ) -> tuple[Any, Any, Any, bool]:
         # Java's currentLag waits through addAndGet without setActiveTask, so
         # wakeup() does not end it: not wakeable. The FFI's presence flag 0 is
         # the empty OptionalLong.
         return self._value_spec(_lib.Consumer_current_lag_cb, _lag_or_none,
-                                topic_partition.topic(), topic_partition.partition())
+                                *_lag_partition(topic_partition))
 
-    def _committed_spec(self, partitions: list[TopicPartition], timeout_ms: int = _NO_TIMEOUT
+    def _committed_spec(self, partitions: list[TopicPartition] | None, timeout_ms: int = _NO_TIMEOUT
                         ) -> tuple[Any, Any, Any, bool]:
         # The core maps a partition without a committed offset to None, as Java to null.
         return self._value_spec(_lib.Consumer_committed_cb, lambda raw: to_offset_map(raw or {}),
                                 tp_to_spec(partitions), timeout_ms, wakeable=True)
 
-    def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int],
+    def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int] | None,
                                 timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         # The core maps a partition without an offset for its timestamp to None, as Java to null.
         return self._value_spec(_lib.Consumer_offsets_for_times_cb,
                                 lambda raw: to_offset_and_timestamp_map(raw or {}),
                                 timestamps_to_spec(timestamps_to_search), timeout_ms)
 
-    def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition],
+    def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition] | None,
                            timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(fn, lambda raw: to_long_map(raw or {}), tp_to_spec(partitions),
                                 timeout_ms)
 
-    def _partitions_for_spec(self, topic: str, timeout_ms: int = _NO_TIMEOUT
+    def _partitions_for_spec(self, topic: str | None, timeout_ms: int = _NO_TIMEOUT
                              ) -> tuple[Any, Any, Any, bool]:
         return self._value_spec(_lib.Consumer_partitions_for_cb,
                                 lambda raw: to_partition_info_list(raw or []), topic, timeout_ms,
@@ -1575,14 +1566,11 @@ class _ConsumerState:
             raw = _lib.Consumer_metrics(h)
         return to_metrics_map(raw)
 
-    def _assign_partitions(self, partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
-        """Java's ``assign()`` argument checks: a null collection raises after
-        the open check (the FFI takes a list, so the binding checks it); a null
-        partition or topic is left to the core as a blank topic."""
-        if partitions is None:
-            with self._use():
-                raise IllegalArgumentError(
-                    message="Topic partitions collection to assign to cannot be None")
+    def _assign_partitions(self, partitions: Iterable[TopicPartition] | None
+                           ) -> list[TopicPartition] | None:
+        """``assign()``'s partitions for the FFI: a null collection crosses as
+        ``NULL``, which the core answers with Java's error; a null partition or
+        topic is left to the core as a blank topic."""
         return blank_null_topic_partitions(partitions)
 
     def _timeout_ms(self, timeout: Duration | None, *, timer: bool = False,
@@ -1629,14 +1617,16 @@ class _ConsumerState:
             with self._use():
                 raise raised
 
-    def _subscribe_listener(self, callback: Any) -> ConsumerRebalanceListener | None:
-        """``subscribe``'s listener: left out (``MISSING``) is Java's
-        ``Optional.empty()``, no listener; a ``None`` is Java's
-        ``subscribe(…, null)``, refused with "RebalanceListener cannot be None"
-        before ``subscribeInternal`` (after the closed check, Order)."""
-        if callback is None:
-            self._check_not_null("subscribe_callback", None)
-        return None if callback is MISSING else cast("ConsumerRebalanceListener", callback)
+    @staticmethod
+    def _subscribe_listener(callback: Any) -> tuple[ConsumerRebalanceListener | None, bool]:
+        """``subscribe``'s listener and whether the overload taking one is
+        called: left out (``MISSING``) is Java's ``Optional.empty()``, no
+        listener; a ``None`` is Java's ``subscribe(…, null)``, which crosses the
+        FFI as a ``NULL`` listener, refused by the core with Java's
+        "RebalanceListener cannot be null"."""
+        if callback is MISSING:
+            return None, False
+        return cast("ConsumerRebalanceListener | None", callback), True
 
     def _seek_args(self, partition: TopicPartition | None, offset: Any,
                    offset_and_metadata: Any) -> tuple[int | None, OffsetAndMetadata | None]:
@@ -1710,7 +1700,6 @@ class _ConsumerState:
 
             with self._use():
                 raise KafkaTimeout()
-        self._check_not_null("partitions_for", topic)
 
     def _offsets_arg(self, offsets: Any) -> Any:
         """The ``offsets`` of ``commit`` / ``commit_nowait`` for the specs:
@@ -1725,12 +1714,13 @@ class _ConsumerState:
     def _check_committed_partitions(self, partitions: object) -> None:
         """Java's ``committed``: ``throwIfGroupIdNotDefined()`` precedes the
         ``partitions.isEmpty()`` that throws on null, so a consumer without a
-        ``group.id`` reports the group first (the binding knows the group id)."""
+        ``group.id`` reports the group first (the binding knows the group id,
+        exception 5); with one, the null collection crosses the FFI as
+        ``NULL``."""
         if partitions is None and not self._group_id_defined:
             with self._use():
                 pass
             raise InvalidGroupIdError(message=GROUP_ID_NOT_DEFINED_MESSAGE)
-        self._check_not_null("committed", partitions)
 
     def _c_group_metadata(self) -> ConsumerGroupMetadata:
         # Java's groupMetadata() calls throwIfGroupIdNotDefined(); the core's
@@ -1854,8 +1844,7 @@ class _ConsumerState:
             return int(position)
         if op == "current_lag":
             (partition,) = args
-            lag, error = _lib.ConsumerHandle_current_lag(
-                handle, partition.topic(), partition.partition())
+            lag, error = _lib.ConsumerHandle_current_lag(handle, *_lag_partition(partition))
             raise_if_error(error)
             return _lag_or_none(lag)
         if op == "committed":

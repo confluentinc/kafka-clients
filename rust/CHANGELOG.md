@@ -2,6 +2,24 @@
 
 All notable changes to the `confluent-kafka` crate are documented in this file.
 
+## [Unreleased]
+
+### C FFI
+
+- A NULL mandatory argument (a handle, a string, a list, a map, an element, a
+  function pointer) is checked at every export and reported with the error Java
+  throws there: `kafka_common_Error_LOCAL_NULL_POINTER` (the new
+  `LocalNullPointerError`, Java's `NullPointerException`, message
+  "<parameter> must not be null"), or Java's own error and text where Java
+  checks the argument (`IllegalArgumentException` for `assign(null)`). Fallible
+  functions, the `_err` twins of `confluent_kafka_bindings.h` and `_cb`
+  completions deliver it; a `confluent_kafka.h` function with no error channel
+  logs it and aborts the process, as does a fallible function given a NULL
+  `out_err` when it has an error to store. Nothing dereferences a NULL.
+- **Breaking:** the made-up failure values (`fallback`) a function without an
+  error channel returned on a caught panic are gone: such a panic aborts.
+  `_destroy(NULL)` stays a no-op.
+
 ## [1.0.0] - 2026-10-30
 
 ### General availability

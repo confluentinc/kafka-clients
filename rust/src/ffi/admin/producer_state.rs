@@ -17,6 +17,7 @@
 //! Java's `OptionalInt coordinatorEpoch()` and `OptionalLong
 //! currentTransactionStartOffset()` cross as `-1` when empty.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::admin::ProducerState;
@@ -40,12 +41,15 @@ pub(crate) fn box_producer_state(state: ProducerState) -> *mut kafka_admin_Produ
 /// # Safety
 ///
 /// `state` must be a live producer-state handle, kept alive for `'a`.
-pub(crate) unsafe fn producer_state_ref<'a>(state: *const kafka_admin_ProducerState_t) -> &'a ProducerState {
+pub(crate) unsafe fn producer_state_ref<'a>(
+    state: *const kafka_admin_ProducerState_t,
+    param: &'static str,
+) -> &'a ProducerState {
     // SAFETY: Per this function's `# Safety`, `state` is a live producer-state handle kept alive
     // for `'a`. Every `kafka_admin_ProducerState_t` comes from `box_producer_state`, which boxes a
     // `ProducerState`, so the cast yields a valid shared reference. The type has no setters, so
     // nothing mutates it while borrowed.
-    unsafe { &*(state as *const ProducerState) }
+    unsafe { require_ref::<_, ProducerState>(state, param) }
 }
 
 /// Frees a `kafka_admin_ProducerState_t *` element of an owned container.
@@ -110,7 +114,7 @@ pub extern "C" fn kafka_admin_ProducerState_new(
 pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kafka_admin_ProducerState_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    unsafe { producer_state_ref(self_) }.producer_id()
+    unsafe { producer_state_ref(self_, "self_") }.producer_id()
 }
 
 /// Returns the producer epoch.
@@ -123,7 +127,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_id(self_: *const kaf
 pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    unsafe { producer_state_ref(self_) }.producer_epoch()
+    unsafe { producer_state_ref(self_, "self_") }.producer_epoch()
 }
 
 /// Returns the last sequence number written by the producer.
@@ -136,7 +140,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_producer_epoch(self_: *const 
 pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const kafka_admin_ProducerState_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    unsafe { producer_state_ref(self_) }.last_sequence()
+    unsafe { producer_state_ref(self_, "self_") }.last_sequence()
 }
 
 /// Returns the timestamp of the producer's last write.
@@ -149,42 +153,36 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_last_sequence(self_: *const k
 pub unsafe extern "C" fn kafka_admin_ProducerState_last_timestamp(self_: *const kafka_admin_ProducerState_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    unsafe { producer_state_ref(self_) }.last_timestamp()
+    unsafe { producer_state_ref(self_, "self_") }.last_timestamp()
 }
 
 /// Returns the epoch of the transaction coordinator, or `-1` for `OptionalInt.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no coordinator epoch: Java reads a negative one as
-/// `OptionalInt.empty()`.
-///
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_coordinator_epoch(self_: *const kafka_admin_ProducerState_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    unsafe { producer_state_ref(self_) }.coordinator_epoch().unwrap_or(-1)
+    unsafe { producer_state_ref(self_, "self_") }.coordinator_epoch().unwrap_or(-1)
 }
 
 /// Returns the start offset of the producer's ongoing transaction, or `-1` for
 /// `OptionalLong.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no transaction start offset: Java reads a negative one
-/// as `OptionalLong.empty()`.
-///
 /// # Safety
 ///
 /// `self_` must be a valid producer-state handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_offset(
     self_: *const kafka_admin_ProducerState_t,
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    unsafe { producer_state_ref(self_) }
+    unsafe { producer_state_ref(self_, "self_") }
         .current_transaction_start_offset()
         .unwrap_or(-1)
 }
@@ -200,7 +198,7 @@ pub unsafe extern "C" fn kafka_admin_ProducerState_current_transaction_start_off
 pub unsafe extern "C" fn kafka_admin_ProducerState_to_string(self_: *const kafka_admin_ProducerState_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid producer-state handle, kept alive
     // for this call, as `producer_state_ref` requires.
-    into_c_string(&unsafe { producer_state_ref(self_) }.to_string())
+    into_c_string(&unsafe { producer_state_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned producer-state handle; `NULL` is a no-op.

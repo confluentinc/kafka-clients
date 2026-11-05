@@ -79,9 +79,6 @@ from ._base import (
     LONG_MAX_VALUE,
     Completion,
     _ProducerState,
-    check_group_metadata,
-    check_offsets,
-    check_record,
     close_timeout_ms,
     closed_while_sending,
     free_error,
@@ -168,7 +165,7 @@ class _Completion:
                  "outcome", "_waiter", "_fired", "completed")
 
     def __init__(self, producer: object, callback: Callback | None,
-                 future: _KafkaFutureImpl[RecordMetadata], topic: str, partition: int | None,
+                 future: _KafkaFutureImpl[RecordMetadata], topic: str | None, partition: int | None,
                  untrack: Callable[[_KafkaFutureImpl[RecordMetadata]], None]) -> None:
         self._producer = producer
         self._callback = callback
@@ -391,8 +388,6 @@ class Producer(Generic[K, V], _ProducerState):
         abortable error.
         """
         self._check_not_closed()
-        check_group_metadata(group_metadata)
-        check_offsets(offsets)
         native = group_metadata_handle(group_metadata)
         spec = offsets_to_spec(offsets)
         self._run_void("AddOffsetsToTxn", _lib.Producer_send_offsets_to_transaction_cb,
@@ -516,7 +511,6 @@ class Producer(Generic[K, V], _ProducerState):
         if callback is MISSING:
             callback = None
         self._check_not_closed()
-        check_record(record)
         if callback is not None:
             reject_coroutine_callback(callback)
             check_callback(callback)
@@ -614,8 +608,6 @@ class Producer(Generic[K, V], _ProducerState):
         (``TimeoutError``). Raises ``TypeError`` for a ``None`` topic.
         """
         self._check_not_closed()
-        if topic is None:
-            raise TypeError("topic must not be None")
         partitions, error = self._run_queued(
             f"the metadata of topic {topic}", _lib.Producer_partitions_for_cb, topic,
             free=_free_partitions_payload)

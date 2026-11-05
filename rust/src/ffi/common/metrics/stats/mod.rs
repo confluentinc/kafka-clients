@@ -29,6 +29,7 @@
 //! Each class file writes its exports out in full (the translation lint
 //! reads the source without expanding macros).
 
+use crate::ffi::precondition::require_ref;
 use std::sync::{Arc, OnceLock};
 
 use crate::common::metrics::{CompoundStat, Measurable, MeasurableStat, MetricValueProvider, Stat};
@@ -81,13 +82,13 @@ impl<T> StatHandle<T> {
     /// # Safety
     ///
     /// `ptr` must be a valid handle of this class, alive for `'a`.
-    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self, param: &'static str) -> &'a Self {
         // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this class alive for
         // `'a`, i.e. the `Box::into_raw` of a `StatHandle<T>` in `boxed`, which only `destroy`
         // takes back. The handle is never mutated through a pointer: the views are filled in
         // through their `OnceLock`s and the stat is shared through its `Arc`, so the shared
         // reference is sound for `'a`.
-        unsafe { &*ptr }
+        unsafe { require_ref::<_, Self>(ptr, param) }
     }
 
     /// The stat.
@@ -178,12 +179,12 @@ mod tests {
         // while it is alive, and `take_measurable_stat` clones the stat out of the view without
         // taking the view.
         unsafe {
-            let h = StatHandle::from_ptr(handle);
+            let h = StatHandle::from_ptr(handle, "handle");
             assert_eq!(h.as_stat(), h.as_stat());
             assert_eq!(h.as_measurable(), h.as_measurable());
             assert_eq!(h.as_measurable_stat(), h.as_measurable_stat());
-            stat_ref(h.as_stat()).record(&config, 3.0, 0);
-            assert_eq!(measurable_ref(h.as_measurable()).measure(&config, 0), 3.0);
+            stat_ref(h.as_stat(), "value").record(&config, 3.0, 0);
+            assert_eq!(measurable_ref(h.as_measurable(), "value").measure(&config, 0), 3.0);
             // Taking the view shares the stat: the handle keeps working.
             let shared = take_measurable_stat(h.as_measurable_stat() as *mut _);
             shared.record(&config, 5.0, 0);

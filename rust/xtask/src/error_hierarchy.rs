@@ -109,10 +109,14 @@ const EXCLUSIONS: &[&str] = &[
 ///   listener's foreign `Throwable`, and the binding swaps its original
 ///   exception back in from the error's `opaque`, so the user never sees a
 ///   class for it.
-const RUST_ONLY_IDS: &[&str] = &["LOCAL_CALLBACK"];
+/// - `LOCAL_NULL_POINTER` is `LocalNullPointerError`, Java's
+///   `java.lang.NullPointerException`, which the C boundary reports for a `NULL`
+///   mandatory argument. Python has no class for it: the binding raises Python's
+///   own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
+const RUST_ONLY_IDS: &[&str] = &["LOCAL_CALLBACK", "LOCAL_NULL_POINTER"];
 
 /// `(ffi_id_constant, java_class_fqn)` — one row per concrete (non-abstract) Java
-/// exception class, i.e. one row per FFI id (all 167 enum ids except `NONE`, which
+/// exception class, i.e. one row per FFI id (all enum ids except `NONE`, which
 /// is the no-error sentinel, and the `RUST_ONLY_IDS`; `UNKNOWN_SERVER_ERROR` is
 /// `UnknownServerException`).
 /// This is the reviewed correspondence between the two vocabularies (see the
@@ -698,7 +702,9 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         &[&[], &[("String", "s")]],
     ),
     // `java.lang.NullPointerException` has no class: a `null` argument Java rejects
-    // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
+    // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types),
+    // and the core's `LOCAL_NULL_POINTER` id is one of the `RUST_ONLY_IDS`, which the
+    // binding maps to that `TypeError`.
 ];
 
 /// JDK classes at the top of every chain: `Throwable`'s constructors decide the

@@ -827,6 +827,15 @@ static void test_mock_admin_set_fetches_remaining_until_visible(void) {
     kafka_admin_MockAdminClient_set_fetches_remaining_until_visible(f.mock, "nope", 1, &err);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "No such topic as nope");
+    /* Java's `allTopics.get(null)` misses too and prints `null`. */
+    err = NULL;
+    kafka_admin_MockAdminClient_set_fetches_remaining_until_visible(f.mock, NULL, 1, &err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "No such topic as null");
+    err = NULL;
+    kafka_admin_MockAdminClient_mark_topic_for_deletion(f.mock, NULL, &err);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "Topic null did not exist.");
     fixture_destroy(&f);
 }
 
@@ -3512,6 +3521,12 @@ static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitio
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
+    /* Java's `futures.get(null)` misses the same way. */
+    err = NULL;
+    future = kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(result, NULL, &err);
+    TEST_ASSERT_NULL(future);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "Offsets for consumer group 'null' were not requested.");
     kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
     kafka_Map_destroy(specs);
     kafka_admin_ListConsumerGroupOffsetsSpec_destroy(spec);
@@ -3920,9 +3935,11 @@ static void test_mock_admin_remove_members_rejects_an_empty_member_list(void) {
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     assert_error_message(err, "Invalid empty members has been provided");
     err = NULL;
+    // Java's constructor dereferences a null collection (`members.isEmpty()`).
     options = kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(NULL, &err);
     TEST_ASSERT_NULL(options);
-    assert_error_message(err, "Invalid empty members has been provided");
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_null_pointer_error(err));
+    assert_error_message(err, "members must not be null");
     kafka_List_destroy(empty);
 }
 
@@ -5020,6 +5037,11 @@ static void test_mock_admin_describe_transactions_reports_unsupported_per_id(voi
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
+    err = NULL;
+    future = kafka_admin_DescribeTransactionsResult_description(result, NULL, &err);
+    TEST_ASSERT_NULL(future);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+    assert_error_message(err, "TransactionalId `null` was not included in the request");
     expect_fails_with(kafka_admin_DescribeTransactionsResult_all(result), "Not implemented yet");
     kafka_admin_DescribeTransactionsResult_destroy(result);
     kafka_admin_DescribeTransactionsResult_destroy(NULL);
@@ -5058,6 +5080,14 @@ static void test_mock_admin_fence_producers_reports_unsupported_per_id(void) {
     TEST_ASSERT_NULL(future);
     TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
     kafka_common_Error_destroy(err);
+    for (int epoch = 0; epoch < 2; epoch++) {
+        err = NULL;
+        future = epoch ? kafka_admin_FenceProducersResult_epoch_id(result, NULL, &err)
+                       : kafka_admin_FenceProducersResult_producer_id(result, NULL, &err);
+        TEST_ASSERT_NULL(future);
+        TEST_ASSERT_TRUE(kafka_common_Error_is_local_illegal_argument_error(err));
+        assert_error_message(err, "TransactionalId `null` was not included in the request");
+    }
     expect_fails_with(kafka_admin_FenceProducersResult_all(result), "Not implemented yet");
     kafka_admin_FenceProducersResult_destroy(result);
     kafka_admin_FenceProducersResult_destroy(NULL);

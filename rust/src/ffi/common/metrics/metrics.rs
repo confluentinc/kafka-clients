@@ -29,6 +29,7 @@
 //! registry (`init` during `add_reporter`, `metric_change` / `metric_removal`
 //! during `add_metric*` / `remove_*`, `close` during `close`).
 
+use crate::ffi::precondition::{require_mut, require_ref, require_str};
 use std::collections::BTreeMap;
 use std::ffi::c_char;
 use std::sync::Arc;
@@ -55,7 +56,7 @@ use crate::ffi::common::metrics::sensor::{
 };
 use crate::ffi::common::{FailValue, deliver_value};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t, list_strings, map_strings};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t, list_strings, map_strings};
 
 // ---------------------------------------------------------------------------
 // Metrics
@@ -72,13 +73,16 @@ pub struct kafka_common_metrics_Metrics_t {
 /// # Safety
 ///
 /// `metrics` must be a valid registry handle, alive for `'a`.
-pub(crate) unsafe fn metrics_ref<'a>(metrics: *const kafka_common_metrics_Metrics_t) -> &'a Metrics {
+pub(crate) unsafe fn metrics_ref<'a>(
+    metrics: *const kafka_common_metrics_Metrics_t,
+    param: &'static str,
+) -> &'a Metrics {
     // SAFETY: Per this function's `# Safety`, `metrics` is a valid registry handle alive for `'a`,
     // i.e. the `Box::into_raw` of a `Metrics` in `boxed` (every registry handle is owned: no view
     // of this type is handed out). Only `kafka_common_metrics_Metrics_destroy` takes the `Metrics`
     // back, and the registry is otherwise used only through `&self`, so the shared reference is
     // sound for `'a`.
-    unsafe { &*(metrics as *const Metrics) }
+    unsafe { require_ref::<_, Metrics>(metrics, param) }
 }
 
 fn boxed(metrics: Metrics) -> *mut kafka_common_metrics_Metrics_t {
@@ -152,13 +156,12 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name(
     name: *const c_char,
     group: *const c_char,
 ) -> *mut kafka_common_MetricName_t {
-    box_metric_name(
-        // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as
-        // `metrics_ref` requires, and `name` and `group` are NUL-terminated strings, as
-        // `c_str_to_string` requires; the reference is used only within this call and the strings
-        // are copied into owned `String`s.
-        unsafe { metrics_ref(self_) }.metric_name(unsafe { c_str_to_string(name) }, unsafe { c_str_to_string(group) }),
-    )
+    // SAFETY: Per this function's `# Safety`, `name` and `group` are NUL-terminated strings, as
+    // `require_str` requires; they are copied into owned `String`s.
+    let (name, group) = unsafe { (require_str(name, "name"), require_str(group, "group")) };
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
+    // requires; the reference is used only within this call.
+    box_metric_name(unsafe { metrics_ref(self_, "self_") }.metric_name(name, group))
 }
 
 /// `metricName(String name, String group, String description)`.
@@ -188,19 +191,19 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 ) -> *mut kafka_common_MetricName_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    box_metric_name(unsafe { metrics_ref(self_) }.metric_name_with_description(
+    box_metric_name(unsafe { metrics_ref(self_, "self_") }.metric_name_with_description(
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `description` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(description) },
+        unsafe { require_str(description, "description") },
     ))
 }
 
@@ -221,7 +224,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated and
-/// `tags` null or a valid map of NUL-terminated strings.
+/// `tags` a valid map of NUL-terminated strings.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
@@ -234,19 +237,19 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
 ) -> *mut kafka_common_MetricName_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    box_metric_name(unsafe { metrics_ref(self_) }.metric_name_with_tags(
+    box_metric_name(unsafe { metrics_ref(self_, "self_") }.metric_name_with_tags(
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
-        // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+        unsafe { require_str(group, "group") },
+        // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
         // strings, as `map_strings` requires; the entries are copied into owned `String`s, so
         // nothing borrows the map after this call.
-        unsafe { map_strings(tags) }.into_iter().collect::<BTreeMap<_, _>>(),
+        unsafe { map_strings(tags, "tags") }.into_iter().collect::<BTreeMap<_, _>>(),
     ))
 }
 
@@ -266,7 +269,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_tags(
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated and
-/// `tags` null or a valid map of NUL-terminated strings.
+/// `tags` a valid map of NUL-terminated strings.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
@@ -280,23 +283,23 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 ) -> *mut kafka_common_MetricName_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    box_metric_name(unsafe { metrics_ref(self_) }.metric_name_with_description_tags(
+    box_metric_name(unsafe { metrics_ref(self_, "self_") }.metric_name_with_description_tags(
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `description` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(description) },
-        // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+        unsafe { require_str(description, "description") },
+        // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
         // strings, as `map_strings` requires; the entries are copied into owned `String`s, so
         // nothing borrows the map after this call.
-        unsafe { map_strings(tags) }.into_iter().collect::<BTreeMap<_, _>>(),
+        unsafe { map_strings(tags, "tags") }.into_iter().collect::<BTreeMap<_, _>>(),
     ))
 }
 
@@ -323,7 +326,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
 /// # Safety
 ///
 /// `self_` must be a valid registry handle, the strings NUL-terminated,
-/// `key_value` null or a valid list of NUL-terminated strings and `out_err` a
+/// `key_value` a valid list of NUL-terminated strings and `out_err` a
 /// valid slot pointing at null.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
@@ -337,27 +340,27 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_name_with_descripti
     key_value: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_MetricName_t {
-    // SAFETY: Per this function's `# Safety`, `key_value` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `key_value` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
-    let key_value = unsafe { list_strings(key_value) };
+    let key_value = unsafe { list_strings(key_value, "key_value") };
     let key_value: Vec<&str> = key_value.iter().map(String::as_str).collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .metric_name_with_description_key_value(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            unsafe { c_str_to_string(name) },
+            unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `group` is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            unsafe { c_str_to_string(group) },
+            unsafe { require_str(group, "group") },
             // SAFETY: Per this function's `# Safety`, `description` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            unsafe { c_str_to_string(description) },
+            unsafe { require_str(description, "description") },
             &key_value,
         )
         .map(box_metric_name);
@@ -381,7 +384,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_config(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call. The `Arc` is cloned, so the config
     // handle returned shares the registry's config.
-    box_metric_config(Arc::clone(unsafe { metrics_ref(self_) }.config()))
+    box_metric_config(Arc::clone(unsafe { metrics_ref(self_, "self_") }.config()))
 }
 
 /// `getSensor(String name)`: the sensor registered under `name`, `NULL` when there is none.
@@ -406,9 +409,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_get_sensor(
     name: *const c_char,
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
-    // requires, and `name` a NUL-terminated string, as `c_str_to_string` requires; the reference is
+    // requires, and `name` a NUL-terminated string, as `require_str` requires; the reference is
     // used only within this call and the name is copied into an owned `String`.
-    match unsafe { metrics_ref(self_) }.get_sensor(&unsafe { c_str_to_string(name) }) {
+    match unsafe { metrics_ref(self_, "self_") }.get_sensor(&unsafe { require_str(name, "name") }) {
         Some(sensor) => box_sensor(sensor),
         None => std::ptr::null_mut(),
     }
@@ -443,11 +446,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor(
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        .sensor(&unsafe { c_str_to_string(name) })
+        .sensor(&unsafe { require_str(name, "name") })
         .map(box_sensor);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as `deliver` requires; on
     // success the owned handle written there passes to the C caller.
@@ -486,13 +489,13 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_leve
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-        // `c_str_to_string` requires, and `recording_level` a recording-level singleton, as
+        // `require_str` requires, and `recording_level` a recording-level singleton, as
         // `recording_level_of` requires; the name is copied into an owned `String` and the level
         // copied out.
-        .sensor_with_recording_level(&unsafe { c_str_to_string(name) }, unsafe {
-            recording_level_of(recording_level)
+        .sensor_with_recording_level(&unsafe { require_str(name, "name") }, unsafe {
+            recording_level_of(recording_level, "recording_level")
         })
         .map(box_sensor);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as
@@ -534,12 +537,12 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_parents(
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-        // `c_str_to_string` requires, and `parents` null or a valid list of sensor handles, as
+        // `require_str` requires, and `parents` null or a valid list of sensor handles, as
         // `list_sensors` requires; the name is copied into an owned `String` and the sensors cloned
         // into owned `Arc`s, so nothing borrows either after this call.
-        .sensor_with_parents(&unsafe { c_str_to_string(name) }, &unsafe { list_sensors(parents) })
+        .sensor_with_parents(&unsafe { require_str(name, "name") }, &unsafe { list_sensors(parents) })
         .map(box_sensor);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as `deliver`
     // requires; on success the owned handle written there passes to the C caller.
@@ -580,15 +583,15 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_recording_leve
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_recording_level_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `recording_level` is a recording-level
             // singleton, as `recording_level_of` requires; the value is copied out.
-            unsafe { recording_level_of(recording_level) },
+            unsafe { recording_level_of(recording_level, "recording_level") },
             // SAFETY: Per this function's `# Safety`, `parents` is null or a valid list of sensor
             // handles, as `list_sensors` requires; the sensors are cloned into owned `Arc`s, so
             // nothing borrows the list after this call.
@@ -637,12 +640,12 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_parents
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_config_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config
             // handle, as `metric_config_option` requires; it returns an owned `Arc`, so nothing
             // borrows the handle after this call.
@@ -695,19 +698,19 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_recordi
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_config_recording_level_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config
             // handle, as `metric_config_option` requires; it returns an owned `Arc`, so nothing
             // borrows the handle after this call.
             unsafe { metric_config_option(config) },
             // SAFETY: Per this function's `# Safety`, `recording_level` is a recording-level
             // singleton, as `recording_level_of` requires; the value is copied out.
-            unsafe { recording_level_of(recording_level) },
+            unsafe { recording_level_of(recording_level, "recording_level") },
             // SAFETY: Per this function's `# Safety`, `parents` is null or a valid list of sensor
             // handles, as `list_sensors` requires; the sensors are cloned into owned `Arc`s, so
             // nothing borrows the list after this call.
@@ -757,12 +760,12 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_config_inactiv
 ) -> *mut kafka_common_metrics_Sensor_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_config_inactive_sensor_expiration_time_seconds_parents(
             // SAFETY: Per this function's `# Safety`, `name` is a NUL-terminated string, as
-            // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows
+            // `require_str` requires; it is copied into an owned `String`, so nothing borrows
             // it after this call.
-            &unsafe { c_str_to_string(name) },
+            &unsafe { require_str(name, "name") },
             // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config
             // handle, as `metric_config_option` requires; it returns an owned `Arc`, so nothing
             // borrows the handle after this call.
@@ -811,10 +814,10 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_sensor_with_options(
     // `Box::into_raw` of a `SensorOptionsInner` in
     // `kafka_common_metrics_SensorOptionsBuilder_build` (every options handle is owned); nothing
     // mutates a `SensorOptionsInner`, and the reference is used only within this call.
-    let options = unsafe { &*(options as *const SensorOptionsInner) };
+    let options = unsafe { require_ref::<_, SensorOptionsInner>(options, "options") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .sensor_with_options(options.options())
         .map(box_sensor);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as `deliver`
@@ -839,9 +842,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_sensor(
     name: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
-    // requires, and `name` a NUL-terminated string, as `c_str_to_string` requires; the reference is
+    // requires, and `name` a NUL-terminated string, as `require_str` requires; the reference is
     // used only within this call and the name is copied into an owned `String`.
-    unsafe { metrics_ref(self_) }.remove_sensor(&unsafe { c_str_to_string(name) })
+    unsafe { metrics_ref(self_, "self_") }.remove_sensor(&unsafe { require_str(name, "name") })
 }
 
 /// `addMetric(MetricName metricName, Measurable measurable)`: the name is
@@ -878,11 +881,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_measurable
     let measurable = Box::new(ArcMeasurable(unsafe { take_measurable(measurable) }));
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    match unsafe { metrics_ref(self_) }
+    match unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
         // `metric_name_ref` requires; the name is cloned, so nothing borrows the handle after this
         // call.
-        .add_metric_with_measurable(unsafe { metric_name_ref(metric_name) }.clone(), measurable)
+        .add_metric_with_measurable(unsafe { metric_name_ref(metric_name, "metric_name") }.clone(), measurable)
     {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -921,12 +924,12 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_metric_val
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    match unsafe { metrics_ref(self_) }
+    match unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
         // `metric_name_ref` requires, and `metric_value_provider` a valid metric-value-provider
         // handle not used again when owned, as `take_metric_value_provider` requires; the name is
         // cloned, so nothing borrows either handle after this call.
-        .add_metric_with_metric_value_provider(unsafe { metric_name_ref(metric_name) }.clone(), unsafe {
+        .add_metric_with_metric_value_provider(unsafe { metric_name_ref(metric_name, "metric_name") }.clone(), unsafe {
             take_metric_value_provider(metric_value_provider)
         }) {
         Ok(()) => {},
@@ -966,11 +969,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_with_config_met
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    match unsafe { metrics_ref(self_) }.add_metric_with_config_metric_value_provider(
+    match unsafe { metrics_ref(self_, "self_") }.add_metric_with_config_metric_value_provider(
         // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
         // `metric_name_ref` requires; the name is cloned, so nothing borrows the handle after this
         // call.
-        unsafe { metric_name_ref(metric_name) }.clone(),
+        unsafe { metric_name_ref(metric_name, "metric_name") }.clone(),
         // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config handle,
         // as `metric_config_option` requires; it returns an owned `Arc`, so nothing borrows the
         // handle after this call.
@@ -1017,11 +1020,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_metric_if_absent(
 ) -> *mut kafka_common_metrics_KafkaMetric_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call. The metric returned is an owned `Arc`.
-    box_kafka_metric(unsafe { metrics_ref(self_) }.add_metric_if_absent(
+    box_kafka_metric(unsafe { metrics_ref(self_, "self_") }.add_metric_if_absent(
         // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
         // `metric_name_ref` requires; the name is cloned, so nothing borrows the handle after this
         // call.
-        unsafe { metric_name_ref(metric_name) }.clone(),
+        unsafe { metric_name_ref(metric_name, "metric_name") }.clone(),
         // SAFETY: Per this function's `# Safety`, `config` is null or a valid metric-config handle,
         // as `metric_config_option` requires; it returns an owned `Arc`, so nothing borrows the
         // handle after this call.
@@ -1058,7 +1061,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_remove_metric(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires, and `metric_name` a valid metric-name handle, as `metric_name_ref` requires; both
     // references are used only within this call.
-    match unsafe { metrics_ref(self_) }.remove_metric(unsafe { metric_name_ref(metric_name) }) {
+    match unsafe { metrics_ref(self_, "self_") }.remove_metric(unsafe { metric_name_ref(metric_name, "metric_name") }) {
         Some(metric) => box_kafka_metric(metric),
         None => std::ptr::null_mut(),
     }
@@ -1085,7 +1088,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_reporter(
     // was owned, as `take_metrics_reporter` requires; the registry reference is used only within
     // this call, and an owned reporter is consumed here while a view's implementation is shared
     // through its `Arc`.
-    unsafe { metrics_ref(self_) }.add_reporter(unsafe { take_metrics_reporter(reporter) })
+    unsafe { metrics_ref(self_, "self_") }.add_reporter(unsafe { take_metrics_reporter(reporter) })
 }
 
 /// Get all the metrics currently maintained indexed by metricName
@@ -1107,7 +1110,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metrics(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call. The view holds its own reference to
     // the registry's map.
-    box_metrics_view(unsafe { metrics_ref(self_) }.metrics())
+    box_metrics_view(unsafe { metrics_ref(self_, "self_") }.metrics())
 }
 
 /// Returns the metric registered under `metric_name`, or `NULL` when none is.
@@ -1130,7 +1133,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires, and `metric_name` a valid metric-name handle, as `metric_name_ref` requires; both
     // references are used only within this call.
-    match unsafe { metrics_ref(self_) }.metric(unsafe { metric_name_ref(metric_name) }) {
+    match unsafe { metrics_ref(self_, "self_") }.metric(unsafe { metric_name_ref(metric_name, "metric_name") }) {
         Some(metric) => box_kafka_metric(metric),
         None => std::ptr::null_mut(),
     }
@@ -1150,8 +1153,8 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid registry handle, `template` a valid template handle, `key_value` `NULL`
-/// or a valid list of NUL-terminated strings and `out_err` a valid slot pointing at `NULL`. The
+/// `self_` must be a valid registry handle, `template` a valid template handle, `key_value` a valid
+/// list of NUL-terminated strings and `out_err` a valid slot pointing at `NULL`. The
 /// returned name is owned by the caller and freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -1161,18 +1164,18 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_key_v
     key_value: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_MetricName_t {
-    // SAFETY: Per this function's `# Safety`, `key_value` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `key_value` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
-    let key_value = unsafe { list_strings(key_value) };
+    let key_value = unsafe { list_strings(key_value, "key_value") };
     let key_value: Vec<&str> = key_value.iter().map(String::as_str).collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         // SAFETY: Per this function's `# Safety`, `template` is a valid metric-name-template
         // handle, as `metric_name_template_ref` requires; the reference is used only within this
         // call.
-        .metric_instance_with_key_value(unsafe { metric_name_template_ref(template) }, &key_value)
+        .metric_instance_with_key_value(unsafe { metric_name_template_ref(template, "template") }, &key_value)
         .map(box_metric_name);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as
     // `deliver` requires; on success the owned handle written there passes to the C caller.
@@ -1193,7 +1196,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_key_v
 ///
 /// # Safety
 ///
-/// `self_` must be a valid registry handle, `template` a valid template handle, `tags` `NULL` or a
+/// `self_` must be a valid registry handle, `template` a valid template handle, `tags` a
 /// valid map of NUL-terminated strings and `out_err` a valid slot pointing at `NULL`. The returned
 /// name is owned by the caller and freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
@@ -1206,16 +1209,16 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_tags(
 ) -> *mut kafka_common_MetricName_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    let result = unsafe { metrics_ref(self_) }
+    let result = unsafe { metrics_ref(self_, "self_") }
         .metric_instance_with_tags(
             // SAFETY: Per this function's `# Safety`, `template` is a valid metric-name-template
             // handle, as `metric_name_template_ref` requires; the reference is used only within
             // this call.
-            unsafe { metric_name_template_ref(template) },
-            // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of
+            unsafe { metric_name_template_ref(template, "template") },
+            // SAFETY: Per this function's `# Safety`, `tags` is a valid map of
             // NUL-terminated strings, as `map_strings` requires; the entries are copied into owned
             // `String`s, so nothing borrows the map after this call.
-            unsafe { map_strings(tags) }.into_iter().collect::<BTreeMap<_, _>>(),
+            unsafe { map_strings(tags, "tags") }.into_iter().collect::<BTreeMap<_, _>>(),
         )
         .map(box_metric_name);
     // SAFETY: Per this function's `# Safety`, `out_err` is writable, as
@@ -1234,7 +1237,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_metric_instance_with_tags(
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_close(self_: *const kafka_common_metrics_Metrics_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
     // requires; the reference is used only within this call.
-    unsafe { metrics_ref(self_) }.close()
+    unsafe { metrics_ref(self_, "self_") }.close()
 }
 
 /// Frees an owned registry handle; null is a no-op. Sensor and metric
@@ -1339,13 +1342,14 @@ struct SensorOptionsBuilderInner {
 /// other call during it.
 unsafe fn builder_mut<'a>(
     self_: *mut kafka_common_metrics_SensorOptionsBuilder_t,
+    param: &'static str,
 ) -> &'a mut SensorOptionsBuilderInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle, i.e. the
     // `Box::into_raw` of a `SensorOptionsBuilderInner` in
     // `kafka_common_metrics_SensorOptionsBuilder_new` (every builder handle is owned), alive for
     // `'a` and used by no other call during it, so the exclusive reference aliases nothing for
     // `'a`.
-    unsafe { &mut *(self_ as *mut SensorOptionsBuilderInner) }
+    unsafe { require_mut::<_, SensorOptionsBuilderInner>(self_, param) }
 }
 
 /// Returns a builder with every parameter unset or at its default.
@@ -1384,9 +1388,9 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_name(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `builder_mut` requires, and `name` a NUL-terminated string, as
-    // `c_str_to_string` requires; the exclusive reference is used only within this call. The name
+    // `require_str` requires; the exclusive reference is used only within this call. The name
     // is copied into an owned `String`.
-    unsafe { builder_mut(self_) }.name = Some(unsafe { c_str_to_string(name) });
+    unsafe { builder_mut(self_, "self_") }.name = Some(unsafe { require_str(name, "name") });
 }
 
 /// Sets the sensor's config.
@@ -1409,7 +1413,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_config(
     // uses at the same time, as `builder_mut` requires, and `config` null or a valid metric-config
     // handle, as `metric_config_option` requires; the exclusive reference is used only within this
     // call. The config is held as an owned `Arc`.
-    unsafe { builder_mut(self_) }.config = unsafe { metric_config_option(config) };
+    unsafe { builder_mut(self_, "self_") }.config = unsafe { metric_config_option(config) };
 }
 
 /// Sets how long the sensor may go unrecorded before the registry expires it.
@@ -1430,7 +1434,8 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_inactive_
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `builder_mut` requires; the exclusive reference is used only within
     // this call.
-    unsafe { builder_mut(self_) }.inactive_sensor_expiration_time_seconds = inactive_sensor_expiration_time_seconds;
+    unsafe { builder_mut(self_, "self_") }.inactive_sensor_expiration_time_seconds =
+        inactive_sensor_expiration_time_seconds;
 }
 
 /// Sets the sensor's recording level.
@@ -1453,7 +1458,8 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_recording
     // uses at the same time, as `builder_mut` requires, and `recording_level` a recording-level
     // singleton, as `recording_level_of` requires; the exclusive reference is used only within this
     // call. The level is copied out.
-    unsafe { builder_mut(self_) }.recording_level = unsafe { recording_level_of(recording_level) };
+    unsafe { builder_mut(self_, "self_") }.recording_level =
+        unsafe { recording_level_of(recording_level, "recording_level") };
 }
 
 /// Sets the parent sensors.
@@ -1477,7 +1483,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_set_parents(
     // uses at the same time, as `builder_mut` requires, and `parents` null or a valid list of
     // sensor handles, as `list_sensors` requires; the exclusive reference is used only within this
     // call. The sensors are cloned into owned `Arc`s.
-    unsafe { builder_mut(self_) }.parents = unsafe { list_sensors(parents) };
+    unsafe { builder_mut(self_, "self_") }.parents = unsafe { list_sensors(parents) };
 }
 
 /// Returns the built options, or `NULL` on failure. The builder stays usable.
@@ -1501,7 +1507,7 @@ pub unsafe extern "C" fn kafka_common_metrics_SensorOptionsBuilder_build(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `builder_mut` requires; the exclusive reference is used only within
     // this call: the options built copy what they take from it.
-    let inner = unsafe { builder_mut(self_) };
+    let inner = unsafe { builder_mut(self_, "self_") };
     let mut builder = SensorOptionsBuilder::new()
         .set_config(inner.config.clone())
         .set_inactive_sensor_expiration_time_seconds(inner.inactive_sensor_expiration_time_seconds)
@@ -1626,17 +1632,17 @@ mod tests {
                 description.as_ptr(),
                 tags,
             );
-            let expected = metrics_ref(registry).metric_name_with_description_tags(
+            let expected = metrics_ref(registry, "registry").metric_name_with_description_tags(
                 "n",
                 "g",
                 "d",
                 BTreeMap::from([("k".to_string(), "v".to_string())]),
             );
-            assert_eq!(*metric_name_ref(tagged), expected);
+            assert_eq!(*metric_name_ref(tagged, "tagged"), expected);
             let tagged_only =
                 kafka_common_metrics_Metrics_metric_name_with_tags(registry, name.as_ptr(), group.as_ptr(), tags);
-            assert_eq!(metric_name_ref(tagged_only).tags(), expected.tags());
-            assert_eq!(metric_name_ref(tagged_only).description(), "");
+            assert_eq!(metric_name_ref(tagged_only, "tagged_only").tags(), expected.tags());
+            assert_eq!(metric_name_ref(tagged_only, "tagged_only").description(), "");
             kafka_common_MetricName_destroy(tagged_only);
             kafka_Map_destroy(tags);
             let described = kafka_common_metrics_Metrics_metric_name_with_description(
@@ -1645,7 +1651,7 @@ mod tests {
                 group.as_ptr(),
                 description.as_ptr(),
             );
-            assert_eq!(metric_name_ref(described).description(), "d");
+            assert_eq!(metric_name_ref(described, "described").description(), "d");
             kafka_common_MetricName_destroy(described);
 
             // Key/value pairs: an odd list is Java's IllegalArgumentException.
@@ -1674,7 +1680,7 @@ mod tests {
                 &mut err,
             );
             assert!(err.is_null());
-            assert_eq!(*metric_name_ref(from_pairs), expected);
+            assert_eq!(*metric_name_ref(from_pairs, "from_pairs"), expected);
             kafka_common_MetricName_destroy(from_pairs);
             kafka_List_destroy(pairs);
 
@@ -1695,7 +1701,7 @@ mod tests {
                 "a DEBUG sensor under an INFO config"
             );
             let again = kafka_common_metrics_Metrics_get_sensor(registry, sensor_name.as_ptr());
-            assert!(Arc::ptr_eq(sensor_ref(sensor), sensor_ref(again)));
+            assert!(Arc::ptr_eq(sensor_ref(sensor, "sensor"), sensor_ref(again, "again")));
             kafka_common_metrics_Sensor_destroy(again);
             let parents = kafka_List_new();
             kafka_List_add(parents, sensor as *mut c_void);
@@ -1784,10 +1790,16 @@ mod tests {
                 "the registry's built-in `count` metric and ours"
             );
             let found = kafka_common_metrics_MetricsView_get(view, tagged);
-            assert!(Arc::ptr_eq(kafka_metric_ref(found), kafka_metric_ref(metric)));
+            assert!(Arc::ptr_eq(
+                kafka_metric_ref(found, "found"),
+                kafka_metric_ref(metric, "metric")
+            ));
             kafka_common_metrics_KafkaMetric_destroy(found);
             let removed = kafka_common_metrics_Metrics_remove_metric(registry, tagged);
-            assert!(Arc::ptr_eq(kafka_metric_ref(removed), kafka_metric_ref(metric)));
+            assert!(Arc::ptr_eq(
+                kafka_metric_ref(removed, "removed"),
+                kafka_metric_ref(metric, "metric")
+            ));
             // The view is live: the removal shows in it.
             assert_eq!(kafka_common_metrics_MetricsView_len(view), 1);
             assert_eq!(kafka_common_metrics_MetricsView_contains_key(view, tagged), 0);
@@ -1855,7 +1867,10 @@ mod tests {
             let existing =
                 kafka_common_metrics_Metrics_add_metric_if_absent(registry, metric_name, ptr::null(), provider);
             let registered = kafka_common_metrics_Metrics_metric(registry, metric_name);
-            assert!(Arc::ptr_eq(kafka_metric_ref(existing), kafka_metric_ref(registered)));
+            assert!(Arc::ptr_eq(
+                kafka_metric_ref(existing, "existing"),
+                kafka_metric_ref(registered, "registered")
+            ));
             kafka_common_metrics_KafkaMetric_destroy(existing);
             kafka_common_metrics_KafkaMetric_destroy(registered);
             kafka_common_metrics_stats_Avg_destroy(avg);
@@ -1877,8 +1892,8 @@ mod tests {
                 kafka_common_metrics_Metrics_metric_instance_with_key_value(registry, template, pairs, &mut err);
             assert!(err.is_null());
             assert_eq!(
-                *metric_name_ref(instance),
-                metrics_ref(registry)
+                *metric_name_ref(instance, "instance"),
+                metrics_ref(registry, "registry")
                     .metric_instance_with_key_value(&rust_template, &["k", "v"])
                     .unwrap()
             );
