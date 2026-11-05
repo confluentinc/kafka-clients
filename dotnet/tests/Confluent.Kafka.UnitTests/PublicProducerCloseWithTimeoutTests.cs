@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -42,27 +43,27 @@ public sealed class PublicProducerCloseWithTimeoutTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public async Task Close_NegativeTimeout_ThrowsArgumentOutOfRangeException(string flavor)
+    public async Task Close_NegativeTimeout_ThrowsIllegalArgumentException(string flavor)
     {
         if (flavor == SyncFlavor)
         {
             KafkaProducer<byte[], byte[]> producer = Sync(60000);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => producer.Close(s_negative)));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => producer.Close(s_negative)));
 
             Assert.NotNull(producer.Metrics());
             TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => producer.Send(Record(Topic("negative-close"))));
+            Assert.Throws<IllegalStateException>(() => producer.Send(Record(Topic("negative-close"))));
         }
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = producer.Close(s_negative); }));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
 
             Assert.NotNull(producer.Metrics());
             await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record(Topic("negative-close"))); });
+            Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(Topic("negative-close"))); });
         }
     }
 
@@ -76,14 +77,14 @@ public sealed class PublicProducerCloseWithTimeoutTests
             KafkaProducer<byte[], byte[]> producer = Sync(60000);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             TestTimeout.Run(producer.Close, Deadline);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => producer.Close(s_negative)));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => producer.Close(s_negative)));
         }
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             await TestTimeout.Run(() => producer.Close(), Deadline);
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = producer.Close(s_negative); }));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
         }
     }
 
@@ -116,7 +117,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         Assert.All(
             outcomes,
             outcome => Assert.True(
-                outcome is KafkaException || (outcome is InvalidOperationException && outcome is not ObjectDisposedException),
+                outcome is KafkaException || outcome is IllegalStateException,
                 $"a send the close ended had {outcome?.GetType().Name ?? "no error"}: {outcome?.Message}"));
     }
 
@@ -133,7 +134,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
             Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset);
 
             TestTimeout.Run(() => producer.Close(s_negative), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => producer.Send(Record(topic)));
+            Assert.Throws<IllegalStateException>(() => producer.Send(Record(topic)));
             TestTimeout.Run(() => producer.Close(s_negative), Deadline);
         }
         else
@@ -145,7 +146,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
             Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset);
 
             await TestTimeout.Run(() => producer.Close(s_negative), Deadline);
-            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record(topic)); });
+            Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(topic)); });
             await TestTimeout.Run(() => producer.Close(s_negative), Deadline);
         }
     }
@@ -155,10 +156,9 @@ public sealed class PublicProducerCloseWithTimeoutTests
     {
     }
 
-    private static void AssertNegativeTimeout(ArgumentOutOfRangeException thrown)
+    private static void AssertNegativeTimeout(IllegalArgumentException thrown)
     {
-        Assert.Equal("timeout", thrown.ParamName);
-        Assert.StartsWith(NegativeTimeout, thrown.Message, StringComparison.Ordinal);
+        Assert.Equal(NegativeTimeout, thrown.Message);
     }
 
     private static Exception? SendOutcome(KafkaProducer<byte[], byte[]> producer, string topic)

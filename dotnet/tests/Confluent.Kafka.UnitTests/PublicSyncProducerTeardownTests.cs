@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -30,7 +31,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The sync producer's teardown: Close and Dispose return without hanging and are idempotent under one latch;
 /// Dispose first flushes a manual mock's pending sends, while Close leaves them pending; a call after teardown
-/// throws ObjectDisposedException.
+/// throws IllegalStateException.
 /// </summary>
 public sealed class PublicSyncProducerTeardownTests
 {
@@ -103,16 +104,16 @@ public sealed class PublicSyncProducerTeardownTests
     }
 
     [Fact]
-    public void Ops_AfterClose_ThrowObjectDisposed()
+    public void Ops_AfterClose_ThrowIllegalState()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Teardown(producer, () => producer.Close());
 
-        // Every operation throws ObjectDisposedException after teardown; the type only, as for the consumer.
-        Assert.Throws<ObjectDisposedException>(
+        // Every operation throws IllegalStateException after teardown; the type only, as for the consumer.
+        Assert.Throws<IllegalStateException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
-        Assert.Throws<ObjectDisposedException>(() => producer.Flush());
-        Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
+        Assert.Throws<IllegalStateException>(() => producer.Flush());
+        Assert.Throws<IllegalStateException>(() => producer.PartitionsFor(Topic));
 
         TestTimeout.Dispose(producer);
     }

@@ -23,27 +23,20 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class ElectLeadersMarshal
 {
-    internal static IReadOnlyDictionary<TopicPartition, KafkaException?> CopyOutPartitions(IntPtr partitions)
+    internal static IReadOnlyDictionary<TopicPartition, Exception?> CopyOutPartitions(IntPtr partitions)
     {
         IntPtr outErr = IntPtr.Zero;
         int count = NativeMethods.MapSize(partitions, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        Dictionary<TopicPartition, KafkaException?> copied = new Dictionary<TopicPartition, KafkaException?>(count);
+        Dictionary<TopicPartition, Exception?> copied = new Dictionary<TopicPartition, Exception?>(count);
         for (int i = 0; i < count; i++)
         {
             IntPtr partition = NativeMethods.MapKey(partitions, i, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             IntPtr borrowedError = NativeMethods.MapValue(partitions, i, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-
-            // The map holds KafkaException values, so an election error of another type fails the future.
-            Exception? error = KafkaException.FromFfiError(borrowedError, owned: false);
-            if (error is not null and not KafkaException)
-            {
-                throw error;
-            }
-
-            copied[TopicPartitionListMarshal.CopyOutElement(partition)] = (KafkaException?)error;
+            copied[TopicPartitionListMarshal.CopyOutElement(partition)] =
+                KafkaException.FromFfiError(borrowedError, owned: false);
         }
 
         return copied;

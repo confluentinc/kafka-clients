@@ -23,6 +23,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Resource;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -68,7 +69,7 @@ public sealed class PublicAdminDescribeAclsTests
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -82,7 +83,7 @@ public sealed class PublicAdminDescribeAclsTests
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
         Assert.Same(result.Values().Get(), result.Values().Get());
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
     }
 
@@ -97,7 +98,7 @@ public sealed class PublicAdminDescribeAclsTests
                 new ResourcePatternFilter(ResourceType.ANY, null, PatternType.ANY),
                 new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY)));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -124,7 +125,7 @@ public sealed class PublicAdminDescribeAclsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeAcls(Filter("gone")));
+        Assert.Throws<IllegalStateException>(() => admin.DescribeAcls(Filter("gone")));
     }
 
     [Fact]

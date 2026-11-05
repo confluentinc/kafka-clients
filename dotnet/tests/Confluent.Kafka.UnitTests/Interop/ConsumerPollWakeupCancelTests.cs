@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -58,7 +59,7 @@ public sealed class ConsumerPollWakeupCancelTests
         consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
         consumer.Wakeup();
-        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
+        WakeupException ex = await Assert.ThrowsAsync<WakeupException>(
             () => TestTimeout.Run(() => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray), s_deadline));
         Assert.False(string.IsNullOrEmpty(ex.Message));
 

@@ -27,6 +27,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -155,7 +156,7 @@ public sealed class PublicProducerFirstStageTests
                 new ProducerRecord<byte[], byte[]>("first-stage-closed", Encoding.UTF8.GetBytes("v")), callback);
 
             Assert.True(stage.IsFaulted, "the refusal did not fault the first stage inside the call");
-            InvalidOperationException refused = await Assert.ThrowsAsync<InvalidOperationException>(() => stage.AsTask());
+            IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(() => stage.AsTask());
             Assert.Equal("Cannot perform operation after producer has been closed", refused.Message);
 
             await Task.Delay(s_settle);

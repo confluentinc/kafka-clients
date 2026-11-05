@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -173,7 +174,7 @@ public sealed class PublicRecordMetadataTests
         }
 
         RecordMetadata placeholder = Assert.IsType<RecordMetadata>(callback.Metadata);
-        Assert.Equal(2, Assert.IsType<KafkaException>(callback.Exception).Code);
+        Assert.Equal(2, Assert.IsType<CorruptRecordException>(callback.Exception).Code);
         Assert.Equal(Topic, placeholder.Topic);
         Assert.Equal(2, placeholder.Partition);
         Assert.False(placeholder.HasOffset);
@@ -208,8 +209,8 @@ public sealed class PublicRecordMetadataTests
                 KafkaFuture<RecordMetadata> future = producer.Send(Record(), callback);
                 if (fail)
                 {
-                    Assert.True(producer.ErrorNext(new KafkaException(2, "metadata-failure", isRetriable: true)));
-                    Assert.Throws<KafkaException>(() => future.Get());
+                    Assert.True(producer.ErrorNext(new CorruptRecordException("metadata-failure")));
+                    Assert.Throws<CorruptRecordException>(() => future.Get());
                 }
                 else
                 {
@@ -232,8 +233,8 @@ public sealed class PublicRecordMetadataTests
                 AsyncKafkaFuture<RecordMetadata> future = await producer.Send(Record(), callback);
                 if (fail)
                 {
-                    Assert.True(producer.ErrorNext(new KafkaException(2, "metadata-failure", isRetriable: true)));
-                    await Assert.ThrowsAsync<KafkaException>(() => future.Get());
+                    Assert.True(producer.ErrorNext(new CorruptRecordException("metadata-failure")));
+                    await Assert.ThrowsAsync<CorruptRecordException>(() => future.Get());
                 }
                 else
                 {

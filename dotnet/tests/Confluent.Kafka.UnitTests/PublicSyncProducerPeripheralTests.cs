@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -43,12 +44,12 @@ public sealed class PublicSyncProducerPeripheralTests
     }
 
     [Fact]
-    public void Flush_AfterDispose_ThrowsObjectDisposed()
+    public void Flush_AfterDispose_ThrowsIllegalState()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Flush());
+        Assert.Throws<IllegalStateException>(() => producer.Flush());
     }
 
     [Fact]
@@ -102,12 +103,12 @@ public sealed class PublicSyncProducerPeripheralTests
     }
 
     [Fact]
-    public void PartitionsFor_AfterDispose_ThrowsObjectDisposed()
+    public void PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
+        Assert.Throws<IllegalStateException>(() => producer.PartitionsFor(Topic));
     }
 
     [Fact]

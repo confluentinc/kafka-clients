@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -124,7 +125,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// call the future's <see cref="KafkaFuture{T}.Get()"/> before asserting on a callback.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public bool CompleteNext() => _native.MockCompleteNext();
 
     /// <summary>
@@ -134,20 +135,20 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <param name="exception">The exception to fail the send with.</param>
     /// <returns><see langword="true"/> if a pending send was failed; otherwise <see langword="false"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="exception"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public bool ErrorNext(Exception exception) => _native.MockErrorNext(exception);
 
     /// <summary>
     /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>); the native mock
     /// exposes the count only.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public int HistoryCount() => _native.MockHistoryCount();
 
     /// <summary>
     /// Clears the sent history and any pending completions (Java <c>MockProducer.clear()</c>).
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
 
     /// <inheritdoc/>

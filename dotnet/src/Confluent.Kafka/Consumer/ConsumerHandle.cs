@@ -17,6 +17,8 @@ using System.Collections.Generic;
 using System.Threading;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -25,9 +27,9 @@ namespace Confluent.Kafka.Consumer;
 /// <see cref="IOffsetCommitCallback"/>); the consumer's own calls made there go through the consumer's own handle,
 /// which also has the forms this class lacks. On a <see cref="KafkaConsumer{TKey, TValue}"/> every operation other
 /// than <see cref="Wakeup"/>, <see cref="Assignment"/> and <see cref="Paused"/> works only inside such a callback, and
-/// throws <see cref="InvalidOperationException"/> elsewhere. The handle holds its consumer weakly: once the consumer is
-/// destroyed, <see cref="Wakeup"/> does nothing, <see cref="Assignment"/> and <see cref="Paused"/> still return, and
-/// every other operation throws <see cref="InvalidOperationException"/>.
+/// throws <see cref="ConcurrentModificationException"/> elsewhere. The handle holds its consumer weakly: once the
+/// consumer is destroyed, <see cref="Wakeup"/> does nothing, <see cref="Assignment"/> and <see cref="Paused"/> still
+/// return, and every other operation throws <see cref="IllegalStateException"/>.
 /// </summary>
 public sealed class ConsumerHandle : IDisposable
 {
@@ -100,7 +102,7 @@ public sealed class ConsumerHandle : IDisposable
         ValidatePartition(partition);
         if (offset < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(offset), offset, "seek offset must not be a negative number");
+            throw new IllegalArgumentException("seek offset must not be a negative number");
         }
 
         _native.Seek(partition.Topic, partition.Partition, offset);

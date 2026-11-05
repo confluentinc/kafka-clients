@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -28,15 +29,16 @@ namespace Confluent.Kafka.UnitTests;
 /// message.
 /// </summary>
 /// <remarks>
-/// The guards are stricter than Java, whose assign accepts a negative partition. Assign checks its partitions before
-/// the closed check, so a disposed consumer proves its guard runs before the native call; every other call makes the
-/// closed check first, as Python's consumer does, so for it the witness is the live outcome the guard pre-empts.
+/// The guards are stricter than Java, whose assign accepts a negative partition. Every call makes the closed check
+/// first, as Java's and Python's consumers do, so the witness is the live outcome the guard pre-empts.
 /// </remarks>
 public sealed class ConsumerNegativePartitionGuardTests
 {
     private const string Topic = "neg-guard";
 
     private const string NegativePartition = "Partition must not be negative.";
+
+    private const string ClosedMessage = "This consumer has already been closed.";
 
     private static readonly TopicPartition s_negative = new TopicPartition(Topic, -1);
 
@@ -59,21 +61,32 @@ public sealed class ConsumerNegativePartitionGuardTests
             "partitions");
 
         MockConsumer<byte[], byte[]> disposed = NewDisposedMock();
-        AssertGuard(
-            Assert.Throws<ArgumentOutOfRangeException>(() => disposed.Assign(new[] { s_negative })),
-            "partitions");
+        IllegalStateException closed = Assert.Throws<IllegalStateException>(() => disposed.Assign(new[] { s_negative }));
+        Assert.Equal(ClosedMessage, closed.Message);
     }
 
     [Fact]
     public void SnapshotPartitions_AsyncAssign_RejectsANegativePartition_BeforeAnySubmit()
     {
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(
+            Serdes.ByteArray, Serdes.ByteArray);
+        using (TestTimeout.Disposal(consumer))
+        {
+            AssertGuard(
+                Assert.Throws<ArgumentOutOfRangeException>(
+                    () => { _ = consumer.Assign(new[] { new TopicPartition(Topic, 0), s_negative }); }),
+                "partitions");
+
+            // The guard throws before a Task is returned, so nothing was assigned.
+            Assert.Empty(consumer.Assignment());
+        }
+
         AsyncMockConsumer<byte[], byte[]> disposed = new AsyncMockConsumer<byte[], byte[]>(
             Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(disposed);
-
-        AssertGuard(
-            Assert.Throws<ArgumentOutOfRangeException>(() => { _ = disposed.Assign(new[] { s_negative }); }),
-            "partitions");
+        IllegalStateException closed = Assert.Throws<IllegalStateException>(
+            () => { _ = disposed.Assign(new[] { s_negative }); });
+        Assert.Equal(ClosedMessage, closed.Message);
     }
 
     [Fact]
@@ -87,7 +100,7 @@ public sealed class ConsumerNegativePartitionGuardTests
         AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => consumer.Commit(offsets)), "offsets");
 
         MockConsumer<byte[], byte[]> disposed = NewDisposedMock();
-        Assert.Throws<ObjectDisposedException>(() => disposed.Commit(offsets));
+        Assert.Throws<IllegalStateException>(() => disposed.Commit(offsets));
     }
 
     [Fact]
@@ -102,7 +115,7 @@ public sealed class ConsumerNegativePartitionGuardTests
             "timestampsToSearch");
 
         MockConsumer<byte[], byte[]> disposed = NewDisposedMock();
-        Assert.Throws<ObjectDisposedException>(() => disposed.OffsetsForTimes(timestamps));
+        Assert.Throws<IllegalStateException>(() => disposed.OffsetsForTimes(timestamps));
     }
 
     [Fact]
@@ -117,9 +130,9 @@ public sealed class ConsumerNegativePartitionGuardTests
         AssertGuard(Assert.Throws<ArgumentOutOfRangeException>(() => consumer.CurrentLag(s_negative)), "partition");
 
         MockConsumer<byte[], byte[]> disposed = NewDisposedMock();
-        Assert.Throws<ObjectDisposedException>(() => disposed.Seek(s_negative, 0));
-        Assert.Throws<ObjectDisposedException>(() => disposed.Seek(s_negative, new OffsetAndMetadata(0)));
-        Assert.Throws<ObjectDisposedException>(() => disposed.CurrentLag(s_negative));
+        Assert.Throws<IllegalStateException>(() => disposed.Seek(s_negative, 0));
+        Assert.Throws<IllegalStateException>(() => disposed.Seek(s_negative, new OffsetAndMetadata(0)));
+        Assert.Throws<IllegalStateException>(() => disposed.CurrentLag(s_negative));
     }
 
     [Fact]
@@ -141,7 +154,7 @@ public sealed class ConsumerNegativePartitionGuardTests
             "partition");
 
         MockConsumer<byte[], byte[]> disposed = NewDisposedMock();
-        Assert.Throws<ObjectDisposedException>(() => disposed.Position(s_negative));
+        Assert.Throws<IllegalStateException>(() => disposed.Position(s_negative));
     }
 
     [Fact]

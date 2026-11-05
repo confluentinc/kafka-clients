@@ -18,6 +18,7 @@ using System.Linq;
 using System.Reflection;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -96,30 +97,24 @@ public sealed class PublicUuidTests
         Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => Uuid.Parse(null!)).ParamName);
 
         string twentyFive = new string('A', 25);
-        ArgumentException tooLong = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyFive));
-        Assert.StartsWith(
+        IllegalArgumentException tooLong = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(twentyFive));
+        Assert.Equal(
             "Input string with prefix `" + new string('A', 24) + "` is too long to be decoded as a base64 UUID",
-            tooLong.Message,
-            StringComparison.Ordinal);
+            tooLong.Message);
 
         string twentyThree = new string('A', 23);
-        ArgumentException wrongCount = Assert.Throws<ArgumentException>(() => Uuid.Parse(twentyThree));
-        Assert.StartsWith(
+        IllegalArgumentException wrongCount = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(twentyThree));
+        Assert.Equal(
             "Input string `" + twentyThree + "` decoded as 17 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
-            wrongCount.Message,
-            StringComparison.Ordinal);
+            wrongCount.Message);
 
-        ArgumentException wrongLength = Assert.Throws<ArgumentException>(() => Uuid.Parse("AAAA"));
-        Assert.StartsWith(
+        IllegalArgumentException wrongLength = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse("AAAA"));
+        Assert.Equal(
             "Input string `AAAA` decoded as 3 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
-            wrongLength.Message,
-            StringComparison.Ordinal);
+            wrongLength.Message);
 
-        ArgumentException notBase64 = Assert.Throws<ArgumentException>(() => Uuid.Parse("!!!!"));
-        Assert.StartsWith(
-            "Input string `!!!!` is not a valid base64 UUID",
-            notBase64.Message,
-            StringComparison.Ordinal);
+        IllegalArgumentException notBase64 = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse("!!!!"));
+        Assert.Equal("Input string `!!!!` is not a valid base64 UUID", notBase64.Message);
     }
 
     [Fact]
@@ -129,17 +124,13 @@ public sealed class PublicUuidTests
         string standard = urlSafe.Replace('_', '/');
         Assert.NotEqual(urlSafe, standard);
 
-        ArgumentException slash = Assert.Throws<ArgumentException>(() => Uuid.Parse(standard));
-        Assert.StartsWith(
-            "Input string `" + standard + "` is not a valid base64 UUID",
-            slash.Message,
-            StringComparison.Ordinal);
-        Assert.Equal("value", slash.ParamName);
+        IllegalArgumentException slash = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(standard));
+        Assert.Equal("Input string `" + standard + "` is not a valid base64 UUID", slash.Message);
 
         Assert.False(Uuid.TryParse(standard, out Uuid rejected));
         Assert.Equal(Uuid.ZERO_UUID, rejected);
 
-        Assert.Throws<ArgumentException>(() => Uuid.Parse("AAAAAAAAAAAAAAAAAAAA+A"));
+        Assert.Throws<IllegalArgumentException>(() => Uuid.Parse("AAAAAAAAAAAAAAAAAAAA+A"));
         Assert.Equal("AAAAAAAAAAAAAAAAAAAA-A", Uuid.Parse("AAAAAAAAAAAAAAAAAAAA-A").ToString());
 
         Assert.Equal(new Uuid(-1L, -1L), Uuid.Parse(urlSafe));
@@ -167,13 +158,9 @@ public sealed class PublicUuidTests
         string shortOfPadding = padded.Substring(0, padded.Length - 1);
         Assert.Equal(23, shortOfPadding.Length);
 
-        ArgumentException rejected =
-            Assert.Throws<ArgumentException>(() => Uuid.Parse(shortOfPadding));
-        Assert.StartsWith(
-            "Input string `" + shortOfPadding + "` is not a valid base64 UUID",
-            rejected.Message,
-            StringComparison.Ordinal);
-        Assert.Equal("value", rejected.ParamName);
+        IllegalArgumentException rejected =
+            Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(shortOfPadding));
+        Assert.Equal("Input string `" + shortOfPadding + "` is not a valid base64 UUID", rejected.Message);
 
         Assert.False(Uuid.TryParse(shortOfPadding, out Uuid fromTryParse));
         Assert.Equal(Uuid.ZERO_UUID, fromTryParse);

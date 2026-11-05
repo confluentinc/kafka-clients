@@ -22,6 +22,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -307,7 +308,7 @@ internal sealed class SoakClient : IDisposable
 
     internal static string ErrorMessage(Exception ex) => ex.Message;
 
-    internal static bool ErrorIsRetriable(Exception ex) => ex is KafkaException kafka && kafka.IsRetriable;
+    internal static bool ErrorIsRetriable(Exception ex) => ex is RetriableException;
 
     // Bounded, as Python's soak: endless retrying would never reach the SUMMARY verdict, and
     // run.sh's restart re-joins the group. Non-retriable errors have their own, lower bound.

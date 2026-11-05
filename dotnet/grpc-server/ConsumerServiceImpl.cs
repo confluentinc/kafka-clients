@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Grpc.Core;
 
 using Proto = Confluent.Kafka.Test;
@@ -100,7 +101,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         // Pattern subscription is not ported: answer -31 rather than subscribe to no topic.
         if (request.HasPattern)
         {
-            return RunStatus(request.ConsumerId, _ => throw new NotSupportedException(Translate.PatternSubscribeUnsupported));
+            return RunStatus(request.ConsumerId, _ => throw new UnsupportedOperationException(Translate.PatternSubscribeUnsupported));
         }
 
         List<string> topics = new List<string>(request.Topics);

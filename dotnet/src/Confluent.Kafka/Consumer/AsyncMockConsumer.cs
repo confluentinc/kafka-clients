@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -297,7 +298,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <param name="offset">The beginning offset to reset to.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateBeginningOffset(string topic, int partition, long offset) =>
         _native.UpdateBeginningOffset(topic, partition, offset);
 
@@ -310,7 +311,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <param name="offset">The end offset to reset to.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateEndOffset(string topic, int partition, long offset) =>
         _native.UpdateEndOffset(topic, partition, offset);
 
@@ -327,7 +328,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <param name="leaderPort">The leader port for every partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
         _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
@@ -341,8 +342,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <param name="value">The value bytes, or <see langword="null"/> for a tombstone.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">The partition is not assigned.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _native.AddRecord(topic, partition, offset, key, value);
 
@@ -351,7 +351,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>MockConsumer.setPollException</c>); <see langword="null"/> clears a pending one.
     /// </summary>
     /// <param name="exception">The exception for the next poll, or <see langword="null"/> to clear a pending one.</param>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void SetPollException(KafkaException? exception) => _native.SetPollException(exception);
 
     /// <summary>
@@ -370,7 +370,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public Task Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.RebalanceWithCallback(partitions);
 
     /// <summary>
@@ -382,14 +382,14 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>OnPartitionsLost</c> fires with them on the consumer's drain thread; then they leave the
     /// <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
     /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
-    /// <see cref="InvalidOperationException"/>, as Java's <c>IllegalStateException</c>.
+    /// <see cref="IllegalStateException"/>, as Java's.
     /// </remarks>
     /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
     /// <returns>A <see cref="Task"/> that completes when the partitions are lost.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
         _native.LosePartitionsWithCallback(partitions);
 

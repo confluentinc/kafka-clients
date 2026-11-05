@@ -20,13 +20,15 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The consumer handle cannot be freed under a native call: every family throws
-/// <see cref="ObjectDisposedException"/> after Dispose, and a teardown racing Wakeup, short sync calls or unawaited
+/// <see cref="IllegalStateException"/> after Dispose, and a teardown racing Wakeup, short sync calls or unawaited
 /// async calls neither crashes nor throws anything else.
 /// </summary>
 /// <remarks>
@@ -43,57 +45,57 @@ public sealed class PublicConsumerHandleProtectionTests
     private static string[] ProofTopic() => new[] { "h1-topic" };
 
     [Fact]
-    public void SyncQueryFamily_AfterDispose_ThrowsObjectDisposed()
+    public void SyncQueryFamily_AfterDispose_ThrowsIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Committed(partitions));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => consumer.Committed(partitions));
+        Assert.Throws<IllegalStateException>(
             () => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long> { [Tp()] = 0L }));
-        Assert.Throws<ObjectDisposedException>(() => consumer.BeginningOffsets(partitions));
-        Assert.Throws<ObjectDisposedException>(() => consumer.EndOffsets(partitions));
-        Assert.Throws<ObjectDisposedException>(() => consumer.PartitionsFor("h1-topic"));
-        Assert.Throws<ObjectDisposedException>(() => consumer.ListTopics());
+        Assert.Throws<IllegalStateException>(() => consumer.BeginningOffsets(partitions));
+        Assert.Throws<IllegalStateException>(() => consumer.EndOffsets(partitions));
+        Assert.Throws<IllegalStateException>(() => consumer.PartitionsFor("h1-topic"));
+        Assert.Throws<IllegalStateException>(() => consumer.ListTopics());
     }
 
     [Fact]
-    public void SyncStateReads_AfterDispose_ThrowObjectDisposed()
+    public void SyncStateReads_AfterDispose_ThrowIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
-        Assert.Throws<ObjectDisposedException>(() => consumer.Paused());
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
-        Assert.Throws<ObjectDisposedException>(() => consumer.Metrics());
-        Assert.Throws<ObjectDisposedException>(() => consumer.EnforceRebalance());
-        Assert.Throws<ObjectDisposedException>(() => consumer.EnforceRebalance("a reason"));
-        Assert.Throws<ObjectDisposedException>(() => consumer.CurrentLag(Tp()));
-        Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync());
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Subscription());
+        Assert.Throws<IllegalStateException>(() => consumer.Paused());
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
+        Assert.Throws<IllegalStateException>(() => consumer.Metrics());
+        Assert.Throws<IllegalStateException>(() => consumer.EnforceRebalance());
+        Assert.Throws<IllegalStateException>(() => consumer.EnforceRebalance("a reason"));
+        Assert.Throws<IllegalStateException>(() => consumer.CurrentLag(Tp()));
+        Assert.Throws<IllegalStateException>(() => consumer.CommitAsync());
+        Assert.Throws<IllegalStateException>(
             () => consumer.Seek(Tp(), new OffsetAndMetadata(0L, null, null)));
     }
 
     [Fact]
-    public void MockDriverHelpers_AfterDispose_ThrowObjectDisposed()
+    public void MockDriverHelpers_AfterDispose_ThrowIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.AddRecord("h1-topic", 0, 0L, null, null));
-        Assert.Throws<ObjectDisposedException>(() => consumer.SetPollException(new KafkaException("boom")));
-        Assert.Throws<ObjectDisposedException>(() => consumer.UpdateBeginningOffset("h1-topic", 0, 0L));
-        Assert.Throws<ObjectDisposedException>(() => consumer.UpdateEndOffset("h1-topic", 0, 5L));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => consumer.AddRecord("h1-topic", 0, 0L, null, null));
+        Assert.Throws<IllegalStateException>(() => consumer.SetPollException(new KafkaException("boom")));
+        Assert.Throws<IllegalStateException>(() => consumer.UpdateBeginningOffset("h1-topic", 0, 0L));
+        Assert.Throws<IllegalStateException>(() => consumer.UpdateEndOffset("h1-topic", 0, 5L));
+        Assert.Throws<IllegalStateException>(
             () => consumer.UpdatePartitions("h1-topic", 1, 1, "localhost", 9092));
     }
 
     [Fact]
-    public async Task AsyncQueryFamily_AfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task AsyncQueryFamily_AfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
             new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -101,15 +103,15 @@ public sealed class PublicConsumerHandleProtectionTests
 
         TopicPartition[] partitions = new[] { Tp() };
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Committed(partitions));
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Committed(partitions));
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long> { [Tp()] = 0L }));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.BeginningOffsets(partitions));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.EndOffsets(partitions));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.PartitionsFor("h1-topic"));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.ListTopics());
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Commit());
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Position(Tp()));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.BeginningOffsets(partitions));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.EndOffsets(partitions));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.PartitionsFor("h1-topic"));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.ListTopics());
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Commit());
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Position(Tp()));
     }
 
     [Fact]
@@ -196,13 +198,13 @@ public sealed class PublicConsumerHandleProtectionTests
                                 _ = consumer.Assignment();
                                 _ = consumer.Poll(s_pollTimeout);
                             }
-                            catch (ObjectDisposedException)
+                            catch (IllegalStateException)
                             {
                             }
                             catch (KafkaException)
                             {
                             }
-                            catch (InvalidOperationException)
+                            catch (ConcurrentModificationException)
                             {
                             }
                             catch (Exception ex)

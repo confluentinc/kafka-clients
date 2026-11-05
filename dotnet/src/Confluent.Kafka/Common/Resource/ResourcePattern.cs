@@ -16,6 +16,7 @@ using System;
 using System.Globalization;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Common.Resource;
 
@@ -53,7 +54,7 @@ public sealed class ResourcePattern
     /// it.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="resourceType"/> is <see cref="ResourceType.ANY"/>, or
     /// <paramref name="patternType"/> is <see cref="PatternType.ANY"/> or
     /// <see cref="PatternType.MATCH"/>.
@@ -67,14 +68,13 @@ public sealed class ResourcePattern
 
         if (resourceType == ResourceType.ANY)
         {
-            throw new ArgumentException("resourceType must not be ANY", nameof(resourceType));
+            throw new IllegalArgumentException("resourceType must not be ANY");
         }
 
         if (patternType == PatternType.MATCH || patternType == PatternType.ANY)
         {
-            throw new ArgumentException(
-                string.Format(CultureInfo.InvariantCulture, "patternType must not be {0}", patternType),
-                nameof(patternType));
+            throw new IllegalArgumentException(
+                string.Format(CultureInfo.InvariantCulture, "patternType must not be {0}", patternType));
         }
 
         ResourceType = resourceType;

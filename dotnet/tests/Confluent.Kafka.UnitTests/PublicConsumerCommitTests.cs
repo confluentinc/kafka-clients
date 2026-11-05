@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -149,13 +150,12 @@ public sealed class PublicConsumerCommitTests
     }
 
     [Fact]
-    public void OffsetAndMetadata_NegativeOffset_ThrowsArgumentOutOfRangeWithJavaMessage()
+    public void OffsetAndMetadata_NegativeOffset_ThrowsIllegalArgumentWithJavaMessage()
     {
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new OffsetAndMetadata(-1));
 
-        Assert.Equal("offset", ex.ParamName);
-        Assert.Contains("Invalid negative offset", ex.Message);
+        Assert.Equal("Invalid negative offset", ex.Message);
     }
 
     [Fact]
@@ -188,21 +188,21 @@ public sealed class PublicConsumerCommitTests
     }
 
     [Fact]
-    public async Task Commit_AfterDispose_ThrowsObjectDisposed()
+    public async Task Commit_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Commit());
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Commit());
     }
 
     [Fact]
-    public async Task CommitOffsets_AfterDispose_ThrowsObjectDisposed()
+    public async Task CommitOffsets_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>
             {
                 [new TopicPartition(Topic, 0)] = new OffsetAndMetadata(1),
@@ -210,12 +210,12 @@ public sealed class PublicConsumerCommitTests
     }
 
     [Fact]
-    public async Task CommitAsync_AfterDispose_ThrowsObjectDisposed()
+    public async Task CommitAsync_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.CommitAsync(); });
+        Assert.Throws<IllegalStateException>(() => { _ = consumer.CommitAsync(); });
     }
 
     [Fact]

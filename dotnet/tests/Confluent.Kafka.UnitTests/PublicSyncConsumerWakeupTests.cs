@@ -18,6 +18,7 @@ using System.Text;
 using System.Threading;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Xunit;
@@ -61,7 +62,7 @@ public sealed class PublicSyncConsumerWakeupTests
         consumer.Wakeup();
 
         // Called directly: TestTimeout.Run would wrap the throw in an AggregateException.
-        KafkaException ex = Assert.Throws<KafkaException>(() => consumer.Poll(s_pollTimeout));
+        WakeupException ex = Assert.Throws<WakeupException>(() => consumer.Poll(s_pollTimeout));
         Assert.False(string.IsNullOrEmpty(ex.Message));
 
         ConsumerRecords<byte[], byte[]> records = default!;

@@ -55,7 +55,6 @@ public sealed class CommonNativeMethodsMarshallingTests
     }
 
     [Theory]
-    [InlineData("kafka_common_Error_is_retriable_error_err")]
     [InlineData("kafka_common_Error_is_api_error_err")]
     public void ErrorPredicates_ReturnTheirInt8AsAnSByte(string entryPoint)
     {

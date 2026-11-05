@@ -16,6 +16,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -32,7 +35,7 @@ public interface IConsumerCommon
 {
     /// <summary>
     /// Interrupts a blocked operation of this consumer (Java <c>wakeup()</c>): the operation in progress, or the
-    /// next one Java's <c>wakeup()</c> interrupts, throws a <see cref="KafkaException"/> with the Wakeup code, once.
+    /// next one Java's <c>wakeup()</c> interrupts, throws a <see cref="WakeupException"/>, once.
     /// It may be called from any thread, and does nothing once the consumer is closed.
     /// </summary>
     void Wakeup();
@@ -41,13 +44,13 @@ public interface IConsumerCommon
     /// Returns the current consumer group metadata (Java <c>groupMetadata()</c>).
     /// </summary>
     /// <returns>A snapshot of the group membership.</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
-    /// <exception cref="KafkaException">
+    /// <exception cref="InvalidGroupIdException">
     /// A <see cref="KafkaConsumer{TKey, TValue}"/> or <see cref="AsyncKafkaConsumer{TKey, TValue}"/> has no
-    /// <c>group.id</c>: code 24 (<c>INVALID_GROUP_ID</c>) with Java's message, after the closed and concurrency checks.
+    /// <c>group.id</c>, with Java's message, after the closed and concurrency checks.
     /// </exception>
     ConsumerGroupMetadata GroupMetadata();
 
@@ -55,8 +58,8 @@ public interface IConsumerCommon
     /// Returns the current partition assignment (Java <c>assignment()</c>), as a new copy.
     /// </summary>
     /// <returns>The assigned topic-partitions (a copy; empty when nothing is assigned).</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
     IReadOnlyCollection<TopicPartition> Assignment();
@@ -65,8 +68,8 @@ public interface IConsumerCommon
     /// Returns the current topic subscription (Java <c>subscription()</c>), as a new copy.
     /// </summary>
     /// <returns>The subscribed topics (a copy; empty when not subscribed).</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
     IReadOnlyCollection<string> Subscription();
@@ -75,8 +78,8 @@ public interface IConsumerCommon
     /// Returns the currently paused partitions (Java <c>paused()</c>), as a new copy.
     /// </summary>
     /// <returns>The paused topic-partitions (a copy; empty when none are paused).</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
     IReadOnlyCollection<TopicPartition> Paused();
@@ -90,7 +93,7 @@ public interface IConsumerCommon
     /// <see cref="KafkaException"/> below cannot occur under that protocol.
     /// </remarks>
     /// <param name="reason">An optional human-readable reason, or <see langword="null"/>.</param>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
     /// The core reported a rebalance failure (not reachable under the current KIP-848
     /// no-op).
@@ -107,8 +110,8 @@ public interface IConsumerCommon
     /// keys.
     /// </remarks>
     /// <returns>An owned, immutable snapshot (empty when no metrics are registered — e.g. a mock).</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
@@ -123,9 +126,9 @@ public interface IConsumerCommon
     /// It may be called from any thread, a callback included. The handle holds the consumer weakly: it does not
     /// keep the consumer alive. Once the consumer is destroyed, the handle's <see cref="ConsumerHandle.Wakeup"/> does
     /// nothing, its <see cref="ConsumerHandle.Assignment"/> and <see cref="ConsumerHandle.Paused"/> still return, and
-    /// its other operations throw <see cref="InvalidOperationException"/>. See <see cref="ConsumerHandle"/>.
+    /// its other operations throw <see cref="IllegalStateException"/>. See <see cref="ConsumerHandle"/>.
     /// </remarks>
     /// <returns>A new, caller-owned handle (never <see langword="null"/>).</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     ConsumerHandle Handle();
 }

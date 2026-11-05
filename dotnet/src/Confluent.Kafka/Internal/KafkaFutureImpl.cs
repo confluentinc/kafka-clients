@@ -502,7 +502,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             ? Convert.ToString(_value, CultureInfo.InvariantCulture) ?? "null"
             : "null";
         Exception? error = state >= Failed ? Failure : null;
-        string exception = error is null ? "null" : error.GetType().FullName + ": " + error.Message;
+        string exception = error is null ? "null" : JavaText.ToString(error);
         bool done = error is not null || (state == Succeeded && _value is not null);
         return "KafkaFuture{value=" + value + ",exception=" + exception + ",done=" + (done ? "true" : "false") + "}";
     }

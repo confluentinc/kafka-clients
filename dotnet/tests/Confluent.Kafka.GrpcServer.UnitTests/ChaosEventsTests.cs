@@ -22,6 +22,7 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.GrpcServer.Chaos;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -266,12 +267,21 @@ public sealed class ChaosEventsTests
     }
 
     [Fact]
-    public void Failed_OfANonKafkaException_IsTheTranslatedLocalIllegalState()
+    public void Failed_OfAnIllegalStateException_IsItsId()
+    {
+        Proto.WorkloadEvent failed = ChaosEvents.Failed(new IllegalStateException("boom"));
+
+        Assert.Equal(-4, failed.Failed.Error.Code);
+        Assert.Equal("boom", failed.Failed.Error.Message);
+    }
+
+    [Fact]
+    public void Failed_OfAnExceptionWithoutAnId_IsTheServerFallback()
     {
         Proto.WorkloadEvent failed = ChaosEvents.Failed(new InvalidOperationException("boom"));
 
         Assert.Equal(-4, failed.Failed.Error.Code);
-        Assert.Equal("boom", failed.Failed.Error.Message);
+        Assert.Equal("dotnet server: InvalidOperationException: boom", failed.Failed.Error.Message);
     }
 
     internal static long UnixNanos() => (DateTime.UtcNow - DateTime.UnixEpoch).Ticks * 100;
