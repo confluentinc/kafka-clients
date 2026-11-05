@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 
 using Xunit;
@@ -116,7 +117,7 @@ public sealed class AdminLogDirsSubmitArgumentTests
         AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(request, null));
 
         Assert.Single(result.Values);
-        KafkaException failure = Assert.Throws<KafkaException>(() => result.Values[second].Get(s_deadline));
+        KafkaStorageException failure = FutureAssert.Throws<KafkaStorageException>(() => result.Values[second].Get(s_deadline));
         Assert.Equal(KafkaStorageErrorCode, failure.Code);
         Assert.Equal("Log directory /first is offline", failure.Message);
     }

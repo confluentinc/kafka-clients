@@ -21,9 +21,13 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -124,22 +128,22 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", failure.Message);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
 
         AsyncDescribeTopicsResult described =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Absent, StillPresent }));
         Assert.Equal(StillPresent, (await TestTimeout.Run(
             () => described.TopicNameValues![StillPresent].Get(), s_deadline)).Name);
 
-        KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException describeFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline));
     }
 
@@ -223,13 +227,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // The cast picks the TopicCollection overload: a lone literal null matches the name-collection one too (CS0121).
-        ArgumentException nullDelete = Assert.Throws<ArgumentException>(() => admin.DeleteTopics((TopicCollection)null!));
+        IllegalArgumentException nullDelete = Assert.Throws<IllegalArgumentException>(() => admin.DeleteTopics((TopicCollection)null!));
         Assert.Equal(
             "The TopicCollection: null provided did not match any supported classes for deleteTopics.",
             nullDelete.Message);
         Assert.Null(nullDelete.ParamName);
-        ArgumentException nullDescribe =
-            Assert.Throws<ArgumentException>(() => admin.DescribeTopics((TopicCollection)null!));
+        IllegalArgumentException nullDescribe =
+            Assert.Throws<IllegalArgumentException>(() => admin.DescribeTopics((TopicCollection)null!));
         Assert.Equal(
             "The TopicCollection: null provided did not match any supported classes for describeTopics.",
             nullDescribe.Message);
@@ -299,14 +303,14 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     }
 
     [Fact]
-    public void AfterClose_BothRpcsThrowObjectDisposed()
+    public void AfterClose_BothRpcsThrowIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "alpha" })));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "alpha" })));
     }
 
@@ -409,19 +413,19 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Equal(collected.Partitions.Count, named.Partitions.Count);
         Assert.Equal(collected.TopicId, named.TopicId);
 
-        KafkaException describeFailure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException describeFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => byName.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
         AsyncDeleteTopicsResult deleted = admin.DeleteTopics(new[] { Present, Absent }, new DeleteTopicsOptions());
         Assert.Null(deleted.TopicIdValues);
         await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
-        KafkaException deleteFailure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException deleteFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", deleteFailure.Message);
 
         AsyncDescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
-        KafkaException gone = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException gone = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present].Get(), s_deadline));
         Assert.Equal($"Topic {Present} not found.", gone.Message);
     }
@@ -450,10 +454,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
     }
 
-    private static Task<KafkaException> Failure(Func<Task> call) =>
-        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(call), s_deadline);
+    private static Task<KafkaTimeoutException> Failure(Func<Task> call) =>
+        TestTimeout.Run(() => FutureAssert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
 
-    private static void AssertSameTimeout(KafkaException expected, KafkaException actual)
+    private static void AssertSameTimeout(KafkaTimeoutException expected, KafkaTimeoutException actual)
     {
         Assert.Equal(7, expected.Code);
         Assert.Equal(expected.Code, actual.Code);

@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -115,14 +116,13 @@ public sealed class PublicSyncConsumerPreconditionTests
     }
 
     [Fact]
-    public void Poll_NegativeTimeout_ThrowsArgumentOutOfRange()
+    public void Poll_NegativeTimeout_ThrowsIllegalArgument()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => consumer.Poll(TimeSpan.FromMilliseconds(-1)));
-        Assert.Equal("timeout", ex.ParamName);
-        Assert.StartsWith("Invalid negative timeout -1", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("Invalid negative timeout -1", ex.Message);
     }
 
     [Fact]
@@ -131,18 +131,19 @@ public sealed class PublicSyncConsumerPreconditionTests
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => consumer.Poll(TimeSpan.FromSeconds(-2)));
-        Assert.Equal("timeout", ex.ParamName);
+        Assert.Equal("Invalid negative timeout -2000", ex.Message);
     }
 
     [Fact]
-    public void Subscribe_NullTopics_ThrownBeforeNativeCall_EvenWhenClosed()
+    public void Subscribe_NullTopics_WhenClosed_ReportsTheClosedConsumerFirst()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(null!));
+        Assert.Equal("This consumer has already been closed.", ex.Message);
     }
 
     [Fact]
@@ -150,26 +151,26 @@ public sealed class PublicSyncConsumerPreconditionTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Position(new TopicPartition("unassigned", 0)));
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => consumer.Position(new TopicPartition("unassigned", 0)));
         Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
     }
 
     [Fact]
-    public void Seek_UnassignedPartition_ThrowsInvalidOperationException()
+    public void Seek_UnassignedPartition_ThrowsIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
         Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }
 
     [Fact]
-    public void Pause_UnassignedPartition_ThrowsInvalidOperationException()
+    public void Pause_UnassignedPartition_ThrowsIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Pause(new[] { new TopicPartition("unassigned", 0) }));
         Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }

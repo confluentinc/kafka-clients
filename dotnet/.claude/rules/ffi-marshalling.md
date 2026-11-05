@@ -122,7 +122,7 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
 **Tests required:**
 
   - A non-ASCII topic round-trips (guards manual UTF-8; catches `LPStr`).
-  - Each `int8_t` predicate (`is_done`, `is_retriable_error`) reads correctly as
+  - Each `int8_t` predicate (`is_done`, `is_api_error`) reads correctly as
     `sbyte`.
   - `NativeMethods` loads on net462, net8.0, net10.0 (TFM smoke test).
 
@@ -421,12 +421,12 @@ awaits it (decision 9).
     dropped by the core without a delivery, so its second stage stays pending
     (`rust/src/producer/internals/sender.rs:1379-1400` at `9bff36d1`).
   - A `Send` racing `Close` (decision 7 refuses a `Send` that starts after `Close` with
-    `ObjectDisposedException`, before any P/Invoke, so the core's refusal inside the call is
-    reached only by a `Send` already past that check): each `Send` throws
-    `ObjectDisposedException`, or its first stage completes, or ends faulted with
-    `InvalidOperationException` (the core's `IllegalStateError`, decision 14) or the
-    `KafkaException` "Producer closed while send in progress"; no deadlock, and every first
-    stage settles exactly once.
+    `IllegalStateException` "Cannot perform operation after producer has been closed", before
+    any P/Invoke, so the core's refusal inside the call is reached only by a `Send` already past
+    that check): each `Send` throws that `IllegalStateException`, or its first stage completes,
+    or ends faulted with `IllegalStateException` (the core's `IllegalStateError`, the same class)
+    or the `KafkaException` "Producer closed while send in progress"; no deadlock, and every
+    first stage settles exactly once.
   - The `Send` token tests, by name (ledgers 19 and 71; the Actor confirms the names in P1.2):
       - T17 `PublicProducerFirstStageTests.Send_CallerTokenFiresWhileTheRecordIsQueued_EndsTheFirstStageCanceledAfterTheHandOver`
         (two cases, as Python's `test_cancelling_a_send_waiting_for_its_handover_raises_after_it`:
@@ -497,13 +497,14 @@ one `PartitionsFor` delivers is the reader's). Read the signature, not the prefi
   - **The client handle** (decision 6). One `SafeClientHandle` subclass per producer class,
     `ownsHandle: true`, `IsInvalid => handle == IntPtr.Zero`. Operation P/Invokes take the
     `SafeHandle` as their parameter, so the marshaller holds a call-scoped reference and a closed
-    handle throws `ObjectDisposedException`. A class-only call (the `MockProducer_*` functions)
+    handle throws `ObjectDisposedException`, which the binding turns into the closed client's
+    `IllegalStateException` (§A5) wherever it can reach the caller. A class-only call (the `MockProducer_*` functions)
     takes `DangerousAddRefClass` and passes the stored class pointer. The destroy runs only from
     `ReleaseHandle`, with the class pointer and no `AddRef`, and only after `CloseExplicitly`;
     a handle released any other way (the finalizer) is leaked with one `Trace.TraceWarning`
     (decision 7), because the destroy blocks and runs user callbacks.
   - **Teardown order** (decision 7; `dotnet/CLAUDE.md` §4 **Close/Dispose**): refuse new calls
-    (`ObjectDisposedException`), close, stop and join the `CompletionThread`, wait for the
+    (the closed client's `IllegalStateException`, §A5), close, stop and join the `CompletionThread`, wait for the
     in-flight uses (P/Invokes in progress) to reach 0, then release, so the destroy runs on the
     closing thread and never inside `__execute_callbacks`. A `Close` called from a callback
     leaves the teardown to the `CompletionThread` after its drain. The destroy invalidates every
@@ -562,8 +563,8 @@ released on the drain thread, which could then run the destroy inside `__execute
 
   - Create and dispose many producers of both flavors: no leak, no crash; a send burst leaves
     no native handle behind.
-  - Double `Dispose` is safe; a call after `Dispose` throws `ObjectDisposedException` before any
-    native call.
+  - Double `Dispose` is safe; a call after `Dispose` throws `IllegalStateException` ("Cannot
+    perform operation after producer has been closed") before any native call.
   - With a `PartitionsFor` in flight (an unreachable broker), `Dispose` destroys on the closing
     thread, and the pending completion fires exactly once (ledger 79 4b).
   - A producer finalized without `Dispose` is leaked with one `Trace.TraceWarning` and no
@@ -742,63 +743,80 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 ## A5 Error model (operational vs. precondition)
 
 **Decision:** Two surfaces. **Core (operational) errors** cross as a
-`kafka_common_Error_t` handle → the error table's type (decision 14): `KafkaException`
-(code, retriable, message) or a .NET built-in, mirroring the Python sibling. **Precondition errors** (bad
-argument / state) are validated in the binding *before* the FFI call and raise
-standard .NET exceptions — never `KafkaException`.
+`kafka_common_Error_t` handle → the class of the error's id, mirroring Java and the Python
+sibling: a generated Kafka class under `KafkaException`, or a Java-named class for a Java
+built-in, which derives from the .NET built-in (`dotnet/CLAUDE.md` §2, §3; this replaced
+decision 14's flat `KafkaException`, `dotnet/design/history/M22/P1-error-hierarchy-parity/PLAN.md`).
+**Precondition errors** (bad argument / state) are validated in the binding *before* the FFI
+call and raise the class Java raises there — never `KafkaException`.
 
 **Rule:**
 
-  - **Operational:** The error arrives in `out_err` (§0.1) and is read once by the
-    error-table helper; an owned handle is freed after the read;
-    `kafka_common_Error_source_err` is borrowed.
-    `KafkaException.FromHandle` reads the accessors (message **before** free),
-    then `_destroy` in a `finally` — freed exactly once even if construction
-    throws (§A2, §A3); the exception holds copied values, not the handle. Sync
-    failures `throw`; async send failures fault the `Task` (§A7) — same
-    `FromHandle`. Keep it **one flat `KafkaException` for now** (the ABI exposes
-    only code/retriable/fatal); typed subclasses can be added under it later,
-    non-breakingly.
-  - **Precondition:** validate before any pin/marshal/P/Invoke and throw
-    `ArgumentNullException` (null topic/record/config),
-    `ArgumentOutOfRangeException` (a **negative partition** or a **negative
-    timestamp** — the ABI silently maps either to "unset", so the binding must reject it,
-    with Java's texts, ledger 284 — or a negative timeout), or `ObjectDisposedException` / `InvalidOperationException` (closed
-    producer). **Mandatory**, not optional: the ABI doesn't validate preconditions
-    (CLAUDE.md §3) and some functions `assert!`/panic on violation — a panic
-    across FFI is UB.
+  - **Operational:** The error arrives in `out_err` (§0.1) and is read once by the one
+    reader, `KafkaException.FromFfiError`; an owned handle is freed after the read;
+    `kafka_common_Error_source_err` is borrowed. The reader reads the accessors (message
+    **before** free), then `_destroy` in a `finally` — freed exactly once even if construction
+    throws (§A2, §A3); the exception holds copied values, not the handle. Sync failures
+    `throw`; async send failures fault the `Task` (§A7) — same reader. The ABI exposes the id
+    (`kafka_common_Error__enum_err`), the hierarchy predicates and the payload views; it has no
+    fatal export.
+  - **The error table:** -2, -3, -4, -5 and -31 → `ConcurrentModificationException`,
+    `IllegalArgumentException`, `IllegalStateException`, `TimeoutException`
+    (`Confluent.Kafka.Java.Util.Concurrent`) and `UnsupportedOperationException`; -24 →
+    `CorrelationIdMismatchException`; every other id → its class through the generated
+    registry, its fields read from the error's payload view; an id the registry does not know
+    (a newer native library) → a bare `KafkaException`. -1 is two classes, told apart as Python
+    does by `kafka_common_Error_is_api_error_err`: false → a bare `KafkaException`, true →
+    `UnknownServerException`. A `local_callback` error → the carried instance. `Code` is
+    internal and is the class's id (-1 for a bare `KafkaException`). There is no
+    `IsRetriable`: the class is the category (`catch (RetriableException)`), as in Java and
+    Python.
+  - **Binding-made errors** take the class Java or the core gives the same condition. A closed
+    producer throws `IllegalStateException` "Cannot perform operation after producer has been
+    closed", the error the core's own closed check gives a call that races `Close` (the
+    consumer's and the admin client's: §B5, §C1). The in-callback wait of §A7 times out with
+    Kafka's `TimeoutException` (`Confluent.Kafka.Common.Errors`). An admin result missing a
+    value the core should have given (the "the admin result produced no …" checks) follows
+    Python per site: the null or empty value Python substitutes, or a plain
+    `InvalidOperationException` where Python raises `RuntimeError`.
+  - **Precondition:** validate before any pin/marshal/P/Invoke. Where Java throws
+    `IllegalArgumentException`, throw it with Java's message: a null topic ("Topic cannot be
+    null."), a **negative partition** ("Invalid partition: %d. Partition number should always
+    be non-negative or null.") or a **negative timestamp** ("Invalid timestamp: %d. Timestamp
+    should always be non-negative or null.") — the ABI silently maps either to "unset", so the
+    binding must reject it —, a negative timeout ("The timeout cannot be negative."). A .NET-only
+    precondition, where Java throws `NullPointerException` or nothing, keeps
+    `ArgumentNullException` (null record/config) or `ArgumentOutOfRangeException`.
+    **Mandatory**, not optional: the ABI doesn't validate preconditions (CLAUDE.md §3) and
+    some functions `assert!`/panic on violation — a panic across FFI is UB.
 
-**Why:** a flat `KafkaException` matches what the ABI exposes and the Python
-sibling. Preconditions are a separate surface because they are programmer errors,
-not Kafka outcomes — Java raises `IllegalArgument`/`IllegalState`, Python
-`ValueError`/`TypeError`, confluent-kafka-dotnet `ArgumentException`, all before
-the native call. Ours must too, *and must* because the ABI would otherwise panic.
-
-**Note — flat now, typed later.** The flat `KafkaException` is the *current*
-choice; a Java-style typed hierarchy can be added later **non-breakingly**
-(subclasses derive from `KafkaException`, so `catch (KafkaException)` still
-works). If we do, the changes are localized: `KafkaException.FromHandle` becomes
-a `Code` → subclass factory, and specific cases move from "flat + code" to a
-type. The two-surface model, the handle lifecycle, and the precondition
-exceptions are unchanged.
+**Why:** the class of the id is what Java throws and Python raises, and the ABI exposes it.
+Preconditions are a separate surface because they are programmer errors, not Kafka outcomes —
+Java raises `IllegalArgument`/`IllegalState`, Python its Java-named errors
+(`IllegalArgumentError`, `IllegalStateError`) and `TypeError` for Java's `NullPointerException`,
+all before the native call. Ours must too, *and must* because
+the ABI would otherwise panic. A check the binding makes in the core's place throws the core's
+class, so one condition never has two types.
 
 **Anti-patterns:**
 
   - Not checking the out-param; leaking the error handle or reading `_message`
-    after `_destroy`; a `FromHandle` that can throw before its `_destroy`.
-  - A confluent-kafka-dotnet-style `Error`/`ErrorCode` object; a per-code
-    hierarchy now (over-engineering vs the Python sibling).
+    after `_destroy`; a reader that can throw before its `_destroy`.
+  - A confluent-kafka-dotnet-style `Error`/`ErrorCode` object; an `IsRetriable` / `IsFatal`
+    flag in place of the class; a plain .NET built-in where the core's error for the same
+    condition has a Java-named class (`ObjectDisposedException` for a closed producer); a
+    rethrow that wraps a core error in a new exception, losing its class.
   - Relying on the ABI to reject bad args (→ panic/UB); throwing `KafkaException`
     for a programmer error; validating after the P/Invoke.
 
 **Tests required:**
 
-  - A sync failure throws `KafkaException` with the right code/message/flags; an
-    async failure faults the `Task` (via mock `error_next`); the handle is freed
-    exactly once; a non-ASCII message round-trips.
-  - Null topic/record → `ArgumentNullException`; post-`Dispose` →
-    `ObjectDisposedException`; negative partition or timestamp → `ArgumentOutOfRangeException` with Java's text —
-    each before any native call.
+  - A sync failure throws the class of its id with the right message (-1 with `is_api_error`
+    false → exactly `KafkaException`); an async failure faults the `Task` (via mock
+    `error_next`); the handle is freed exactly once; a non-ASCII message round-trips.
+  - Null record → `ArgumentNullException`; null topic, negative partition and negative timestamp →
+    `IllegalArgumentException` with Java's message; post-`Dispose` → `IllegalStateException`
+    with the producer's closed message — each before any native call.
 
 ---
 
@@ -813,6 +831,12 @@ which decision 7 makes the closing thread, or the `CompletionThread` after its d
 `AsyncKafkaProducer` a completion queued behind a running async callback is handled later, on the
 pump, outside `__execute_callbacks` (ledger 54, B9; the async delivery callback paragraph at the
 end of this section).
+
+One producer callback runs on none of these threads and crosses no ABI: when a serializer throws an
+`ApiException` on `KafkaProducer` / `AsyncKafkaProducer`, the record never reaches the core, and the
+binding runs the user's delivery callback itself, once, inside `Send` on the caller's thread, with
+Java's placeholder metadata, before it returns the failed future (CLAUDE.md §3, as Java's `doSend`).
+The mocks rethrow that exception from `Send`, as Java's `MockProducer` does.
 
   - **The `_cb` completions:** the async `Send`'s handover `cb`, `flush_cb`, `close_cb` /
     `close_with_timeout_cb`, the transaction `_cb`s, `partitions_for_cb`. Each fires once with the
@@ -876,7 +900,7 @@ callback of M14/P1 (the old form C) is replaced by `Callback_t`.
     completion handled by the chain (queued behind a running async callback, or the callback's own
     end) follows the async form's order (`dotnet/CLAUDE.md` §4, **The async form**): callback,
     report, then `Complete`.
-  - **The user callback's `exception`** is the error table's type (decision 14, ledger 33):
+  - **The user callback's `exception`** is the class of the error's id (§A5, ledger 33):
     `Exception?`, and the same instance for a `local_callback` error, so an `ErrorNext(Exception)`
     exception reaches the callback unchanged (decision 15).
   - **A throwing user callback** (decision 20): catch it, report it through
@@ -930,7 +954,8 @@ foreign-thread rules are gone; the no-throw rule stays because the frame below i
     its type, code and message asserted (DoD §3).
   - A send error from the call keeps `self_` alive until destroy; if the core fires the callback
     later (a record appended before `maybeAddPartition` fails, BH:38221-38225), it fires once.
-  - `ErrorNext(exception)`: the same instance reaches the callback and `Get` (decision 15).
+  - `ErrorNext(exception)`: the same instance reaches the callback, and `Get` throws an
+    `ExecutionException` whose `InnerException` is that instance (decision 15).
   - A throwing user callback: reported through `local_callback` (the future keeps the record's
     outcome), one `Trace.TraceError` seen by a `TraceListener`, and the other records unaffected.
   - Aggressive GC while sends are in flight does not collect a delegate.
@@ -1005,17 +1030,18 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
         returns. `Close` from any mock callback returns at once and leaves the teardown to the
         `CompletionThread`, as on the real producer. From an async mock callback after an
         `await`, a commit or an abort keeps the flag: it waits with the `max.block.ms` deadline
-        and ends with the code-7 timeout below. That is a recorded deviation from Java's and
+        and ends with the Kafka `TimeoutException` below. That is a recorded deviation from Java's and
         Python's mocks, which only a `_cb` form that skips the report wait would remove.
       - A queued wait waits at most `max.block.ms` (read from the config dictionary, default
         60000): from a sync callback `PartitionsFor` and the five transaction operations, whose
         completion is queued behind the callback that waits; from an async callback after an
         `await`, a commit or an abort, which waits for the callback's own report
         (`with_txn_control_cb` passes `in_callback = false`, `rust/src/ffi/producer/mod.rs:992`
-        at `851c8d95`). It then throws a retriable `KafkaException` with code 7, Kafka's
-        `TimeoutException` (ledger 79 5d; Python's `KafkaTimeoutError`,
-        `python/confluent_kafka/producer/_base.py:470-472`), not `System.TimeoutException`,
-        which decision 14 keeps for -5. The message is Python's: from a sync callback
+        at `851c8d95`). It then throws Kafka's `TimeoutException`
+        (`Confluent.Kafka.Common.Errors`, id 7; ledger 79 5d; Python's `KafkaTimeoutError`,
+        `python/confluent_kafka/producer/_base.py:470-472`), not the
+        `Confluent.Kafka.Java.Util.Concurrent.TimeoutException` of the core's -5. The message is
+        Python's: from a sync callback
         "Timeout expired after {ms}ms while awaiting {operation} from a send() callback, which
         blocks the producer's completion thread" (`_base.py:130-134`); from an async callback
         "Timeout expired after {ms}ms while awaiting {operation} from an async send() callback,
@@ -1061,16 +1087,16 @@ from stalling every later completion.
 
 **Tests required:**
 
-  - A record's future resolves with `RecordMetadata`, or faults with the error table's type.
+  - A record's future resolves with `RecordMetadata`, or faults with the class of the error's id.
   - `Flush`, the transaction ops, `PartitionsFor` and `Close` complete through their `_cb` forms
     on both flavors, and run no delivery callback on the caller's thread.
   - The in-callback rules, on `KafkaProducer` and `AsyncKafkaProducer`, from a sync callback
     and from an async one after an `await`: `Flush` throws Java's message; a queued wait ends
-    after `max.block.ms` with a retriable `KafkaException`, code 7, and the matching Python
+    after `max.block.ms` with Kafka's `TimeoutException` and the matching Python
     message (a short `max.block.ms` in the test); `Close` returns at once and the teardown runs
     after the drain. On the mocks, the mock rules in the `Flush` bullet above. A mock's `Flush`
     from a callback the core cannot see completes every pending send and returns at once, with no
-    `max.block.ms` wait and no code-7 timeout; the completed sends' delivery callbacks run after
+    `max.block.ms` wait and no `TimeoutException`; the completed sends' delivery callbacks run after
     the calling callback returns.
   - `Dispose` with sends in flight returns (does not hang).
   - A token ends only the wait and frees nothing early; high-concurrency produce does not starve
@@ -1164,8 +1190,8 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     holding op runs) fails at once with `LOCAL_CONCURRENT_MODIFICATION` (-2) and the
     message "KafkaConsumer is not safe for multi-threaded access.": a blocking form or a
     getter through `out_err`, a `_cb` form through its `cb`, queued like any completion.
-    Both surface as `InvalidOperationException` with the core's message, sync and async,
-    state reads included (decisions 14 and 17, §B5). ⚠ **The one way back into a
+    Both surface as `ConcurrentModificationException` with the core's message, sync and
+    async, state reads included (decision 17, §B5). ⚠ **The one way back into a
     consumer from its own callback is `ConsumerHandle`**, below; inside a callback the
     consumer's own methods route to it (ledger 114).
   - **The owner check** (ledger 136), as Java's `acquire()`
@@ -1174,18 +1200,18 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     `KafkaConsumer` and `AsyncKafkaConsumer` every call but `Wakeup()`, `Handle()` and
     `Dispose` / `DisposeAsync` is one **use** of the thread that makes it, `Metrics()`,
     `Close` and the state reads included. A call while another thread holds a use throws
-    `InvalidOperationException` with the core's message before anything reaches the core,
+    `ConcurrentModificationException` with the core's message before anything reaches the core,
     as Python's `_use()` raises `ConcurrentModificationError` with it (`_base.py:123`,
     `:410-412`); the same thread nests. A call made inside a callback (ledger 113's flag) is
     not checked, wherever ledger 114 sends it: on the async consumers a callback runs on the
     drain thread while the call that delivers it still holds its use for its caller's thread,
     where Python's callbacks run on that thread and nest (`_base.py:1505-1508`). The check
-    comes after the closed check, as in Python (`_base.py:401-402`):
-    `ObjectDisposedException` once the consumer is closed or while a `Dispose` tears it
-    down. An explicit `Close` is checked like any call; once it passes, its thread is the
+    comes after the closed check, as in Python (`_base.py:401-402`): `IllegalStateException`
+    "This consumer has already been closed." once the consumer is closed or while a
+    `Dispose` tears it down. An explicit `Close` is checked like any call; once it passes, its thread is the
     closing thread until the close ends, as Java's `close()` holds `acquire()`
     (`AsyncKafkaConsumer.java:1566`), and a call from another thread meanwhile throws
-    `InvalidOperationException`, as Python's does (`_base.py:403-405`). A `Dispose` is not
+    `ConcurrentModificationException`, as Python's does (`_base.py:403-405`). A `Dispose` is not
     checked and never throws (§B2).
   - **A use** is also what teardown waits for (§B2). It records the thread that made the
     call and ends when the call ends: a blocking call when it returns, an async call once
@@ -1205,7 +1231,7 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     thread nests. A call made inside a callback does not wait, as Python's holding task
     passes (`_mock_core.py:44-45`): `AsyncMockConsumer`'s callbacks run on the drain
     thread while the call that delivers them holds its use, so a wait there would never
-    end. A call from another thread throws `InvalidOperationException` with the same
+    end. A call from another thread throws `ConcurrentModificationException` with the same
     message instead for the whole of `AsyncMockConsumer.Rebalance` and `LosePartitions`,
     whether the listener is sync or async, and while an async commit callback it
     delivers runs, from its start, its synchronous part included, as Python's mock sets
@@ -1219,7 +1245,7 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     `3f8a5bc6`; ledger 140). Each goes through the core mock, whose flag refuses an
     overlapping call with -2 (`rust/src/ffi/consumer/mock_consumer.rs:1207-1228`,
     `mod.rs:3554-3565`, `:667-675` at `3f8a5bc6`), so one that overlaps another thread's
-    mock op throws `InvalidOperationException` *(deviation: Java's and Python's answer;
+    mock op throws `ConcurrentModificationException` *(deviation: Java's and Python's answer;
     and Python's `current_lag()` with an end offset waits inside `position()`, where the
     .NET mock reads the lag from the core mock in one call)*.
   - **Callable from any thread, at any time:** `Consumer_wakeup_err`
@@ -1265,8 +1291,8 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     the commits. Its other operations fail with `LOCAL_UNSUPPORTED_OPERATION` (−31) and
     the message "ConsumerHandle async operations are not supported on a MockConsumer
     handle; drive the MockConsumer directly."
-    (`rust/src/consumer/internals/async_kafka_consumer.rs:841-844` at `9bff36d1`), a
-    `NotSupportedException` (decision 14, §B5; ledger 206).
+    (`rust/src/consumer/internals/async_kafka_consumer.rs:841-844` at `9bff36d1`), an
+    `UnsupportedOperationException` (§B5; ledger 206).
   - After the consumer's destroy, every handle op fails with `LOCAL_ILLEGAL_STATE`
     (-4): §B2 Category 6.
   - **Inside a callback** (ledgers 113, 127) means on the thread that runs a sync listener
@@ -1307,7 +1333,7 @@ the calling thread; a `_cb` form queues them, and its own completion, for
         `CancellationToken` is checked before the call, as every async op checks it, and
         not after: nothing can interrupt a handle op, as nothing cancels Python's
         in-callback call, which has no `await`.
-      - **Refused at once** with `InvalidOperationException` and the core's message
+      - **Refused at once** with `ConcurrentModificationException` and the core's message
         "KafkaConsumer is not safe for multi-threaded access.", before anything is
         submitted, as Python's `_refuse_inside_callback` raises (`_base.py:1027-1035` at
         `dd826c17`): every other waiting call. These are `Poll`, `Subscribe`,
@@ -1323,8 +1349,10 @@ the calling thread; a `_cb` form queues them, and its own completion, for
         answers. `Wakeup()` and `Handle()` are unchanged, and `Close` and `Dispose`
         follow ledgers 113 and 120 (`dotnet/CLAUDE.md` §4).
       - **Order:** a routed call first makes the checks its call makes outside a
-        callback, in Python's order (closed, owner, null, `group.id`, timeout; ledger
-        164), and routes last, as Python's `_c_*` bodies do
+        callback, in Python's order (closed, owner, null, `group.id`, timeout, except
+        `Committed`, whose `group.id` check precedes its null check as Java's
+        `throwIfGroupIdNotDefined()` precedes `partitions.isEmpty()`; ledger 164), and
+        routes last, as Python's `_c_*` bodies do
         (`python/confluent_kafka/consumer/consumer.py:615-629` at `dd826c17`). A refused
         call is refused right after the closed check, as Python's
         `_refuse_inside_callback` (`_base.py:1027-1035`). The owner check skips a call
@@ -1333,13 +1361,14 @@ the calling thread; a `_cb` form queues them, and its own completion, for
         close runs can call back in, as Java sets `closed` only once its close has run
         (`AsyncKafkaConsumer.java:1566-1576`) and Python lets the closing thread's own
         calls through (`_base.py:401-405`). Once the close has ended, the call throws
-        `ObjectDisposedException`, as Python's closed check raises
+        `IllegalStateException` "This consumer has already been closed.", as Python's closed
+        check raises
         (`_base.py:605-609`). A routed call is still an in-flight use (§B2), so teardown
         waits for it before the destroy.
       - **On the mocks** the routing is the same. A `MockConsumer` handle commits, timed
         or not, and answers `CurrentLag`, `GroupMetadata` and the sync reads; it fails its
         other ops, the timed lookups, `PartitionsFor` and `ListTopics` included, with the
-        `NotSupportedException` above (−31 since ledger 206). Java's and Python's mocks instead let a callback call
+        `UnsupportedOperationException` above (−31 since ledger 206). Java's and Python's mocks instead let a callback call
         every method, through their reentrant monitor (`MockConsumer.java`'s
         `synchronized` methods; `_mock_core.py:30-32` at `3f8a5bc6`) *(deviation: the
         core mock's handle lacks those ops; goes when it has them)*.
@@ -1392,12 +1421,12 @@ is the core's, so the binding adds none there.
 
 **Tests required:**
 
-  - A call from another thread while one holds a use → `InvalidOperationException` with
-    the core's message, from the owner check before the native call, for a blocking op, a
+  - A call from another thread while one holds a use → `ConcurrentModificationException`
+    with the core's message, from the owner check before the native call, for a blocking op, a
     `_cb` op and a guarded state read alike (decision 17), and in the gaps the core's flag
     leaves: just before and just after another thread's native call, and while an async
     result is handed back (ledger 136); no corruption. The same thread nests; an
-    overlapping call of the owning thread gets the core's -2, as the same exception.
+    overlapping call of the owning thread gets the core's -2, as the same class.
     Awaited async calls in sequence pass whichever thread each resumes on. `Wakeup()` and
     `Handle()` from another thread succeed meanwhile; `Metrics()` is refused like any
     call. A call made inside a callback on the drain thread passes the owner check, and on
@@ -1415,13 +1444,13 @@ is the core's, so the binding adds none there.
     it.
   - `Wakeup()` from another thread ends a blocking `Poll` promptly (ledger 34).
   - **The handle's gate:** a `KafkaConsumer` handle op outside a callback throws
-    `InvalidOperationException` with the core's handle message. Inside a listener,
+    `ConcurrentModificationException` with the core's handle message. Inside a listener,
     on the sync and the async consumer, a handle op (`Seek`, `Position`, `Commit`,
     `CurrentLag`) succeeds while the op that runs the listener holds the flag, and
     `CommitAsync(offsets)` commits. The handle's `Wakeup` and sync reads work from
     another thread. On a `MockConsumer` handle a commit and `CurrentLag` succeed
-    outside a callback, and an unwired op (`Seek`) throws `KafkaException` with the
-    core's message.
+    outside a callback, and an unwired op (`Seek`) throws `UnsupportedOperationException`
+    with the core's message.
   - **Routing inside a callback** (ledger 114), on the sync and the async consumer,
     inside a listener and a commit callback, and after an `await` too:
       - `Commit()`, `Seek`, `Position`, `Committed`, `CurrentLag`, `Assignment`,
@@ -1430,8 +1459,8 @@ is the core's, so the binding adds none there.
         `PartitionsFor` and `ListTopics`, timed or not, answer as outside a callback
         (Python's `test_kafka_consumer.py:1069-1146` at `dd826c17`). This is
         `consumer-threading.md` §31's first test, on the public API.
-      - `Poll`, `Subscribe`, `Unsubscribe` and `Assign` throw `InvalidOperationException`
-        at once; on the async consumer nothing is submitted
+      - `Poll`, `Subscribe`, `Unsubscribe` and `Assign` throw
+        `ConcurrentModificationException` at once; on the async consumer nothing is submitted
         (`test_kafka_consumer.py:1148-1175`).
       - `Subscription` throws the core's −2, and `Metrics()` answers.
       - A routed call that the consumer's own leftover wakeup ends is made again, for
@@ -1441,7 +1470,7 @@ is the core's, so the binding adds none there.
       - A listener that the close runs commits through the routing.
       - On a mock, the commits, `CurrentLag` and `GroupMetadata` succeed, and `Seek`,
         `Position`, the lookups, `PartitionsFor` and `ListTopics` throw the handle's
-        `NotSupportedException` (ledger 141; −31 since ledger 206).
+        `UnsupportedOperationException` (ledger 141; −31 since ledger 206).
   - `Dispose` / `DisposeAsync` return without hanging, with an op in flight and with
     a live `ConsumerHandle`. ⚠ The teardown routes are **not** restated here: see
     §B2's path list.
@@ -1533,8 +1562,8 @@ const-ness and its header text decide, not the type name:
 
     | # | Trigger | Route | Thread |
     |---|---|---|---|
-    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`ObjectDisposedException`; during an explicit `Close`, another thread's call throws `InvalidOperationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy | the closing thread |
-    | 2 | `Dispose` / `DisposeAsync` from inside a callback on the drain thread (async consumers; a `Close` there throws `InvalidOperationException`, ledger 113) | the teardown is scheduled and the call returns; path 1's steps run once the drain's in-flight use has ended, never inside `__execute_callbacks`, and the drain thread is joined from the pool thread, never from itself | a pool thread, after the drain (as Python's runs in an executor off the loop, `python/confluent_kafka/consumer/async_consumer.py:604-608` at `3f8a5bc6`) |
+    | 1 | every `Close` overload, `Dispose`, `DisposeAsync` | refuse new calls (`IllegalStateException` "This consumer has already been closed."; during an explicit `Close`, another thread's call throws `ConcurrentModificationException`, §B1's owner check) → close (sync consumers: the blocking `close*`; async consumers: `close*_cb`, awaited) → stop and join the drain thread (async consumers) → wait until the in-flight uses reach 0 → set the explicit-teardown flag → release the `SafeHandle` → destroy | the closing thread |
+    | 2 | `Dispose` / `DisposeAsync` from inside a callback on the drain thread (async consumers; a `Close` there throws `ConcurrentModificationException`, ledger 113) | the teardown is scheduled and the call returns; path 1's steps run once the drain's in-flight use has ended, never inside `__execute_callbacks`, and the drain thread is joined from the pool thread, never from itself | a pool thread, after the drain (as Python's runs in an executor off the loop, `python/confluent_kafka/consumer/async_consumer.py:604-608` at `3f8a5bc6`) |
 
     The cases, all on these two paths:
       - **`Dispose` from another thread while an op runs:** `Consumer_wakeup_err`
@@ -1547,7 +1576,7 @@ const-ness and its header text decide, not the type name:
         `unsubscribe`). `Dispose` does
         not throw (ledger 34 (ii); a recorded deviation, `dotnet/CLAUDE.md` §4). A call a
         callback of that op makes, routed to the handle (ledger 114), may take the wakeup
-        first: it then throws the wakeup's `KafkaException` (-18) into the callback, as
+        first: it then throws the wakeup's `WakeupException` (-18) into the callback, as
         Python's routed call raises `WakeupError` for its own wake aimed at the running
         call and retries only a wake left over from an ended call
         (`_base.py:1267-1315` at `3f8a5bc6`), and `Dispose` sends the wakeup again, so the
@@ -1560,7 +1589,7 @@ const-ness and its header text decide, not the type name:
         the same way, "covering its submission, its wait and its callbacks"
         (`python/confluent_kafka/consumer/_base.py:445-456` at `3f8a5bc6`).
       - **An explicit `Close` from another thread while an op runs:** the owner check
-        refuses it at once → `InvalidOperationException`, before any state changes, so
+        refuses it at once → `ConcurrentModificationException`, before any state changes, so
         nothing is torn down and the consumer stays usable (ledgers 34 (ii), 136), as
         Java's `close()` fails in `acquire()` (`AsyncKafkaConsumer.java:1566`) and
         Python's raises (`_base.py:449-454` at `3f8a5bc6`). Call `Wakeup()` first. A
@@ -1570,7 +1599,7 @@ const-ness and its header text decide, not the type name:
       - **A `Close` or `Dispose` from inside a listener or commit callback on the
         sync consumers:** the op that runs the callback holds the single-owner flag,
         and the blocking close takes it too, so the core rejects the close with -2 →
-        `InvalidOperationException`, and nothing is torn down (ledger 34 (iii);
+        `ConcurrentModificationException`, and nothing is torn down (ledger 34 (iii);
         `rust/src/ffi/consumer/mod.rs:316-325`, `:660-676`, `:3700-3706` at
         `3f8a5bc6`). Python's `close()` raises `ConcurrentModificationError` there
         and leaves the consumer open
@@ -1596,8 +1625,8 @@ const-ness and its header text decide, not the type name:
     field. `ReleaseHandle` destroys only when the explicit-teardown flag is set
     (path 1); reached any other way it traces once and leaks. It passes the class
     pointer with no `AddRef`, because the handle is already being released. Close
-    always comes before destroy. Guard use-after-close with
-    `ObjectDisposedException`, checked before any P/Invoke.
+    always comes before destroy. Guard use-after-close with the closed consumer's
+    `IllegalStateException` (§B5), checked before any P/Invoke.
   - **Every operation P/Invoke takes the `SafeHandle`** (decision 6), so the
     marshaller's call-scoped `AddRef` is a blocking form's in-flight use, for its
     whole run. A `_cb` form's P/Invoke returns at once, so its in-flight use is
@@ -1647,7 +1676,7 @@ const-ness and its header text decide, not the type name:
     that. After the consumer's destroy, every handle op fails with
     `LOCAL_ILLEGAL_STATE` (-4, "consumer destroyed",
     `rust/src/ffi/consumer/consumer_handle.rs:121-123` at `3f8a5bc6`) →
-    `InvalidOperationException` (decision 14), and the handle is still safe to
+    `IllegalStateException` (§B5), and the handle is still safe to
     destroy (BH:30638-30641, BH:30974-30975 at `3f8a5bc6`). This replaces M9/P8's
     P8-D1 reference and the deferred destroy it caused: a live handle no longer
     defers the consumer's destroy.
@@ -1713,17 +1742,17 @@ in flight, one of which may be waiting on that very callback.
     after a successful call, after a failed one and when the call never ran; after a
     call that ran, the callback still fires with its `self_` alive.
   - **Category 6:** a handle op after the consumer's destroy throws
-    `InvalidOperationException` (-4); destroying the handle after the consumer is
+    `IllegalStateException` (-4); destroying the handle after the consumer is
     safe; the consumer's `Dispose` destroys at once with a handle outstanding.
   - **The path list:** a `Dispose` from another thread during a blocking `Poll`, and
     during an async `Poll`, returns and does not throw; an explicit cross-thread
-    `Close` throws `InvalidOperationException` and leaves the consumer usable; a
-    `Close` or `Dispose` inside a sync listener throws `InvalidOperationException`;
-    a `Close` inside a callback on the async consumers throws `InvalidOperationException`
+    `Close` throws `ConcurrentModificationException` and leaves the consumer usable; a
+    `Close` or `Dispose` inside a sync listener throws `ConcurrentModificationException`;
+    a `Close` inside a callback on the async consumers throws `ConcurrentModificationException`
     and leaves the consumer open, while a `Dispose` there is deferred and the destroy runs
     after the drain; a finalized consumer writes one trace and does not destroy.
-  - Double-`Dispose` is safe; a call after `Dispose` throws
-    `ObjectDisposedException`.
+  - Double-`Dispose` is safe; a call after `Dispose` throws `IllegalStateException` ("This
+    consumer has already been closed.").
 
 ---
 
@@ -1850,27 +1879,24 @@ deferred (CLAUDE.md §6.4).
 
 ## B5 Error model (operational vs. precondition)
 
-**Decision:** Two surfaces. **Core (operational) errors** cross as a
-`kafka_common_Error_t` handle → the error table's type (decision 14): `KafkaException`
-(code, retriable, message) or a .NET built-in, mirroring the Python sibling. **Precondition errors** (bad
-argument / state) are validated in the binding *before* the FFI call and raise
-standard .NET exceptions — never `KafkaException`. The consumer adds two more
-shapes: **wakeup** and **concurrent use**.
+**Decision:** Two surfaces, as §A5. **Core (operational) errors** cross as a
+`kafka_common_Error_t` handle → the class of the error's id (§A5's error table), mirroring
+Java and the Python sibling. **Precondition errors** (bad argument / state) are validated in
+the binding *before* the FFI call and raise the class Java raises there — never
+`KafkaException`. The consumer adds two more shapes: **wakeup** and **concurrent use**.
 
 **Rule:**
 
   - **Operational:** The error arrives in `out_err` (§0.1) and is read once by the
     error-table helper; an owned handle is freed after the read;
-    `kafka_common_Error_source_err` is borrowed. `KafkaException.FromHandle` reads the
+    `kafka_common_Error_source_err` is borrowed. `KafkaException.FromFfiError` reads the
     accessors (message **before** free), then `_destroy` in a `finally` — freed
     exactly once even if construction throws (§B2, §B3); the exception holds copied
     values, not the handle. Sync failures `throw`; async op failures fault the
-    `Task` (§B7) — same `FromHandle`. Keep it **one flat `KafkaException` for now** for
-    every code the error table gives no .NET type (decision 14): it carries `Code`
-    (`kafka_common_Error__enum_err`) and `IsRetriable`
-    (`kafka_common_Error_is_retriable_error_err`) (BH:17798, BH:33877 at `3f8a5bc6`); the
-    header has no fatal predicate. Typed subclasses can be added under it later,
-    non-breakingly.
+    `Task` (§B7) — the same reader. The class comes from the id
+    (`kafka_common_Error__enum_err`, BH:17798 at `3f8a5bc6`) by §A5's error table; `Code`
+    is internal and is that id, and there is no `IsRetriable`: `catch (RetriableException)`
+    classifies, as in Java and Python. The header has no fatal predicate.
   - **Two error channels on the commit-callback family, and they must not be
     conflated** (M9/P7; M19/P1 forms). For `Consumer_commit_async_with_callback` /
     `_commit_async_with_offsets_callback` and their `_cb` twins:
@@ -1893,15 +1919,31 @@ shapes: **wakeup** and **concurrent use**.
     A commit can start cleanly and fail later, so both channels need their own coverage. A
     `MockConsumer` always delivers success, so testing the delivered channel means driving
     the trampoline as the core would.
-  - **Precondition:** validate before any pin/marshal/P/Invoke and throw
-    `ArgumentNullException` (null topic/partition/config),
-    `ArgumentOutOfRangeException` (a negative timeout), or `ObjectDisposedException`
-    / `InvalidOperationException` (closed consumer). **Mandatory**, not optional:
-    the ABI doesn't validate preconditions (CLAUDE.md §3), and a `NULL` where the
+  - **Precondition:** validate before any pin/marshal/P/Invoke. Where Java throws
+    `IllegalArgumentException`, throw it with Java's message: a negative timeout where
+    Java's method checks the sign (`Poll`, `Commit`, `Position`: Java's `Timer`, "Invalid
+    negative timeout <ms>"; `Close`: "The timeout cannot be negative."); `Seek`'s negative
+    offset; a null `Subscribe` collection ("Topic collection to subscribe to cannot be
+    null") or a null or blank topic in it ("Topic collection to subscribe to cannot contain
+    null or empty topic"); a null or empty `SubscriptionPattern` ("Topic pattern to
+    subscribe to cannot be null" / "… cannot be empty"); a null `Assign` collection ("Topic partitions collection to
+    assign to cannot be null") or a null or blank topic in one of its partitions ("Topic
+    partitions to assign to cannot have null or empty topic"); a null listener
+    ("RebalanceListener cannot be null"); and a null `SeekToBeginning` / `SeekToEnd`
+    collection ("Partitions collection cannot be null"). Where Java makes no check
+    (`Committed`, `PartitionsFor`, `ListTopics`, `OffsetsForTimes`, `BeginningOffsets`,
+    `EndOffsets`), a negative timeout throws it with the core's own `_with_timeout`
+    message, "Timeout must not be negative", the error (-3) the core returns for it. A
+    closed consumer throws `IllegalStateException` (Java's "This consumer has already been
+    closed."). Any other .NET-only precondition, where Java throws `NullPointerException`
+    or nothing, keeps `ArgumentNullException` (a null `PartitionsFor` topic; a null
+    `Pause` / `Resume`, `Committed`, `BeginningOffsets` or `EndOffsets` collection or
+    `OffsetsForTimes` map; a null config) or `ArgumentOutOfRangeException`. **Mandatory**, not
+    optional: the ABI doesn't validate preconditions (CLAUDE.md §3), and a `NULL` where the
     header asks for a live handle is undefined behavior. A panic in the core does not
     cross the boundary: the `_err` twin stores it as -4 with a message beginning "Rust
     panic caught at the FFI boundary in <function>" (`rust/ffi-macros/src/lib.rs:87-88`
-    at `3f8a5bc6`), which the error table maps to `InvalidOperationException`, not to
+    at `3f8a5bc6`), which the error table maps to `IllegalStateException`, not to
     Java's error; so a check the binding skips surfaces as that panic. The core's getters
     panic on a closed consumer
     (`rust/src/consumer/internals/async_kafka_consumer.rs:3928-3931` at `3f8a5bc6`),
@@ -1909,14 +1951,14 @@ shapes: **wakeup** and **concurrent use**.
   - **`GroupMetadata()` without `group.id` (ledger 105).** The core panics there too
     (`rust/src/consumer/internals/async_kafka_consumer.rs:4026-4032` at `3f8a5bc6`), so
     .NET makes Java's check itself: after its closed check and before calling C, it
-    throws the `INVALID_GROUP_ID` (24) `KafkaException` with Java's message, "To use the
+    throws `InvalidGroupIdException` (24) with Java's message, "To use the
     group management or offset commit APIs, you must provide a valid group.id in the
     consumer configuration." (`AsyncKafkaConsumer.java:1293-1298`, `:1528-1537`), as
     Python does (`python/confluent_kafka/consumer/_base.py:1571-1577` at `3f8a5bc6`). It
     is not a precondition in the sense above: it stands in for a core check, so it throws
-    the type Java's `InvalidGroupIdException` maps to, not a .NET built-in.
-  - **`wakeup()`** → the interrupted op surfaces a flat `KafkaException` with the
-    **Wakeup** code (-18, BH:355 at `3f8a5bc6`) (Java `WakeupException` semantics —
+    Java's class, not a .NET built-in.
+  - **`wakeup()`** → the interrupted op throws `WakeupException` (-18, BH:355 at
+    `3f8a5bc6`), Java's class and Python's `WakeupError(KafkaError)` (Java semantics —
     raised **once**, then the flag clears and the op works again; consumer-threading
     §11). Java's `wakeup()` interrupts only the ops whose future registers with the
     `WakeupTrigger`: `poll`, `commitSync`, `position`, `committed`, `partitionsFor`,
@@ -1925,17 +1967,14 @@ shapes: **wakeup** and **concurrent use**.
     Any other op (`CommitAsync`, `Subscribe`, `Seek`, `Pause`, `OffsetsForTimes`,
     `Close`, `CurrentLag`, …) does not consume it, so a wakeup sent during one stays
     armed for the next wakeable call (`CurrentLag`:
-    `python/confluent_kafka/consumer/_base.py:1425-1429` at `3f8a5bc6`). **Not** a
-    subclass (decision 14), although Java and Python use one (`WakeupException`;
-    Python's `WakeupError(KafkaError)`,
-    `python/confluent_kafka/common/errors/wakeup_error.py:32` at `3f8a5bc6`): a
-    `WakeupException : KafkaException` can be added later without a break (the Note
-    below). Distinct from **`CancellationToken`** cancellation →
-    **`OperationCanceledException`** (the .NET-native cancel, CLAUDE.md §3 — the analog
+    `python/confluent_kafka/consumer/_base.py:1425-1429` at `3f8a5bc6`). It is a
+    `KafkaException`, as Java's and Python's are
+    (`python/confluent_kafka/common/errors/wakeup_error.py:32` at `3f8a5bc6`). Distinct
+    from **`CancellationToken`** cancellation → **`OperationCanceledException`** (the .NET-native cancel, CLAUDE.md §3 — the analog
     of Python re-raising `CancelledError`); which ops a cancel wakes is §B7.
   - **Concurrent use** (single-owner, one op in flight; the binding's owner check, then the
     core's flag, ledger 136, §B1). A call from another thread while one holds a use throws
-    `InvalidOperationException` with Java's `acquire()` message, "KafkaConsumer is not safe
+    `ConcurrentModificationException` with Java's `acquire()` message, "KafkaConsumer is not safe
     for multi-threaded access.", from the owner check before the native call. A call that
     passes the check but meets an op still in the core (an overlapping call of the owning
     thread) fails at once with `LOCAL_CONCURRENT_MODIFICATION` (-2) and the same message
@@ -1944,13 +1983,12 @@ shapes: **wakeup** and **concurrent use**.
     completion (`rust/src/ffi/consumer/mod.rs:700-702`, `:721-734` at `3f8a5bc6`); a state
     read (`Assignment` / `Subscription` / `Paused` / `GroupMetadata`) through `out_err`
     with a `NULL` return (BH:30513-30552, BH:30609-30621 at `3f8a5bc6`). Every one
-    surfaces as `InvalidOperationException` with that message, sync and async (decisions
-    14 and 17), as Java's
+    surfaces as `ConcurrentModificationException` with that message, sync and async
+    (decision 17), so the owner check and the core's -2 are one class, as Java's
     `ConcurrentModificationException` and Python's `ConcurrentModificationError`
-    (`python/confluent_kafka/concurrent_modification_error.py:31` at `3f8a5bc6`) are one
-    type. This replaces M3/P2's split (a faulted `Task` carrying `KafkaException` for an
-    async op).
-  - **`ConsumerHandle` errors take the error table like every other call (decision 14).**
+    (`python/confluent_kafka/concurrent_modification_error.py:31` at `3f8a5bc6`) are. This
+    replaces M3/P2's split (a faulted `Task` carrying `KafkaException` for an async op).
+  - **`ConsumerHandle` errors take the error table like every other call (§A5).**
     Three conditions are handle-specific, all core behavior surfaced verbatim:
       - **The callback gate (ledger 104).** On a `KafkaConsumer` handle an async op
         (`Seek`, `Pause`, `Position`, `Commit`, `CurrentLag`, …) is admitted only while
@@ -1959,7 +1997,7 @@ shapes: **wakeup** and **concurrent use**.
         submitted, with the message "KafkaConsumer is not safe for multi-threaded access.
         ConsumerHandle operations are allowed only from inside a callback the consumer is
         running (ConsumerRebalanceListener, OffsetCommitCallback); from another thread call
-        wakeup()." → `InvalidOperationException` (BH:30642-30648;
+        wakeup()." → `ConcurrentModificationException` (BH:30642-30648;
         `rust/src/consumer/internals/async_kafka_consumer.rs:307-309`, `:904-909` at
         `3f8a5bc6`). `Wakeup` and the sync reads (`Assignment`, `Paused`) work from any
         thread at any time. Java has no handle (a listener captures the consumer, and
@@ -1968,106 +2006,105 @@ shapes: **wakeup** and **concurrent use**.
         `acquire()`. `Wakeup`, the sync reads, `CurrentLag` and every commit work against
         the mock; every other async op fails with `LocalUnsupportedOperation` (−31) and
         the message "ConsumerHandle async operations are not supported on a MockConsumer
-        handle; drive the MockConsumer directly." → `NotSupportedException`
+        handle; drive the MockConsumer directly." → `UnsupportedOperationException`
         (`rust/src/consumer/internals/async_kafka_consumer.rs:841-844` at `9bff36d1`).
         **Assert it, do not work around it**, and assert the exact message (DoD §3),
         since the type alone does not tell it from another unsupported operation.
       - **After the consumer is destroyed** every handle op fails with -4 →
-        `InvalidOperationException`, and a `_cb` handle op fires its `cb` inline (ledger
+        `IllegalStateException`, and a `_cb` handle op fires its `cb` inline (ledger
         34 (i); `rust/src/ffi/consumer/consumer_handle.rs:48-51` at `3f8a5bc6`).
     A blocking handle op runs as a task of the consumer and waits on a channel, whichever
     thread calls it, so it works from inside a listener that a blocking consumer op runs;
     the M9/P8 in-runtime `IllegalStateError` is gone
     (`rust/src/ffi/consumer/consumer_handle.rs:37-46` at `3f8a5bc6`).
-  - **The core's local codes map by the error table (decision 14, M19/P1).** -2 and -4 →
-    `InvalidOperationException`, -3 → `ArgumentException`, -5 → `System.TimeoutException`,
-    -31 → `NotSupportedException`, each with the core's message; a `local_callback` error → the carried instance; every
-    other code → `KafkaException`. This holds on every surface, the `ConsumerHandle`
-    included, so a handle op and the same consumer op throw the same type
+  - **The core's local codes map by the error table (§A5).** -2 →
+    `ConcurrentModificationException`, -3 → `IllegalArgumentException`, -4 →
+    `IllegalStateException`, -5 → `TimeoutException` (`Confluent.Kafka.Java.Util.Concurrent`),
+    -24 → `CorrelationIdMismatchException`, -31 → `UnsupportedOperationException`, each with
+    the core's message; a `local_callback` error → the carried instance; every other id → its
+    class through the generated registry (-1 by `is_api_error`). This holds on every
+    surface, the `ConsumerHandle` included, so a handle op and the same consumer op throw the same type
     (`HandleAndConsumer_ReportTheSameCoreError_Identically` keeps asserting it). It
     replaces the M9/P8 rule that kept `illegal_state` a `KafkaException`.
   - **The guard-bypass contrast is itself a contract, and it is testable.** The same
     logical call has two different surfaces depending on which handle it goes
     through, and the header states both: `Consumer_assignment` fails with -2 through
     `out_err` and returns `NULL` while another call holds the consumer (BH:30513-30524 at
-    `3f8a5bc6`) → `InvalidOperationException`, while `ConsumerHandle_assignment` takes no
+    `3f8a5bc6`) → `ConcurrentModificationException`, while `ConsumerHandle_assignment` takes no
     guard and returns the owned list from any thread (BH:31850-31862, BH:30642-30648 at
     `3f8a5bc6`). Inside a callback that holds the guard the first is rejected and the
     second succeeds — the reason `ConsumerHandle` exists, and the mock-testable form of
     `consumer-threading.md` §31's first mandatory regression test (no broker, no threads,
     no sleeps). On the public surface the consumer's own `Assignment()` inside a callback
     is routed to the handle (ledger 114) and succeeds too; the contrast shows on a call
-    sent to the core as outside, `Subscription()`, which throws `InvalidOperationException`
+    sent to the core as outside, `Subscription()`, which throws `ConcurrentModificationException`
     (-2) in the same listener.
 
-**Why:** the flat `KafkaException` with `Code` and `IsRetriable` matches what the ABI
-exposes (decision 14), and the codes that stand for Java built-ins get their .NET type now,
-so typed subclasses can come later without a break. Preconditions are a separate surface
-because they are programmer errors, not Kafka outcomes — Java raises
-`IllegalArgument`/`IllegalState`, Python its Java-named errors (`NullPointerError`,
-`IllegalArgumentError`; root `CLAUDE.md:431` at `3f8a5bc6`), all before the native call;
-ours must too, *and must* because the ABI would otherwise reach undefined behavior or a
-core panic. The wakeup shape keeps Java's once-only semantics on the flat type (Java's
-`WakeupException` and Python's `WakeupError` become a subclass later, the Note below).
-Concurrent use is refused by the binding's owner check, as Java's `acquire()` and Python's use
-table refuse it, and behind it by the core (ledger 136); since M19/P1 every rejection is the
-same `InvalidOperationException`, sync or async (decision 17).
-
-**Note — flat now, typed later.** The flat `KafkaException` is the *current*
-choice; a Java-style typed hierarchy can be added later **non-breakingly**
-(subclasses derive from `KafkaException`, so `catch (KafkaException)` still
-works). If we do, `KafkaException.FromHandle` becomes a `Code` → subclass factory
-and specific cases move from "flat + code" to a type — e.g. the **Wakeup** case
-would become a `WakeupException`. The two-surface model, the handle lifecycle, and
-the precondition exceptions are unchanged.
+**Why:** the class of the id is what Java throws and Python raises, and the ABI exposes it
+(§A5). Preconditions are a separate surface because they are programmer errors, not Kafka
+outcomes — Java raises `IllegalArgument`/`IllegalState`, Python its Java-named errors
+(`IllegalArgumentError`, `IllegalStateError`) and `TypeError` for Java's `NullPointerException`
+(root `CLAUDE.md`, Python Binding Conventions: Types, the `Objects.requireNonNull` row, and
+Implementation over the FFI, exception 4), all before the native call; ours must too, *and must* because
+the ABI would otherwise reach undefined behavior or a core panic. A check the binding makes in
+the core's place throws the core's class. The wakeup shape keeps Java's once-only semantics on
+Java's class. Concurrent use is refused by the binding's owner check, as Java's `acquire()` and
+Python's use table refuse it, and behind it by the core (ledger 136); every rejection is the
+same `ConcurrentModificationException`, sync or async (decision 17).
 
 **Anti-patterns:**
 
   - Not checking the out-param / return value; leaking the error handle or reading
-    `_message` after `_destroy`; a `FromHandle` that can throw before its `_destroy`.
-  - A per-code hierarchy now (decision 14 keeps one flat `KafkaException`); throwing
-    `KafkaException` for a programmer error (the `GroupMetadata()` check of ledger 105 is
-    not one: Java throws `InvalidGroupIdException` there); validating after the P/Invoke.
-  - Making `wakeup()` a distinct exception subclass now (decision 14 keeps it flat; the
-    Note above says how it is added later); conflating a `wakeup()`
-    (`KafkaException`/Wakeup) with a `CancellationToken` cancel
+    `_message` after `_destroy`; a reader that can throw before its `_destroy`.
+  - A plain .NET built-in or a bare `KafkaException` where Java and the core give the
+    condition a class (a closed consumer as `ObjectDisposedException`, a Java-checked
+    negative timeout as `ArgumentOutOfRangeException`); throwing `KafkaException` for a
+    programmer error (the `GroupMetadata()` check of ledger 105 is not one: Java throws
+    `InvalidGroupIdException` there); validating after the P/Invoke.
+  - Conflating a `wakeup()` (`WakeupException`) with a `CancellationToken` cancel
     (`OperationCanceledException`).
-  - Any type other than `InvalidOperationException` for a concurrent call (-2), a state
-    read or an op, sync or async (decision 17).
-  - Treating the −31 `NotSupportedException` on a mock-derived `ConsumerHandle`, or the -2 a
+  - Any class other than `ConcurrentModificationException` for a concurrent call (the
+    owner check or the core's -2), a state read or an op, sync or async (decision 17).
+  - Treating the −31 `UnsupportedOperationException` on a mock-derived `ConsumerHandle`, or the -2 a
     `KafkaConsumer` handle op gets outside a callback (ledger 104), as a bug to route
     around (a managed pre-check, a silent no-op, an invented "mock unsupported"
     exception) — it is documented core behavior, and the binding's job is to surface it
     unchanged.
   - Branching on an error code outside the one error-table helper, or mapping a code the
     table does not list.
-  - Adding an `InvalidOperationException` concurrent-rejection mapping to a **handle**
+  - Adding a `ConcurrentModificationException` concurrent-rejection mapping to a **handle**
     sync read (`Assignment`, `Paused`). It has none to map: it takes no guard
     (BH:30642-30648 at `3f8a5bc6`).
 
 **Tests required:**
 
-  - A sync failure throws `KafkaException` with the right code/message/`IsRetriable`; an
+  - A sync failure throws the class of its id with the right message; an
     async failure faults the `Task` (via `MockConsumer.SetPollException`, decision 15); the
     handle is freed exactly once; a non-ASCII message round-trips.
-  - Null topic/partition → `ArgumentNullException`; post-`Dispose` →
-    `ObjectDisposedException`; each before any native call.
-  - `GroupMetadata()` without `group.id` throws `KafkaException` with code 24 and Java's
-    exact message; after `Dispose` it still throws `ObjectDisposedException` (ledger 105).
-  - `wakeup()` → the next `poll`/`commit` throws `KafkaException` (Wakeup)
+  - A null `Subscribe`, `Assign` or `SeekToBeginning` collection, a null topic in a
+    `Subscribe` or `Assign` argument, a null pattern or a null listener →
+    `IllegalArgumentException` with Java's message; a null `PartitionsFor` topic or `Pause`
+    collection → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
+    with Java's or the core's message; post-`Dispose` → `IllegalStateException` with the
+    closed message; each before any native call.
+  - `GroupMetadata()` without `group.id` throws `InvalidGroupIdException` with Java's
+    exact message; after `Dispose` it still throws the closed `IllegalStateException`
+    (ledger 105).
+  - `wakeup()` → the next `poll`/`commit` throws `WakeupException`
     **once**, then the consumer works again; a `CancellationToken` cancel →
     `OperationCanceledException`.
-  - A concurrent sync state read → `InvalidOperationException`; a concurrent op, blocking
-    or `_cb` → `InvalidOperationException` too (decision 17).
+  - A concurrent sync state read → `ConcurrentModificationException`; a concurrent op,
+    blocking or `_cb` → `ConcurrentModificationException` too (decision 17); an owner-check
+    rejection and a core -2 have the same class.
   - **`ConsumerHandle`:** on a `KafkaConsumer` handle an op outside a callback throws
-    `InvalidOperationException` with the exact gate message (ledger 104); on a
+    `ConcurrentModificationException` with the exact gate message (ledger 104); on a
     mock-derived handle `Wakeup`, the sync reads, `CurrentLag` and the commits succeed
     (`CommitAsync(offsets)` from a listener commits into the mock), and every other async
-    op throws `NotSupportedException` **and the exact message**; after the consumer's destroy every handle op throws
-    `InvalidOperationException`. And the guard-bypass contrast — inside a listener fired
+    op throws `UnsupportedOperationException` **and the exact message**; after the consumer's destroy every handle op throws
+    `IllegalStateException`. And the guard-bypass contrast — inside a listener fired
     by `MockConsumer.Rebalance`, `handle.Assignment()` **succeeds**, the same listener's
     `consumer.Assignment()` is routed to the handle (ledger 114) and returns the same
-    assignment, and its `consumer.Subscription()` throws `InvalidOperationException`.
+    assignment, and its `consumer.Subscription()` throws `ConcurrentModificationException`.
     ⚠ That last one needs a **mutation check** (turn the routing off and confirm the
     consumer's `Assignment()` fails), or a regression that stops routing passes it
     silently.
@@ -2315,7 +2352,7 @@ Poll():                             runtime task: poll(timeout)
     `catch` around a P/Invoke that threw before native ran.
   - **One op in flight** per consumer. A `_cb` call while another op runs gets its `cb`
     with -2, queued like any completion, and the `Task` faults with
-    `InvalidOperationException` (decision 17, §B5). The core releases its guard before it
+    `ConcurrentModificationException` (decision 17, §B5). The core releases its guard before it
     queues a completion (`rust/src/ffi/consumer/mod.rs:700-712` at `3f8a5bc6`), so an
     `await`-then-resubmit from the continuation is not rejected.
   - No continuation runs on the drain thread, and the drain thread never waits on user
@@ -2374,8 +2411,8 @@ the core's flag's (§B1, ledger 136).
   - `wakeup()` during an in-flight `Poll` ends the `Task` **once**, then the consumer works
     again (§B5); a `CancellationToken` cancel → `OperationCanceledException`.
   - A cancelled `CurrentLag` sends no wakeup: the next `Poll` is not woken (ledger 103).
-  - A concurrent async op → a faulted `Task` with `InvalidOperationException`; a concurrent
-    state read → `InvalidOperationException` (§B5, decision 17).
+  - A concurrent async op → a faulted `Task` with `ConcurrentModificationException`; a
+    concurrent state read → `ConcurrentModificationException` (§B5, decision 17).
   - An `await`-then-resubmit from the continuation succeeds (no -2).
   - The `cb`s, listeners and commit callbacks run on `confluent-kafka-consumer-pump`; no
     continuation runs on it.
@@ -2463,8 +2500,12 @@ The C shapes (BH at `25a4d475`):
     `DisposeAsync` call `kafka_admin_Admin_close_cb`, which waits without a limit, as Java's
     `close()`. `Close(TimeSpan)` calls `kafka_admin_Admin_close_with_timeout_cb`. On
     `KafkaAdminClient` and `AsyncKafkaAdminClient` a negative timeout throws
-    `ArgumentOutOfRangeException("The timeout cannot be negative.")` before the closed check, as
-    Java does (ledgers 82, 174). The sync flavour waits on a `Completion`, the async one on a
+    `IllegalArgumentException("The timeout cannot be negative.")` before the closed check, as
+    Java does (ledgers 82, 174). After `Close`, an RPC throws `IllegalStateException` with
+    Java's message "Cannot accept new calls when AdminClient is closing." (§A5) *(deviation, as
+    Python's: Java's `KafkaAdminClient` returns the Result and fails its futures with that
+    exception; the native handle is gone after `Close`, so the call has no Result to return)*,
+    and a second `Close` does nothing. The sync flavour waits on a `Completion`, the async one on a
     `TaskCompletionSource` with `RunContinuationsAsynchronously`; its `CancellationToken` ends only
     the caller's wait: the close goes on in the core, and the rest of the teardown (join the drain
     thread, wait for the in-flight uses, destroy) runs when the close ends, as Python's cancelled

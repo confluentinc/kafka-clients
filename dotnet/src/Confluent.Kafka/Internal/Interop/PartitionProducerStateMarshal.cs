@@ -29,7 +29,8 @@ internal static class PartitionProducerStateMarshal
     {
         if (state == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no partition producer state.");
+            // Python's binding reads a missing state as one with no active producers.
+            return new DescribeProducersResult.PartitionProducerState(new List<ProducerState>());
         }
 
         IntPtr outErr = IntPtr.Zero;
@@ -63,7 +64,7 @@ internal static class PartitionProducerStateMarshal
     {
         if (producer == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no producer state.");
+            throw new InvalidOperationException("The admin result produced no producer state.");
         }
 
         IntPtr outErr = IntPtr.Zero;

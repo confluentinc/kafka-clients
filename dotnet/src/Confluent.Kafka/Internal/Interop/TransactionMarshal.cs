@@ -55,7 +55,8 @@ internal static class TransactionMarshal
     {
         if (list == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no transaction listings.");
+            // Python's binding reads a missing list as an empty one.
+            return Array.Empty<TransactionListing>();
         }
 
         IntPtr outErr = IntPtr.Zero;
@@ -72,9 +73,9 @@ internal static class TransactionMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             IntPtr state = NativeMethods.TransactionListingState(listing, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
+            // Python's binding reads a missing transactional id as an empty string.
             listings[i] = new TransactionListing(
-                Utf8Marshal.PtrToString(transactionalId)
-                    ?? throw new KafkaException("The admin result produced no transactional id for a listing."),
+                Utf8Marshal.PtrToString(transactionalId) ?? string.Empty,
                 producerId,
                 TransactionDescriptionMarshal.StateFrom(state));
         }

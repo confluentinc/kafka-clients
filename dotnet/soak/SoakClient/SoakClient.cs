@@ -22,8 +22,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Util.Concurrent;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Soak;
@@ -303,11 +305,18 @@ internal sealed class SoakClient : IDisposable
         return built;
     }
 
-    internal static int? ErrorCode(Exception ex) => ex is KafkaException kafka ? kafka.Code : (int?)null;
+    // The error's C id, as Python's soak reads a class's _ffi_id: a KafkaException's Code, or the id the
+    // generated lookup gives a Java-named class or CorrelationIdMismatchException.
+    internal static int? ErrorCode(Exception ex) => KafkaException.FfiIdOf(ex);
+
+    // The error a failed Get() carries, as Python's soak failure_of: Get() throws Java's
+    // ExecutionException with the future's failure as its InnerException. Any other error is itself.
+    internal static Exception FailureOf(Exception ex) =>
+        ex is ExecutionException { InnerException: { } cause } ? cause : ex;
 
     internal static string ErrorMessage(Exception ex) => ex.Message;
 
-    internal static bool ErrorIsRetriable(Exception ex) => ex is KafkaException kafka && kafka.IsRetriable;
+    internal static bool ErrorIsRetriable(Exception ex) => ex is RetriableException;
 
     // Bounded, as Python's soak: endless retrying would never reach the SUMMARY verdict, and
     // run.sh's restart re-joins the group. Non-retriable errors have their own, lower bound.
@@ -639,8 +648,11 @@ internal sealed class SoakClient : IDisposable
             {
                 // CancellationToken.None: the stop token would end the first stage with
                 // OperationCanceledException for a record the core still delivers (Python's send
-                // takes none). The first stage is awaited: it is the producer's backpressure.
-                task = (await _producer.Send(producerRecord, CancellationToken.None).ConfigureAwait(false)).Get();
+                // takes none). The first stage is awaited: it is the producer's backpressure. The
+                // completion stage faults with the delivery's error itself, as Python's when_complete
+                // action receives it.
+                task = (await _producer.Send(producerRecord, CancellationToken.None).ConfigureAwait(false))
+                    .ToCompletionStage();
             }
             catch (Exception ex)
             {
@@ -1191,7 +1203,7 @@ internal sealed class SoakClient : IDisposable
             }
             catch (Exception ex)
             {
-                HandleCreateError(entry.Key, ex);
+                HandleCreateError(entry.Key, FailureOf(ex));
             }
         }
 
@@ -1254,7 +1266,7 @@ internal sealed class SoakClient : IDisposable
             }
             catch (Exception ex)
             {
-                Classify("delete", entry.Key, ex, UnknownTopicOrPartitionCode);
+                Classify("delete", entry.Key, FailureOf(ex), UnknownTopicOrPartitionCode);
                 continue;
             }
 
@@ -1288,7 +1300,7 @@ internal sealed class SoakClient : IDisposable
             }
             catch (Exception ex)
             {
-                Classify("create", entry.Key, ex, TopicAlreadyExistsCode);
+                Classify("create", entry.Key, FailureOf(ex), TopicAlreadyExistsCode);
                 continue;
             }
 

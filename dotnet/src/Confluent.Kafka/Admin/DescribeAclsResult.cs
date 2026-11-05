@@ -18,6 +18,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -50,7 +51,7 @@ public sealed class DescribeAclsResult
     /// <returns>
     /// A future yielding the bindings, or failing with the call's own
     /// <see cref="KafkaException"/>; on <see cref="MockAdminClient"/>, which does not implement the
-    /// call, with a <see cref="System.NotSupportedException"/>.
+    /// call, with an <see cref="UnsupportedOperationException"/>.
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public KafkaFuture<IReadOnlyCollection<AclBinding>> Values() =>

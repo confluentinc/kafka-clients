@@ -20,11 +20,16 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -68,6 +73,10 @@ public sealed class PublicConsumerCheckOrderTests
     private static readonly IOffsetCommitCallback s_callback = new NoOpCommitCallback();
 
     private static readonly IAsyncOffsetCommitCallback s_asyncCallback = new NoOpAsyncCommitCallback();
+
+    private static readonly IConsumerRebalanceListener s_listener = new AssignedListener(() => { });
+
+    private static readonly IAsyncConsumerRebalanceListener s_asyncListener = new NoOpAsyncListener();
 
     public static IEnumerable<object[]> RealConsumers() => new[]
     {
@@ -115,25 +124,27 @@ public sealed class PublicConsumerCheckOrderTests
         IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
             AsyncOnly(consumer, NullArgumentCalls(consumer), NullAsyncCallbackCalls()));
 
-        Dictionary<string, (Type Type, string ParamName)> before = new Dictionary<string, (Type, string)>
+        Dictionary<string, (Type Type, string Detail)> before = new Dictionary<string, (Type, string)>
         {
             ["Commit(null)"] = (typeof(ArgumentNullException), "offsets"),
             ["Commit(null, timeout)"] = (typeof(ArgumentNullException), "offsets"),
             ["CommitAsync(null)"] = (typeof(ArgumentNullException), "offsets"),
             ["CommitAsync(null, callback)"] = (typeof(ArgumentNullException), "offsets"),
             ["CommitAsync(null, async callback)"] = (typeof(ArgumentNullException), "offsets"),
-            ["SeekToBeginning(null)"] = (typeof(ArgumentNullException), "partitions"),
-            ["SeekToEnd(null)"] = (typeof(ArgumentNullException), "partitions"),
+            ["SeekToBeginning(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
+            ["SeekToEnd(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
             ["Seek(partition, null)"] = (typeof(ArgumentNullException), "offsetAndMetadata"),
-            ["Seek(default, negative offset)"] = (typeof(ArgumentOutOfRangeException), "offset"),
+            ["Seek(default, negative offset)"] = (typeof(IllegalArgumentException), "seek offset must not be a negative number"),
         };
         Assert.Equal(kind == "AsyncKafkaConsumer" ? 29 : 26, seen.Count);
         foreach (KeyValuePair<string, Exception?> call in seen)
         {
-            if (before.TryGetValue(call.Key, out (Type Type, string ParamName) expected))
+            if (before.TryGetValue(call.Key, out (Type Type, string Detail) expected))
             {
                 Assert.True(call.Value?.GetType() == expected.Type, call.Key + ": " + call.Value);
-                Assert.Equal(expected.ParamName, ((ArgumentException)call.Value!).ParamName);
+                Assert.Equal(
+                    expected.Detail,
+                    call.Value is ArgumentNullException nullArgument ? nullArgument.ParamName : call.Value!.Message);
             }
             else
             {
@@ -286,10 +297,10 @@ public sealed class PublicConsumerCheckOrderTests
         object consumer = Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
-        KafkaException zero = Assert.IsType<KafkaException>(
+        KafkaTimeoutException zero = Assert.IsType<KafkaTimeoutException>(
             Thrown(consumer, c => c.PartitionsFor(null!, TimeSpan.Zero), c => c.PartitionsFor(null!, TimeSpan.Zero)));
         Assert.Equal(RequestTimedOutCode, zero.Code);
-        Assert.True(zero.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(zero);
         Assert.Equal(string.Empty, zero.Message);
         AssertNegative(
             Thrown(consumer, c => c.PartitionsFor(null!, s_negative), c => c.PartitionsFor(null!, s_negative)),
@@ -365,7 +376,39 @@ public sealed class PublicConsumerCheckOrderTests
         Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 41 : 38, seen.Count);
         foreach (KeyValuePair<string, Exception?> call in seen)
         {
-            Assert.True(call.Value is ObjectDisposedException, call.Key + ": " + call.Value);
+            Assert.True(call.Value is IllegalStateException, call.Key + ": " + call.Value);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(AllConsumers))]
+    public void OnAClosedConsumer_ANullSubscribeOrAssign_ReportsTheClosedConsumer(string kind)
+    {
+        object consumer = Create(kind, groupId: true);
+        TestTimeout.Dispose((IDisposable)consumer);
+
+        Dictionary<string, Exception?> seen = AsyncOnly(consumer, NullSubscribeAndAssignCalls(consumer), NullAsyncSubscribeCalls());
+
+        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 6 : 5, seen.Count);
+        foreach (KeyValuePair<string, Exception?> call in seen)
+        {
+            Assert.True(
+                call.Value is IllegalStateException { Message: "This consumer has already been closed." },
+                call.Key + ": " + call.Value);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public async Task WhileAnotherThreadIsInside_ANullSubscribeOrAssign_ReportsTheConcurrentAccess(string kind)
+    {
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+            AsyncOnly(consumer, NullSubscribeAndAssignCalls(consumer), NullAsyncSubscribeCalls()));
+
+        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 6 : 5, seen.Count);
+        foreach (KeyValuePair<string, Exception?> call in seen)
+        {
+            AssertConcurrent(call.Key, call.Value);
         }
     }
 
@@ -414,7 +457,7 @@ public sealed class PublicConsumerCheckOrderTests
             }
 
             Exception? polled = await Record.ExceptionAsync(() => TestTimeout.Run(() => polling, s_deadline));
-            Assert.True(polled is KafkaException { Code: -18 }, polled?.ToString());
+            Assert.True(polled is WakeupException, polled?.ToString());
             return seen;
         }
         finally
@@ -467,7 +510,7 @@ public sealed class PublicConsumerCheckOrderTests
 
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the poll never held the consumer");
+                throw new System.TimeoutException("the poll never held the consumer");
             }
 
             Thread.Yield();
@@ -518,23 +561,21 @@ public sealed class PublicConsumerCheckOrderTests
     private static void AssertConcurrent(string call, Exception? thrown)
     {
         Assert.True(
-            thrown is InvalidOperationException { Message: Concurrent } && thrown is not ObjectDisposedException,
+            thrown is ConcurrentModificationException { Message: Concurrent },
             call + ": " + thrown);
     }
 
     private static void AssertGroupIdNotDefined(Exception? thrown)
     {
-        KafkaException error = Assert.IsType<KafkaException>(thrown);
+        InvalidGroupIdException error = Assert.IsType<InvalidGroupIdException>(thrown);
         Assert.Equal(InvalidGroupIdCode, error.Code);
         Assert.Equal(GroupIdNotDefined, error.Message);
-        Assert.False(error.IsRetriable);
     }
 
     private static void AssertNegative(Exception? thrown, string message)
     {
-        ArgumentOutOfRangeException negative = Assert.IsType<ArgumentOutOfRangeException>(thrown);
-        Assert.Equal("timeout", negative.ParamName);
-        Assert.StartsWith(message, negative.Message, StringComparison.Ordinal);
+        IllegalArgumentException negative = Assert.IsType<IllegalArgumentException>(thrown);
+        Assert.Equal(message, negative.Message);
     }
 
     private static ConsumerCallbackReporter Reporter(object consumer) =>
@@ -607,6 +648,25 @@ public sealed class PublicConsumerCheckOrderTests
             ["CurrentLag(default)"] = (c => c.CurrentLag(default), c => c.CurrentLag(default)),
         });
 
+    // Java's KafkaConsumer checks these arguments after acquireAndEnsureOpen(); the listener of subscribe(topics,
+    // listener) is checked before it, so these calls give a listener.
+    private static Dictionary<string, Exception?> NullSubscribeAndAssignCalls(object consumer) =>
+        Calls(consumer, new Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)>
+        {
+            ["Subscribe(null)"] = (c => c.Subscribe(null!), c => c.Subscribe(null!)),
+            ["Subscribe(null, listener)"] = (c => c.Subscribe(null!, s_listener), c => c.Subscribe(null!, s_listener)),
+            ["Subscribe(empty topic)"] = (c => c.Subscribe(new[] { string.Empty }), c => c.Subscribe(new[] { string.Empty })),
+            ["Assign(null)"] = (c => c.Assign(null!), c => c.Assign(null!)),
+            ["Assign(null topic)"] = (
+                c => c.Assign(new[] { new TopicPartition(null!, 0) }), c => c.Assign(new[] { new TopicPartition(null!, 0) })),
+        });
+
+    private static Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>> NullAsyncSubscribeCalls() =>
+        new Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>>
+        {
+            ["Subscribe(null, async listener)"] = c => c.Subscribe(null!, s_asyncListener),
+        };
+
     private static Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>> NullAsyncCallbackCalls() =>
         new Dictionary<string, Func<IAsyncConsumer<byte[], byte[]>, Task>>
         {
@@ -668,6 +728,16 @@ public sealed class PublicConsumerCheckOrderTests
         public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
         {
         }
+    }
+
+    /// <summary>An asynchronous rebalance listener that does nothing.</summary>
+    private sealed class NoOpAsyncListener : IAsyncConsumerRebalanceListener
+    {
+        public Task OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+
+        public Task OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
+
+        public Task OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions) => Task.CompletedTask;
     }
 
     /// <summary>A commit callback that does nothing.</summary>

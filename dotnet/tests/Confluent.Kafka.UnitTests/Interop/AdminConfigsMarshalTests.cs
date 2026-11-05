@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -200,12 +201,12 @@ public sealed class AdminConfigsMarshalTests
 
         Assert.NotNull(await TestTimeout.Run(() => result.Values[present].Get(), s_deadline));
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
+        UnknownTopicOrPartitionException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal("Resource ConfigResource(type=TOPIC, name='cfg-absent-topic') not found.", failure.Message);
 
-        KafkaException all = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        UnknownTopicOrPartitionException all = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.All().Get()), s_deadline);
         Assert.Equal(failure.Message, all.Message);
     }
 

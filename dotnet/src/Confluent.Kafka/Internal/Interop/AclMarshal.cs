@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Resource;
 
 namespace Confluent.Kafka.Internal.Interop;
@@ -157,15 +158,16 @@ internal static class AclMarshal
                 IntPtr borrowedError = NativeMethods.DeleteAclsFilterResultError(result, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
 
-                // A FilterResult holds a KafkaException, so a deletion error of another type fails the filter's future.
+                // A FilterResult holds an ApiException, as Java's does, so a deletion error of another class fails
+                // the filter's future.
                 Exception? error = KafkaException.FromFfiError(borrowedError, owned: false);
-                if (error is not null and not KafkaException)
+                if (error is not null and not ApiException)
                 {
                     throw error;
                 }
 
                 copied.Add(new DeleteAclsResult.FilterResult(
-                    binding == IntPtr.Zero ? null : CopyOutBinding(binding), (KafkaException?)error));
+                    binding == IntPtr.Zero ? null : CopyOutBinding(binding), (ApiException?)error));
             }
 
             return new DeleteAclsResult.FilterResults(copied);

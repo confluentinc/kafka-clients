@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -96,7 +97,7 @@ public sealed class PublicConsumerTfmSmokeTests
             await TestTimeout.Run(async () => committed = await consumer.Committed(request), s_deadline);
             Assert.Empty(committed);
 
-            await Assert.ThrowsAsync<NotSupportedException>(() => consumer.OffsetsForTimes(
+            await Assert.ThrowsAsync<UnsupportedOperationException>(() => consumer.OffsetsForTimes(
                 new System.Collections.Generic.Dictionary<TopicPartition, long>
                 {
                     [new TopicPartition(Topic, Partition)] = 1_000L,
@@ -190,7 +191,7 @@ public sealed class PublicConsumerTfmSmokeTests
             Assert.Equal(Topic, info.Topic);
             Assert.True(consumer.ListTopics().ContainsKey(Topic));
 
-            Assert.Throws<NotSupportedException>(() => consumer.OffsetsForTimes(
+            Assert.Throws<UnsupportedOperationException>(() => consumer.OffsetsForTimes(
                 new System.Collections.Generic.Dictionary<TopicPartition, long> { [tp] = 1_000L }));
         }
         finally

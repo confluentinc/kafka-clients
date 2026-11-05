@@ -18,6 +18,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 
 namespace Confluent.Kafka.Admin;
 
@@ -47,7 +48,7 @@ public sealed class LogDirDescription
     /// <param name="replicaInfos">The replicas hosted in this directory.</param>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
     public LogDirDescription(
-        KafkaException? error, IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos)
+        ApiException? error, IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos)
         : this(error, replicaInfos, null, null, false)
     {
     }
@@ -70,7 +71,7 @@ public sealed class LogDirDescription
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
     public LogDirDescription(
-        KafkaException? error,
+        ApiException? error,
         IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
         long? totalBytes,
         long? usableBytes)
@@ -107,7 +108,7 @@ public sealed class LogDirDescription
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
     public LogDirDescription(
-        KafkaException? error,
+        ApiException? error,
         IReadOnlyDictionary<TopicPartition, ReplicaInfo> replicaInfos,
         long? totalBytes,
         long? usableBytes,
@@ -130,12 +131,12 @@ public sealed class LogDirDescription
 
     /// <summary>
     /// The directory-level error, or <see langword="null"/> when the directory is healthy —
-    /// Java's <c>error()</c>, whose <c>ApiException</c> maps to <see cref="KafkaException"/>.
+    /// Java's <c>error()</c>.
     /// </summary>
     /// <remarks>
     /// Non-null does not mean the query failed: see the type remarks.
     /// </remarks>
-    public KafkaException? Error { get; }
+    public ApiException? Error { get; }
 
     /// <summary>
     /// The replicas hosted in this directory, keyed by topic partition — Java's

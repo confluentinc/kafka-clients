@@ -21,6 +21,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -189,11 +190,11 @@ public sealed class PublicHeadersTests
         using IEnumerator<Header> headerIteratorBeforeClose = headers.GetEnumerator();
         headers.SetReadOnly();
 
-        InvalidOperationException add = Assert.Throws<InvalidOperationException>(
+        IllegalStateException add = Assert.Throws<IllegalStateException>(
             () => headers.Add(new Header("key", Bytes("value"))));
         Assert.Equal("RecordHeaders has been closed.", add.Message);
 
-        InvalidOperationException remove = Assert.Throws<InvalidOperationException>(() => headers.Remove("key"));
+        IllegalStateException remove = Assert.Throws<IllegalStateException>(() => headers.Remove("key"));
         Assert.Equal("RecordHeaders has been closed.", remove.Message);
 
         using (IEnumerator<Header> headerIterator = headers.GetEnumerator())
@@ -338,7 +339,7 @@ public sealed class PublicHeadersTests
             "key", "key cannot be null.", Assert.Throws<ArgumentNullException>(() => { _ = headers.GetHeaders(null!); }));
 
         headers.SetReadOnly();
-        Assert.Throws<InvalidOperationException>(() => headers.Remove(null!));
+        Assert.Throws<IllegalStateException>(() => headers.Remove(null!));
 
         AssertNullArgument(
             "key",

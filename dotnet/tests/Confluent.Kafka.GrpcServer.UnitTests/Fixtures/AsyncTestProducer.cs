@@ -76,7 +76,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
             ValueTask<AsyncKafkaFuture<RecordMetadata>> admission =
                 _inner.Send(record, new CountingCallback(callback, index, _probe), cancellationToken);
             if (_behaviour.FailEach is (int code, string message)
-                && !SpinWait.SpinUntil(() => _inner.ErrorNext(new KafkaException(code, message, isRetriable: false)), s_mockTimeout))
+                && !SpinWait.SpinUntil(() => _inner.ErrorNext(TestValues.OfClass(code, message)), s_mockTimeout))
             {
                 throw new InvalidOperationException($"record {index} never reached the mock to be failed");
             }

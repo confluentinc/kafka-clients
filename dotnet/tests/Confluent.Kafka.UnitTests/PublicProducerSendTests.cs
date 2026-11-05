@@ -20,7 +20,9 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -79,14 +81,14 @@ public sealed class PublicProducerSendTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
 
-        Assert.True(producer.ErrorNext(new KafkaException(2, "boom-corrupt-message", isRetriable: true)));
+        Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("boom-corrupt-message")));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             () => WithTimeout(sendTask));
 
         Assert.Equal(2, failure.Code);
         Assert.Contains("boom-corrupt-message", failure.Message, StringComparison.Ordinal);
-        Assert.True(failure.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(failure);
     }
 
     [Fact]
@@ -98,10 +100,10 @@ public sealed class PublicProducerSendTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
 
-        KafkaException injected = new KafkaException(2, "the injected instance", isRetriable: true);
+        KafkaException injected = new Common.Errors.CorruptRecordException("the injected instance");
         Assert.True(producer.ErrorNext(injected));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => WithTimeout(sendTask));
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
         Assert.Same(injected, failure);
     }
 
@@ -214,12 +216,12 @@ public sealed class PublicProducerSendTests
     }
 
     [Fact]
-    public async Task Send_AfterDispose_ThrowsObjectDisposed()
+    public async Task Send_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(producer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"))).Delivery());
     }
 
@@ -394,7 +396,7 @@ public sealed class PublicProducerSendTests
     public void ConcurrentSendAndDispose_DoesNotCrash()
     {
         // Sends racing Dispose under GC pressure: the destroy waits for a send still in the native call, so a
-        // use-after-free would crash here. A racing send may throw ObjectDisposedException.
+        // use-after-free would crash here. A racing send may throw IllegalStateException.
         for (int iteration = 0; iteration < 40; iteration++)
         {
             AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -410,7 +412,7 @@ public sealed class PublicProducerSendTests
                             {
                                 _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
                             }
-                            catch (ObjectDisposedException)
+                            catch (IllegalStateException)
                             {
                                 // Expected once Dispose wins the latch — not a crash.
                             }
@@ -483,7 +485,7 @@ public sealed class PublicProducerSendTests
                             _ = producer.Send(new ProducerRecord<byte[], byte[]>(
                                 Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
                         }
-                        catch (ObjectDisposedException)
+                        catch (IllegalStateException)
                         {
                             // Expected once Dispose wins the latch — nothing more to push.
                             break;
@@ -534,7 +536,7 @@ public sealed class PublicProducerSendTests
         Task winner = await Task.WhenAny(task, Task.Delay(s_deadline)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw new TimeoutException("Send did not complete within the deadline — treated as a hang.");
+            throw new System.TimeoutException("Send did not complete within the deadline — treated as a hang.");
         }
 
         return await task.ConfigureAwait(false);

@@ -17,6 +17,7 @@ using System.Linq;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -25,7 +26,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// <see cref="NativeConsumer"/>'s teardown: DisposeAsync and Dispose return with an unawaited operation in flight,
 /// under GC churn too; double, concurrent and mixed teardown is safe, and a call after it throws
-/// <see cref="ObjectDisposedException"/>.
+/// <see cref="IllegalStateException"/>.
 /// </summary>
 public sealed class ConsumerAsyncTeardownTests
 {
@@ -109,21 +110,21 @@ public sealed class ConsumerAsyncTeardownTests
     }
 
     [Fact]
-    public async Task Operation_AfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Operation_AfterDisposeAsync_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.SubscribeWithCallback(ProofTopic()));
     }
 
     [Fact]
-    public async Task Handle_AfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Handle_AfterDisposeAsync_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+        Assert.Throws<IllegalStateException>(() => consumer.Handle);
     }
 }

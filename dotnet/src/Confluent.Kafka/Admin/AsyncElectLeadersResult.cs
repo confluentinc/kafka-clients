@@ -33,14 +33,14 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="ElectLeadersResult"/>
 public sealed class AsyncElectLeadersResult
 {
-    private static readonly Func<IReadOnlyDictionary<TopicPartition, KafkaException?>, object?> s_firstFailure =
+    private static readonly Func<IReadOnlyDictionary<TopicPartition, Exception?>, object?> s_firstFailure =
         ElectLeadersResult.FirstFailure;
 
-    private readonly KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, KafkaException?>> _partitions;
+    private readonly KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> _partitions;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncElectLeadersResult(
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, KafkaException?>> partitions, SafeAdminResultHandle native)
+        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions, SafeAdminResultHandle native)
     {
         _partitions = partitions;
         _native = native;
@@ -58,8 +58,8 @@ public sealed class AsyncElectLeadersResult
     /// does not fault this future, which faults only when the election could not be run at all.
     /// </returns>
     /// <remarks>Every call returns the same future, as Java's accessor returns its stored field.</remarks>
-    public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>> Partitions() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException?>>(_partitions);
+    public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions() =>
+        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, Exception?>>(_partitions);
 
     /// <summary>
     /// Completes when every partition's election succeeded, and faults with the first
@@ -74,7 +74,7 @@ public sealed class AsyncElectLeadersResult
     public AsyncKafkaFuture All() => new AsyncKafkaFuture(_partitions.ThenApply(s_firstFailure));
 
     internal static AsyncElectLeadersResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, KafkaException?>> Partitions, SafeAdminResultHandle Result)
+        (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
             native) =>
         new AsyncElectLeadersResult(native.Partitions, native.Result);
 }

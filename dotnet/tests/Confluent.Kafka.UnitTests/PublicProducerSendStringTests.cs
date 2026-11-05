@@ -241,7 +241,7 @@ public sealed class PublicProducerSendStringTests
                 return Task.FromResult<RecordMetadata?>(future.Get(s_deadline));
             }
 
-            KafkaException failure = Assert.Throws<KafkaException>(() => future.Get(s_deadline));
+            Common.Errors.TimeoutException failure = FutureAssert.Throws<Common.Errors.TimeoutException>(() => future.Get(s_deadline));
             Assert.Equal(TimeoutCode, failure.Code);
             return Task.FromResult<RecordMetadata?>(null);
         }
@@ -272,7 +272,7 @@ public sealed class PublicProducerSendStringTests
                 return await TestTimeout.Run(() => _producer.Send(record).Delivery(), s_deadline);
             }
 
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            Common.Errors.TimeoutException failure = await FutureAssert.ThrowsAsync<Common.Errors.TimeoutException>(
                 () => TestTimeout.Run(() => _producer.Send(record).Delivery(), s_deadline));
             Assert.Equal(TimeoutCode, failure.Code);
             return null;

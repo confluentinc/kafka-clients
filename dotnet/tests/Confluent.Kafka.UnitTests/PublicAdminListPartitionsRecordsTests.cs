@@ -23,6 +23,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -89,12 +90,12 @@ public sealed class PublicAdminListPartitionsRecordsTests
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
         Task perTopic = Assert.Single(result.Values).Value.Get();
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -126,7 +127,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             });
 
         Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value.Get();
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perPartition, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
@@ -211,7 +212,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             };
         Assert.Equal(2, offsets.Count);
         AsyncListOffsetsResult listed = admin.ListOffsets(offsets);
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => listed.PartitionResult(new TopicPartition(Topic, 0)).Get(), s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }
@@ -301,15 +302,15 @@ public sealed class PublicAdminListPartitionsRecordsTests
     }
 
     [Fact]
-    public void AfterClose_EveryNewRpcThrowsObjectDisposed()
+    public void AfterClose_EveryNewRpcThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(
             () => admin.CreatePartitions(new Dictionary<string, NewPartitions>()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DeleteRecords(new Dictionary<TopicPartition, RecordsToDelete>()));
     }
 
@@ -342,7 +343,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline));
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(
                 () => admin.CreatePartitions(
                     new Dictionary<string, NewPartitions> { ["p2b-smoke"] = NewPartitions.IncreaseTo(2) }).All().Get(),

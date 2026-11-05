@@ -1,4 +1,4 @@
-// Copyright 2025 Confluent Inc.
+// Copyright 2026 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,39 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// GENERATED, DO NOT EDIT. Produced from the Java source by `cargo xtask generate-error-codes`
+// and checked for staleness by `cargo xtask check-generated`.
+
 using System;
+
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Common.Errors;
 
 /// <summary>
-/// A failed serialization or deserialization of a record key or value, Java's <c>SerializationException</c>:
-/// a <see cref="KafkaException"/> whose <see cref="KafkaException.Code"/> is 0.
+/// Any exception during serialization or deserialization. Java's
+/// <c>org.apache.kafka.common.errors.SerializationException</c>.
 /// </summary>
-public class SerializationException : KafkaException
+public class SerializationException : global::Confluent.Kafka.Common.KafkaException
 {
-    /// <summary>Initializes an exception with a default message.</summary>
-    public SerializationException()
-    {
-    }
-
-    /// <summary>Initializes an exception with a message.</summary>
-    public SerializationException(string? message)
-        : base(message)
-    {
-    }
-
-    /// <summary>Initializes an exception with a message and a cause.</summary>
+    /// <summary>
+    /// Initializes the exception, as Java's <c>SerializationException(String message, Throwable cause)</c>.
+    /// </summary>
     public SerializationException(string? message, Exception? innerException)
         : base(message, innerException)
     {
     }
 
-    /// <summary>
-    /// Initializes an exception with a cause, whose type's full name and message, Java's <c>cause.toString()</c>,
-    /// become the message, or the default message for a <see langword="null"/> cause.
-    /// </summary>
-    public SerializationException(Exception? cause)
-        : base(cause)
+    /// <summary>Initializes the exception, as Java's <c>SerializationException(String message)</c>.</summary>
+    public SerializationException(string? message)
+        : base(message)
     {
     }
+
+    /// <summary>Initializes the exception, as Java's <c>SerializationException(Throwable cause)</c>.</summary>
+    public SerializationException(Exception? innerException)
+        : base(innerException)
+    {
+    }
+
+    /// <summary>Initializes the exception, as Java's <c>SerializationException()</c>.</summary>
+    public SerializationException()
+    {
+    }
+
+    internal SerializationException(CoreError _, string? message, Exception? innerException)
+        : base(_, message, innerException)
+    {
+    }
+
+    internal override int FfiId => -15;
 }

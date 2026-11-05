@@ -21,6 +21,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -91,7 +92,7 @@ public sealed class PublicProducerSendHeadersTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
 
-        Assert.Throws<SerializationException>(() => producer.Send(record));
+        Assert.Throws<ThrowingSerializer<string>.BoomException>(() => producer.Send(record));
 
         AssertWritable(record);
     }
@@ -104,7 +105,7 @@ public sealed class PublicProducerSendHeadersTests
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
-        Assert.Throws<SerializationException>(() => { _ = producer.Send(record); });
+        Assert.Throws<ThrowingSerializer<string>.BoomException>(() => { _ = producer.Send(record); });
 
         AssertWritable(record);
     }
@@ -178,7 +179,7 @@ public sealed class PublicProducerSendHeadersTests
     private static void AssertSealedWithTheOriginalHeader(ProducerRecord<string, string> record)
     {
         Assert.True(record.Headers.IsReadOnly);
-        InvalidOperationException closed = Assert.Throws<InvalidOperationException>(
+        IllegalStateException closed = Assert.Throws<IllegalStateException>(
             () => record.Headers.Add(new Header("test", Bytes("test"))));
         Assert.Equal(Closed, closed.Message);
 
@@ -195,13 +196,13 @@ public sealed class PublicProducerSendHeadersTests
 
     private static void AssertMetadataTimeout(KafkaFuture<RecordMetadata> future)
     {
-        KafkaException failure = Assert.Throws<KafkaException>(() => future.Get(s_deadline));
+        Common.Errors.TimeoutException failure = FutureAssert.Throws<Common.Errors.TimeoutException>(() => future.Get(s_deadline));
         Assert.Equal(TimeoutCode, failure.Code);
     }
 
     private static async Task AssertMetadataTimeout(ValueTask<AsyncKafkaFuture<RecordMetadata>> send)
     {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        Common.Errors.TimeoutException failure = await FutureAssert.ThrowsAsync<Common.Errors.TimeoutException>(
             () => TestTimeout.Run(() => send.Delivery(), s_deadline));
         Assert.Equal(TimeoutCode, failure.Code);
     }

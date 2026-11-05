@@ -47,9 +47,9 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // Each measurement is repeated and the lowest result taken.
     private const int MeasurementAttempts = 4;
 
-    // The absolute per-send budget, which the marginal budget cannot see: the measured 464 B (net8.0, net10.0; the
-    // delivery state, its KafkaFutureImpl, the delivery task, the record and the record's Headers) plus 16 B, less
-    // than one more object.
+    // The absolute per-send budget, which the marginal budget cannot see: the measured 472 B (net8.0, net10.0; the
+    // delivery state, its KafkaFutureImpl with the field that caches the Get() task, the delivery task, the record and
+    // the record's Headers) plus 8 B, less than one more object.
     private const long FastPathPerSendBudgetBytes = 480;
 
     // More attempts than the marginal test, as an absolute figure has no matched pair to cancel a one-off allocation.
