@@ -65,17 +65,9 @@ test('the producer uses the functions of the plan', () => {
   ]) {
     assert.ok(called.has(name), `${name} is not called`);
   }
-  // Rules 4 and 5: no blocking twin, never read the future.
-  for (const name of [
-    'kafka_producer_Producer_send',
-    'kafka_producer_Producer_send_with_callback',
-    'kafka_producer_Producer_flush',
-    'kafka_producer_Producer_close',
-    'kafka_common_KafkaFuture_get',
-    'kafka_common_KafkaFuture_get_err',
-  ]) {
-    assert.ok(!called.has(name), `${name} must not be called`);
-  }
+  // Rules 4 and 5 (no blocking twin, never read the future) are the rule
+  // linter's check-cb-twin-only, which forbids every function with a `_cb`
+  // twin, these included (make lint-rules).
 });
 
 test('the one blocking close is the finalizer force-close (rule 4 exception)', () => {

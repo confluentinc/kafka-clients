@@ -379,6 +379,10 @@ blocks:
             # @types/node, which compile the library (lib/*.ts -> dist/) and
             # run the typing tests.
             - (cd javascript && npm ci --no-audit --no-fund)
+            # The submodule is a shallow clone; the rule linter's Java index
+            # (make lint-javascript, part of verify-javascript) reads the
+            # Kafka tags pinned in xtask and fails without them.
+            - (cd rust && cargo xtask fetch-java-refs)
             - make verify-javascript
         - name: "verify-javascript (Linux amd64) — ssl"
           commands:
