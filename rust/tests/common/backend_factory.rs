@@ -772,6 +772,5 @@ mod grpc_backends {
 
 #[cfg(feature = "multilanguage-tests")]
 pub use grpc_backends::{
-    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, JsGrpcFactory, PythonAsyncGrpcFactory,
-    PythonGrpcFactory,
+    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, JsGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory,
 };
