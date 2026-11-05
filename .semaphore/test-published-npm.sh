@@ -68,13 +68,22 @@ install_and_smoke() {
     work=$(mktemp -d /tmp/test-published-npm.XXXXXX)
     work=$(cd "$work" && pwd -P)
     mkdir "$work/project"
-    # An empty cache and no user configuration; the public registry, whatever the machine sets.
-    export npm_config_cache="$work/cache" npm_config_userconfig="$work/npmrc"
+    # An empty cache and no user or global configuration; the public registry, whatever the
+    # machine sets. npm reads npm_config_* case-insensitively, the last variant winning, so drop
+    # every inherited one and pass the settings on the command line too (see test-npm.sh).
+    for name in $(env | sed -n 's/^\([Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[A-Za-z0-9_]*\)=.*/\1/p'); do
+        unset "$name"
+    done
+    export npm_config_cache="$work/cache" npm_config_userconfig="$work/npmrc" npm_config_globalconfig="$work/npmrc-global"
     export npm_config_registry=https://registry.npmjs.org/ npm_config_update_notifier=false
     : > "$work/npmrc"
+    : > "$work/npmrc-global"
     echo "Node.js $(node --version), npm $(npm --version), on $platform"
     (cd "$work/project" && npm init -y >/dev/null \
-        && retry npm install --ignore-scripts --no-audit --no-fund "@confluentinc/kafka-javascript@$1") \
+        && retry npm install --ignore-scripts --no-audit --no-fund \
+            --registry=https://registry.npmjs.org/ --@confluentinc:registry=https://registry.npmjs.org/ \
+            --cache="$work/cache" --userconfig="$work/npmrc" --globalconfig="$work/npmrc-global" \
+            "@confluentinc/kafka-javascript@$1") \
         || die "npm install @confluentinc/kafka-javascript@$1 failed"
     node "$2" --platform "$platform" --version "$1" --project "$work/project"
     rm -rf "$work"
