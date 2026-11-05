@@ -115,6 +115,13 @@ cp "$dir/$main" "$dir/$mine" "$work/tarballs/"
 
 # An empty cache and no user or global configuration, so nothing cached or configured earlier
 # can be used; a registry where nothing listens (port 9, discard), with no retries.
+# npm reads npm_config_* case-insensitively and lets the last variant in the environment win,
+# so an inherited NPM_CONFIG_REGISTRY (the macOS CI job sets one) could override ours: drop
+# every inherited variant first, and pass the same settings on the command line, which npm
+# ranks above the environment.
+for name in $(env | sed -n 's/^\([Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$name"
+done
 export npm_config_cache="$work/cache" npm_config_userconfig="$work/npmrc" npm_config_globalconfig="$work/npmrc-global"
 export npm_config_registry=http://127.0.0.1:9/ npm_config_fetch_retries=0 npm_config_update_notifier=false
 export npm_config_audit=false npm_config_fund=false
@@ -122,7 +129,10 @@ export npm_config_audit=false npm_config_fund=false
 : > "$work/npmrc-global"
 echo '{"name": "package-smoke", "version": "1.0.0", "private": true}' > "$work/project/package.json"
 echo "Installing @confluentinc/kafka-javascript $version and its $platform package into $work/project"
-(cd "$work/project" && npm install --ignore-scripts --no-audit --no-fund "$work/tarballs/$main" "$work/tarballs/$mine") \
+(cd "$work/project" && npm install --ignore-scripts --no-audit --no-fund \
+    --registry=http://127.0.0.1:9/ --@confluentinc:registry=http://127.0.0.1:9/ --fetch-retries=0 \
+    --cache="$work/cache" --userconfig="$work/npmrc" --globalconfig="$work/npmrc-global" \
+    "$work/tarballs/$main" "$work/tarballs/$mine") \
     || die "npm install of the tarballs failed"
 
 # The installed tree is exactly the two packages, from the tarballs under test.
