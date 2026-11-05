@@ -281,10 +281,13 @@ Phase 2 adds `ErrorPayloadMarshal` with readers that build the class from the me
 Phase 4 replaces their bodies with the view reads. `KafkaException` has no entry, as Python's
 `_table()` skips `KafkaError`: −1 is D18's case. −27 has no entry either (D8).
 
-Where Python builds a class through its Java constructor rather than with the core's message, the
-reader does the same: `QuotaViolationException` has Java's message (D16), and
-`NoOffsetForPartitionException` builds its message from the partitions, as Java's
-`(Collection<TopicPartition>)` constructor does (Python's `_CORE_KWARGS`).
+A reader rebuilds a message through a Java constructor only where the core's message cannot be
+Java's: `QuotaViolationException`, whose Java `getMessage()` is null, gets Java's text (D16).
+Everywhere else the reader keeps the core's message. Where Java's class has several constructors
+with different messages, the core's message already follows the constructor that Java's call site
+uses. For example, `NoOffsetForPartitionException` is singular from `MockConsumer` and
+`OffsetFetcherUtils` and plural from `SubscriptionState`. That reader builds only its set of
+partitions. (Python's `_CORE_KWARGS` rebuilds the plural message, which differs from this.)
 
 What C exposes:
 - `CorrelationIdMismatchException`'s ids have no C accessor; they read −1, as Python's do.
@@ -952,7 +955,7 @@ generated `.cs` files are also reviewed by `dotnet-critic`.
   | `QuotaViolationException` | `Metric`, `Value`, `Bound` (D7) |
   | consumer `OffsetOutOfRangeException` | `OffsetOutOfRangePartitions`, and `Partitions` |
   | `LogTruncationException` | `DivergentOffsets`, and the inherited partitions |
-  | `NoOffsetForPartitionException` | `Partitions`, and Java's message (D7) |
+  | `NoOffsetForPartitionException` | `Partitions`, as a set; the core's message is kept (D7) |
   | `RecordDeserializationException` | none: not reachable from .NET, and no reader (D7, D8) |
   | `CorrelationIdMismatchException` | −1 (no C accessor) |
 
