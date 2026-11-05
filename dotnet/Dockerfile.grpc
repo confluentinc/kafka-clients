@@ -37,7 +37,8 @@ WORKDIR /src
 # native at rust/target/release/ (Confluent.Kafka.csproj's
 # EnsureNativeLibraryExists probes ../../../rust/target/ from
 # dotnet/src/Confluent.Kafka), the shared build config at the binding root
-# (Directory.Build.props / .editorconfig / the strong-name key), the library the
+# (Directory.Build.props / .editorconfig / the strong-name key, and the analyzers
+# Directory.Build.props loads), the library the
 # server ProjectReferences, the server itself, and the proto crate (the server's
 # ProtoRoot resolves ../../rust/multilanguage-test-server/proto from
 # dotnet/grpc-server). Both csproj paths are relative, so the in-image layout
@@ -47,6 +48,7 @@ COPY rust/target/include/confluent_kafka.h /src/rust/target/include/confluent_ka
 COPY dotnet/Directory.Build.props /src/dotnet/Directory.Build.props
 COPY dotnet/.editorconfig /src/dotnet/.editorconfig
 COPY dotnet/Confluent.Kafka.snk /src/dotnet/Confluent.Kafka.snk
+COPY dotnet/analyzers/Confluent.Kafka.Analyzers /src/dotnet/analyzers/Confluent.Kafka.Analyzers
 COPY dotnet/src /src/dotnet/src
 COPY dotnet/grpc-server /src/dotnet/grpc-server
 COPY rust/multilanguage-test-server/proto /src/rust/multilanguage-test-server/proto
