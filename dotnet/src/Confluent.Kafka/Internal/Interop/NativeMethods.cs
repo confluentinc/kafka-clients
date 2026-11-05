@@ -696,8 +696,17 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_record_TimestampType__enum_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TimestampTypeEnum(IntPtr self, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_common_header_internals_RecordHeaders_new_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr RecordHeadersNew(ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_common_header_internals_RecordHeaders__as_Headers_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr RecordHeadersAsHeaders(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_header_internals_RecordHeaders_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void RecordHeadersDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_header_Headers_add_with_key_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void HeadersAddWithKeyValue(IntPtr self, IntPtr key, KafkaBytes value, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_common_header_Headers_to_array_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr HeadersToArray(IntPtr self, ref IntPtr outErr);
@@ -875,9 +884,38 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_metrics_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ProducerMetrics(SafeProducerHandle self, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecord_with_partition_timestamp_key", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ProducerRecordWithPartitionTimestampKey(
-        IntPtr topic, int partition, long timestamp, IntPtr key, IntPtr value, ref IntPtr outErr);
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_new_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerRecordOptionsBuilderNew(ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_set_topic_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderSetTopic(IntPtr self, IntPtr topic, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_set_partition_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderSetPartition(IntPtr self, int partition, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_set_timestamp_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderSetTimestamp(IntPtr self, long timestamp, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_set_key_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderSetKey(IntPtr self, IntPtr key, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_set_value_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderSetValue(IntPtr self, IntPtr value, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_set_headers_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderSetHeaders(IntPtr self, IntPtr headers, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_build", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerRecordOptionsBuilderBuild(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptionsBuilder_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsBuilderDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecord_with_options", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerRecordWithOptions(IntPtr options, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecordOptions_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerRecordOptionsDestroy(IntPtr self, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_producer_ProducerRecord_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerRecordDestroy(IntPtr self, ref IntPtr outErr);

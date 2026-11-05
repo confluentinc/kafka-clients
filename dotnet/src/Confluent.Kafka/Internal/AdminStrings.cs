@@ -17,13 +17,15 @@ using System;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// Rejects an admin string that cannot cross the C ABI unchanged: one containing <c>'\0'</c>, which
-/// ends the C string, or an unpaired UTF-16 surrogate, which UTF-8 encoding replaces.
+/// Rejects a string that cannot cross the C ABI unchanged, an admin request string or a producer record's topic or
+/// header key: one containing <c>'\0'</c>, which ends the C string, or an unpaired UTF-16 surrogate, which UTF-8
+/// encoding replaces.
 /// </summary>
 /// <remarks>
-/// A recorded deviation: Java length-prefixes every string, so it never alters one. Here such a
-/// string would act on another target, or merge two of the caller's keys into one, so it is
-/// rejected with <see cref="ArgumentException"/> before anything is pinned.
+/// A recorded deviation: Java sends a NUL whole and writes <c>'?'</c> for an unpaired surrogate, with no error. Here
+/// the C ABI would cut the string at the NUL and the UTF-8 encoder replace the surrogate, so the string could act on
+/// another target, or merge two of the caller's keys into one; it is rejected with <see cref="ArgumentException"/>
+/// before anything is pinned.
 /// </remarks>
 internal static class AdminStrings
 {
@@ -31,11 +33,22 @@ internal static class AdminStrings
         "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
         "surrogate: such a string cannot be passed to the native client unchanged.";
 
-    internal static void Validate(string? value, string parameterName)
+    internal const string InvalidTopicMessage =
+        "A topic must not contain a NUL character or an unpaired UTF-16 " +
+        "surrogate: such a string cannot be passed to the native client unchanged.";
+
+    internal const string InvalidHeaderKeyMessage =
+        "A header key must not contain a NUL character or an unpaired UTF-16 " +
+        "surrogate: such a string cannot be passed to the native client unchanged.";
+
+    internal static void Validate(string? value, string parameterName) =>
+        Validate(value, InvalidStringMessage, parameterName);
+
+    internal static void Validate(string? value, string message, string parameterName)
     {
         if (value is not null && !CrossesUnchanged(value))
         {
-            throw new ArgumentException(InvalidStringMessage, parameterName);
+            throw new ArgumentException(message, parameterName);
         }
     }
 

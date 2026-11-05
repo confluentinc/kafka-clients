@@ -17,7 +17,7 @@
 #
 # Builds the wheels of the Python binding into wheelhouse/, one for each
 # supported CPython version, for the platform of the machine it runs on (Linux
-# x86_64 or aarch64, macOS x86_64 or arm64). It first builds the Rust FFI
+# x86_64 or aarch64, macOS arm64). It first builds the Rust FFI
 # library (.semaphore/build-ffi-library.sh), then compiles the C extension
 # (python/_confluentkafka.c) against it with cibuildwheel, which repairs each
 # wheel so that it contains the library: auditwheel copies the .so and sets the
