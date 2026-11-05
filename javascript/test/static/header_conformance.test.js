@@ -24,19 +24,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { headerPath, stripComments, declaredFunctions, errorEnumerators } = require('../../scripts/header');
+const { calledFunctions: calledIn } = require('../../scripts/lint/c_source');
 
 const SRC = path.join(__dirname, '..', '..', 'src');
 const header = fs.readFileSync(headerPath(), 'utf8');
 const declared = declaredFunctions(header);
 
-/** The kafka_* functions a C source calls (an identifier followed by `(`). */
+/** The kafka_* functions a C source file calls (an identifier followed by `(`). */
 function calledFunctions(file) {
-  const code = stripComments(fs.readFileSync(file, 'utf8'));
-  const names = new Set();
-  const re = /\b(kafka_\w+)\s*\(/g;
-  let m;
-  while ((m = re.exec(code)) !== null) names.add(m[1]);
-  return names;
+  return calledIn(fs.readFileSync(file, 'utf8'));
 }
 
 const sources = fs.readdirSync(SRC).filter((f) => f.endsWith('.c'));
