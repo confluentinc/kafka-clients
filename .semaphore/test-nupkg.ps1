@@ -186,9 +186,11 @@ Invoke-Smoke (Join-Path $publish 'PackageSmoke.exe') @($version)
 # output, so the package is the only Confluent.Kafka it can use.
 $unit = Join-Path $work 'unit'
 New-Item -ItemType Directory -Path (Join-Path $unit 'tests') | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $unit 'analyzers') | Out-Null
 Copy-Item (Join-Path $repo 'dotnet\Directory.Build.props'), (Join-Path $repo 'dotnet\Confluent.Kafka.snk'), (Join-Path $repo 'dotnet\.editorconfig') $unit
+Copy-Item -Recurse (Join-Path $repo 'dotnet\analyzers\Confluent.Kafka.Analyzers') (Join-Path $unit 'analyzers')
 Copy-Item -Recurse (Join-Path $repo 'dotnet\tests\Confluent.Kafka.UnitTests') (Join-Path $unit 'tests')
-Get-ChildItem -Recurse -Directory (Join-Path $unit 'tests') | Where-Object { $_.Name -in 'bin', 'obj' } | Remove-Item -Recurse -Force
+Get-ChildItem -Recurse -Directory (Join-Path $unit 'tests'), (Join-Path $unit 'analyzers') | Where-Object { $_.Name -in 'bin', 'obj' } | Remove-Item -Recurse -Force
 # Where the project looks for the kafka submodule, ..\..\..\kafka from its directory. A junction
 # needs no administrator rights.
 New-Item -ItemType Junction -Path (Join-Path $work 'kafka') -Target (Join-Path $repo 'kafka') | Out-Null

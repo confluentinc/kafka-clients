@@ -253,7 +253,7 @@ if [ "$mode" = full ]; then
     # Through a file rather than a pipe, so that a failing tar fails the script.
     mkdir "$work/unit"
     tar -C dotnet --exclude bin --exclude obj -cf "$work/unit.tar" Directory.Build.props Confluent.Kafka.snk \
-        .editorconfig tests/Confluent.Kafka.UnitTests
+        .editorconfig analyzers/Confluent.Kafka.Analyzers tests/Confluent.Kafka.UnitTests
     tar -C "$work/unit" -xf "$work/unit.tar"
     # Where the project looks for the kafka submodule, ../../../kafka from its directory.
     ln -s "$(pwd -P)/kafka" "$work/kafka"
