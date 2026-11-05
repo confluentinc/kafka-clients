@@ -17,6 +17,7 @@ using System;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -32,9 +33,12 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
 {
     private readonly SafeAdminResultHandle _native;
 
-    private AsyncRemoveMembersFromConsumerGroupResult(SafeAdminResultHandle native)
+    private readonly bool _removeAll;
+
+    private AsyncRemoveMembersFromConsumerGroupResult(SafeAdminResultHandle native, bool removeAll)
     {
         _native = native;
+        _removeAll = removeAll;
     }
 
     internal SafeAdminResultHandle Native => _native;
@@ -56,20 +60,17 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
     /// A new future that completes when the member was removed, and fails with the member's error, or with the call's
     /// error when the whole request failed.
     /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="member"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// The request removed every member, or <paramref name="member"/> was not part of it, as Java throws at the call;
-    /// or its group instance id has a NUL character or an unpaired surrogate.
+    /// <exception cref="IllegalArgumentException">
+    /// The request removed every member, or <paramref name="member"/> (a null one included) was not part of it, as Java
+    /// throws at the call.
     /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="member"/>'s group instance id has a NUL character.</exception>
     public AsyncKafkaFuture MemberResult(MemberToRemove member)
     {
-        if (member is null)
-        {
-            throw new ArgumentNullException(nameof(member));
-        }
-
+        NativeAdminClient.RequireRequestedMember(member, _removeAll);
         return new AsyncKafkaFuture(NativeAdminClient.RemoveMembersFromConsumerGroupMemberResult(_native, member));
     }
 
-    internal static AsyncRemoveMembersFromConsumerGroupResult OfClient(SafeAdminResultHandle native) => new AsyncRemoveMembersFromConsumerGroupResult(native);
+    internal static AsyncRemoveMembersFromConsumerGroupResult OfClient(SafeAdminResultHandle native, RemoveMembersFromConsumerGroupOptions options) =>
+        new AsyncRemoveMembersFromConsumerGroupResult(native, options.RemoveAll);
 }

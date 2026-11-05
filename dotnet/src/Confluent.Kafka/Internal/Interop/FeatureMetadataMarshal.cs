@@ -26,12 +26,12 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class FeatureMetadataMarshal
 {
-    internal static FeatureMetadata CopyOut(IntPtr metadata)
+    internal static FeatureMetadata? CopyOut(IntPtr metadata)
     {
         if (metadata == IntPtr.Zero)
         {
             // Python's binding reads missing metadata as None, so the future completes with null.
-            return null!;
+            return null;
         }
 
         IntPtr outErr = IntPtr.Zero;

@@ -240,15 +240,22 @@ public sealed class PublicAdminTeardownTests
     }
 
     [Fact]
-    public void RealClient_RejectsANullConfigValue()
+    public void RealClient_ANullConfigValue_IsAnsweredAsJavasValidator()
     {
-        ArgumentException failure = Assert.Throws<ArgumentException>(
+        ConfigException list = Assert.Throws<ConfigException>(
             () => new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = null! }));
-        Assert.Equal("config", failure.ParamName);
-        Assert.StartsWith(
-            "Configuration value for key 'bootstrap.servers' must not be null.",
-            failure.Message,
-            StringComparison.Ordinal);
+        Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", list.Message);
+
+        ConfigException named = Assert.Throws<ConfigException>(() => new AsyncKafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["security.protocol"] = null! }));
+        Assert.Equal(
+            "Invalid value null for configuration security.protocol: String must be one of (case insensitive): " +
+            "SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT",
+            named.Message);
+
+        // A key whose validator accepts null is not set.
+        TestTimeout.Dispose(new KafkaAdminClient(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["client.id"] = null! }));
 
         Assert.Equal(
             "config",

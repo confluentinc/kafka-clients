@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Java.Lang;
@@ -57,16 +58,17 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
     /// (<c>"latest"</c>).
     /// </param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
         _native = NativeConsumer.CreateMock(autoOffsetReset, withPump: false);
     }
 
@@ -301,7 +303,6 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or the consumer is manually assigned (Java's <c>IllegalArgumentException</c>).
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
 
@@ -317,7 +318,6 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or a partition is not currently assigned.
     /// </exception>

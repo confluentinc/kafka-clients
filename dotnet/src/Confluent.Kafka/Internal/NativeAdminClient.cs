@@ -84,15 +84,7 @@ internal sealed partial class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(config));
         }
 
-        foreach (KeyValuePair<string, string> entry in config)
-        {
-            if (entry.Value is null)
-            {
-                throw new ArgumentException(
-                    $"Configuration value for key '{entry.Key}' must not be null.",
-                    nameof(config));
-            }
-        }
+        config = NullConfigValues.Apply(config, NullConfigValues.Admin);
 
         return Start(new SafeKafkaAdminClientHandle(NewAdminClient(config)), isMock: false, flavour);
     }

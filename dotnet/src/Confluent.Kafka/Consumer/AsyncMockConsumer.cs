@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Java.Lang;
@@ -60,16 +61,17 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
     /// (<c>"latest"</c>).
     /// </param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     public AsyncMockConsumer(
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
         _native = NativeConsumer.CreateMock(autoOffsetReset);
     }
 
@@ -369,7 +371,6 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <returns>A <see cref="Task"/> that completes when the rebalance is done.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public Task Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.RebalanceWithCallback(partitions);
 
@@ -388,7 +389,6 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <returns>A <see cref="Task"/> that completes when the partitions are lost.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
         _native.LosePartitionsWithCallback(partitions);

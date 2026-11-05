@@ -118,20 +118,20 @@ public sealed class ProducerConfigMarshalTests
     }
 
     [Fact]
-    public void Create_ConfigWithNullValue_ThrowsArgumentException()
+    public void Create_ConfigWithNullValue_IsAnsweredAsJavasValidator()
     {
-        var config = new Dictionary<string, string>
-        {
-            ["bootstrap.servers"] = null!,
-        };
+        ConfigException list = Assert.Throws<ConfigException>(
+            () => NativeProducer.Create(new Dictionary<string, string> { ["bootstrap.servers"] = null! }));
+        Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", list.Message);
 
-        ArgumentException failure = Assert.Throws<ArgumentException>(() => NativeProducer.Create(config));
+        ConfigException named = Assert.Throws<ConfigException>(() => NativeProducer.Create(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["linger.ms"] = null! }));
+        Assert.Equal("Invalid value null for configuration linger.ms: Value must be non-null", named.Message);
 
-        Assert.Equal("config", failure.ParamName);
-        Assert.StartsWith(
-            "Configuration value for key 'bootstrap.servers' must not be null.",
-            failure.Message,
-            StringComparison.Ordinal);
+        // A key whose validator accepts null is not set.
+        NativeProducer producer = NativeProducer.Create(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["transactional.id"] = null! });
+        TestTimeout.Run(producer.Dispose, TimeSpan.FromSeconds(30));
     }
 
     [Fact]

@@ -330,13 +330,15 @@ public sealed class PublicHeadersTests
     [Fact]
     public void HeadersNullKeyChecks_AndOrder()
     {
+        // Java's RecordHeaders.checkKey throws IllegalArgumentException, not a NullPointerException.
         Headers headers = new Headers();
-        AssertNullArgument("key", "key cannot be null.", Assert.Throws<ArgumentNullException>(() => headers.Remove(null!)));
-        AssertNullArgument(
-            "key", "key cannot be null.", Assert.Throws<ArgumentNullException>(() => headers.LastHeader(null!)));
-
-        AssertNullArgument(
-            "key", "key cannot be null.", Assert.Throws<ArgumentNullException>(() => { _ = headers.GetHeaders(null!); }));
+        Assert.Equal(
+            "key cannot be null.", Assert.Throws<IllegalArgumentException>(() => headers.Remove(null!)).Message);
+        Assert.Equal(
+            "key cannot be null.", Assert.Throws<IllegalArgumentException>(() => headers.LastHeader(null!)).Message);
+        Assert.Equal(
+            "key cannot be null.",
+            Assert.Throws<IllegalArgumentException>(() => { _ = headers.GetHeaders(null!); }).Message);
 
         headers.SetReadOnly();
         Assert.Throws<IllegalStateException>(() => headers.Remove(null!));

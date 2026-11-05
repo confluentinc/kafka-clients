@@ -21,6 +21,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
@@ -164,6 +165,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
+    /// <summary>
+    /// A consumer constructor's deserializer, or Java's <c>ConfigException</c> for a null one: Java falls back to the
+    /// <paramref name="key"/> config, a class name, which .NET config cannot hold, so the key is always missing.
+    /// </summary>
+    internal static T RequireDeserializer<T>(T? deserializer, string key)
+        where T : class =>
+        deserializer ?? throw new ConfigException(
+            "Missing required configuration \"" + key + "\" which has no default value.");
+
     internal static NativeConsumer Create(IReadOnlyDictionary<string, string> config, bool withPump = true)
     {
         if (config is null)
@@ -171,15 +181,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new ArgumentNullException(nameof(config));
         }
 
-        foreach (KeyValuePair<string, string> entry in config)
-        {
-            if (entry.Value is null)
-            {
-                throw new ArgumentException(
-                    $"Configuration value for key '{entry.Key}' must not be null.",
-                    nameof(config));
-            }
-        }
+        config = NullConfigValues.Apply(config, NullConfigValues.Consumer);
 
         IntPtr classPointer = NewKafkaConsumer(config);
         IntPtr outErr = IntPtr.Zero;
@@ -314,7 +316,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal long? CurrentLag(string topic, int partition)
     {
-        CheckInAUse(() => RequireTopicPartition(topic, partition), UseKind.UnownedOnMock);
+        if (CheckInAUse(() => LagOfANullTopic(topic, partition), UseKind.UnownedOnMock))
+        {
+            return 0;
+        }
+
         if (RoutesToTheHandle)
         {
             return Route(handle => handle.CurrentLag(topic, partition));
@@ -652,14 +658,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // KafkaConsumer refuses a null collection or topic with Java's messages, and the core refuses a blank topic
-    // with the same text. Java's MockConsumer has no check of its own (a null is its NullPointerException).
+    // with the same text. Java's KafkaConsumer checks group.id first, so without one the refusal is the core's
+    // InvalidGroupIdException, which the binding throws itself where it refuses the topics. Java's MockConsumer has no
+    // check of its own (a null is its NullPointerException).
     private string[] SnapshotTopics(IReadOnlyCollection<string> topics)
     {
         if (topics is null)
         {
             throw IsMock
-                ? (ArgumentException)new ArgumentNullException(nameof(topics))
-                : new IllegalArgumentException(NullSubscribeTopicsMessage);
+                ? new ArgumentNullException(nameof(topics))
+                : GroupIdMissing ? GroupIdNotDefined() : new IllegalArgumentException(NullSubscribeTopicsMessage);
         }
 
         string[] topicArray = new string[topics.Count];
@@ -670,7 +678,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 throw IsMock
                     ? new ArgumentException("Topic names must not be null.", nameof(topics))
-                    : (ArgumentException)new IllegalArgumentException(NullSubscribeTopicMessage);
+                    : GroupIdMissing ? GroupIdNotDefined() : new IllegalArgumentException(NullSubscribeTopicMessage);
             }
 
             topicArray[index++] = topic;
@@ -695,25 +703,25 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckInAUse(() => SnapshotPartitions(partitions)),
+            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
             NativeMethods.ConsumerPause,
             (handle, snapshot) => handle.Pause(snapshot));
 
     internal void Resume(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckInAUse(() => SnapshotPartitions(partitions)),
+            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
             NativeMethods.ConsumerResume,
             (handle, snapshot) => handle.Resume(snapshot));
 
     internal void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
+            SnapshotSeekPartitions(partitions),
             NativeMethods.ConsumerSeekToBeginning,
             (handle, snapshot) => handle.SeekToBeginning(snapshot));
 
     internal void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
+            SnapshotSeekPartitions(partitions),
             NativeMethods.ConsumerSeekToEnd,
             (handle, snapshot) => handle.SeekToEnd(snapshot));
 
@@ -885,9 +893,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    private T CheckInAUse<T>(Func<T> checks)
+    private T CheckInAUse<T>(Func<T> checks, UseKind kind = UseKind.Owned)
     {
-        int owner = EnterUse();
+        int owner = EnterUse(kind);
         try
         {
             return checks();
@@ -961,6 +969,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return CheckInAUse(checks);
     }
 
+    // Java's KafkaConsumer checks these arguments before acquire(), so before the closed and owner checks, which the
+    // call's own use makes; Java's MockConsumer checks them after ensureNotClosed(), which the mock's use makes.
+    private T CheckBeforeAcquire<T>(Func<T> checks) => IsMock ? CheckInAUse(checks) : checks();
+
     private T CheckWhenOpen<T>(Func<T> checks)
     {
         if (IsMock)
@@ -972,32 +984,33 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return checks();
     }
 
-    // As Python's seek: a negative offset is checked before the owner check only for a null partition, otherwise
-    // after it.
+    // Java's KafkaConsumer checks the offset before acquire(), so before the closed and owner checks; Java's
+    // MockConsumer checks no offset, and the core mock answers a negative one as Java's does.
     private void CheckSeekArguments(string topic, int partition, long offset)
     {
-        if (topic is null)
+        if (IsMock)
         {
-            CheckWhenOpen(() => RequireSeekOffset(offset));
+            CheckInAUse(() => RequireAssignedTopic(topic, partition));
+            return;
         }
 
-        CheckInAUse(() =>
-        {
-            RequireTopicPartition(topic, partition);
-            RequireSeekOffset(offset);
-        });
+        RequireSeekOffset(offset);
+        CheckInAUse(() => RequireAssignedTopic(topic, partition));
     }
 
+    // Java's KafkaConsumer reads the offset before acquire(); Java's MockConsumer after ensureNotClosed().
     private void CheckSeekArguments(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
     {
-        CheckWhenOpen(() =>
+        CheckBeforeAcquire(() =>
         {
             if (offsetAndMetadata is null)
             {
                 throw new ArgumentNullException(nameof(offsetAndMetadata));
             }
+
+            return true;
         });
-        CheckInAUse(() => RequireTopicPartition(topic, partition));
+        CheckInAUse(() => RequireAssignedTopic(topic, partition));
     }
 
     private static void RequireCallback(object callback)
@@ -1330,30 +1343,45 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return (long)timeout.TotalMilliseconds;
     }
 
-    private static void RequireTopicPartition(string? topic, int partition)
+    // A null topic is never assigned and cannot cross the C ABI, so the binding throws what Java's
+    // SubscriptionState.assignedState throws for a partition that is not assigned. A negative partition goes to the
+    // core, which answers as Java does.
+    internal static void RequireAssignedTopic(string? topic, int partition)
     {
         if (topic is null)
         {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        if (partition < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(partition), partition, "Partition must not be negative.");
+            throw new IllegalStateException(NoCurrentAssignment(partition));
         }
     }
 
-    private static void RequirePositionPartition(TopicPartition partition)
+    // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null topic never has;
+    // Java's KafkaConsumer refuses the partition as not assigned. Returns whether the lag is the mock's 0.
+    private bool LagOfANullTopic(string? topic, int partition)
+    {
+        if (topic is null && IsMock)
+        {
+            return true;
+        }
+
+        RequireAssignedTopic(topic, partition);
+        return false;
+    }
+
+    internal static string NoCurrentAssignment(int partition) =>
+        "No current assignment for partition null-" + partition.ToString(CultureInfo.InvariantCulture);
+
+    internal const string PositionNotAssigned =
+        "You can only check the position for partitions assigned to this consumer.";
+
+    // Java's position checks isAssigned first: KafkaConsumer throws IllegalStateException, MockConsumer
+    // IllegalArgumentException.
+    private void RequirePositionPartition(TopicPartition partition)
     {
         if (partition.Topic is null)
         {
-            throw new ArgumentNullException(nameof(partition), "TopicPartition.Topic must not be null.");
-        }
-
-        if (partition.Partition < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(partition), partition.Partition, "Partition must not be negative.");
+            throw IsMock
+                ? new IllegalArgumentException(PositionNotAssigned)
+                : new IllegalStateException(PositionNotAssigned);
         }
     }
 
@@ -1864,9 +1892,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // Java's KafkaConsumer.metrics() takes no acquire(), so another thread's call does not refuse it; the use only keeps
+    // the handle alive. Java's MockConsumer.metrics() is synchronized, so the mock waits as for any call.
     internal IReadOnlyDictionary<MetricName, IMetric> Metrics()
     {
-        int owner = EnterUse();
+        int owner = EnterUse(UseKind.OwnedOnMock);
         try
         {
             IntPtr outErr = IntPtr.Zero;
@@ -1951,9 +1981,19 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal void EnforceRebalance(string? reason) =>
-        CallSync(arguments =>
+    // Java's enforceRebalance only logs (KafkaConsumer) or sets a flag (MockConsumer): it takes no acquire() and makes no
+    // closed check, so after close it returns and another thread's call does not refuse it. The use only keeps the
+    // handle alive; it runs no queued callback, which belongs to the thread that owns the consumer.
+    internal void EnforceRebalance(string? reason)
+    {
+        if (!TryEnterUse(out int owner, UseKind.Unowned))
         {
+            return;
+        }
+
+        try
+        {
+            using NativeCallArguments arguments = new NativeCallArguments();
             IntPtr outErr = IntPtr.Zero;
             if (reason is null)
             {
@@ -1965,8 +2005,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
 
             KafkaException.ThrowIfFfiFailed(ref outErr);
-        },
-        UseKind.UnownedOnMock);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
 
     public void Dispose()
     {
@@ -2123,12 +2167,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 throw new ArgumentException("Topic names must not be null.", nameof(offsets));
             }
 
-            if (tp.Partition < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(offsets), tp.Partition, "Partition must not be negative.");
-            }
-
             OffsetAndMetadata value = entry.Value;
             if (value is null)
             {
@@ -2170,8 +2208,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return SnapshotPartitions(partitions!);
     }
 
-    // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message; Java's
-    // MockConsumer has no check of its own.
+    // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message before acquire(), so
+    // before the closed and owner checks; Java's MockConsumer has no check of its own.
     private (string Topic, int Partition)[] SnapshotSeekPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
         if (partitions is null && !IsMock)
@@ -2179,11 +2217,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new IllegalArgumentException("Partitions collection cannot be null");
         }
 
-        return SnapshotPartitions(partitions!);
+        return CheckWhenOpen(() => SnapshotPartitions(partitions!));
     }
 
-    // A negative partition is refused, although Java's assign accepts one.
-    internal static (string Topic, int Partition)[] SnapshotPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    // A partition number goes to the core, which answers as Java does. A null topic cannot cross the C ABI: where Java
+    // looks the partition up in the assignment (pause, resume), it is refused as Java refuses a partition that is not
+    // assigned.
+    internal static (string Topic, int Partition)[] SnapshotPartitions(
+        IReadOnlyCollection<TopicPartition> partitions,
+        bool nullTopicIsUnassigned = false)
     {
         if (partitions is null)
         {
@@ -2196,13 +2238,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             if (tp.Topic is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(partitions));
-            }
-
-            if (tp.Partition < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(partitions), tp.Partition, "Partition must not be negative.");
+                throw nullTopicIsUnassigned
+                    ? new IllegalStateException(NoCurrentAssignment(tp.Partition))
+                    : new ArgumentException("Topic names must not be null.", nameof(partitions));
             }
 
             snapshot[index++] = (tp.Topic, tp.Partition);
@@ -2252,12 +2290,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
             }
 
-            if (tp.Partition < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(timestampsToSearch), tp.Partition, "Partition must not be negative.");
-            }
-
             topics[index] = tp.Topic;
             partitionArray[index] = tp.Partition;
             timestamps[index] = entry.Value;
@@ -2275,7 +2307,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void UpdateOffset(string topic, int partition, long offset, bool beginning)
     {
-        RequireTopicPartition(topic, partition);
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(partition), partition, "Partition must not be negative.");
+        }
+
         CallMock((mock, arguments) =>
         {
             IntPtr offsets = arguments.LongMap(new[] { topic }, new[] { partition }, new[] { offset }, 1);
@@ -2486,7 +2527,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     private bool ChecksOwner(UseKind kind) =>
-        (kind == UseKind.Owned || (kind == UseKind.UnownedOnMock && !IsMock)) && !_reporter.InCallback;
+        (kind == UseKind.Owned
+            || (kind == UseKind.UnownedOnMock && !IsMock)
+            || (kind == UseKind.OwnedOnMock && IsMock))
+        && !_reporter.InCallback;
 
     private bool RefusedWhileBusy => !IsMock || _reporter.RunsAsyncCallback || Volatile.Read(ref _refusingUses) != 0;
 
@@ -2537,13 +2581,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether a use is checked against the owner: <c>Owned</c> always; <c>UnownedOnMock</c>, the three calls Java's
-    /// MockConsumer leaves unsynchronized, only on a real consumer; <c>Unowned</c>, Wakeup and Handle, never.
+    /// Whether a use is checked against the owner: <c>Owned</c> always; <c>UnownedOnMock</c>, the calls Java's
+    /// MockConsumer leaves unsynchronized but Java's KafkaConsumer guards with acquire(), only on a real consumer;
+    /// <c>OwnedOnMock</c>, Metrics, which Java's KafkaConsumer leaves outside acquire() but Java's MockConsumer
+    /// synchronizes, only on a mock; <c>Unowned</c>, Wakeup, Handle and EnforceRebalance, never.
     /// </summary>
     private enum UseKind
     {
         Owned,
         Unowned,
         UnownedOnMock,
+        OwnedOnMock,
     }
 }

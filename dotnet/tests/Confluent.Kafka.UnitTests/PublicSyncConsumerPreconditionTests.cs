@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Java.Lang;
@@ -31,6 +32,32 @@ public sealed class PublicSyncConsumerPreconditionTests
 {
     private const string Topic = "sync-precondition-topic";
     private const int Partition = 0;
+
+    [Theory]
+    [InlineData(nameof(KafkaConsumer<byte[], byte[]>))]
+    [InlineData(nameof(AsyncKafkaConsumer<byte[], byte[]>))]
+    [InlineData(nameof(MockConsumer<byte[], byte[]>))]
+    [InlineData(nameof(AsyncMockConsumer<byte[], byte[]>))]
+    public void Constructor_NullDeserializer_ThrowsJavasMissingConfiguration(string consumer)
+    {
+        Dictionary<string, string> config = new Dictionary<string, string>
+        {
+            ["bootstrap.servers"] = "localhost:1",
+            ["group.protocol"] = "consumer",
+        };
+        Func<IDeserializer<byte[]>?, IDeserializer<byte[]>?, object> create = consumer switch
+        {
+            nameof(KafkaConsumer<byte[], byte[]>) => (k, v) => new KafkaConsumer<byte[], byte[]>(config, k!, v!),
+            nameof(AsyncKafkaConsumer<byte[], byte[]>) => (k, v) => new AsyncKafkaConsumer<byte[], byte[]>(config, k!, v!),
+            nameof(MockConsumer<byte[], byte[]>) => (k, v) => new MockConsumer<byte[], byte[]>(k!, v!),
+            _ => (k, v) => new AsyncMockConsumer<byte[], byte[]>(k!, v!),
+        };
+
+        ConfigException key = Assert.Throws<ConfigException>(() => create(null, null));
+        Assert.Equal("Missing required configuration \"key.deserializer\" which has no default value.", key.Message);
+        ConfigException value = Assert.Throws<ConfigException>(() => create(Serdes.ByteArray, null));
+        Assert.Equal("Missing required configuration \"value.deserializer\" which has no default value.", value.Message);
+    }
 
     [Fact]
     public void Subscribe_NullTopics_ThrowsArgumentNull()
@@ -67,8 +94,6 @@ public sealed class PublicSyncConsumerPreconditionTests
 
     [Theory]
     [InlineData("assign")]
-    [InlineData("pause")]
-    [InlineData("resume")]
     [InlineData("seekToBeginning")]
     [InlineData("seekToEnd")]
     public void PartitionOps_NullElementTopic_ThrowArgumentException(string op)
@@ -106,13 +131,27 @@ public sealed class PublicSyncConsumerPreconditionTests
         Assert.Contains("Offset value must not be null.", ex.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Position_NullTopic_ThrowsArgumentNull()
+    // Java's SubscriptionState.assignedState throws for a partition that is not assigned, which a null topic never is.
+    [Theory]
+    [InlineData("pause")]
+    [InlineData("resume")]
+    public void PauseAndResume_NullElementTopic_ThrowIllegalState(string op)
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Position(default));
-        Assert.Equal("partition", ex.ParamName);
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
+            () => InvokePartitionOp(consumer, op, new[] { new TopicPartition(null!, 3) }));
+        Assert.Equal("No current assignment for partition null-3", ex.Message);
+    }
+
+    // Java's MockConsumer.position throws IllegalArgumentException for a partition that is not assigned.
+    [Fact]
+    public void Position_NullTopic_ThrowsIllegalArgument()
+    {
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => consumer.Position(default));
+        Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
     }
 
     [Fact]

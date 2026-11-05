@@ -13,7 +13,8 @@
 // limitations under the License.
 
 using System;
-using System.Text;
+
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
@@ -49,7 +50,7 @@ public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
         : this(
             user,
             credentialInfo,
-            Encoding.UTF8.GetBytes(password ?? throw new ArgumentNullException(nameof(password))))
+            Utf8Marshal.JavaUtf8.GetBytes(password ?? throw new ArgumentNullException(nameof(password))))
     {
     }
 

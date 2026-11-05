@@ -52,9 +52,9 @@ internal sealed partial class NativeAdminClient
 
     private static readonly ResultFuture s_updateFeaturesValues = NativeMethods.UpdateFeaturesResultValues;
 
-    private static readonly Func<IntPtr, FeatureMetadata> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
+    private static readonly Func<IntPtr, FeatureMetadata?> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
 
-    internal (KafkaFutureImpl<FeatureMetadata> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
+    internal (KafkaFutureImpl<FeatureMetadata?> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
         DescribeFeaturesOptions? options)
     {
         EnterUse();

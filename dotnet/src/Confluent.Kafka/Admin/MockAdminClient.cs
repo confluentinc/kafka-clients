@@ -262,7 +262,7 @@ public sealed class MockAdminClient : IAdmin
     public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         RemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     /// <remarks>
@@ -333,9 +333,20 @@ public sealed class MockAdminClient : IAdmin
             _native.AlterUserScramCredentials(alterations, options));
 
     /// <inheritdoc/>
+    /// <exception cref="IndexOutOfBoundsException">
+    /// No renewer is given: Java's mock makes the first renewer the token's owner.
+    /// </exception>
     public CreateDelegationTokenResult CreateDelegationToken(
-        CreateDelegationTokenOptions? options = null) =>
-        CreateDelegationTokenResult.OfClient(_native.CreateDelegationToken(options));
+        CreateDelegationTokenOptions? options = null)
+    {
+        // Java's mock reads renewers().get(0) as the token's owner, out of bounds for its default LinkedList.
+        if (options is null || options.Renewers is { Count: 0 })
+        {
+            throw new IndexOutOfBoundsException("Index: 0, Size: 0");
+        }
+
+        return CreateDelegationTokenResult.OfClient(_native.CreateDelegationToken(options));
+    }
 
     /// <inheritdoc/>
     public RenewDelegationTokenResult RenewDelegationToken(
@@ -454,7 +465,7 @@ public sealed class MockAdminClient : IAdmin
     /// <param name="newOffsets">The beginning offset per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// A key has a null topic, or a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been disposed.</exception>
@@ -469,7 +480,7 @@ public sealed class MockAdminClient : IAdmin
     /// <param name="newOffsets">The end offset per topic partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// A key has a null topic, or a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been disposed.</exception>
@@ -487,7 +498,7 @@ public sealed class MockAdminClient : IAdmin
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
+    /// A key has a null topic, or a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been disposed.</exception>

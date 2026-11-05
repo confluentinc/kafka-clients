@@ -35,14 +35,18 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The order of the consumer calls' checks, Python's: closed first, then the owner check and the arguments, an
-/// argument Python checks before the use (Java's before <c>acquire()</c>, but <c>Seek</c>'s offset only for a null
-/// partition) coming before the owner check (after the owner wait on the mocks), then <c>group.id</c> and the timeout.
+/// argument Python checks before the use coming before the owner check (after the owner wait on the mocks), then
+/// <c>group.id</c> and the timeout. The arguments Java's <c>KafkaConsumer</c> checks before <c>acquire()</c>
+/// (<c>seek</c>'s negative offset and null <c>OffsetAndMetadata</c>, <c>seekToBeginning</c>'s and <c>seekToEnd</c>'s
+/// null collection) come before the closed check too.
 /// </summary>
 public sealed class PublicConsumerCheckOrderTests
 {
     private const string Topic = "check-order-topic";
 
     private const string Concurrent = "KafkaConsumer is not safe for multi-threaded access.";
+
+    private const string ClosedMessage = "This consumer has already been closed.";
 
     private const string GroupIdNotDefined =
         "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer "
@@ -155,26 +159,20 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public async Task WhileAnotherThreadIsInside_ANegativePartition_IsReportedWithTheOtherArguments(string kind)
+    public async Task WhileAnotherThreadIsInside_ANegativePartition_ReportsTheConcurrentAccess_ButANegativeOffsetComesFirst(string kind)
     {
         IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
             Calls(consumer, NegativePartitionCalls()));
 
-        Dictionary<string, string> before = new Dictionary<string, string>
-        {
-            ["SeekToBeginning(negative partition)"] = "partitions",
-            ["SeekToEnd(negative partition)"] = "partitions",
-            ["Commit(negative partition)"] = "offsets",
-            ["CommitAsync(negative partition)"] = "offsets",
-        };
+        // The binding makes no partition check: the core answers a negative partition after the owner check, as Java
+        // does after acquire(). Java's seek checks a negative offset before acquire().
         Assert.Equal(11, seen.Count);
         foreach (KeyValuePair<string, Exception?> call in seen)
         {
-            if (before.TryGetValue(call.Key, out string? paramName))
+            if (call.Key == "Seek(partition, negative offset)")
             {
-                ArgumentOutOfRangeException guard = Assert.IsType<ArgumentOutOfRangeException>(call.Value);
-                Assert.Equal(paramName, guard.ParamName);
-                Assert.Equal(-1, guard.ActualValue);
+                IllegalArgumentException negative = Assert.IsType<IllegalArgumentException>(call.Value);
+                Assert.Equal("seek offset must not be a negative number", negative.Message);
             }
             else
             {
@@ -219,7 +217,11 @@ public sealed class PublicConsumerCheckOrderTests
             {
                 if (call.Key == "CurrentLag(default)")
                 {
-                    Assert.Equal("topic", Assert.IsType<ArgumentNullException>(call.Value).ParamName);
+                    // Java's MockConsumer.currentLag is not synchronized and answers 0 for a partition with no end
+                    // offset, which a null topic never has: the call returns its Task.
+                    Assert.Equal(
+                        "the call returned a Task, RanToCompletion",
+                        Assert.IsType<InvalidOperationException>(call.Value).Message);
                 }
                 else
                 {
@@ -261,6 +263,19 @@ public sealed class PublicConsumerCheckOrderTests
         AssertNegative(
             Thrown(consumer, c => c.Position(s_tp0, s_negative), c => c.Position(s_tp0, s_negative)),
             "Invalid negative timeout -1000");
+    }
+
+    // Java's subscribeInternal runs throwIfGroupIdNotDefined() before it checks the topics.
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public void WithoutAGroupId_SubscribeToANullCollectionOrTopic_ReportsTheGroupIdFirst(string kind)
+    {
+        object consumer = Create(kind, groupId: false);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+
+        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe(null!), c => c.Subscribe(null!)));
+        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe(new string[] { null! }), c => c.Subscribe(new string[] { null! })));
+        AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe(null!, s_listener), c => c.Subscribe(null!, s_asyncListener)));
     }
 
     [Theory]
@@ -373,10 +388,35 @@ public sealed class PublicConsumerCheckOrderTests
 
         AsyncOnly(consumer, seen, NullAsyncCallbackCalls());
 
+        // Java's KafkaConsumer checks these before acquire(), so before the closed check; Java's MockConsumer after
+        // ensureNotClosed().
+        Dictionary<string, (Type Type, string Detail)> beforeAcquire = kind.Contains("Mock", StringComparison.Ordinal)
+            ? new Dictionary<string, (Type, string)>()
+            : new Dictionary<string, (Type, string)>
+            {
+                ["SeekToBeginning(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
+                ["SeekToEnd(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
+                ["Seek(default, negative offset)"] = (
+                    typeof(IllegalArgumentException), "seek offset must not be a negative number"),
+                ["Seek(partition, negative offset)"] = (
+                    typeof(IllegalArgumentException), "seek offset must not be a negative number"),
+                ["Seek(partition, null)"] = (typeof(ArgumentNullException), "offsetAndMetadata"),
+            };
         Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 41 : 38, seen.Count);
         foreach (KeyValuePair<string, Exception?> call in seen)
         {
-            Assert.True(call.Value is IllegalStateException, call.Key + ": " + call.Value);
+            if (beforeAcquire.TryGetValue(call.Key, out (Type Type, string Detail) expected))
+            {
+                Assert.True(call.Value?.GetType() == expected.Type, call.Key + ": " + call.Value);
+                Assert.Equal(
+                    expected.Detail,
+                    call.Value is ArgumentNullException nullArgument ? nullArgument.ParamName : call.Value!.Message);
+            }
+            else
+            {
+                Assert.True(call.Value is IllegalStateException, call.Key + ": " + call.Value);
+                Assert.Equal(ClosedMessage, call.Value!.Message);
+            }
         }
     }
 

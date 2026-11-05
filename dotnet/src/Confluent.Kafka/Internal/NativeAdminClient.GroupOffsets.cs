@@ -14,11 +14,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Internal;
 
@@ -447,6 +449,17 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> AlterConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
+        if (partition.Topic is null)
+        {
+            // No request partition has a null topic, so Java's future fails as for one not attempted. A recorded
+            // deviation: Java fails it only once the call has answered, with the call's own error if it failed.
+            KafkaFutureImpl<object?> notAttempted = new KafkaFutureImpl<object?>();
+            notAttempted.CompleteWithError(new IllegalArgumentException(
+                "Alter offset for partition \"null-" + partition.Partition.ToString(CultureInfo.InvariantCulture) +
+                "\" was not attempted"));
+            return notAttempted;
+        }
+
         IntPtr native = NewResultTopicPartition(partition);
         try
         {
@@ -599,6 +612,14 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> DeleteConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
+        if (partition.Topic is null)
+        {
+            // No request partition has a null topic: Java's membership check throws at the call.
+            throw new IllegalArgumentException(
+                "Partition null-" + partition.Partition.ToString(CultureInfo.InvariantCulture) +
+                " was not included in the original request");
+        }
+
         IntPtr native = NewResultTopicPartition(partition);
         try
         {
@@ -734,6 +755,22 @@ internal sealed partial class NativeAdminClient
         {
             ExitUse();
         }
+    }
+
+    /// <summary>
+    /// Java's <c>memberResult</c> checks for a null member: the <c>removeAll</c> mode first, then the membership a null
+    /// member never has. The core makes both checks for any other member.
+    /// </summary>
+    internal static void RequireRequestedMember(MemberToRemove? member, bool removeAll)
+    {
+        if (member is not null)
+        {
+            return;
+        }
+
+        throw new IllegalArgumentException(removeAll
+            ? "The method: memberResult is not applicable in 'removeAll' mode"
+            : "Member null was not included in the original request");
     }
 
     internal static KafkaFutureImpl<object?> RemoveMembersFromConsumerGroupMemberResult(

@@ -72,8 +72,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
     /// failure.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
-    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
-    /// surrogate, which the native client cannot receive unchanged.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
+    /// cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">On <c>KafkaProducer</c>, a serializer threw an
     /// <see cref="InvalidCastException"/> while encoding the key or value; any other serializer throw except an
     /// <see cref="ApiException"/>, and every serializer throw on <c>MockProducer</c>, is rethrown unchanged (see the
@@ -101,8 +101,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
-    /// surrogate, which the native client cannot receive unchanged.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
+    /// cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">On <c>KafkaProducer</c>, a serializer threw an
     /// <see cref="InvalidCastException"/> while encoding the key or value; any other serializer throw except an
     /// <see cref="ApiException"/>, and every serializer throw on <c>MockProducer</c>, is rethrown unchanged (see the
@@ -168,6 +168,6 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// closes fails with the <see cref="KafkaException"/> "Producer closed while send in progress".
     /// Its delivery callback does not run.
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative, on <c>KafkaProducer</c>.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative, on <c>KafkaProducer</c>.</exception>
     void Close(TimeSpan timeout);
 }

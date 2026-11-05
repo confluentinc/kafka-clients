@@ -22,6 +22,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
+using Confluent.Kafka.Internal;
 using Confluent.Kafka.Java.Lang;
 using Xunit;
 
@@ -163,8 +164,9 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
+        FeatureMetadata? metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
 
+        Assert.NotNull(metadata);
         Assert.NotNull(metadata.FinalizedFeatures);
         Assert.NotNull(metadata.SupportedFeatures);
         Assert.NotNull(metadata.FinalizedFeaturesEpoch);
@@ -376,16 +378,27 @@ public sealed class PublicAdminP7Tests
     }
 
     [Fact]
-    public void DescribeUserScramCredentials_NullUser_ThrowsSynchronously()
+    public async Task DescribeUserScramCredentials_NullUser_FailsTheFutureAsJava()
     {
-        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        AsyncMockAdminClient asyncAdmin = AsyncMockAdminClient.Create().Build();
+        using IDisposable asyncDisposal = TestTimeout.Disposal(asyncAdmin);
+        MockAdminClient syncAdmin = MockAdminClient.Create().Build();
+        using IDisposable syncDisposal = TestTimeout.Disposal(syncAdmin);
 
-        AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
+        // The mock's call fails, and a null user's future carries the call's error, as Java's dataFuture does.
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => asyncAdmin.DescribeUserScramCredentials().Description(null).Get());
+        FutureAssert.Throws<UnsupportedOperationException>(
+            () => syncAdmin.DescribeUserScramCredentials().Description(null).Get(TimeSpan.FromSeconds(30)));
 
-        ArgumentNullException nullUser =
-            Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
-        Assert.Equal("userName", nullUser.ParamName);
+        // Once the response arrives, no user in it is null.
+        KafkaFutureImpl<object?> response = new KafkaFutureImpl<object?>();
+        KafkaFutureImpl<UserScramCredentialsDescription> missing = NativeAdminClient.NoSuchNullUser(response);
+        Assert.False(missing.IsDone);
+        response.Complete(null);
+        ResourceNotFoundException noSuchUser =
+            await FutureAssert.ThrowsAsync<ResourceNotFoundException>(() => new AsyncKafkaFuture<UserScramCredentialsDescription>(missing).Get());
+        Assert.Equal("No such user: null", noSuchUser.Message);
     }
 
     [Fact]

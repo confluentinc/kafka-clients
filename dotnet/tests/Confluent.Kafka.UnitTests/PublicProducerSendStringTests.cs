@@ -28,20 +28,20 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// A topic or a header key the C ABI would change, one holding a NUL character or an unpaired UTF-16 surrogate, makes
+/// A topic or a header key the C ABI would change, one holding a NUL character, makes
 /// the send throw <see cref="ArgumentException"/> on all four producers, before the record reaches the core: the Kafka
 /// producers have sealed the headers by then, the mocks leave them writable, no callback fires for the record, and the
-/// producer still sends. A non-ASCII topic and header key, a surrogate pair included, are sent.
+/// producer still sends. A non-ASCII topic and header key, a surrogate pair included, are sent, and so is one with an
+/// unpaired surrogate, which crosses as Java's <c>String.getBytes(UTF_8)</c> encodes it, as <c>?</c>.
 /// </summary>
 public sealed class PublicProducerSendStringTests
 {
     private const string TopicMessage =
-        "A topic must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "A topic must not contain a NUL character: such a string cannot be passed to the native client unchanged.";
 
     private const string HeaderKeyMessage =
-        "A header key must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "A header key must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
 
     private const string Topic = "topic";
 
@@ -73,6 +73,11 @@ public sealed class PublicProducerSendStringTests
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["nul"] = "t\0u",
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> s_loneSurrogates =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
             ["lone-high"] = "t\uD800u",
             ["lone-low"] = "t\uDC00u",
         };
@@ -89,8 +94,8 @@ public sealed class PublicProducerSendStringTests
     public void LabelTable_HoldsTheStringsItsNamesSay()
     {
         Assert.Equal('\0', s_altered["nul"][1]);
-        Assert.True(char.IsHighSurrogate(s_altered["lone-high"][1]));
-        Assert.True(char.IsLowSurrogate(s_altered["lone-low"][1]));
+        Assert.True(char.IsHighSurrogate(s_loneSurrogates["lone-high"][1]));
+        Assert.True(char.IsLowSurrogate(s_loneSurrogates["lone-low"][1]));
         Assert.True(char.IsSurrogatePair(NonAsciiTopic[NonAsciiTopic.Length - 2], NonAsciiTopic[NonAsciiTopic.Length - 1]));
         Assert.True(char.IsSurrogatePair(NonAsciiKey[NonAsciiKey.Length - 2], NonAsciiKey[NonAsciiKey.Length - 1]));
     }
@@ -133,7 +138,7 @@ public sealed class PublicProducerSendStringTests
         try
         {
             subject.Reject(Record(s_altered["nul"], "h"), callback);
-            subject.Reject(Record(Topic, s_altered["lone-low"]), callback);
+            subject.Reject(Record(Topic, s_altered["nul"]), callback);
             await subject.Deliver(Record(Topic, "h"));
         }
         finally
@@ -160,6 +165,28 @@ public sealed class PublicProducerSendStringTests
         {
             Assert.Equal(NonAsciiTopic, metadata!.Topic);
             Assert.Equal(1, subject.HistoryCount());
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Producers))]
+    public async Task Send_ATopicAndHeaderKeyWithAnUnpairedSurrogate_IsSent(string producer)
+    {
+        foreach (string label in s_loneSurrogates.Keys)
+        {
+            await using Subject subject = Create(producer);
+            string lone = s_loneSurrogates[label];
+            ProducerRecord<string, string> record = Record(lone, lone);
+
+            RecordMetadata? metadata = await subject.Deliver(record);
+
+            Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+            if (subject.IsMock)
+            {
+                // The topic the core holds, read back: the surrogate crossed as '?'.
+                Assert.Equal("t?u", metadata!.Topic);
+                Assert.Equal(1, subject.HistoryCount());
+            }
         }
     }
 

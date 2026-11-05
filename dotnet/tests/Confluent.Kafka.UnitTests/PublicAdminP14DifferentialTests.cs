@@ -68,9 +68,6 @@ public sealed class PublicAdminP14DifferentialTests
     private const string UnknownTopicOrPartitionMessage = "This server does not host this topic-partition.";
 
     // The core mock's refusal, an ArgumentException, where Java's mock throws IndexOutOfBoundsException.
-    private const string NoRenewer =
-        "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner";
-
     private const int DelegationTokenNotFoundCode = 62;
     private const string DelegationTokenNotFoundMessage = "";
 
@@ -1232,8 +1229,11 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(
             "Member diff-ab-3 was not included in the original request",
             Assert.Throws<IllegalArgumentException>(() => { _ = syncResult.MemberResult(unrequested); }).Message);
-        AssertThrowAlike(() => { _ = syncResult.MemberResult(null!); }, () => { _ = asyncResult.MemberResult(null!); });
-        Assert.Equal("member", Assert.Throws<ArgumentNullException>(() => { _ = syncResult.MemberResult(null!); }).ParamName);
+        AssertThrowAlike<IllegalArgumentException>(
+            () => { _ = syncResult.MemberResult(null!); }, () => { _ = asyncResult.MemberResult(null!); });
+        Assert.Equal(
+            "Member null was not included in the original request",
+            Assert.Throws<IllegalArgumentException>(() => { _ = syncResult.MemberResult(null!); }).Message);
 
         RemoveMembersFromConsumerGroupOptions everyone = new RemoveMembersFromConsumerGroupOptions();
         RemoveMembersFromConsumerGroupResult syncAll = sync.RemoveMembersFromConsumerGroup("diff-ab-group", everyone);
@@ -1247,6 +1247,11 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(
             "The method: memberResult is not applicable in 'removeAll' mode",
             Assert.Throws<IllegalArgumentException>(() => { _ = syncAll.MemberResult(members[0]); }).Message);
+        AssertThrowAlike<IllegalArgumentException>(
+            () => { _ = syncAll.MemberResult(null!); }, () => { _ = asyncAll.MemberResult(null!); });
+        Assert.Equal(
+            "The method: memberResult is not applicable in 'removeAll' mode",
+            Assert.Throws<IllegalArgumentException>(() => { _ = syncAll.MemberResult(null!); }).Message);
     }
 
     [Fact]
@@ -1631,11 +1636,9 @@ public sealed class PublicAdminP14DifferentialTests
             "owner=User:diff-an-alice;renewers=User:diff-an-alice,User:diff-an-bob;max=86400000;expiry=-1",
             TokenOf(Assert.IsType<DelegationToken>(created)));
 
-        IllegalArgumentException noRenewer = Assert.IsType<IllegalArgumentException>(
-            await Agree(
-                FutureProbe.Of(sync.CreateDelegationToken().DelegationToken()),
-                FutureProbe.Of(async.CreateDelegationToken().DelegationToken())));
-        Assert.Equal(NoRenewer, noRenewer.Message);
+        // Java's mock reads renewers().get(0) at the call.
+        AssertThrowAlike<IndexOutOfBoundsException>(() => sync.CreateDelegationToken(), () => async.CreateDelegationToken());
+        Assert.Equal("Index: 0, Size: 0", Assert.Throws<IndexOutOfBoundsException>(() => sync.CreateDelegationToken()).Message);
     }
 
     [Fact]
@@ -1855,14 +1858,12 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeUserScramCredentialsResult syncResult = sync.DescribeUserScramCredentials();
         AsyncDescribeUserScramCredentialsResult asyncResult = async.DescribeUserScramCredentials();
-        AssertThrowAlike(() => syncResult.Description(null!), () => asyncResult.Description(null!));
         AssertThrowAlike<ArgumentException>(() => syncResult.Description("diff\0ar"), () => asyncResult.Description("diff\0ar"));
 
         // The null-element guards are the binding's, with its messages; the request-string guard names the member's own
         // parameter.
         Assert.Equal("alterations", Assert.Throws<ArgumentNullException>(() => sync.AlterUserScramCredentials(null!)).ParamName);
         Assert.Equal("featureUpdates", Assert.Throws<ArgumentNullException>(() => sync.UpdateFeatures(null!)).ParamName);
-        Assert.Equal("userName", Assert.Throws<ArgumentNullException>(() => syncResult.Description(null!)).ParamName);
         AssertArgument(
             "The SCRAM credential alterations must not contain a null element.",
             "alterations",

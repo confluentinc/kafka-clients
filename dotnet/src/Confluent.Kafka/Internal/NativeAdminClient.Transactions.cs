@@ -71,7 +71,7 @@ internal sealed partial class NativeAdminClient
     private static readonly SafeAdminResultHandle.Destroy s_destroyDescribeTransactionsResult =
         NativeMethods.DescribeTransactionsResultDestroy;
 
-    private static readonly Func<IntPtr, TransactionDescription> s_copyOutTransactionDescription =
+    private static readonly Func<IntPtr, TransactionDescription?> s_copyOutTransactionDescription =
         TransactionDescriptionMarshal.CopyOut;
 
     private static readonly AdminOptionsMarshal.New s_newAbortTransactionOptions = NativeMethods.AbortTransactionOptionsNew;
@@ -234,7 +234,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription>> Descriptions, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result)
         DescribeTransactions(IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options)
     {
         EnterUse();
@@ -284,13 +284,13 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static Dictionary<string, KafkaFutureImpl<TransactionDescription>> StartTransactionDescriptions(
+    private static Dictionary<string, KafkaFutureImpl<TransactionDescription?>> StartTransactionDescriptions(
         SafeAdminResultHandle result, List<string> transactionalIds)
     {
         try
         {
-            Dictionary<string, KafkaFutureImpl<TransactionDescription>> futures =
-                new Dictionary<string, KafkaFutureImpl<TransactionDescription>>(transactionalIds.Count, StringComparer.Ordinal);
+            Dictionary<string, KafkaFutureImpl<TransactionDescription?>> futures =
+                new Dictionary<string, KafkaFutureImpl<TransactionDescription?>>(transactionalIds.Count, StringComparer.Ordinal);
             foreach (string transactionalId in transactionalIds)
             {
                 IntPtr future;
@@ -304,7 +304,7 @@ internal sealed partial class NativeAdminClient
 
                 futures.Add(
                     transactionalId,
-                    NativeFutureSource<TransactionDescription>.Start(
+                    NativeFutureSource<TransactionDescription?>.Start(
                         SafeKafkaFutureHandle.Owned(future), s_copyOutTransactionDescription));
             }
 

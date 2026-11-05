@@ -63,7 +63,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="newTopics"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="newTopics"/> contains a null element, or a topic name, a configuration
-    /// name or a configuration value containing a NUL character or an unpaired surrogate
+    /// name or a configuration value containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks), or a null configuration value, which the native
     /// client cannot send (see <see cref="NewTopic.Configs"/>). A null topic name is rejected
     /// by the <see cref="NewTopic"/> constructor.
@@ -95,7 +95,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
-    /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// name containing a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -121,7 +121,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
-    /// character or an unpaired surrogate.
+    /// character.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteTopicsResult DeleteTopics(
@@ -151,7 +151,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
-    /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// name containing a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -177,7 +177,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
-    /// character or an unpaired surrogate.
+    /// character.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeTopicsResult DescribeTopics(
@@ -221,7 +221,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="newPartitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="newPartitions"/> contains a null topic name or a null entry, or a
-    /// topic name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// topic name containing a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -251,7 +251,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="recordsToDelete"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="recordsToDelete"/> contains a topic partition with a null topic, or
-    /// a null entry, or a topic containing a NUL character or an unpaired surrogate (see the
+    /// a null entry, or a topic containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -330,7 +330,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="resources"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="resources"/> contains a null element, or a resource name containing a NUL
-    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeConfigsResult DescribeConfigs(
@@ -363,7 +363,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="configs"/> contains a null resource, a null operation collection, or
     /// a null operation, or a resource name, a config name or a config value containing a NUL
-    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks). A null
+    /// character (see the <see cref="IAdmin"/> remarks). A null
     /// config value (<see cref="AlterConfigOpType.DELETE"/>'s) is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -408,7 +408,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory.
     /// Also thrown for a replica whose topic, or a
-    /// log directory, contains a NUL character or an unpaired surrogate (see the
+    /// log directory, contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -431,7 +431,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="replicas"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="replicas"/> contains a null element, or a replica whose topic
-    /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// contains a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeReplicaLogDirsResult DescribeReplicaLogDirs(
@@ -467,7 +467,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, or with a
-    /// topic containing a NUL character or an unpaired surrogate (see the
+    /// topic containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -503,7 +503,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="reassignments"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="reassignments"/> contains a topic partition with a null topic, or
-    /// with a topic containing a NUL character or an unpaired surrogate (see the
+    /// with a topic containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -536,7 +536,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="offsets"/> contains a topic partition with a null topic, or a null
     /// <see cref="OffsetAndMetadata"/> value; or <paramref name="groupId"/>, a topic or an
-    /// offset's metadata contains a NUL character or an unpaired surrogate (see the
+    /// offset's metadata contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks). A null metadata is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -569,8 +569,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic; or
-    /// <paramref name="groupId"/>, or a topic, contains a NUL character or an unpaired
-    /// surrogate (see the <see cref="IAdmin"/> remarks).
+    /// <paramref name="groupId"/>, or a topic, contains a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
@@ -600,7 +599,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, or with a
-    /// topic containing a NUL character or an unpaired surrogate (see the
+    /// topic containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <remarks>
@@ -662,7 +661,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topicPartitionOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicPartitionOffsets"/> contains a topic partition with a null
-    /// topic, or a topic containing a NUL character or an unpaired surrogate (see the
+    /// topic, or a topic containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks). A null spec is not rejected: it reads as
     /// <see cref="OffsetSpec.Latest"/>, as in Java.
     /// </exception>
@@ -704,8 +703,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// defines, which Java's enum-typed <c>Set</c> cannot express but a C# cast can.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// <c>options.ProtocolTypes</c> holds a protocol type containing a NUL character or an
-    /// unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// <c>options.ProtocolTypes</c> holds a protocol type containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListGroupsResult ListGroups(ListGroupsOptions? options = null);
@@ -736,7 +734,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
-    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeConsumerGroupsResult DescribeConsumerGroups(
@@ -768,7 +766,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
-    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeClassicGroupsResult DescribeClassicGroups(
@@ -795,7 +793,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="groupId"/> contains a NUL character or an unpaired surrogate (see the
+    /// <paramref name="groupId"/> contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -831,7 +829,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="groupSpecs"/> contains a null group id, a null spec, a null
     /// selected topic, or a repeated group id, or a group id or selected topic containing a
-    /// NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
@@ -854,7 +852,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="groupIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupIds"/> contains a null element, or a group id containing a NUL
-    /// character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDeleteConsumerGroupsResult DeleteConsumerGroups(
@@ -887,7 +885,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="groupId"/>, <c>options.Reason</c> or a member's group instance id
-    /// contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// contains a NUL character (see the <see cref="IAdmin"/>
     /// remarks). A null reason is <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -918,7 +916,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="acls"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="acls"/> contains a null element, or a binding whose resource name,
-    /// principal or host contains a NUL character or an unpaired surrogate (see the
+    /// principal or host contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -948,7 +946,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="filters"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="filters"/> contains a null element, or a filter whose resource name,
-    /// principal or host contains a NUL character or an unpaired surrogate (see the
+    /// principal or host contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks). A null name, principal or host means "any" and is
     /// accepted.
     /// </exception>
@@ -976,8 +974,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// The filter's resource name, principal or host contains a NUL character or an unpaired
-    /// surrogate (see the <see cref="IAdmin"/> remarks). A null component — "any" — is
+    /// The filter's resource name, principal or host contains a NUL character (see the <see cref="IAdmin"/> remarks). A null component — "any" — is
     /// <em>not</em> rejected.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1004,7 +1001,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="filter"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// A component matches exactly but carries no match name, or a component's entity type
-    /// or match name contains a NUL character or an unpaired surrogate (see the
+    /// or match name contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1035,8 +1032,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="entries"/> contains a null element, or an alteration whose entity has
-    /// a type or name, or one of whose ops has a quota name, containing a NUL character or an
-    /// unpaired surrogate (see the <see cref="IAdmin"/> remarks).
+    /// a type or name, or one of whose ops has a quota name, containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncAlterClientQuotasResult AlterClientQuotas(
@@ -1059,8 +1055,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <see cref="AsyncDescribeUserScramCredentialsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// <paramref name="users"/> contains a user name containing a NUL character or an unpaired
-    /// surrogate (see the <see cref="IAdmin"/> remarks).
+    /// <paramref name="users"/> contains a user name containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
@@ -1085,7 +1080,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="alterations"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="alterations"/> contains a null element, or an alteration whose user
-    /// name contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// name contains a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1104,8 +1099,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <c>options.Renewers</c> is null or contains a null element, or a renewer's or
-    /// <c>options.Owner</c>'s principal type or name contains a NUL character or an unpaired
-    /// surrogate (see the <see cref="IAdmin"/> remarks).
+    /// <c>options.Owner</c>'s principal type or name contains a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncCreateDelegationTokenResult CreateDelegationToken(CreateDelegationTokenOptions? options = null);
@@ -1167,7 +1161,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <c>options.Owners</c> contains a null element, or an owner whose principal type or
-    /// name contains a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
+    /// name contains a NUL character (see the <see cref="IAdmin"/>
     /// remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1201,7 +1195,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="featureUpdates"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="featureUpdates"/> contains a null name, a null update, a name containing a
-    /// NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks), or a name its
+    /// NUL character (see the <see cref="IAdmin"/> remarks), or a name its
     /// own comparer lets appear twice; or, on a <see cref="AsyncKafkaAdminClient"/>, it is empty or contains a
     /// blank name, the two Java rejects before enqueuing anything. A <see cref="AsyncMockAdminClient"/> accepts
     /// an empty map, and returns an empty result, and a blank name, as Java's mock checks no names.
@@ -1243,7 +1237,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
-    /// silently, or an id containing a NUL character or an unpaired surrogate (see the
+    /// silently, or an id containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1264,7 +1258,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="transactionalIds"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalIds"/> contains a null element, which the ABI would skip
-    /// silently, or an id containing a NUL character or an unpaired surrogate (see the
+    /// silently, or an id containing a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1288,7 +1282,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, which the
-    /// ABI would skip silently, or with a topic containing a NUL character or an unpaired surrogate
+    /// ABI would skip silently, or with a topic containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1311,8 +1305,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// failure — see <see cref="AsyncListTransactionsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// <c>options.FilteredTransactionalIdPattern</c> contains a NUL character or an unpaired
-    /// surrogate (see the <see cref="IAdmin"/> remarks).
+    /// <c>options.FilteredTransactionalIdPattern</c> contains a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     AsyncListTransactionsResult ListTransactions(ListTransactionsOptions? options = null);
@@ -1329,7 +1322,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="spec"/> carries a topic partition whose topic is null (constructible, as
     /// in Java, or a <c>default(TopicPartition)</c>) — a null topic cannot cross the C ABI —
-    /// or whose topic contains a NUL character or an unpaired surrogate (see the
+    /// or whose topic contains a NUL character (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -1349,7 +1342,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> contains a NUL character or an unpaired surrogate
+    /// <paramref name="transactionalId"/> contains a NUL character
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>

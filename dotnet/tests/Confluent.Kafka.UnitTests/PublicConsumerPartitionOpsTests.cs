@@ -234,10 +234,26 @@ public sealed class PublicConsumerPartitionOpsTests
         TopicPartition[] withNullTopic = { default };
 
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.Assign(withNullTopic));
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Pause(withNullTopic));
-        await Assert.ThrowsAsync<ArgumentException>(() => consumer.Resume(withNullTopic));
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToBeginning(withNullTopic));
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToEnd(withNullTopic));
+    }
+
+    // Java's SubscriptionState.assignedState throws for a partition that is not assigned, which a null topic never is.
+    // The binding throws at the call, before a Task is returned.
+    [Fact]
+    public void PauseAndResume_ElementWithNullTopic_ThrowIllegalStateAtTheCall()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+
+        TopicPartition[] withNullTopic = { default };
+
+        Assert.Equal(
+            "No current assignment for partition null-0",
+            Assert.Throws<IllegalStateException>(() => { _ = consumer.Pause(withNullTopic); }).Message);
+        Assert.Equal(
+            "No current assignment for partition null-0",
+            Assert.Throws<IllegalStateException>(() => { _ = consumer.Resume(withNullTopic); }).Message);
     }
 
     [Fact]

@@ -43,7 +43,10 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     /// </summary>
     /// <param name="config">Configuration keyed by Java dotted names.</param>
     /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
-    /// <exception cref="ArgumentException">A configuration value is null.</exception>
+    /// <exception cref="ConfigException">
+    /// A config value is null for a key whose Java validator rejects null, with that validator's message. Any other
+    /// null value is not set.
+    /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
     public AsyncKafkaAdminClient(IReadOnlyDictionary<string, string> config)
     {
@@ -219,7 +222,7 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     public AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         AsyncRemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

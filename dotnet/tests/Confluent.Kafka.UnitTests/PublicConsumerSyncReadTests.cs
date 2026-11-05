@@ -188,11 +188,13 @@ public sealed class PublicConsumerSyncReadTests
     }
 
     [Fact]
-    public void EnforceRebalance_AfterDispose_ThrowsIllegalState()
+    public void EnforceRebalance_AfterDispose_Returns()
     {
+        // Java's enforceRebalance makes no closed check.
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
-        Assert.Throws<IllegalStateException>(() => consumer.EnforceRebalance());
+        consumer.EnforceRebalance();
+        consumer.EnforceRebalance("a reason");
     }
 
     [Fact]

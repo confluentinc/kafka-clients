@@ -325,6 +325,26 @@ public sealed class PublicProducerDeliveryCallbackTests
     [Theory]
     [InlineData(Sync)]
     [InlineData(Async)]
+    public async Task ErrorNext_Null_CompletesTheNextSendSuccessfully_AsJavasErrorNext(string flavor)
+    {
+        Flavor producer = Flavor.Create(flavor, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+        RecordingDeliveryCallback callback = new RecordingDeliveryCallback();
+
+        Task<RecordMetadata> sendTask = producer.Send(
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 1), callback);
+        DriveUntilResolved(() => producer.ErrorNext(null));
+
+        RecordMetadata metadata = await WithTimeout(sendTask);
+        Assert.Equal(1, metadata.Partition);
+        (RecordMetadata delivered, Exception? exception) = Assert.Single(await SettledCompletions(callback, expected: 1));
+        Assert.Null(exception);
+        Assert.Equal(metadata.Offset, delivered.Offset);
+    }
+
+    [Theory]
+    [InlineData(Sync)]
+    [InlineData(Async)]
     public void NoCallback_OnSynchronousThrow_AfterDispose(string flavor)
     {
         // Java's doSend rethrows a closed-producer error without running the callback.
@@ -887,7 +907,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
         internal abstract bool CompleteNext();
 
-        internal abstract bool ErrorNext(Exception exception);
+        internal abstract bool ErrorNext(Exception? exception);
 
         public abstract void Dispose();
 
@@ -913,7 +933,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
             internal override bool CompleteNext() => _producer.CompleteNext();
 
-            internal override bool ErrorNext(Exception exception) =>
+            internal override bool ErrorNext(Exception? exception) =>
                 _producer.ErrorNext(exception);
 
             public override void Dispose() => _producer.Dispose();
@@ -940,7 +960,7 @@ public sealed class PublicProducerDeliveryCallbackTests
 
             internal override bool CompleteNext() => _producer.CompleteNext();
 
-            internal override bool ErrorNext(Exception exception) =>
+            internal override bool ErrorNext(Exception? exception) =>
                 _producer.ErrorNext(exception);
 
             public override void Dispose() => _producer.Dispose();

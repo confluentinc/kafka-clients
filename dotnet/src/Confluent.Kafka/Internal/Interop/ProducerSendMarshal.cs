@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Text;
 
 using Confluent.Kafka.Common.Header;
 
@@ -102,10 +101,9 @@ internal static unsafe class ProducerSendMarshal
         return true;
     }
 
-    // Java sends a NUL in a topic or a header key whole and writes '?' for an unpaired surrogate, with no error; the C
-    // ABI would cut the string at the NUL and the UTF-8 encoder replace the surrogate, so the string is rejected before
-    // anything is pinned. Python's mocks, pure Python, accept such a record; the mocks here build it through the C ABI
-    // and reject it too.
+    // Java sends a NUL in a topic or a header key whole, with no error; the C ABI would cut the string at the NUL, so
+    // the string is rejected before anything is pinned. An unpaired surrogate crosses as '?', as Java writes it.
+    // Python's mocks, pure Python, accept such a record; the mocks here build it through the C ABI and reject it too.
     private static void RejectAlteredStrings(in SerializedProducerRecord record)
     {
         AdminStrings.Validate(record.Topic, AdminStrings.InvalidTopicMessage, RecordParameter);
@@ -230,7 +228,7 @@ internal static unsafe class ProducerSendMarshal
 
     private static void SetTopic(IntPtr builder, string topic, ref IntPtr outErr)
     {
-        int capacity = Encoding.UTF8.GetMaxByteCount(topic.Length) + 1;
+        int capacity = Utf8Marshal.JavaUtf8.GetMaxByteCount(topic.Length) + 1;
         if (capacity <= MaxStackStringBytes)
         {
             byte* buffer = stackalloc byte[capacity];
@@ -255,7 +253,7 @@ internal static unsafe class ProducerSendMarshal
                 ? default
                 : new KafkaBytes(value.Length == 0 ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
             string key = header.Key;
-            int capacity = Encoding.UTF8.GetMaxByteCount(key.Length) + 1;
+            int capacity = Utf8Marshal.JavaUtf8.GetMaxByteCount(key.Length) + 1;
             if (capacity <= MaxStackStringBytes)
             {
                 byte* buffer = stackalloc byte[capacity];
@@ -274,7 +272,7 @@ internal static unsafe class ProducerSendMarshal
         int length;
         fixed (char* chars = value)
         {
-            length = Encoding.UTF8.GetBytes(chars, value.Length, buffer, capacity - 1);
+            length = Utf8Marshal.JavaUtf8.GetBytes(chars, value.Length, buffer, capacity - 1);
         }
 
         buffer[length] = 0;
