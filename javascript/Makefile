@@ -17,7 +17,12 @@ RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 PROFILE ?= release
 CONFLUENT_KAFKA_LIB_DIR ?= $(RUST_PROJECT_ROOT)/target/$(PROFILE)
 CONFLUENT_KAFKA_INCLUDE_DIR ?= $(RUST_PROJECT_ROOT)/target/include
-export CONFLUENT_KAFKA_LIB_DIR CONFLUENT_KAFKA_INCLUDE_DIR
+# How the addon links libconfluent_kafka (binding.gyp): dynamic, the default,
+# for development, the tests and the gRPC image; static for a release, whose
+# addon carries the library (.semaphore/build-javascript-native.sh), e.g.
+# `make -C javascript build CONFLUENT_KAFKA_LINK=static`.
+CONFLUENT_KAFKA_LINK ?= dynamic
+export CONFLUENT_KAFKA_LIB_DIR CONFLUENT_KAFKA_INCLUDE_DIR CONFLUENT_KAFKA_LINK
 
 NODE ?= node
 NPM ?= npm
