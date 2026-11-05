@@ -314,6 +314,51 @@ properties are checked against the Java parameters of their names.
 - There is no mutex outside `callback_queue.c`, and no array, queue or cap of records in
   `lib/producer/`.
 
+**As built in P4.** Every N rule reads `scripts/lint/c_model.js` (the bodies, calls and
+header prototypes, with their doc comments). Each allowlist entry carries its reason, and
+an entry that waives nothing is the rule's `*-unused-allowance` finding.
+
+- A C call site is named `file:function:callee#n`, `n` its rank among that callee's calls
+  in the function (from 1): N1's subjects and the N1 / N7 / N8 allowlist keys use it, so a
+  key names one call and survives edits elsewhere in the file.
+- N1: a slot is read when the call is an argument of `FFI_ERR` / `FFI_SET` /
+  `FFI_DISCARD` (possibly behind a cast), when `ffi_take(&slot)` comes in the next
+  statement, or when the slot is the calling function's own `out_err` parameter.
+- N2: the blocking forms are `f` and `f_err` for every header `f_cb`. One entry: the
+  finalizer's `kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)` in
+  `producer_force_close`.
+- N3: the hooks are the functions passed to `__set_callbacks_notify_err`; a hook that
+  calls nothing (the finalizer's no-op) passes. The guard is the positive
+  `if (q->notify_open)`; a negated one is `notify-unguarded`.
+- N4: `__execute_callbacks_err` is called from the queue's executor (`producer_execute`,
+  listed), which nothing calls directly, and `q->execute` is called only in `cbq_drain`.
+  `cbq_drain`'s callers are listed (`call_js`, `js_producer_pump`). Its loop, `while`,
+  `for` or `do`, holds no destroy (no loop is `drain-missing`), and no function that runs
+  inside the drain (a completion handed to a `_cb` twin or to an interface's constructor)
+  reaches a client's destroy through the C call graph (`destroy-in-completion`).
+- N5: in C, a delivery completion is a function src/ hands to an interface's constructor
+  (`..._new` / `..._new_err`) as an `_fn_t`; it calls `call_ref` once and
+  `__set_callback_result_err` once, after it. In TypeScript, the function handed to a
+  `native.<fn>` call that completes a future (`['_complete']`) calls the user callback
+  (a value of the `Callback` type) once, before it. The C report sits under an
+  `if (!…destroying)` guard (rule 6: no report once destroy has begun).
+- N6: **owned** is a non-const `kafka_..._t *` returned by a header function (an `__as_`
+  view excepted), an `out_err` error, or a non-const handle parameter of a completion of a
+  `_cb` twin. Each owned type is destroyed somewhere (`<Type>_destroy[_err]`), or handed to
+  a header function whose doc says that parameter is "(consumed)". **Borrowed** is a
+  `const` handle parameter of an interface method src/ implements; it is never passed to
+  a destroy, or to a src/ function that destroys that parameter (found to a fixed point).
+- N7 and N8: the lists are in the rules (`ALLOWED`) with their reasons. N7 covers
+  allocations on the send path; a copy (`memcpy`, `memmove`, `strdup`,
+  `napi_create_buffer_copy`) is never allowed. N8 looks for lock identifiers outside
+  `callback_queue.c` (a declaration keyed by its declarator,
+  `src/util.h:CallbackQueue.notify_mtx`), and for array / `Map` / `Set` class fields,
+  constructor parameter properties and module variables, and cap-named constants, in
+  `lib/producer/`. A2's `TEST_ONLY` entry also checks that its test still calls the
+  registration.
+- Known limit: the C tokenizer reads both sides of an `#if` / `#ifdef`, so a call under a
+  disabled branch counts as made.
+
 ### D — documentation (TSDoc)
 
 **D1 `check-tsdoc-present`:** every export and public member has a TSDoc comment.
@@ -457,9 +502,12 @@ Answered 2026-11-05, for P3:
    shorter forms lack optional, is accepted beside the options object
    (`send(record, callback?)`).
 10. **An option whose Java parameter may be null** may be left out, omission meaning
-    null. "May be null" is read from the Java index: the parameter's type is a boxed
-    primitive (`Integer`, `Long`, ...) or a key / value type variable (`K`, `V`), or the
-    form's Javadoc `@param` for it contains the word `null`.
+    null. "May be null" is read from the Java index, and needs a positive statement: the
+    parameter's type is a boxed primitive (`Byte`, `Short`, `Integer`, `Long`, `Float`,
+    `Double`, `Boolean`, `Character`) or a key / value type variable (`K`, `V`), or the
+    form's Javadoc `@param` for it says "may be null", "can be null", "if null", "null
+    means", "null for", "or null" or "nullable" (any case) and says none of "not null",
+    "non-null", "may not be null", "must not be null", "cannot be null", "not be null".
 11. **Gaps kept in the baseline:** the serializer constructor overloads
     (`not-options KafkaProducer.constructor`) and `KafkaFuture.get(timeout)`
     (`not-options KafkaFuture.get`).
@@ -468,6 +516,12 @@ Answered 2026-11-05, for P3:
     an `unused-allowance` finding.
 13. **N1–N8 are all built**, the heuristic N5, N7 and N8 included, each with an explicit
     allowlist whose entries carry a reason; an entry that waives nothing is a finding.
+
+Answered 2026-11-06:
+
+14. **`error_discard`'s unread slot** on the destroy of a panic error is accepted as the
+    end of the chain (retrying could loop): an N1 allowlist entry for exactly that call
+    site, `src/error.c:error_discard:kafka_common_Error_destroy_err#2`.
 
 Also following the Python conventions (root CLAUDE.md, "Signatures"): J6 merges the
 parameters of different forms at one position whose Java types map to one host type into
