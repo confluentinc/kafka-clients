@@ -595,8 +595,8 @@ blocks:
       - "Verify language bindings (Linux amd64)"
       - "Verify language bindings (macOS arm64)"
       - "Verify language bindings (Windows amd64)"
-    run:
-      when: "tag =~ '.*'"
+    #run:
+      #when: "tag =~ '.*'"
     execution_time_limit:
       minutes: 10
     task:
@@ -1374,8 +1374,8 @@ blocks:
   # To resume an interrupted release, rerun the failed blocks of the tag build.
   - name: "Release (.NET): native library (Linux amd64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1397,8 +1397,8 @@ blocks:
 
   - name: "Release (.NET): native library (Linux arm64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1420,8 +1420,8 @@ blocks:
 
   - name: "Release (.NET): native library (macOS arm64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1449,8 +1449,8 @@ blocks:
 
   - name: "Release (.NET): native library (Windows amd64)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1479,8 +1479,8 @@ blocks:
 
   - name: "Release (.NET): native library (Windows x86)"
     dependencies: []
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1514,8 +1514,8 @@ blocks:
       - "Release (.NET): native library (macOS arm64)"
       - "Release (.NET): native library (Windows amd64)"
       - "Release (.NET): native library (Windows x86)"
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
@@ -1544,8 +1544,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Linux amd64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1578,8 +1578,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Linux arm64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1612,8 +1612,8 @@ blocks:
 
   - name: "Release (.NET): package verification (macOS arm64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1646,8 +1646,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Windows amd64)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1688,8 +1688,8 @@ blocks:
 
   - name: "Release (.NET): package verification (Windows x86)"
     dependencies: ["Release (.NET): pack"]
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 60
     task:
@@ -1739,8 +1739,8 @@ blocks:
       - "Release (.NET): package verification (macOS arm64)"
       - "Release (.NET): package verification (Windows amd64)"
       - "Release (.NET): package verification (Windows x86)"
-    run:
-      when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    # run:
+    # when: "tag =~ '^dotnet/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
     execution_time_limit:
       minutes: 20
     task:
