@@ -544,7 +544,9 @@ public sealed class ConsumerCommitCallbackBridgeTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference ReportAFailureLate(ConsumerCallbackReporter reporter, ManualResetEventSlim reported)
     {
+#pragma warning disable CKRDA0001 // Stands in for the user's callback Task; completing it inline is what the GC check needs.
         TaskCompletionSource<bool> outcome = new TaskCompletionSource<bool>();
+#pragma warning restore CKRDA0001
         reporter.Exit(reporter.Enter(asyncCallback: true));
         reporter.ReportWhenEnded(1, outcome.Task, null, reported.Set);
         InvalidCastException failure = new InvalidCastException("reported after destroy");
