@@ -113,10 +113,6 @@ def release_version_problem(version):
     return None
 
 
-def is_pre_release(version):
-    return "-" in version
-
-
 def read_json(path):
     try:
         with open(path, encoding="utf-8") as f:
