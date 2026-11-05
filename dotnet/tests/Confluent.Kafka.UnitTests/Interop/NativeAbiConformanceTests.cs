@@ -345,7 +345,7 @@ public sealed class NativeAbiConformanceTests
             failure);
     }
 
-    private static string ReadHeader()
+    internal static string ReadHeader()
     {
         string path = Path.Combine(AppContext.BaseDirectory, HeaderFile);
         if (!File.Exists(path))

@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -77,7 +78,7 @@ public sealed class PublicConsumerPositionTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition unassigned = new TopicPartition(Topic, 5);
 
-        ArgumentException ex = await Assert.ThrowsAsync<ArgumentException>(
+        IllegalArgumentException ex = await Assert.ThrowsAsync<IllegalArgumentException>(
             () => PositionOf(consumer, unassigned));
 
         Assert.Equal(
@@ -91,7 +92,7 @@ public sealed class PublicConsumerPositionTests
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 3);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        await Assert.ThrowsAsync<ArgumentException>(
+        await Assert.ThrowsAsync<IllegalArgumentException>(
             () => PositionOf(consumer, new TopicPartition(Topic, 9)));
 
         long position = await PositionOf(consumer, new TopicPartition(Topic, Partition));
@@ -123,22 +124,23 @@ public sealed class PublicConsumerPositionTests
     }
 
     [Fact]
-    public async Task Position_NullTopic_ThrowsArgumentNull()
+    public async Task Position_NullTopic_ThrowsIllegalArgumentAtTheCall()
     {
+        // Java's MockConsumer.position throws IllegalArgumentException for a partition that is not assigned.
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        await Assert.ThrowsAsync<ArgumentNullException>(
-            () => consumer.Position(default));
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Position(default); });
+        Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
     }
 
     [Fact]
-    public async Task Position_AfterDispose_ThrowsObjectDisposed()
+    public async Task Position_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.Position(new TopicPartition(Topic, Partition)));
     }
 

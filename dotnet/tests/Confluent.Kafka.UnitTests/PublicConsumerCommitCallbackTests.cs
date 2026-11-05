@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -327,46 +328,43 @@ public sealed class PublicConsumerCommitCallbackTests
         Assert.Equal("offsets", error.ParamName);
     }
 
+    // Java's MockConsumer commits any partition; the binding makes no partition check of its own.
     [Fact]
-    public void CommitAsync_NegativePartition_ThrowsArgumentOutOfRangeBeforeAnyNativeCall()
+    public void CommitAsync_NegativePartition_IsCommittedByTheCore()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingCommitCallback callback = new RecordingCommitCallback();
+        TopicPartition negative = new TopicPartition(Topic, -1);
 
-        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(
-            () => consumer.CommitAsync(
-                new Dictionary<TopicPartition, OffsetAndMetadata>
-                {
-                    [new TopicPartition(Topic, -1)] = new OffsetAndMetadata(1),
-                },
-                callback));
+        consumer.CommitAsync(
+            new Dictionary<TopicPartition, OffsetAndMetadata> { [negative] = new OffsetAndMetadata(1) },
+            callback);
 
-        Assert.Equal("offsets", error.ParamName);
-        Assert.Equal(-1, error.ActualValue);
-        Assert.StartsWith("Partition must not be negative.", error.Message, StringComparison.Ordinal);
-        Assert.Empty(callback.Completions);
+        Completion completion = Assert.Single(callback.Completions);
+        Assert.Null(completion.Exception);
+        Assert.Equal(1, Assert.Contains(negative, completion.Offsets!).Offset);
     }
 
     [Fact]
-    public void CommitAsync_AfterDispose_ThrowsObjectDisposedException()
+    public void CommitAsync_AfterDispose_ThrowsIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
-        Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync(
+        Assert.Throws<IllegalStateException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
+        Assert.Throws<IllegalStateException>(() => consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>()));
     }
 
     [Fact]
-    public async Task AsyncMock_CommitAsync_AfterDispose_ThrowsObjectDisposedException()
+    public async Task AsyncMock_CommitAsync_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.CommitAsync(
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>(), new RecordingCommitCallback()));
     }
 

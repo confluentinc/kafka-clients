@@ -67,21 +67,12 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// </summary>
     /// <param name="userName">The user to look up.</param>
     /// <returns>A future over that user's description.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="userName"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="userName"/> contains a NUL character or an unpaired surrogate.
+    /// <paramref name="userName"/> contains a NUL character, checked at the call. A null <paramref name="userName"/>
+    /// is no user of the response, so its future fails with <c>"No such user: null"</c>, as Java's.
     /// </exception>
-    /// <remarks>
-    /// Both checks throw at the call. A null <paramref name="userName"/> is a deviation: Java's
-    /// <c>description(null)</c> returns a future failed with <c>"No such user: null"</c>.
-    /// </remarks>
-    public AsyncKafkaFuture<UserScramCredentialsDescription> Description(string userName)
+    public AsyncKafkaFuture<UserScramCredentialsDescription> Description(string? userName)
     {
-        if (userName is null)
-        {
-            throw new ArgumentNullException(nameof(userName));
-        }
-
         AdminStrings.Validate(userName, nameof(userName));
 
         return new AsyncKafkaFuture<UserScramCredentialsDescription>(

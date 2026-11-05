@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Resource;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -93,11 +94,10 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void ResourcePattern_AnyResourceType_ThrowsWithJavasMessage()
     {
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new ResourcePattern(ResourceType.ANY, "orders", PatternType.LITERAL));
 
-        Assert.Equal(new ArgumentException("resourceType must not be ANY", "resourceType").Message, ex.Message);
-        Assert.Equal("resourceType", ex.ParamName);
+        Assert.Equal("resourceType must not be ANY", ex.Message);
     }
 
     [Theory]
@@ -107,11 +107,10 @@ public sealed class PublicAclTypesTests
         PatternType patternType,
         string expected)
     {
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new ResourcePattern(ResourceType.TOPIC, "orders", patternType));
 
-        Assert.StartsWith(expected, ex.Message, StringComparison.Ordinal);
-        Assert.Equal("patternType", ex.ParamName);
+        Assert.Equal(expected, ex.Message);
     }
 
     [Fact]
@@ -240,21 +239,19 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void AccessControlEntry_AnyOperation_ThrowsWithJavasMessage()
     {
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new AccessControlEntry("User:alice", "*", AclOperation.ANY, AclPermissionType.ALLOW));
 
-        Assert.Equal(new ArgumentException("operation must not be ANY", "operation").Message, ex.Message);
-        Assert.Equal("operation", ex.ParamName);
+        Assert.Equal("operation must not be ANY", ex.Message);
     }
 
     [Fact]
     public void AccessControlEntry_AnyPermissionType_ThrowsWithJavasMessage()
     {
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ANY));
 
-        Assert.Equal(new ArgumentException("permissionType must not be ANY", "permissionType").Message, ex.Message);
-        Assert.Equal("permissionType", ex.ParamName);
+        Assert.Equal("permissionType must not be ANY", ex.Message);
     }
 
     [Fact]

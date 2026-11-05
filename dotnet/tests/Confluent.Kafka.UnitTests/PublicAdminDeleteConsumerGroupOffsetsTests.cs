@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -44,12 +45,12 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             "p5-group",
             new[] { tp });
 
-        NotSupportedException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(tp).Get()), s_deadline);
+        UnsupportedOperationException fromPartitionResult = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -59,7 +60,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroupOffsets(
+        Assert.Throws<IllegalStateException>(() => admin.DeleteConsumerGroupOffsets(
             "p5-group",
             new[] { new TopicPartition("p5-disposed", 0) }));
     }
@@ -72,7 +73,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         AsyncDeleteConsumerGroupOffsetsResult result =
             admin.DeleteConsumerGroupOffsets("p5-group", new[] { new TopicPartition("p5-known", 0) });
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => result.PartitionResult(new TopicPartition("p5-unknown", 7)));
         Assert.StartsWith("Partition p5-unknown-7 was not included in the original request", thrown.Message, StringComparison.Ordinal);
     }
@@ -87,14 +88,14 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         AsyncDeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
             "p5-group", new[] { first, second, new TopicPartition("p5-dcgo", 0) });
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (TopicPartition partition in new[] { first, second })
         {
-            NotSupportedException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(partition).Get()), s_deadline);
+            UnsupportedOperationException thrown = await TestTimeout.Run(
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(partition).Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }
@@ -108,7 +109,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         Task all = admin.DeleteConsumerGroupOffsets("p5-group", Array.Empty<TopicPartition>()).All().Get();
 
         Assert.NotEqual(TaskStatus.RanToCompletion, all.Status);
-        NotSupportedException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => all), s_deadline);
+        UnsupportedOperationException thrown = await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => all), s_deadline);
         Assert.Equal(NotImplemented, thrown.Message);
     }
 
@@ -123,11 +124,11 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
 
         Assert.StartsWith(
             "Partition p5-unknown-7 was not included in the original request",
-            Assert.Throws<ArgumentException>(() => result.PartitionResult(new TopicPartition("p5-unknown", 7))).Message,
+            Assert.Throws<IllegalArgumentException>(() => result.PartitionResult(new TopicPartition("p5-unknown", 7))).Message,
             StringComparison.Ordinal);
         foreach (Action get in new Action[] { () => result.All().Get(), () => result.PartitionResult(tp).Get(), () => empty.All().Get() })
         {
-            NotSupportedException thrown = Assert.Throws<NotSupportedException>(get);
+            UnsupportedOperationException thrown = FutureAssert.Throws<UnsupportedOperationException>(get);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }

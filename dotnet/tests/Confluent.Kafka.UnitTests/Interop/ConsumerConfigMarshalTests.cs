@@ -15,7 +15,9 @@
 using System;
 using System.Collections.Generic;
 
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -54,7 +56,7 @@ public sealed class ConsumerConfigMarshalTests
     }
 
     [Fact]
-    public void Create_ConfigWithNullValue_ThrowsArgumentException()
+    public void Create_ConfigWithNullValue_IsAnsweredAsJavasValidator()
     {
         var config = new Dictionary<string, string>
         {
@@ -62,11 +64,32 @@ public sealed class ConsumerConfigMarshalTests
             ["group.protocol"] = null!,
         };
 
-        Assert.Throws<ArgumentException>(() => NativeConsumer.Create(config));
+        ConfigException named = Assert.Throws<ConfigException>(() => NativeConsumer.Create(config));
+        Assert.Equal(
+            "Invalid value null for configuration group.protocol: String must be one of (case insensitive): " +
+            "CONSUMER, CLASSIC",
+            named.Message);
+
+        ConfigException custom = Assert.Throws<ConfigException>(() => NativeConsumer.Create(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092", ["auto.offset.reset"] = null! }));
+        Assert.Equal(
+            "Invalid value null for configuration auto.offset.reset: Invalid value `null` for configuration " +
+            "auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format " +
+            "'by_duration:<PnDTnHnMn.nS.>'.",
+            custom.Message);
+
+        // A key whose validator accepts null is not set: a null group.id is no group.id.
+        NativeConsumer consumer = NativeConsumer.Create(new Dictionary<string, string>
+        {
+            ["bootstrap.servers"] = "localhost:9092",
+            ["group.protocol"] = "consumer",
+            ["group.id"] = null!,
+        });
+        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
     }
 
     [Fact]
-    public void Handle_AfterDispose_ThrowsObjectDisposedException()
+    public void Handle_AfterDispose_ThrowsIllegalState()
     {
         var config = new Dictionary<string, string>
         {
@@ -77,6 +100,6 @@ public sealed class ConsumerConfigMarshalTests
         NativeConsumer consumer = NativeConsumer.Create(config);
         TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+        Assert.Throws<IllegalStateException>(() => consumer.Handle);
     }
 }

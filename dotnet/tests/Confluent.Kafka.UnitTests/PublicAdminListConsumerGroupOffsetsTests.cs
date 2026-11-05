@@ -21,7 +21,10 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -53,9 +56,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             result.PartitionsToOffsetAndMetadata().Get(),
             result.PartitionsToOffsetAndMetadata("p5-lcgo-one").Get());
 
-        ArgumentException unknown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException unknown = Assert.Throws<IllegalArgumentException>(
             () => { _ = result.PartitionsToOffsetAndMetadata("p5-lcgo-absent"); });
-        Assert.Equal("groupId", unknown.ParamName);
+        Assert.Equal("Offsets for consumer group 'p5-lcgo-absent' were not requested.", unknown.Message);
     }
 
     [Fact]
@@ -81,14 +84,14 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 
         foreach (Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future in futures)
         {
-            NotSupportedException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => future), s_deadline);
+            UnsupportedOperationException failure = await TestTimeout.Run(
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => future), s_deadline);
 
             Assert.Equal(NotImplemented, failure.Message);
         }
 
         // The no-argument accessor needs exactly one group, as Java's guard does.
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = result.PartitionsToOffsetAndMetadata(); });
     }
 
@@ -105,8 +108,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                 ["p5-lcgo-all-b"] = new ListConsumerGroupOffsetsSpec(),
             });
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -125,7 +128,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 
         Assert.Empty(all);
 
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = result.PartitionsToOffsetAndMetadata(); });
     }
 
@@ -278,8 +281,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         using IDisposable realDisposal = TestTimeout.Disposal(real);
         ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
 
-        KafkaException batched = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException batched = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => real.ListConsumerGroupOffsets(
                     new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                     {
@@ -287,8 +290,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     },
                     options).All().Get()),
             s_deadline);
-        KafkaException single = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException single = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => real.ListConsumerGroupOffsets("p5-lcgo-forward", options).All().Get()),
             s_deadline);
 
@@ -303,10 +306,10 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { admin.ListConsumerGroupOffsets("p5-lcgo-disposed"); });
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () =>
             {
                 admin.ListConsumerGroupOffsets(

@@ -18,8 +18,11 @@ using System.Diagnostics;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -67,15 +70,15 @@ public sealed class PublicAsyncConsumerCloseTests
         AsyncKafkaConsumer<byte[], byte[]> consumer = Real();
         try
         {
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
-            AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() =>
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
+            AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() =>
             {
                 _ = consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(-1)).WithGroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP));
             }));
 
             Assert.Empty(consumer.Subscription());
             await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+            Assert.Throws<IllegalStateException>(() => consumer.Subscription());
         }
         finally
         {
@@ -89,7 +92,7 @@ public sealed class PublicAsyncConsumerCloseTests
         AsyncKafkaConsumer<byte[], byte[]> consumer = Real();
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
 
-        AssertNegativeTimeout(Assert.Throws<ArgumentOutOfRangeException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
+        AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
     }
 
     [Fact]
@@ -99,7 +102,7 @@ public sealed class PublicAsyncConsumerCloseTests
 
         await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(s_negative)), s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+        Assert.Throws<IllegalStateException>(() => consumer.Subscription());
         await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(s_negative)), s_deadline);
     }
 
@@ -116,7 +119,7 @@ public sealed class PublicAsyncConsumerCloseTests
                 () => consumer.Close(CloseOptions.GroupMembershipOperation(operation).WithTimeout(TimeSpan.Zero)),
                 s_deadline);
 
-            Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+            Assert.Throws<IllegalStateException>(() => consumer.Subscription());
         }
     }
 
@@ -132,7 +135,7 @@ public sealed class PublicAsyncConsumerCloseTests
         await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.FromMilliseconds(200))), s_deadline);
 
         Assert.True(elapsed.Elapsed < s_bound, $"Close(CloseOptions) took {elapsed.Elapsed}");
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+        Assert.Throws<IllegalStateException>(() => consumer.Subscription());
     }
 
     [Theory]
@@ -164,18 +167,18 @@ public sealed class PublicAsyncConsumerCloseTests
             Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> listing = consumer.ListTopics(TimeSpan.FromSeconds(60));
             await WaitUntilTheConsumerIsHeld(consumer);
 
-            InvalidOperationException plain = await Assert.ThrowsAsync<InvalidOperationException>(() => consumer.Close());
-            InvalidOperationException withOptions = await Assert.ThrowsAsync<InvalidOperationException>(
+            ConcurrentModificationException plain = await Assert.ThrowsAsync<ConcurrentModificationException>(() => consumer.Close());
+            ConcurrentModificationException withOptions = await Assert.ThrowsAsync<ConcurrentModificationException>(
                 () => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)));
             Assert.Equal(ConcurrentMessage, plain.Message);
             Assert.Equal(ConcurrentMessage, withOptions.Message);
 
             consumer.Wakeup();
-            Assert.Equal(WakeupCode, (await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => listing, s_deadline))).Code);
+            Assert.Equal(WakeupCode, (await Assert.ThrowsAsync<WakeupException>(() => TestTimeout.Run(() => listing, s_deadline))).Code);
 
             Assert.Empty(consumer.Subscription());
             await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+            Assert.Throws<IllegalStateException>(() => consumer.Subscription());
         }
         finally
         {
@@ -204,10 +207,9 @@ public sealed class PublicAsyncConsumerCloseTests
 
     private static void AssertNullOption(ArgumentNullException thrown) => Assert.Equal("option", thrown.ParamName);
 
-    private static void AssertNegativeTimeout(ArgumentOutOfRangeException thrown)
+    private static void AssertNegativeTimeout(IllegalArgumentException thrown)
     {
-        Assert.Equal("option", thrown.ParamName);
-        Assert.StartsWith(NegativeTimeout, thrown.Message, StringComparison.Ordinal);
+        Assert.Equal(NegativeTimeout, thrown.Message);
     }
 
     private static IAsyncConsumer<byte[], byte[]> Create(bool mock) => mock ? Mock() : Real();

@@ -80,7 +80,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, IReadOnlyCollection<GroupListing>> s_copyOutGroupListings =
         GroupDescriptionMarshal.CopyOutListings;
 
-    private static readonly Func<IntPtr, IReadOnlyCollection<KafkaException>> s_copyOutGroupErrors =
+    private static readonly Func<IntPtr, IReadOnlyCollection<Exception>> s_copyOutGroupErrors =
         GroupDescriptionMarshal.CopyOutErrors;
 
     private static readonly Func<IntPtr, ConsumerGroupDescription> s_copyOutConsumerGroupDescription =
@@ -92,7 +92,7 @@ internal sealed partial class NativeAdminClient
     internal (
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> Errors,
+        KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
         SafeAdminResultHandle Result) ListGroups(ListGroupsOptions? options)
     {
         EnterUse();
@@ -119,7 +119,7 @@ internal sealed partial class NativeAdminClient
                 StartOwnedFuture(result, s_listGroupsAll, s_copyOutGroupListings);
             KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid =
                 StartOwnedFuture(result, s_listGroupsValid, s_copyOutGroupListings);
-            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors =
+            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors =
                 StartOwnedFuture(result, s_listGroupsErrors, s_copyOutGroupErrors);
             return (all, valid, errors, result);
         }

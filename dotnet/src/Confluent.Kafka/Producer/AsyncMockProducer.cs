@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -124,8 +125,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
 
+        // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
-            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
+            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: false);
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }
@@ -154,30 +156,33 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// created with <c>autoComplete: false</c>.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public bool CompleteNext() => _native.MockCompleteNext();
 
     /// <summary>
     /// Fails the earliest uncompleted send with <paramref name="exception"/> (Java <c>MockProducer.errorNext</c>); its
-    /// delivery callback and its future's <see cref="AsyncKafkaFuture{T}.Get()"/> receive the same instance.
+    /// delivery callback receives the same instance, and its future's <see cref="AsyncKafkaFuture{T}.Get()"/> faults
+    /// with an <see cref="Java.Util.Concurrent.ExecutionException"/> around it.
     /// </summary>
-    /// <param name="exception">The exception to fail the send with.</param>
-    /// <returns><see langword="true"/> if a pending send was failed; otherwise <see langword="false"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="exception"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    public bool ErrorNext(Exception exception) => _native.MockErrorNext(exception);
+    /// <param name="exception">
+    /// The exception to fail the send with; <see langword="null"/> completes it successfully, as
+    /// <see cref="CompleteNext"/> does.
+    /// </param>
+    /// <returns><see langword="true"/> if a pending send was completed; otherwise <see langword="false"/>.</returns>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public bool ErrorNext(Exception? exception) => _native.MockErrorNext(exception);
 
     /// <summary>
     /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>); the native mock
     /// exposes the count only.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public int HistoryCount() => _native.MockHistoryCount();
 
     /// <summary>
     /// Clears the sent history and any pending completions (Java <c>MockProducer.clear()</c>).
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
 
     /// <inheritdoc/>

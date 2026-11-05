@@ -70,7 +70,7 @@ internal static class MetricsViewMarshal
         }
     }
 
-    private static MetricName CopyOutName(IntPtr name)
+    internal static MetricName CopyOutName(IntPtr name)
     {
         IntPtr outErr = IntPtr.Zero;
         string metric = ReadString(NativeMethods.MetricNameName(name, ref outErr), ref outErr);

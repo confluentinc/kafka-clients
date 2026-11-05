@@ -25,6 +25,8 @@ using Confluent.Kafka.Internal;
 using Confluent.Kafka.Producer;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -81,7 +83,7 @@ public sealed class PublicKafkaFutureTests
         Assert.False(copy.IsDone);
 
         RecordMetadata metadata = NewMetadata();
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         object? observed = null;
         Thread waiter = StartThread(() =>
         {
@@ -102,7 +104,7 @@ public sealed class PublicKafkaFutureTests
         Assert.True(future.IsDone);
         Assert.True(copy.IsDone);
         Assert.True(waiter.Join(s_deadline), $"Get() did not return within {s_deadline}.");
-        Assert.Same(outcome == "result" ? metadata : cause, observed);
+        Assert.Same(outcome == "result" ? metadata : cause, outcome == "result" ? observed : FutureAssert.Unwrapped(observed));
 
         Assert.True(future.IsDone);
     }
@@ -159,18 +161,18 @@ public sealed class PublicKafkaFutureTests
     public void Get_AfterSetException_RethrowsTheSameInstance_Unwrapped()
     {
         const string Message = "Delivery failed: the broker rejected the record.";
-        KafkaException cause = new KafkaException(7, Message, isRetriable: true);
+        KafkaException cause = new Common.Errors.TimeoutException(Message);
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
         Assert.True(completion.CompleteWithError(cause));
         KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
 
         for (int call = 0; call < 2; call++)
         {
-            KafkaException thrown = Assert.Throws<KafkaException>(() => future.Get());
+            KafkaTimeoutException thrown = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get());
             Assert.Same(cause, thrown);
             Assert.Equal(Message, thrown.Message);
             Assert.Equal(7, thrown.Code);
-            Assert.True(thrown.IsRetriable);
+            Assert.IsAssignableFrom<Common.Errors.RetriableException>(thrown);
             Assert.Null(thrown.InnerException);
         }
     }
@@ -267,7 +269,7 @@ public sealed class PublicKafkaFutureTests
     public void OnceDone_ThenApplyWhenCompleteAndAllOf_RunInsideTheCall(string outcome)
     {
         RecordMetadata metadata = NewMetadata();
-        KafkaException failure = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException failure = new Common.Errors.TimeoutException("The operation failed.");
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
         KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
@@ -339,9 +341,9 @@ public sealed class PublicKafkaFutureTests
 
         KafkaFutureImpl<RecordMetadata> failing = new KafkaFutureImpl<RecordMetadata>();
         KafkaFuture erasedFailure = new KafkaFuture<RecordMetadata>(failing);
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
-        Assert.Same(cause, Assert.Throws<KafkaException>(() => erasedFailure.GetNow()));
+        Assert.Same(cause, FutureAssert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
         Assert.True(erasedFailure.IsCompletedExceptionally);
     }
 
@@ -606,7 +608,7 @@ public sealed class PublicKafkaFutureTests
 
     private static void AssertFailsWith(KafkaException failure, Action call)
     {
-        KafkaException thrown = Assert.Throws<KafkaException>(call);
+        KafkaTimeoutException thrown = FutureAssert.Throws<KafkaTimeoutException>(call);
         Assert.Same(failure, thrown);
         Assert.Equal("The operation failed.", thrown.Message);
     }

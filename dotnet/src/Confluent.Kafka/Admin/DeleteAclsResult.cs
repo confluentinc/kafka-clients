@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -113,7 +114,7 @@ public sealed class DeleteAclsResult
     /// </remarks>
     public sealed class FilterResult
     {
-        internal FilterResult(AclBinding? binding, KafkaException? exception)
+        internal FilterResult(AclBinding? binding, ApiException? exception)
         {
             Binding = binding;
             Exception = exception;
@@ -131,7 +132,7 @@ public sealed class DeleteAclsResult
         /// Why deleting this ACL failed, or <see langword="null"/> if it was deleted —
         /// Java's <c>exception()</c>.
         /// </summary>
-        public KafkaException? Exception { get; }
+        public ApiException? Exception { get; }
     }
 
     /// <summary>

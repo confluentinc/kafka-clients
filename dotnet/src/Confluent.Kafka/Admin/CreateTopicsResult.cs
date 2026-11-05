@@ -15,7 +15,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -170,22 +172,14 @@ public sealed class CreateTopicsResult
     /// <c>CreateTopicsResult.TopicMetadataAndConfig</c>.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// Creation can succeed while the metadata is unavailable (an older broker, or a
     /// <c>validateOnly</c> request): the per-topic future then succeeds with an instance whose
-    /// accessors throw, as Java's do. So each accessor is a method; <see cref="HasMetadata"/> tests
-    /// for that state without the throw.
-    /// </para>
-    /// <para>
-    /// Each throw is a fresh <see cref="KafkaException"/> with the stored error's
-    /// <see cref="KafkaException.Code"/>, message and <see cref="KafkaException.IsRetriable"/>, and
-    /// the stored error as its <see cref="System.Exception.InnerException"/>, where Java rethrows the
-    /// stored exception itself: a recorded deviation, so that each call has its own stack trace.
-    /// </para>
+    /// accessors throw the stored exception itself, as Java's do. So each accessor is a method;
+    /// <see cref="HasMetadata"/> tests for that state without the throw.
     /// </remarks>
     public sealed class TopicMetadataAndConfig
     {
-        private readonly KafkaException? _exception;
+        private readonly ApiException? _exception;
         private readonly Uuid _topicId;
         private readonly int _numPartitions;
 
@@ -215,7 +209,7 @@ public sealed class CreateTopicsResult
         /// </summary>
         /// <param name="exception">The reason the metadata is unavailable.</param>
         /// <exception cref="ArgumentNullException"><paramref name="exception"/> is null.</exception>
-        public TopicMetadataAndConfig(KafkaException exception)
+        public TopicMetadataAndConfig(ApiException exception)
         {
             _exception = exception ?? throw new ArgumentNullException(nameof(exception));
         }
@@ -228,7 +222,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The topic id — Java's <c>topicId()</c>.</summary>
         /// <returns>The topic id the broker assigned.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public Uuid TopicId()
         {
             EnsureSuccess();
@@ -237,7 +231,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The partition count — Java's <c>numPartitions()</c>.</summary>
         /// <returns>The number of partitions the topic was created with.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public int NumPartitions()
         {
             EnsureSuccess();
@@ -246,7 +240,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The replication factor — Java's <c>replicationFactor()</c>.</summary>
         /// <returns>The replication factor the topic was created with.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public int ReplicationFactor()
         {
             EnsureSuccess();
@@ -255,7 +249,7 @@ public sealed class CreateTopicsResult
 
         /// <summary>The topic's configuration — Java's <c>config()</c>.</summary>
         /// <returns>The configuration the broker reported for the topic.</returns>
-        /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
+        /// <exception cref="ApiException">The broker returned no metadata for this topic.</exception>
         public Config Config()
         {
             EnsureSuccess();
@@ -266,7 +260,7 @@ public sealed class CreateTopicsResult
         {
             if (_exception is not null)
             {
-                throw new KafkaException(_exception.Code, _exception.Message, _exception.IsRetriable, _exception);
+                ExceptionDispatchInfo.Capture(_exception).Throw();
             }
         }
     }

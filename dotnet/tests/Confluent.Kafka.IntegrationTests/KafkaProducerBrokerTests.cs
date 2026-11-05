@@ -24,6 +24,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Performance.Tests;
 
 using Confluent.Kafka.Producer;
@@ -189,7 +190,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             record.Headers.Add("added", null);
             Assert.Equal(0L, producer.Send(record).Get(s_get).Offset);
 
-            InvalidOperationException closed = Assert.Throws<InvalidOperationException>(
+            IllegalStateException closed = Assert.Throws<IllegalStateException>(
                 () => record.Headers.Add("late", Encoding.UTF8.GetBytes("x")));
             Assert.Equal("RecordHeaders has been closed.", closed.Message);
         }

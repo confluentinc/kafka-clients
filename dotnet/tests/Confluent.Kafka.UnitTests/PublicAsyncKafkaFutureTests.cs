@@ -25,6 +25,9 @@ using Confluent.Kafka.Internal;
 using Confluent.Kafka.Producer;
 using Xunit;
 
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -70,8 +73,18 @@ public sealed class PublicAsyncKafkaFutureTests
         Task<RecordMetadata> first = future.Get();
         Task<RecordMetadata> second = future.Get();
 
-        Assert.Same(delivery.GetAsync(), first);
+        Assert.Same(delivery.JavaGetAsync(), first);
         Assert.Same(first, second);
+        if (state == "completed")
+        {
+            // A value has nothing to wrap: the task is the raw one.
+            Assert.Same(delivery.GetAsync(), first);
+        }
+        else
+        {
+            // A delivery cannot be cancelled, so a cancellation given as its error is a failure like any other.
+            Assert.NotSame(delivery.GetAsync(), first);
+        }
 
         _ = first.Exception;
     }
@@ -256,7 +269,7 @@ public sealed class PublicAsyncKafkaFutureTests
             new AsyncKafkaFuture<RecordMetadata>(failing).Get(BlockingCall.Deadline);
         Assert.False(waitingForFailure.IsCompleted);
         Assert.True(failing.CompleteWithError(failure));
-        InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+        InvalidOperationException thrown = await FutureAssert.ThrowsAsync<InvalidOperationException>(
             () => TestTimeout.Run(() => waitingForFailure, BlockingCall.Deadline));
         Assert.Same(failure, thrown);
         Assert.Equal("delivery failed", thrown.Message);
@@ -322,7 +335,8 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.Equal(state != "pending", future.IsDone);
         Assert.False(future.IsCancelled);
         Assert.Equal(state == "faulted" || state == "canceled", future.IsCompletedExceptionally);
-        Assert.Same(delivery.GetAsync(), future.Get());
+        Assert.Same(delivery.JavaGetAsync(), future.Get());
+        Assert.Same(delivery.GetAsync(), future.ToCompletionStage());
         switch (state)
         {
             case "pending":
@@ -334,13 +348,13 @@ public sealed class PublicAsyncKafkaFutureTests
                 Assert.Equal("KafkaFuture{value=" + metadata + ",exception=null,done=true}", future.ToString());
                 break;
             case "faulted":
-                Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => future.GetNow(absent)));
+                Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => future.GetNow(absent)));
                 Assert.Equal(
                     "KafkaFuture{value=null,exception=System.InvalidOperationException: delivery failed,done=true}",
                     future.ToString());
                 break;
             default:
-                Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => future.GetNow(absent)));
+                Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => future.GetNow(absent)));
                 Assert.Equal(
                     "KafkaFuture{value=null,exception=System.OperationCanceledException: The delivery was canceled.,"
                         + "done=true}",
@@ -353,14 +367,22 @@ public sealed class PublicAsyncKafkaFutureTests
     }
 
     [Fact]
-    public void ToCompletionStage_IsTheTaskGetReturns()
+    public async Task ToCompletionStage_IsTheSameTaskEachCall_ButNotTheTaskGetReturns()
     {
         AsyncKafkaFuture<RecordMetadata> overDelivery = new AsyncKafkaFuture<RecordMetadata>(DeliveryIn("pending"));
-        Assert.Same(overDelivery.Get(), overDelivery.ToCompletionStage());
+        Assert.Same(overDelivery.ToCompletionStage(), overDelivery.ToCompletionStage());
+        Assert.NotSame(overDelivery.Get(), overDelivery.ToCompletionStage());
 
-        AsyncKafkaFuture<RecordMetadata> overImpl =
-            new AsyncKafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>());
-        Assert.Same(overImpl.Get(), overImpl.ToCompletionStage());
+        KafkaFutureImpl<RecordMetadata> impl = new KafkaFutureImpl<RecordMetadata>();
+        AsyncKafkaFuture<RecordMetadata> overImpl = new AsyncKafkaFuture<RecordMetadata>(impl);
+        Task<RecordMetadata> stage = overImpl.ToCompletionStage();
+        Assert.Same(stage, overImpl.ToCompletionStage());
+        Assert.NotSame(overImpl.Get(), stage);
+
+        InvalidOperationException failure = new InvalidOperationException("delivery failed");
+        Assert.True(impl.CompleteWithError(failure));
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => stage));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => overImpl.Get()));
     }
 
     [Fact]
@@ -379,9 +401,9 @@ public sealed class PublicAsyncKafkaFutureTests
 
         KafkaFutureImpl<RecordMetadata> failing = new KafkaFutureImpl<RecordMetadata>();
         AsyncKafkaFuture erasedFailure = new AsyncKafkaFuture<RecordMetadata>(failing);
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
-        Assert.Same(cause, Assert.Throws<KafkaException>(() => erasedFailure.GetNow()));
+        Assert.Same(cause, FutureAssert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
         Assert.True(erasedFailure.IsCompletedExceptionally);
     }
 
@@ -674,16 +696,16 @@ public sealed class PublicAsyncKafkaFutureTests
 
     private static void AssertFailsWith(InvalidOperationException failure, Action call)
     {
-        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(call);
+        InvalidOperationException thrown = FutureAssert.Throws<InvalidOperationException>(call);
         Assert.Same(failure, thrown);
         Assert.Equal("delivery failed", thrown.Message);
     }
 
     private static async Task AssertTimesOut(Task wait)
     {
-        TimeoutException thrown = await Assert.ThrowsAsync<TimeoutException>(
+        JavaTimeoutException thrown = await Assert.ThrowsAsync<JavaTimeoutException>(
             () => TestTimeout.Run(() => wait, BlockingCall.Deadline));
-        Assert.Equal(new TimeoutException().Message, thrown.Message);
+        Assert.Equal(string.Empty, thrown.Message);
     }
 
     private static async Task AssertCanceledBy(CancellationToken token, Task wait)

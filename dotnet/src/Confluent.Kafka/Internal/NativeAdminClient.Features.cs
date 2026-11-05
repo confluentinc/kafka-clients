@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Internal;
 
@@ -51,9 +52,9 @@ internal sealed partial class NativeAdminClient
 
     private static readonly ResultFuture s_updateFeaturesValues = NativeMethods.UpdateFeaturesResultValues;
 
-    private static readonly Func<IntPtr, FeatureMetadata> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
+    private static readonly Func<IntPtr, FeatureMetadata?> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
 
-    internal (KafkaFutureImpl<FeatureMetadata> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
+    internal (KafkaFutureImpl<FeatureMetadata?> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
         DescribeFeaturesOptions? options)
     {
         EnterUse();
@@ -92,7 +93,7 @@ internal sealed partial class NativeAdminClient
                 // A null name cannot cross; the core checks every other name.
                 if (entry.Key is null)
                 {
-                    throw new ArgumentException("Provided feature can not be empty.", nameof(featureUpdates));
+                    throw new IllegalArgumentException("Provided feature can not be empty.");
                 }
 
                 AdminStrings.Validate(entry.Key, nameof(featureUpdates));

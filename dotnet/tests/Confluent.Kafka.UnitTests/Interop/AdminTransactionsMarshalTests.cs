@@ -88,20 +88,18 @@ public sealed class AdminTransactionsMarshalTests
     }
 
     [Fact]
-    public void CopyOut_ANullPointer_ThrowsWithTheMarshalsMessage()
+    public void CopyOut_ANullPointer_ReadsAsPythonReadsIt()
     {
-        Assert.Equal(
-            "The admin result produced no partition producer state.",
-            Assert.Throws<KafkaException>(() => PartitionProducerStateMarshal.CopyOut(IntPtr.Zero)).Message);
+        Assert.Empty(PartitionProducerStateMarshal.CopyOut(IntPtr.Zero).ActiveProducers);
+        Assert.Null(TransactionDescriptionMarshal.CopyOut(IntPtr.Zero));
         Assert.Equal(
             "The admin result produced no producer state.",
-            Assert.Throws<KafkaException>(() => PartitionProducerStateMarshal.CopyOutProducer(IntPtr.Zero)).Message);
-        Assert.Equal(
-            "The admin result produced no transaction description.",
-            Assert.Throws<KafkaException>(() => TransactionDescriptionMarshal.CopyOut(IntPtr.Zero)).Message);
+            Assert.Throws<InvalidOperationException>(
+                () => PartitionProducerStateMarshal.CopyOutProducer(IntPtr.Zero)).Message);
         Assert.Equal(
             "The admin result produced no transaction state.",
-            Assert.Throws<KafkaException>(() => TransactionDescriptionMarshal.StateFrom(IntPtr.Zero)).Message);
+            Assert.Throws<InvalidOperationException>(
+                () => TransactionDescriptionMarshal.StateFrom(IntPtr.Zero)).Message);
     }
 
     [Fact]
@@ -267,7 +265,9 @@ public sealed class AdminTransactionsMarshalTests
                 list,
                 ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            return TransactionDescriptionMarshal.CopyOut(description);
+            TransactionDescription? copied = TransactionDescriptionMarshal.CopyOut(description);
+            Assert.NotNull(copied);
+            return copied;
         }
         finally
         {

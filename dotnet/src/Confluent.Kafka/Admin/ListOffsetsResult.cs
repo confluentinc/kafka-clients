@@ -18,6 +18,7 @@ using System.Globalization;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -60,19 +61,18 @@ public sealed class ListOffsetsResult
     /// </summary>
     /// <param name="partition">A partition that was part of the request.</param>
     /// <returns>That partition's future, carrying its own value or its own failure.</returns>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="partition"/> was not requested, with Java's message.
     /// </exception>
     public KafkaFuture<ListOffsetsResultInfo> PartitionResult(TopicPartition partition)
     {
         if (!_futures.TryGetValue(partition, out KafkaFuture<ListOffsetsResultInfo> future))
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "List Offsets for partition \"{0}\" was not attempted",
-                    partition),
-                nameof(partition));
+                    partition));
         }
 
         return future;

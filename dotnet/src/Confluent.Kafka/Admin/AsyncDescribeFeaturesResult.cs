@@ -28,10 +28,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="DescribeFeaturesResult"/>
 public sealed class AsyncDescribeFeaturesResult
 {
-    private readonly KafkaFutureImpl<Metadata> _featureMetadata;
+    private readonly KafkaFutureImpl<Metadata?> _featureMetadata;
     private readonly SafeAdminResultHandle _native;
 
-    private AsyncDescribeFeaturesResult(KafkaFutureImpl<Metadata> featureMetadata, SafeAdminResultHandle native)
+    private AsyncDescribeFeaturesResult(KafkaFutureImpl<Metadata?> featureMetadata, SafeAdminResultHandle native)
     {
         _featureMetadata = featureMetadata;
         _native = native;
@@ -42,11 +42,14 @@ public sealed class AsyncDescribeFeaturesResult
     /// <summary>
     /// The cluster's feature metadata — Java's <c>featureMetadata()</c>.
     /// </summary>
-    /// <returns>A future over the metadata.</returns>
+    /// <returns>
+    /// A future over the metadata. It completes with <see langword="null"/> when the native client delivers no
+    /// metadata, as Python's completes with <c>None</c>; Java's never completes with <c>null</c>.
+    /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
-    public AsyncKafkaFuture<Metadata> FeatureMetadata() => new AsyncKafkaFuture<Metadata>(_featureMetadata);
+    public AsyncKafkaFuture<Metadata?> FeatureMetadata() => new AsyncKafkaFuture<Metadata?>(_featureMetadata);
 
     internal static AsyncDescribeFeaturesResult OfClient(
-        (KafkaFutureImpl<Metadata> FeatureMetadata, SafeAdminResultHandle Result) native) =>
+        (KafkaFutureImpl<Metadata?> FeatureMetadata, SafeAdminResultHandle Result) native) =>
         new AsyncDescribeFeaturesResult(native.FeatureMetadata, native.Result);
 }

@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -41,7 +42,7 @@ public sealed class RemoveMembersFromConsumerGroupOptions
     /// </summary>
     /// <param name="members">The members to remove. Must not be empty.</param>
     /// <exception cref="ArgumentNullException"><paramref name="members"/> is null.</exception>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="members"/> is empty, with Java's message.
     /// </exception>
     public RemoveMembersFromConsumerGroupOptions(IReadOnlyCollection<MemberToRemove> members)
@@ -53,7 +54,7 @@ public sealed class RemoveMembersFromConsumerGroupOptions
 
         if (members.Count == 0)
         {
-            throw new ArgumentException("Invalid empty members has been provided", nameof(members));
+            throw new IllegalArgumentException("Invalid empty members has been provided");
         }
 
         _members = new HashSet<MemberToRemove>(members);

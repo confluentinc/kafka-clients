@@ -21,6 +21,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -81,7 +82,7 @@ public sealed class AdminP4Stage2ResultMarshalTests
         Assert.Equal(-1L, info.Timestamp);
         Assert.Null(info.LeaderEpoch);
 
-        NotSupportedException failure = Assert.Throws<NotSupportedException>(() => listed.Futures[timestamp].Get(s_deadline));
+        UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => listed.Futures[timestamp].Get(s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }
 

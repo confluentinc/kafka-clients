@@ -55,7 +55,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
             KafkaFuture<RecordMetadata> future = _inner.Send(record, new CountingCallback(callback, index, _probe));
             if (_behaviour.FailEach is (int code, string message))
             {
-                _inner.ErrorNext(new KafkaException(code, message, isRetriable: false));
+                _inner.ErrorNext(TestValues.OfClass(code, message));
             }
 
             return future;

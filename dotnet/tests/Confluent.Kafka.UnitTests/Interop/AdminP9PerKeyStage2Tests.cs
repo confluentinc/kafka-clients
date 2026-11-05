@@ -19,8 +19,10 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -58,7 +60,7 @@ public sealed class AdminP9PerKeyStage2Tests
         Assert.Equal("cp3-present", present.Name);
         Assert.Equal(3, present.Partitions.Count);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => result.TopicNameValues!["cp3-absent"].Get(), s_deadline));
         Assert.Equal("Topic cp3-absent not found.", failure.Message);
     }
@@ -102,7 +104,7 @@ public sealed class AdminP9PerKeyStage2Tests
         Assert.NotNull(await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline));
         Assert.NotNull(await TestTimeout.Run(() => result.Values[broker].Get(), s_deadline));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => result.Values[absent].Get(), s_deadline));
         Assert.Equal(
             "Resource ConfigResource(type=TOPIC, name='cp3-cfg-absent') not found.", failure.Message);
@@ -160,7 +162,7 @@ public sealed class AdminP9PerKeyStage2Tests
         Assert.Equal(keys.Length, awaitables.Count);
         foreach (Func<Task> awaitable in awaitables)
         {
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(awaitable, s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }

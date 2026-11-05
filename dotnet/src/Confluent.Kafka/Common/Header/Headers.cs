@@ -17,6 +17,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 
+using Confluent.Kafka.Java.Lang;
+
 namespace Confluent.Kafka.Common.Header;
 
 /// <summary>
@@ -105,7 +107,7 @@ public sealed class Headers : IEnumerable<Header>
     /// <param name="header">The header to add.</param>
     /// <returns>These headers.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="header"/> is <see langword="null"/>.</exception>
-    /// <exception cref="InvalidOperationException">The headers are read-only.</exception>
+    /// <exception cref="IllegalStateException">The headers are read-only.</exception>
     public Headers Add(Header header)
     {
         if (header is null)
@@ -126,7 +128,7 @@ public sealed class Headers : IEnumerable<Header>
     /// <param name="value">The header value, which may be <see langword="null"/>.</param>
     /// <returns>These headers.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="key"/> is <see langword="null"/>.</exception>
-    /// <exception cref="InvalidOperationException">The headers are read-only.</exception>
+    /// <exception cref="IllegalStateException">The headers are read-only.</exception>
     public Headers Add(string key, byte[]? value) => Add(new Header(key, value));
 
     /// <summary>
@@ -134,8 +136,8 @@ public sealed class Headers : IEnumerable<Header>
     /// </summary>
     /// <param name="key">The key to remove.</param>
     /// <returns>These headers.</returns>
-    /// <exception cref="InvalidOperationException">The headers are read-only.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="key"/> is <see langword="null"/>.</exception>
+    /// <exception cref="IllegalStateException">The headers are read-only.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="key"/> is <see langword="null"/>.</exception>
     public Headers Remove(string key)
     {
         CanWrite();
@@ -174,7 +176,7 @@ public sealed class Headers : IEnumerable<Header>
     /// <summary>Returns the last header with the given key, or <see langword="null"/> when there is none.</summary>
     /// <param name="key">The key to look up.</param>
     /// <returns>The last header with that key, or <see langword="null"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="key"/> is <see langword="null"/>.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="key"/> is <see langword="null"/>.</exception>
     public Header? LastHeader(string key)
     {
         CheckKey(key);
@@ -201,7 +203,7 @@ public sealed class Headers : IEnumerable<Header>
     /// </summary>
     /// <param name="key">The key to look up.</param>
     /// <returns>The headers with that key.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="key"/> is <see langword="null"/>.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="key"/> is <see langword="null"/>.</exception>
     public IEnumerable<Header> GetHeaders(string key)
     {
         CheckKey(key);
@@ -291,7 +293,7 @@ public sealed class Headers : IEnumerable<Header>
     {
         if (key is null)
         {
-            throw new ArgumentNullException(nameof(key), "key cannot be null.");
+            throw new IllegalArgumentException("key cannot be null.");
         }
     }
 
@@ -299,7 +301,7 @@ public sealed class Headers : IEnumerable<Header>
     {
         if (_isReadOnly)
         {
-            throw new InvalidOperationException("RecordHeaders has been closed.");
+            throw new IllegalStateException("RecordHeaders has been closed.");
         }
     }
 

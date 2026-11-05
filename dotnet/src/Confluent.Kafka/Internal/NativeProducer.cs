@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Internal;
@@ -55,6 +56,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     private const string CloseNegativeTimeoutMessage = "The timeout cannot be negative.";
 
+    private const string ClosedMessage = "Cannot perform operation after producer has been closed";
+
+    private const string MockClosedMessage = "MockProducer is already closed.";
+
     private const string CloseInCallbackMessage =
         "Overriding close timeout {0} ms to 0 ms in order to prevent useless blocking due to self-join. This means " +
         "you have incorrectly invoked close with a non-zero timeout from the producer call-back.";
@@ -70,6 +75,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly DeliveryReporter _reporter;
     private readonly long _maxBlockMs;
     private readonly HandleUses _uses = new HandleUses();
+    private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
     private int _closed;
 
     private NativeProducer(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
@@ -99,15 +105,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             throw new ArgumentNullException(nameof(config));
         }
 
-        foreach (KeyValuePair<string, string> entry in config)
-        {
-            if (entry.Value is null)
-            {
-                throw new ArgumentException(
-                    $"Configuration value for key '{entry.Key}' must not be null.",
-                    nameof(config));
-            }
-        }
+        config = NullConfigValues.Apply(config, NullConfigValues.Producer);
 
         IntPtr classPointer = NewKafkaProducer(config);
         IntPtr outErr = IntPtr.Zero;
@@ -142,7 +140,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         return Start(new SafeMockProducerHandle(view, classPointer), completionThreadName, DefaultMaxBlockMs);
     }
 
-    internal Task FlushWithCallback(CancellationToken cancellationToken = default)
+    // The async callbacks of serializer failures, which run in managed code only, that Flush and Close wait for.
+    internal FutureFailure.PendingCallbacks FailureCallbacks => _failureCallbacks;
+
+    internal Task FlushWithCallback(CancellationToken cancellationToken = default) =>
+        _failureCallbacks.After(FlushNativeWithCallback(cancellationToken), cancellationToken);
+
+    private Task FlushNativeWithCallback(CancellationToken cancellationToken)
     {
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
@@ -366,12 +370,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     internal bool MockCompleteNext() =>
         CallMock((IntPtr mock, ref IntPtr outErr) => NativeMethods.MockProducerCompleteNext(mock, ref outErr)) != 0;
 
-    // A null exception is refused, although Java's errorNext(null) completes the send: CompleteNext spells that.
-    internal bool MockErrorNext(Exception exception)
+    // A null exception completes the send successfully, as Java's errorNext(null), which completeNext() calls.
+    internal bool MockErrorNext(Exception? exception)
     {
         if (exception is null)
         {
-            throw new ArgumentNullException(nameof(exception));
+            return MockCompleteNext();
         }
 
         return CallMock((IntPtr mock, ref IntPtr outErr) =>
@@ -435,6 +439,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         {
             // Dispose does not throw; Close reports the same error.
         }
+
+        _failureCallbacks.Wait();
     }
 
     public async ValueTask DisposeAsync()
@@ -459,6 +465,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         {
             // DisposeAsync does not throw; Close reports the same error.
         }
+
+        await _failureCallbacks.Snapshot().ConfigureAwait(false);
     }
 
     // A mock completes its pending sends before it closes, as Python's mock does on exit.
@@ -500,7 +508,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         if (Volatile.Read(ref _closed) != 0)
         {
-            throw new ObjectDisposedException(nameof(NativeProducer));
+            throw new IllegalStateException(IsMock ? MockClosedMessage : ClosedMessage);
         }
     }
 
@@ -738,7 +746,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         if (timeout < TimeSpan.Zero && !IsMock)
         {
-            throw new ArgumentOutOfRangeException(nameof(timeout), CloseNegativeTimeoutMessage);
+            throw new IllegalArgumentException(CloseNegativeTimeoutMessage);
         }
 
         return (long)timeout.TotalMilliseconds;
@@ -954,7 +962,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        return CloseAndTearDownAsync(timeoutMs);
+        return _failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None);
     }
 
     private void CloseWithin(long? timeoutMs)
@@ -970,7 +978,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
-        CloseAndTearDown(timeoutMs);
+        try
+        {
+            CloseAndTearDown(timeoutMs);
+        }
+        finally
+        {
+            _failureCallbacks.Wait();
+        }
     }
 
     private void SubmitClose(long? timeoutMs, Action<IntPtr> onClosed) =>
@@ -1082,7 +1097,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         if (Volatile.Read(ref _closed) != 0)
         {
             ExitUse();
-            throw new ObjectDisposedException(nameof(NativeProducer));
+            throw new IllegalStateException(IsMock ? MockClosedMessage : ClosedMessage);
         }
     }
 

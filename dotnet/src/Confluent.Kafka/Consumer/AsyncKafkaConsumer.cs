@@ -18,8 +18,10 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -45,13 +47,17 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <param name="config">The consumer configuration.</param>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="config"/>, <paramref name="keyDeserializer"/>, or
-    /// <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null: Java then reads the
+    /// <c>key.deserializer</c> / <c>value.deserializer</c> config, which .NET config cannot set.
     /// </exception>
-    /// <exception cref="ArgumentException">A config value is null.</exception>
+    /// <exception cref="ConfigException">
+    /// A config value is null for a key whose Java validator rejects null, with that validator's message. Any other
+    /// null value is not set.
+    /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// <c>group.protocol</c> is <c>classic</c>, which this client does not support; <c>classic</c> is
     /// also the default when the key is unset.
     /// </exception>
@@ -60,8 +66,14 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
+        // Java copies the config map first, so a null one fails before a missing deserializer.
+        if (config is null)
+        {
+            throw new ArgumentNullException(nameof(config));
+        }
+
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
         _native = NativeConsumer.Create(config);
     }
 

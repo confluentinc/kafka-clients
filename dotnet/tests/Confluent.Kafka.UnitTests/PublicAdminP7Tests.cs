@@ -17,12 +17,13 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-
 using Confluent.Kafka.Admin;
-
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
+using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -111,7 +112,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(
             () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
     }
 
@@ -123,12 +124,12 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
-        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(FutureAssert.Throws<DelegationTokenNotFoundException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(FutureAssert.Throws<DelegationTokenNotFoundException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<KafkaException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+            await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<KafkaException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+            await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
     }
 
     [Fact]
@@ -163,8 +164,9 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
+        FeatureMetadata? metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
 
+        Assert.NotNull(metadata);
         Assert.NotNull(metadata.FinalizedFeatures);
         Assert.NotNull(metadata.SupportedFeatures);
         Assert.NotNull(metadata.FinalizedFeaturesEpoch);
@@ -194,10 +196,10 @@ public sealed class PublicAdminP7Tests
             new[] { "group.version", "metadata.version" },
             result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        await FutureAssert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
         foreach (AsyncKafkaFuture value in result.Values.Values)
         {
-            await Assert.ThrowsAsync<KafkaException>(() => value.Get());
+            await FutureAssert.ThrowsAsync<InvalidRequestException>(() => value.Get());
         }
     }
 
@@ -221,7 +223,7 @@ public sealed class PublicAdminP7Tests
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)));
 
         Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
@@ -233,14 +235,13 @@ public sealed class PublicAdminP7Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(
                 new FeatureUpdateEntries(
                     new KeyValuePair<string, FeatureUpdate>(
                         null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE)))));
 
-        Assert.Equal("featureUpdates", thrown.ParamName);
-        Assert.StartsWith("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
+        Assert.Equal("Provided feature can not be empty.", thrown.Message);
     }
 
     [Theory]
@@ -254,7 +255,7 @@ public sealed class PublicAdminP7Tests
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
                 {
@@ -331,7 +332,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -346,7 +347,7 @@ public sealed class PublicAdminP7Tests
         AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
         Assert.Equal("Not implemented yet", error.Message);
     }
 
@@ -356,7 +357,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.AlterUserScramCredentials(
                 new[] { new UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256) }).All().Get());
 
@@ -371,22 +372,33 @@ public sealed class PublicAdminP7Tests
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.Users().Get());
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.Description("alice").Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Users().Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Description("alice").Get());
     }
 
     [Fact]
-    public void DescribeUserScramCredentials_NullUser_ThrowsSynchronously()
+    public async Task DescribeUserScramCredentials_NullUser_FailsTheFutureAsJava()
     {
-        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        AsyncMockAdminClient asyncAdmin = AsyncMockAdminClient.Create().Build();
+        using IDisposable asyncDisposal = TestTimeout.Disposal(asyncAdmin);
+        MockAdminClient syncAdmin = MockAdminClient.Create().Build();
+        using IDisposable syncDisposal = TestTimeout.Disposal(syncAdmin);
 
-        AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
+        // The mock's call fails, and a null user's future carries the call's error, as Java's dataFuture does.
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
+            () => asyncAdmin.DescribeUserScramCredentials().Description(null).Get());
+        FutureAssert.Throws<UnsupportedOperationException>(
+            () => syncAdmin.DescribeUserScramCredentials().Description(null).Get(TimeSpan.FromSeconds(30)));
 
-        ArgumentNullException nullUser =
-            Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
-        Assert.Equal("userName", nullUser.ParamName);
+        // Once the response arrives, no user in it is null.
+        KafkaFutureImpl<object?> response = new KafkaFutureImpl<object?>();
+        KafkaFutureImpl<UserScramCredentialsDescription> missing = NativeAdminClient.NoSuchNullUser(response);
+        Assert.False(missing.IsDone);
+        response.Complete(null);
+        ResourceNotFoundException noSuchUser =
+            await FutureAssert.ThrowsAsync<ResourceNotFoundException>(() => new AsyncKafkaFuture<UserScramCredentialsDescription>(missing).Get());
+        Assert.Equal("No such user: null", noSuchUser.Message);
     }
 
     [Fact]
@@ -431,8 +443,8 @@ public sealed class PublicAdminP7Tests
     [InlineData((short)5, (short)4)]
     public void FinalizedVersionRange_RejectsAnInvalidRange(short min, short max)
     {
-        ArgumentException thrown =
-            Assert.Throws<ArgumentException>(() => new FinalizedVersionRange(min, max));
+        IllegalArgumentException thrown =
+            Assert.Throws<IllegalArgumentException>(() => new FinalizedVersionRange(min, max));
 
         Assert.Contains(
             "Expected minVersionLevel >= 0, maxVersionLevel >= 0 and maxVersionLevel >= minVersionLevel, "
@@ -446,8 +458,8 @@ public sealed class PublicAdminP7Tests
     [InlineData((short)3, (short)2)]
     public void SupportedVersionRange_RejectsAnInvalidRange(short min, short max)
     {
-        ArgumentException thrown =
-            Assert.Throws<ArgumentException>(() => new SupportedVersionRange(min, max));
+        IllegalArgumentException thrown =
+            Assert.Throws<IllegalArgumentException>(() => new SupportedVersionRange(min, max));
 
         Assert.Contains(
             $"Expected 0 <= minVersion <= maxVersion but received minVersion:{min}, maxVersion:{max}.",
@@ -465,7 +477,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void FeatureUpdate_RejectsADowngradeWithoutADowngradeType()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => new FeatureUpdate(0, FeatureUpdate.UpgradeType.UPGRADE));
 
         Assert.Contains(
@@ -478,7 +490,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void FeatureUpdate_RejectsANegativeLevel()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => new FeatureUpdate(-1, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE));
 
         Assert.Contains("Cannot specify a negative version level.", thrown.Message, StringComparison.Ordinal);

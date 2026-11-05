@@ -17,12 +17,17 @@ using System;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Requests;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
+using Confluent.Kafka.Java.Util.Concurrent;
 
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
 using Xunit;
 
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 using Proto = Confluent.Kafka.Test;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests;
@@ -40,8 +45,40 @@ public sealed class TranslateTests
     {
         KafkaException error = TestValues.Coded(27, "rebalance in progress");
 
+        Assert.IsType<RebalanceInProgressException>(error);
         AssertBare(error, 27);
     }
+
+    [Fact]
+    public void ABareKafkaException_IsMinusOne() => AssertBare(new KafkaException("bare"), -1);
+
+    [Fact]
+    public void AConcurrentModificationException_IsItsId() =>
+        AssertBare(new ConcurrentModificationException("KafkaConsumer is not safe for multi-threaded access."), -2);
+
+    [Fact]
+    public void AnIllegalArgumentException_IsItsId() =>
+        AssertBare(new IllegalArgumentException("Timeout must not be negative"), -3);
+
+    [Fact]
+    public void AnIllegalStateException_IsItsId() =>
+        AssertBare(new IllegalStateException("This consumer has already been closed."), -4);
+
+    [Fact]
+    public void AJavaTimeoutException_IsItsId() =>
+        AssertBare(new JavaTimeoutException("Timeout expired after 500ms"), -5);
+
+    [Fact]
+    public void ACorrelationIdMismatchException_IsItsId_NotItsParentsId() =>
+        AssertBare(new CorrelationIdMismatchException("mismatch", 1, 2), -24);
+
+    [Fact]
+    public void AnUnsupportedOperationException_IsItsId() =>
+        AssertBare(new UnsupportedOperationException("Not implemented yet"), -31);
+
+    [Fact]
+    public void ASubclassOfAJavaNamedClass_IsItsNearestId() =>
+        AssertBare(new DerivedIllegalStateException("derived"), -4);
 
     [Fact]
     public void AKafkaExceptionSubclass_KeepsItsCodeAndMessage()
@@ -81,32 +118,36 @@ public sealed class TranslateTests
         Assert.Equal("dotnet server: ArgumentNullException: " + error.Message, proto.Message);
     }
 
-    [Fact]
-    public void AnInvalidOperationException_IsLocalIllegalState_WithItsMessage() =>
-        AssertBare(new InvalidOperationException("KafkaConsumer is not safe for multi-threaded access."), -4);
-
-    [Fact]
-    public void AnObjectDisposedException_IsLocalIllegalState_WithoutDotNetsObjectNameLine() =>
-        AssertBare(
-            new ObjectDisposedException("KafkaConsumer", "This consumer has already been closed."),
-            -4,
-            "This consumer has already been closed.");
-
-    [Fact]
-    public void ATimeoutException_IsLocalTimeout_WithItsMessage() =>
-        AssertBare(new TimeoutException("Timeout expired after 500ms"), -5);
-
-    [Fact]
-    public void ANotSupportedException_IsLocalUnsupportedOperation_WithItsMessage() =>
-        AssertBare(new NotSupportedException("Not implemented yet"), -31);
-
-    [Fact]
-    public void AnyOtherException_IsTheServerFallback()
+    [Theory]
+    [MemberData(nameof(ExceptionsWithoutAnId))]
+    public void AnExceptionWithoutAnId_IsTheServerFallback(Exception error)
     {
-        Proto.KafkaError proto = Translate.ToProto(new FormatException("not a number"));
+        Proto.KafkaError proto = Translate.ToProto(error);
 
         Assert.Equal(-4, proto.Code);
-        Assert.Equal("dotnet server: FormatException: not a number", proto.Message);
+        Assert.Equal($"dotnet server: {error.GetType().Name}: {error.Message}", proto.Message);
+    }
+
+    [Fact]
+    public void AFuturesExecutionException_IsSentAsTheFailureItCarries()
+    {
+        KafkaException cause = TestValues.Coded(27, "rebalance in progress");
+
+        AssertBare(new ExecutionException(cause), 27, "rebalance in progress");
+        AssertBare(new ExecutionException(new IllegalStateException("closed")), -4, "closed");
+        Assert.Same(cause, Translate.Unwrapped(new ExecutionException(cause)));
+        Assert.Same(cause, Translate.Unwrapped(cause));
+    }
+
+    [Fact]
+    public void AnExecutionExceptionWithoutACause_IsTheServerFallback()
+    {
+        ExecutionException error = new ExecutionException((Exception?)null);
+
+        Proto.KafkaError proto = Translate.ToProto(error);
+
+        Assert.Equal(-4, proto.Code);
+        Assert.Equal($"dotnet server: ExecutionException: {error.Message}", proto.Message);
     }
 
     [Fact]
@@ -174,7 +215,26 @@ public sealed class TranslateTests
         Assert.Null(record.Value);
     }
 
+    public static TheoryData<Exception> ExceptionsWithoutAnId() => new TheoryData<Exception>
+    {
+        new InvalidOperationException("the admin result produced no value"),
+        new ObjectDisposedException("ConsumerHandle"),
+        new NotSupportedException("not supported"),
+        new System.TimeoutException("Timeout expired after 500ms"),
+        new NoSuchElementException("no such element"),
+        new IndexOutOfBoundsException("index 3 out of bounds"),
+        new FormatException("not a number"),
+    };
+
     private static void AssertBare(Exception error, int code) => AssertBare(error, code, error.Message);
+
+    private sealed class DerivedIllegalStateException : IllegalStateException
+    {
+        public DerivedIllegalStateException(string message)
+            : base(message)
+        {
+        }
+    }
 
     private static void AssertBare(Exception error, int code, string message)
     {

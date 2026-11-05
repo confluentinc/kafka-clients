@@ -21,6 +21,8 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -142,8 +144,8 @@ public sealed class PublicAdminConfigsTests
 
         await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
+        UnknownTopicOrPartitionException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-absent", failure.Message);
     }
 
@@ -247,8 +249,8 @@ public sealed class PublicAdminConfigsTests
             {
                 [absent] = Array.Empty<AlterConfigOp>(),
             });
-        KafkaException zeroOpsFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => zeroOps.Values[absent].Get()), s_deadline);
+        UnknownTopicOrPartitionException zeroOpsFailure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => zeroOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
         // The same absent resource with one operation is sent, so the core rejects it.
@@ -257,8 +259,8 @@ public sealed class PublicAdminConfigsTests
             {
                 [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => withOps.Values[absent].Get()), s_deadline);
+        UnknownTopicOrPartitionException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
     }
 
@@ -275,8 +277,8 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal(ConfigResourceType.UNKNOWN, key.Type);
         Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.Values[undefined].Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Values[undefined].Get()), s_deadline);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
@@ -327,14 +329,14 @@ public sealed class PublicAdminConfigsTests
     }
 
     [Fact]
-    public void AfterDispose_BothRpcsThrowObjectDisposed()
+    public void AfterDispose_BothRpcsThrowIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeConfigs(new[] { resource }));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.DescribeConfigs(new[] { resource }));
+        Assert.Throws<IllegalStateException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>()));
     }

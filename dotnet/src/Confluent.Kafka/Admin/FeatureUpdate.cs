@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Java.Lang;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -51,7 +53,7 @@ public sealed class FeatureUpdate
     /// accompanied by a downgrade type.
     /// </param>
     /// <param name="upgradeType">The kind of change.</param>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="maxVersionLevel"/> is <c>0</c> with
     /// <see cref="UpgradeType.UPGRADE"/>, or is negative.
     /// </exception>
@@ -59,7 +61,7 @@ public sealed class FeatureUpdate
     {
         if (maxVersionLevel == 0 && upgradeType == UpgradeType.UPGRADE)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE"
@@ -69,7 +71,7 @@ public sealed class FeatureUpdate
 
         if (maxVersionLevel < 0)
         {
-            throw new ArgumentException("Cannot specify a negative version level.");
+            throw new IllegalArgumentException("Cannot specify a negative version level.");
         }
 
         MaxVersionLevel = maxVersionLevel;

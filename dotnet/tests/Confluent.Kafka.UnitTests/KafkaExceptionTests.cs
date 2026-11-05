@@ -16,16 +16,18 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Tests the flat <see cref="KafkaException"/> error model: a core error becomes a <see cref="KafkaException"/> with its
-/// code, retriable flag and message, and its handle is freed exactly once.
+/// Tests <see cref="KafkaException"/>: its constructors, its id, its wraps, and a core error read as its class with its
+/// handle freed exactly once.
 /// </summary>
 public sealed class KafkaExceptionTests
 {
@@ -38,20 +40,22 @@ public sealed class KafkaExceptionTests
     };
 
     [Fact]
-    public void ClassicGroupProtocol_ThrowsNotSupportedException()
+    public void ClassicGroupProtocol_ThrowsUnsupportedOperationException()
     {
         Dictionary<string, string> config = BaseConfig();
         config["group.protocol"] = "classic";
 
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(config));
+        UnsupportedOperationException ex =
+            Assert.Throws<UnsupportedOperationException>(() => NativeConsumer.Create(config));
 
         Assert.Equal(ClassicUnsupported, ex.Message);
     }
 
     [Fact]
-    public void DefaultGroupProtocol_IsClassic_ThrowsNotSupportedException()
+    public void DefaultGroupProtocol_IsClassic_ThrowsUnsupportedOperationException()
     {
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(BaseConfig()));
+        UnsupportedOperationException ex =
+            Assert.Throws<UnsupportedOperationException>(() => NativeConsumer.Create(BaseConfig()));
 
         Assert.Equal(ClassicUnsupported, ex.Message);
     }
@@ -62,15 +66,99 @@ public sealed class KafkaExceptionTests
         Dictionary<string, string> config = BaseConfig();
         config["group.protocol"] = "café";
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => NativeConsumer.Create(config));
+        ConfigException ex = Assert.Throws<ConfigException>(() => NativeConsumer.Create(config));
 
         Assert.Contains("café", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void FromHandle_NullHandle_ReturnsNull()
+    public void PublicConstructors_CodeIsTheIdOfABareKafkaException()
     {
-        Assert.Null(KafkaException.FromHandle(IntPtr.Zero));
+        Exception cause = new InvalidOperationException("c");
+        KafkaException[] built =
+        {
+            new KafkaException(),
+            new KafkaException("m"),
+            new KafkaException("m", cause),
+            new KafkaException(cause),
+        };
+
+        Assert.All(built, exception => Assert.Equal(-1, exception.Code));
+        Assert.All(built, exception => Assert.Equal(-1, exception.FfiId));
+        Assert.All(built, exception => Assert.False(exception is Common.Errors.RetriableException));
+    }
+
+    [Fact]
+    public void NullMessage_MessageIsEmpty_JavaToStringIsTheTypeName()
+    {
+        KafkaException withoutMessage = new KafkaException((string?)null);
+        KafkaException withoutMessageWithCause = new KafkaException(null, new InvalidOperationException("c"));
+        KafkaException emptyMessage = new KafkaException(string.Empty);
+
+        Assert.Equal(string.Empty, withoutMessage.Message);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", JavaText.ToString(withoutMessage));
+        Assert.Equal(string.Empty, withoutMessageWithCause.Message);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", JavaText.ToString(withoutMessageWithCause));
+        Assert.Equal(string.Empty, emptyMessage.Message);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException: ", JavaText.ToString(emptyMessage));
+    }
+
+    [Fact]
+    public void CoreErrorConstructor_KeepsTheMessageAndCause_CodeIsTheIdOfABareKafkaException()
+    {
+        Exception cause = new InvalidOperationException("c");
+
+        KafkaException exception = new KafkaException(default(CoreError), "core message: café", cause);
+
+        Assert.Equal("core message: café", exception.Message);
+        Assert.Same(cause, exception.InnerException);
+        Assert.Equal(-1, exception.Code);
+        Assert.False(exception is Common.Errors.RetriableException);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException: core message: café", JavaText.ToString(exception));
+    }
+
+    [Fact]
+    public void CoreErrorConstructor_NullMessage_MessageIsEmpty()
+    {
+        KafkaException exception = new KafkaException(default(CoreError), null, null);
+
+        Assert.Equal(string.Empty, exception.Message);
+        Assert.Null(exception.InnerException);
+        Assert.Equal("Confluent.Kafka.Common.KafkaException", JavaText.ToString(exception));
+    }
+
+    [Fact]
+    public void AClassConstructor_CodeIsTheIdOfTheClass()
+    {
+        KafkaException exception = new Common.Errors.TopicExistsException("m");
+        KafkaException retriable = new Common.Errors.NotCoordinatorException("m");
+
+        Assert.Equal(36, exception.Code);
+        Assert.Equal(36, exception.FfiId);
+        Assert.False(exception is Common.Errors.RetriableException);
+        Assert.Equal(16, retriable.Code);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(retriable);
+    }
+
+    [Fact]
+    public void WrapAtPoll_WrapsAnotherExceptionAsJavasNewKafkaException_AndKeepsAKafkaException()
+    {
+        Exception cause = new InvalidOperationException("listener failed");
+        KafkaException kafka = new Common.Errors.TopicExistsException("m");
+
+        KafkaException wrapped = KafkaException.WrapAtPoll(cause);
+
+        Assert.Equal("System.InvalidOperationException: listener failed", wrapped.Message);
+        Assert.Same(cause, wrapped.InnerException);
+        Assert.Equal(-1, wrapped.Code);
+        Assert.False(wrapped is Common.Errors.RetriableException);
+        Assert.Same(kafka, KafkaException.WrapAtPoll(kafka));
+    }
+
+    [Fact]
+    public void FromFfiError_NullHandle_ReturnsNull()
+    {
+        Assert.Null(KafkaException.FromFfiError(IntPtr.Zero, owned: true));
     }
 
     [Fact]

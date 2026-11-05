@@ -24,6 +24,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
 
 using Xunit;
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -283,8 +284,8 @@ public sealed class KafkaFutureImplTests
     {
         var timeout = TimeSpan.FromTicks(ticks);
         var future = new KafkaFutureImpl<int>();
-        var thrown = Assert.Throws<TimeoutException>(() => future.Get(timeout));
-        Assert.Equal(new TimeoutException().Message, thrown.Message);
+        var thrown = Assert.Throws<JavaTimeoutException>(() => future.Get(timeout));
+        Assert.Equal(string.Empty, thrown.Message);
         AssertPending(future);
 
         future.Complete(3);
@@ -297,9 +298,9 @@ public sealed class KafkaFutureImplTests
         var timeout = TimeSpan.FromMilliseconds(50);
         var future = new KafkaFutureImpl<int>();
         var clock = Stopwatch.StartNew();
-        var thrown = Assert.Throws<TimeoutException>(() => future.Get(timeout));
+        var thrown = Assert.Throws<JavaTimeoutException>(() => future.Get(timeout));
         Assert.True(clock.Elapsed >= timeout, $"returned after {clock.Elapsed}");
-        Assert.Equal(new TimeoutException().Message, thrown.Message);
+        Assert.Equal(string.Empty, thrown.Message);
         AssertPending(future);
     }
 
@@ -707,7 +708,7 @@ public sealed class KafkaFutureImplTests
         _ = future.ToString();
         future.ThenApply(value => value);
         future.WhenComplete((value, error) => { });
-        Assert.Throws<TimeoutException>(() => future.Get(TimeSpan.Zero));
+        Assert.Throws<JavaTimeoutException>(() => future.Get(TimeSpan.Zero));
         Assert.Null(s_taskField.GetValue(future));
 
         var task = future.GetAsync();
@@ -777,11 +778,11 @@ public sealed class KafkaFutureImplTests
         var negative = future.GetAsync(TimeSpan.FromMilliseconds(-5));
         var clock = Stopwatch.StartNew();
         var timedOut = future.GetAsync(TimeSpan.FromMilliseconds(50));
-        var thrown = await Assert.ThrowsAsync<TimeoutException>(() => WithinDeadline(timedOut));
+        var thrown = await Assert.ThrowsAsync<JavaTimeoutException>(() => WithinDeadline(timedOut));
         Assert.True(clock.Elapsed >= TimeSpan.FromMilliseconds(50), $"faulted after {clock.Elapsed}");
-        Assert.Equal(new TimeoutException().Message, thrown.Message);
-        Assert.IsType<TimeoutException>(zero.Exception!.InnerException);
-        Assert.IsType<TimeoutException>(negative.Exception!.InnerException);
+        Assert.Equal(string.Empty, thrown.Message);
+        Assert.IsType<JavaTimeoutException>(zero.Exception!.InnerException);
+        Assert.IsType<JavaTimeoutException>(negative.Exception!.InnerException);
 
         var waiting = future.GetAsync(TimeSpan.FromMinutes(5));
         var longest = future.GetAsync(TimeSpan.MaxValue);
