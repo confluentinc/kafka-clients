@@ -513,8 +513,9 @@ check-api-compat:
 audit:
 	$(MAKE) -C rust audit
 
-# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`:
-# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]
+# [JAVASCRIPT_VERSION=...]`: see rust/Makefile. VERSION, PYTHON_VERSION,
+# DOTNET_VERSION and JAVASCRIPT_VERSION reach the
 # sub-make through its environment (make passes command-line variables down);
 # this recipe never pastes them in.
 bump-version:
