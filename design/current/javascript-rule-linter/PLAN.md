@@ -32,7 +32,7 @@ Command: `make -C javascript lint-rules`, which runs
 | `test/unit/_config.test.js`, `producer_config.test.js` | config type checks and the constants against Java's literals |
 | `cargo xtask check-generated` | generated `.ts` files are current, none missing, none orphaned |
 
-These keep running. The linter adds what they do not cover. Open decision 9 is whether
+These keep running. The linter adds what they do not cover. Open decision 14 is whether
 the static tests later move into the runner.
 
 ## 3. Architecture
@@ -225,6 +225,15 @@ Each parameter, return and property type follows one table:
 A type the table does not cover is an `unmapped` finding, as in the Rust FFI rule. This
 needs the return and field types from 3.1.
 
+As built in P3 (`scripts/lint/rules/type_mapping.js` holds the full table): `null` /
+`undefined` are stripped from the TypeScript type first, and a return may be a `Promise` of
+the mapped type (a blocking method; A1 says which). The table also maps `byte[]` to
+`Data`; `List` / `Set` / `Collection<T>` and `T[]` to an array of `T`; `Iterable<T>` and
+`Headers` to an iterable or array (of `Header`); `Map` / `Properties` (a client's
+configuration) to the `...Configs` type; `Object` to `unknown`; a type variable to a type
+parameter; and a Java class lib/ translates to its TypeScript type. An options object's
+properties are checked against the Java parameters of their names.
+
 **J8 `check-getters-readonly`** (JS "Java getters are read-only properties", root §3 no public field)
 - Every public property of an exported class is a `get` accessor with no `set`, or a
   `static readonly`.
@@ -242,6 +251,15 @@ needs the return and field types from 3.1.
   through a private method of the same class), then the `addon.c` registration
   `{"<fn>", Impl}`, then the `kafka_*` functions `Impl` calls.
 - Example: `KafkaProducer.flush reaches kafka_producer_Producer_flush_cb but returns void`.
+- The other direction is `promise-not-waiting`. A path that leads nowhere (a `native.<fn>`
+  no descriptor registers, or an implementation no `src/*.c` defines) is
+  `unresolved-native`, never a pass. A method with no native use is not checked.
+- The path follows every call the type checker resolves into a lib/ function or method,
+  transitively (a module helper, another class's method), and the handle is recognised by
+  its type under any name (`const n = native`), in A1 and A2 alike.
+- J7 accepts a Promise return only on a method A1 resolves to a `_cb` twin, or on a listed
+  pure-JS waiting member (`KafkaFuture#get`: Java's `get()` blocks; the JS future settles
+  from the delivery callback).
 
 **A2 `check-native-registry`** (JS "Files and layout")
 - Every function `addon.c` registers is used from `lib/`, and every `native.<fn>` used
@@ -249,7 +267,8 @@ needs the return and field types from 3.1.
 - Only `lib/_native_loader.ts` resolves the `.node` file: the platform package
   `@confluentinc/kafka-javascript-<platform>` first, then `build/Release/`.
 - Only `lib/_native.ts` calls the loader and does the one-time setup.
-- No `index.ts`, and no other `lib/` file, `require`s a `.node` file or the loader.
+- No `index.ts`, and no other `lib/` file, `require`s a `.node` file or the loader; no
+  `index.ts` imports `lib/_native.ts` either (`index-native`).
 
 ### N — the native addon (C)
 
@@ -278,7 +297,7 @@ needs the return and field types from 3.1.
 **N5 `check-completion-order`** (JS rule 6)
 - In each delivery-completion function the calls appear in this order: user callback,
   then future completion, then `__set_callback_result_err`, each at one call site.
-- The check is lexical, not path-sensitive. Open decision 11 covers what it cannot see.
+- The check is lexical, not path-sensitive. Decision 13 covers what it cannot see.
 
 **N6 `check-ownership`** (JS rule 9)
 - Every handle type `src/` receives as owned (from a `_new`, from `out_err`, from a `_cb`
@@ -286,12 +305,12 @@ needs the return and field types from 3.1.
 - The borrowed error and metadata a delivery callback receives are never passed to a
   `_destroy` in that function.
 
-**N7 `check-zero-copy`** (JS rule 8) *(heuristic; open decision 11)*
+**N7 `check-zero-copy`** (JS rule 8) *(heuristic; decision 13: built, with an allowlist)*
 - On the send path (`record.c`, `producer.c`), the key and value cross through
   `napi_get_buffer_info` / `napi_get_typedarray_info` into a `kafka_Bytes_t`.
 - There is no `memcpy`, `malloc` or `napi_create_buffer_copy` on them.
 
-**N8 `check-no-binding-queue`** (JS rule 7) *(heuristic; open decision 11)*
+**N8 `check-no-binding-queue`** (JS rule 7) *(heuristic; decision 13: built, with an allowlist)*
 - There is no mutex outside `callback_queue.c`, and no array, queue or cap of records in
   `lib/producer/`.
 
@@ -306,13 +325,13 @@ needs the return and field types from 3.1.
   every class named this way exists in `lib/`.
 - No JSDoc type annotations (`@param {string}`) in `lib/`.
 
-**D3 `check-tsdoc-size`** *(open decision 10)*
+**D3 `check-tsdoc-size`** *(open decision 15)*
 - The doc is at most 150% of the Javadoc's word count, measured with the same
   `javadoc.rs` count, which reaches JS through `java-index.json`.
 - `words` in `java-index.json` counts a Javadoc as written. A Javadoc that only points
   elsewhere (`@see KafkaConsumer#commitSync()`, `See {@link KafkaProducer#close()}`)
   counts its pointer, where `check-api-docs` measures the Javadoc pointed to
-  (documentation.md §4). If decision 10 keeps D3, P5 adds the followed count.
+  (documentation.md §4). If decision 15 keeps D3, P5 adds the followed count.
 
 **D4 `check-java-line`** (documentation.md §7)
 - No comment in `lib/`, `src/`, `test/`, `scripts/`, `tools/` or the gRPC harness
@@ -395,8 +414,8 @@ Each phase runs the Actor / Critic loop of `.claude/rules/agent-roles.md`. Commi
 | P1 | `cargo xtask java-index --json` (+ return and field types in `java.rs`), runner, baseline, `c_source.js`, H1–H3, D4 | runner green on the tree; fixture tests for each |
 | P2 | J1, J2, J4, J5, J8; J3 with its baseline | as above, plus the mutation cases for these rules |
 | P3 | J6, J7, A1, A2 | as above |
-| P4 | N1–N6 (N7, N8 only if decision 11 says so) | as above |
-| P5 | D1, D2 (D3 if decision 10 says so) | as above |
+| P4 | N1–N8 (decision 13) | as above |
+| P5 | D1, D2 (D3 if decision 15 says so) | as above |
 | P6 | `make -C javascript lint-rules`, `verify-javascript`, Semaphore; a proposal of "(checked by `check-…`)" references for `javascript/CLAUDE.md`, for the user to apply | CI runs it |
 
 ## 8. Decisions
@@ -427,12 +446,37 @@ Answered 2026-11-05:
    `java.lang.Enum#name()` passes on the same terms (`SslClientAuth.name`). Any other
    one translating a Java getter method stays a `readonly-field`.
 8. **`Duration` naming** (for P3): a Java `Duration x` parameter or option becomes
-   `xMs: number` (milliseconds), which J6 and J7 check.
+   `xMs: number` (milliseconds), for every Java `Duration` parameter, single-form methods
+   included. J6 checks an option's name; J7 checks a positional parameter's
+   (`duration-name`) and both types.
+
+Answered 2026-11-05, for P3:
+
+9. **Trailing optional parameters:** when Java's forms differ only by trailing
+   parameters, a JavaScript function taking the longest form's parameters, those the
+   shorter forms lack optional, is accepted beside the options object
+   (`send(record, callback?)`).
+10. **An option whose Java parameter may be null** may be left out, omission meaning
+    null. "May be null" is read from the Java index: the parameter's type is a boxed
+    primitive (`Integer`, `Long`, ...) or a key / value type variable (`K`, `V`), or the
+    form's Javadoc `@param` for it contains the word `null`.
+11. **Gaps kept in the baseline:** the serializer constructor overloads
+    (`not-options KafkaProducer.constructor`) and `KafkaFuture.get(timeout)`
+    (`not-options KafkaFuture.get`).
+12. **`probe`** is an A2 allowlist entry: a test-only registration, called by
+    `test/unit/_native.test.js`. An entry that is not an unused registration any more is
+    an `unused-allowance` finding.
+13. **N1–N8 are all built**, the heuristic N5, N7 and N8 included, each with an explicit
+    allowlist whose entries carry a reason; an entry that waives nothing is a finding.
+
+Also following the Python conventions (root CLAUDE.md, "Signatures"): J6 merges the
+parameters of different forms at one position whose Java types map to one host type into
+one, named after the earliest-declared form (`KafkaProducer(Map configs)` /
+`(Properties properties)` -> `configs`).
 
 Still open, to be asked when their phase starts:
 
-9. **Runner versus tests** (P6): should `layout.test.js` and `header_conformance.test.js`
+14. **Runner versus tests** (P6): should `layout.test.js` and `header_conformance.test.js`
    move into the runner?
-10. **Doc depth** (P5): the 150% size rule and the `WARNING` / `doc-contract-changes.md`
+15. **Doc depth** (P5): the 150% size rule and the `WARNING` / `doc-contract-changes.md`
    flow for JS (D3)?
-11. **Heuristic rules** (P4): N7, N8, and the lexical limits of N5.
