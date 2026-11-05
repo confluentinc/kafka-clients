@@ -46,11 +46,11 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             new[] { tp });
 
         UnsupportedOperationException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(tp).Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -89,13 +89,13 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             "p5-group", new[] { first, second, new TopicPartition("p5-dcgo", 0) });
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (TopicPartition partition in new[] { first, second })
         {
             UnsupportedOperationException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(partition).Get()), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(partition).Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }
@@ -109,7 +109,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         Task all = admin.DeleteConsumerGroupOffsets("p5-group", Array.Empty<TopicPartition>()).All().Get();
 
         Assert.NotEqual(TaskStatus.RanToCompletion, all.Status);
-        UnsupportedOperationException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<UnsupportedOperationException>(() => all), s_deadline);
+        UnsupportedOperationException thrown = await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => all), s_deadline);
         Assert.Equal(NotImplemented, thrown.Message);
     }
 
@@ -128,7 +128,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             StringComparison.Ordinal);
         foreach (Action get in new Action[] { () => result.All().Get(), () => result.PartitionResult(tp).Get(), () => empty.All().Get() })
         {
-            UnsupportedOperationException thrown = Assert.Throws<UnsupportedOperationException>(get);
+            UnsupportedOperationException thrown = FutureAssert.Throws<UnsupportedOperationException>(get);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }

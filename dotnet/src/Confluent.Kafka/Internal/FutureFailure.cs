@@ -57,7 +57,7 @@ internal static class FutureFailure
         }
 
         // As on the delivery path, the future fails once the callback's task has ended.
-        KafkaFutureImpl<RecordMetadata> future = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
         Task task = asyncCallback.OnCompletion(placeholder, error);
         if (task is null || task.IsCompleted)
         {
@@ -81,7 +81,7 @@ internal static class FutureFailure
 
     private static KafkaFutureImpl<RecordMetadata> Failed(ApiException error)
     {
-        KafkaFutureImpl<RecordMetadata> future = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
         future.CompleteWithError(error);
         return future;
     }

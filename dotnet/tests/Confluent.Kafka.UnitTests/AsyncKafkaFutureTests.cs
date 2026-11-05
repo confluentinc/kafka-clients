@@ -39,7 +39,8 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
         var impl = new KafkaFutureImpl<string>();
         var future = new AsyncKafkaFuture<string>(impl);
         Task<string> stage = future.ToCompletionStage();
-        Assert.Same(future.Get(), stage);
+        Assert.Same(impl.GetAsync(), stage);
+        Assert.NotSame(future.Get(), stage);
         MethodInfo[] completers = stage.GetType()
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
             .Where(method => method.Name.StartsWith("Set", StringComparison.Ordinal)

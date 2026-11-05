@@ -24,6 +24,7 @@ using Confluent.Kafka.Internal;
 
 using Confluent.Kafka.Producer;
 using Xunit;
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -70,7 +71,7 @@ public sealed class PublicNonGenericKafkaFutureTests
     }
 
     [Fact]
-    public void Get_AfterFailure_RethrowsTheSameInstance_Unwrapped()
+    public void Get_AfterFailure_ThrowsAnExecutionException_AroundTheSameInstance()
     {
         const string Message = "The operation failed: the broker rejected it.";
         KafkaException cause = new Common.Errors.TopicExistsException(Message);
@@ -81,10 +82,11 @@ public sealed class PublicNonGenericKafkaFutureTests
         waiting.AssertBlocked();
         Assert.True(completion.CompleteWithError(cause));
 
-        Assert.Same(cause, waiting.Join());
+        Assert.Same(cause, FutureAssert.Cause<TopicExistsException>(Assert.IsAssignableFrom<Exception>(waiting.Join())));
         for (int call = 0; call < 2; call++)
         {
-            TopicExistsException thrown = Assert.IsType<TopicExistsException>(BlockingCall.RunWait(() => future.Get()));
+            TopicExistsException thrown = FutureAssert.Cause<TopicExistsException>(
+                Assert.IsAssignableFrom<Exception>(BlockingCall.RunWait(() => future.Get())));
             Assert.Same(cause, thrown);
             Assert.Equal(Message, thrown.Message);
             Assert.Equal(36, thrown.Code);
@@ -212,8 +214,8 @@ public sealed class PublicNonGenericKafkaFutureTests
         }
         else
         {
-            Assert.Same(cause, observed);
-            Assert.Same(cause, BlockingCall.RunGet(() => typed.Get()));
+            Assert.Same(cause, FutureAssert.Unwrapped(observed));
+            Assert.Same(cause, FutureAssert.Unwrapped(BlockingCall.RunGet(() => typed.Get())));
         }
     }
 
@@ -339,9 +341,9 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
         Assert.False(ran);
-        Assert.Same(cause, Assert.Throws<TopicExistsException>(() => skipped.GetNow(-1)));
+        Assert.Same(cause, FutureAssert.Throws<TopicExistsException>(() => skipped.GetNow(-1)));
         Assert.Same(cause, seenFailure);
-        Assert.Same(cause, Assert.Throws<TopicExistsException>(() => after.GetNow()));
+        Assert.Same(cause, FutureAssert.Throws<TopicExistsException>(() => after.GetNow()));
     }
 
     [Fact]
@@ -350,7 +352,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture future = new KafkaFuture(new KafkaFutureImpl<object?>());
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
-        Assert.IsType<System.TimeoutException>(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
+        Assert.IsType<JavaTimeoutException>(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
         future.GetNow();
         BlockingCall waiting = BlockingCall.StartWait(() => future.Get(cancellation.Token));
         waiting.AssertBlocked();
@@ -400,7 +402,8 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.True(first.CompleteWithError(cause));
         Assert.False(all.IsDone);
         Assert.True(second.Complete(2));
-        Assert.Same(cause, BlockingCall.RunWait(() => all.Get()));
+        Assert.Same(
+            cause, FutureAssert.Cause<TopicExistsException>(Assert.IsAssignableFrom<Exception>(BlockingCall.RunWait(() => all.Get()))));
         Assert.True(all.IsCompletedExceptionally);
         Assert.False(all.IsCancelled);
 
@@ -521,7 +524,7 @@ public sealed class PublicNonGenericKafkaFutureTests
 
     private static void AssertFailedWith(KafkaException failure, object? outcome)
     {
-        TopicExistsException thrown = Assert.IsType<TopicExistsException>(outcome);
+        TopicExistsException thrown = FutureAssert.Cause<TopicExistsException>(Assert.IsAssignableFrom<Exception>(outcome));
         Assert.Same(failure, thrown);
         Assert.Equal("The operation failed.", thrown.Message);
     }

@@ -97,7 +97,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
             callback).Delivery();
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-delivery-error")));
 
-        await Assert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
 
         await TestTimeout.Run(() => WaitForCompletions(callback, 1), s_deadline);
 

@@ -105,8 +105,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>
     /// The first stage, which completes once the producer has the record, yielding the record's
     /// <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get()"/> for the
-    /// <see cref="RecordMetadata"/>, or for the delivery failure. Await the <see cref="ValueTask{TResult}"/>
-    /// once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
+    /// <see cref="RecordMetadata"/>, or for an <c>ExecutionException</c> around the delivery failure. Await the
+    /// <see cref="ValueTask{TResult}"/> once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
@@ -140,8 +140,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>
     /// The first stage, which completes once the producer has the record, yielding the record's
     /// <see cref="AsyncKafkaFuture{T}"/>; await its <see cref="AsyncKafkaFuture{T}.Get()"/> for the
-    /// <see cref="RecordMetadata"/>, or for the delivery failure. Await the <see cref="ValueTask{TResult}"/>
-    /// once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
+    /// <see cref="RecordMetadata"/>, or for an <c>ExecutionException</c> around the delivery failure. Await the
+    /// <see cref="ValueTask{TResult}"/> once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.

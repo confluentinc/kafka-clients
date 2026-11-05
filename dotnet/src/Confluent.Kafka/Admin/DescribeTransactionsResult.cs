@@ -81,7 +81,7 @@ public sealed class DescribeTransactionsResult
                 new Dictionary<string, TransactionDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<TransactionDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;

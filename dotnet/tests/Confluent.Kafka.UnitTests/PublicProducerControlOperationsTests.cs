@@ -64,7 +64,7 @@ public sealed class PublicProducerControlOperationsTests
             Assert.False(send.IsCompleted, "Flush waited for the send in progress");
 
             KafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => send, Deadline);
-            AssertMetadataTimeout(Assert.Throws<KafkaTimeoutException>(() => future.Get(Deadline)), topic, maxBlockMs, callback);
+            AssertMetadataTimeout(FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline)), topic, maxBlockMs, callback);
         }
         else
         {
@@ -79,7 +79,7 @@ public sealed class PublicProducerControlOperationsTests
 
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage, Deadline);
             AssertMetadataTimeout(
-                await Assert.ThrowsAsync<KafkaTimeoutException>(() => TestTimeout.Run(() => future.Get(), Deadline)),
+                await FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => TestTimeout.Run(() => future.Get(), Deadline)),
                 topic,
                 maxBlockMs,
                 callback);

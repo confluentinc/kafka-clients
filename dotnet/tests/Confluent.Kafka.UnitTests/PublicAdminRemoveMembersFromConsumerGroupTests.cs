@@ -50,14 +50,14 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             admin.RemoveMembersFromConsumerGroup("p5-group", options);
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         // The core attaches no cause to the mock's refusal, so InnerException stays null.
         Assert.Null(fromAll.InnerException);
 
         UnsupportedOperationException fromMember = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.MemberResult(member).Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.MemberResult(member).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromMember.Message);
         Assert.Null(fromMember.InnerException);
     }
@@ -74,7 +74,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             admin.RemoveMembersFromConsumerGroup("p5-group-all", options);
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
@@ -171,13 +171,13 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             new RemoveMembersFromConsumerGroupOptions(new[] { first, second, new MemberToRemove("instance-1") }));
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (MemberToRemove member in new[] { first, second, new MemberToRemove("instance-2") })
         {
             UnsupportedOperationException fromMember = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.MemberResult(member).Get()), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.MemberResult(member).Get()), s_deadline);
             Assert.Equal(NotImplemented, fromMember.Message);
         }
     }
@@ -202,7 +202,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             StringComparison.Ordinal);
         Assert.Equal("member", Assert.Throws<ArgumentNullException>(() => some.MemberResult(null!)).ParamName);
 
-        UnsupportedOperationException fromMember = Assert.Throws<UnsupportedOperationException>(() => some.MemberResult(new MemberToRemove("instance-1")).Get());
+        UnsupportedOperationException fromMember = FutureAssert.Throws<UnsupportedOperationException>(() => some.MemberResult(new MemberToRemove("instance-1")).Get());
         Assert.Equal(NotImplemented, fromMember.Message);
     }
 

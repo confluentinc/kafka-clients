@@ -221,7 +221,7 @@ public sealed class PublicProducerDeliveryCallbackTests
                 producer.Send(
                     new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
             }
-            catch (KafkaException)
+            catch (Confluent.Kafka.Java.Util.Concurrent.ExecutionException)
             {
                 invokedAtThrow = callback.Completions.Count == 1;
                 threadsAtThrow = callback.Threads;
@@ -252,7 +252,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         // Code 2 = CorruptMessage, which the core classifies retriable / non-fatal.
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("boom-delivery")));
 
-        CorruptRecordException thrown = await Assert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
+        CorruptRecordException thrown = await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
@@ -288,7 +288,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v")), callback);
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("no-partition")));
-        await Assert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
 
         (RecordMetadata Metadata, Exception? Exception) completion =
             Assert.Single(await SettledCompletions(callback, expected: 1));
@@ -315,7 +315,7 @@ public sealed class PublicProducerDeliveryCallbackTests
         DriveUntilResolved(() => producer.ErrorNext(injected));
 
         Exception failure = await Assert.ThrowsAnyAsync<Exception>(() => WithTimeout(sendTask));
-        Assert.Same(injected, failure);
+        Assert.Same(injected, FutureAssert.Unwrapped(failure));
         (RecordMetadata metadata, Exception? delivered) = Assert.Single(await SettledCompletions(callback, expected: 1));
         Assert.Same(injected, delivered);
         Assert.Equal(1, metadata.Partition);

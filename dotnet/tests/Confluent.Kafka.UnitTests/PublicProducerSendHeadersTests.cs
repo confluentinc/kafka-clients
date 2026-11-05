@@ -196,13 +196,13 @@ public sealed class PublicProducerSendHeadersTests
 
     private static void AssertMetadataTimeout(KafkaFuture<RecordMetadata> future)
     {
-        Common.Errors.TimeoutException failure = Assert.Throws<Common.Errors.TimeoutException>(() => future.Get(s_deadline));
+        Common.Errors.TimeoutException failure = FutureAssert.Throws<Common.Errors.TimeoutException>(() => future.Get(s_deadline));
         Assert.Equal(TimeoutCode, failure.Code);
     }
 
     private static async Task AssertMetadataTimeout(ValueTask<AsyncKafkaFuture<RecordMetadata>> send)
     {
-        Common.Errors.TimeoutException failure = await Assert.ThrowsAsync<Common.Errors.TimeoutException>(
+        Common.Errors.TimeoutException failure = await FutureAssert.ThrowsAsync<Common.Errors.TimeoutException>(
             () => TestTimeout.Run(() => send.Delivery(), s_deadline));
         Assert.Equal(TimeoutCode, failure.Code);
     }

@@ -968,7 +968,8 @@ foreign-thread rules are gone; the no-throw rule stays because the frame below i
     its type, code and message asserted (DoD §3).
   - A send error from the call keeps `self_` alive until destroy; if the core fires the callback
     later (a record appended before `maybeAddPartition` fails, BH:38221-38225), it fires once.
-  - `ErrorNext(exception)`: the same instance reaches the callback and `Get` (decision 15).
+  - `ErrorNext(exception)`: the same instance reaches the callback, and `Get` throws an
+    `ExecutionException` whose `InnerException` is that instance (decision 15).
   - A throwing user callback: reported through `local_callback` (the future keeps the record's
     outcome), one `Trace.TraceError` seen by a `TraceListener`, and the other records unaffected.
   - Aggressive GC while sends are in flight does not collect a delegate.

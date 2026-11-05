@@ -82,7 +82,7 @@ public sealed class DescribeProducersResult
             Dictionary<TopicPartition, PartitionProducerState> states = new Dictionary<TopicPartition, PartitionProducerState>(futures.Count);
             foreach (KeyValuePair<TopicPartition, KafkaFuture<PartitionProducerState>> entry in futures)
             {
-                states.Add(entry.Key, entry.Value.GetNow(null!));
+                states.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return states;

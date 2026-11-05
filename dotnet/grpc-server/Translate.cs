@@ -19,6 +19,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util.Concurrent;
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
 
@@ -122,18 +123,29 @@ internal static class Translate
     // As Python's _kafka_error_to_proto sends each class's _ffi_id: a class with an id (a KafkaException,
     // a Java-named class, CorrelationIdMismatchException) sends it; a .NET-only ArgumentException
     // precondition -3. Any other exception has no id, Python's TypeError (ArgumentNullException) and the
-    // Java-named classes without one included, and takes the server-made -4 fallback.
-    internal static Proto.KafkaError ToProto(Exception error) => KafkaException.FfiIdOf(error) switch
+    // Java-named classes without one included, and takes the server-made -4 fallback. A future's Get
+    // throws Java's ExecutionException around the failure; the failure is what is sent, as Python's
+    // _unwrapped sends an ExecutionError's cause.
+    internal static Proto.KafkaError ToProto(Exception error)
     {
-        int code => Coded(code, error),
-        null => error switch
+        Exception sent = Unwrapped(error);
+        return KafkaException.FfiIdOf(sent) switch
         {
-            ArgumentNullException => ServerMade(error),
-            IndexOutOfBoundsException => ServerMade(error),
-            ArgumentException => Coded(LocalIllegalArgumentCode, error),
-            _ => ServerMade(error),
-        },
-    };
+            int code => Coded(code, sent),
+            null => sent switch
+            {
+                ArgumentNullException => ServerMade(sent),
+                IndexOutOfBoundsException => ServerMade(sent),
+                ArgumentException => Coded(LocalIllegalArgumentCode, sent),
+                _ => ServerMade(sent),
+            },
+        };
+    }
+
+    // The error behind a future's Get failure: Java's ExecutionException wraps the cause the future
+    // failed with. Any other error is itself.
+    internal static Exception Unwrapped(Exception error) =>
+        error is ExecutionException { InnerException: { } cause } ? cause : error;
 
     private static GroupMembershipOperation GroupMembershipOperationFromName(string name) => name switch
     {

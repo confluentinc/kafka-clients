@@ -104,7 +104,7 @@ public sealed class PublicKafkaFutureTests
         Assert.True(future.IsDone);
         Assert.True(copy.IsDone);
         Assert.True(waiter.Join(s_deadline), $"Get() did not return within {s_deadline}.");
-        Assert.Same(outcome == "result" ? metadata : cause, observed);
+        Assert.Same(outcome == "result" ? metadata : cause, outcome == "result" ? observed : FutureAssert.Unwrapped(observed));
 
         Assert.True(future.IsDone);
     }
@@ -168,7 +168,7 @@ public sealed class PublicKafkaFutureTests
 
         for (int call = 0; call < 2; call++)
         {
-            KafkaTimeoutException thrown = Assert.Throws<KafkaTimeoutException>(() => future.Get());
+            KafkaTimeoutException thrown = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get());
             Assert.Same(cause, thrown);
             Assert.Equal(Message, thrown.Message);
             Assert.Equal(7, thrown.Code);
@@ -343,7 +343,7 @@ public sealed class PublicKafkaFutureTests
         KafkaFuture erasedFailure = new KafkaFuture<RecordMetadata>(failing);
         KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
-        Assert.Same(cause, Assert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
+        Assert.Same(cause, FutureAssert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
         Assert.True(erasedFailure.IsCompletedExceptionally);
     }
 
@@ -608,7 +608,7 @@ public sealed class PublicKafkaFutureTests
 
     private static void AssertFailsWith(KafkaException failure, Action call)
     {
-        KafkaTimeoutException thrown = Assert.Throws<KafkaTimeoutException>(call);
+        KafkaTimeoutException thrown = FutureAssert.Throws<KafkaTimeoutException>(call);
         Assert.Same(failure, thrown);
         Assert.Equal("The operation failed.", thrown.Message);
     }

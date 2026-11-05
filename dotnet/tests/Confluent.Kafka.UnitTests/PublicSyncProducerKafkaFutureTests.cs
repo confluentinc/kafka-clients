@@ -28,6 +28,7 @@ using Confluent.Kafka.Producer;
 using Xunit;
 using Xunit.Abstractions;
 using Xunit.Sdk;
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -183,9 +184,9 @@ public sealed class PublicSyncProducerKafkaFutureTests
             TestTimeout.Run(() => first = Capture(() => future.Get()), s_deadline);
             TestTimeout.Run(() => second = Capture(() => future.Get()), s_deadline);
 
-            // Unwrapped, and the same instance.
-            KafkaException failure = Assert.IsAssignableFrom<KafkaException>(first);
-            Assert.Same(first, second);
+            // Each Get throws an ExecutionException around the same instance.
+            KafkaException failure = FutureAssert.CauseAny<KafkaException>(first);
+            Assert.Same(failure, FutureAssert.CauseAny<KafkaException>(second));
             Assert.Equal($"Topic {ApiTopic} not present in metadata after 200 ms.", failure.Message);
             Assert.Equal(7, failure.Code);
 
@@ -263,7 +264,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         TestTimeout.Run(producer.Close, s_deadline);
 
-        Assert.Throws<TimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(200)));
+        JavaTimeoutException timedOut = Assert.Throws<JavaTimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(200)));
+        Assert.Equal("Timeout after waiting for 200 ms.", timedOut.Message);
         Assert.False(future.IsDone);
         Assert.Equal(0, callback.Count);
     }

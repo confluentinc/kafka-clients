@@ -63,7 +63,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
             });
 
         UnsupportedOperationException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
         Assert.Equal(NotImplemented, failure.Message);
 
         ListOffsetsResult.ListOffsetsResultInfo earliest =
@@ -129,8 +129,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
 
         Assert.NotNull(await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline));
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(bad).Get()), s_deadline);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(bad).Get()), s_deadline);
+        await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]
@@ -327,10 +327,10 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
 
         KafkaTimeoutException explicitNull = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),
             s_deadline);
         KafkaTimeoutException optionsOnly = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(options).Reassignments().Get()),
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(options).Reassignments().Get()),
             s_deadline);
 
         // 7 is REQUEST_TIMED_OUT, the same on both forms: a form that dropped its options would wait out the client

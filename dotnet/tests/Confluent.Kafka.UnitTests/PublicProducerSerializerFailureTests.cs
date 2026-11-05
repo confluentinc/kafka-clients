@@ -83,7 +83,7 @@ public sealed class PublicProducerSerializerFailureTests
         Assert.Equal(Environment.CurrentManagedThreadId, threadId);
         AssertPlaceholder(metadata, partition: 3);
 
-        Assert.Same(value.LastThrown, await Assert.ThrowsAsync<RecordTooLargeException>(() => future));
+        Assert.Same(value.LastThrown, await FutureAssert.ThrowsAsync<RecordTooLargeException>(() => future));
         Assert.Single(callback.Completions);
         Assert.Equal(1, value.InvocationCount);
         Assert.Equal(0, producer.HistoryCount());
@@ -98,7 +98,7 @@ public sealed class PublicProducerSerializerFailureTests
 
         Task<RecordMetadata> future = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), null);
 
-        Assert.Same(key.LastThrown, await Assert.ThrowsAsync<TopicAuthorizationException>(() => future));
+        Assert.Same(key.LastThrown, await FutureAssert.ThrowsAsync<TopicAuthorizationException>(() => future));
         Assert.Equal(0, producer.HistoryCount());
     }
 
@@ -157,7 +157,7 @@ public sealed class PublicProducerSerializerFailureTests
 
         Assert.Same(
             value.LastThrown,
-            await Assert.ThrowsAsync<RecordTooLargeException>(() => TestTimeout.Run(() => future.Get(), s_deadline)));
+            await FutureAssert.ThrowsAsync<RecordTooLargeException>(() => TestTimeout.Run(() => future.Get(), s_deadline)));
         Assert.Equal(1, callback.Calls);
     }
 
@@ -175,7 +175,7 @@ public sealed class PublicProducerSerializerFailureTests
 
         Assert.Same(
             value.LastThrown,
-            await Assert.ThrowsAsync<RecordTooLargeException>(() => TestTimeout.Run(() => future.Get(), s_deadline)));
+            await FutureAssert.ThrowsAsync<RecordTooLargeException>(() => TestTimeout.Run(() => future.Get(), s_deadline)));
     }
 
     [Theory]

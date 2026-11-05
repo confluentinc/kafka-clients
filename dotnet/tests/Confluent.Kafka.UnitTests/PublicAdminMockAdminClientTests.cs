@@ -481,7 +481,7 @@ public sealed class PublicAdminMockAdminClientTests
         sync.MarkTopicForDeletion("t");
         KafkaFuture<TopicDescription> syncDescribed =
             sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues!["t"];
-        Assert.Equal(UnknownTopicOrPartitionCode, Assert.Throws<UnknownTopicOrPartitionException>(() => syncDescribed.Get(s_deadline)).Code);
+        Assert.Equal(UnknownTopicOrPartitionCode, FutureAssert.Throws<UnknownTopicOrPartitionException>(() => syncDescribed.Get(s_deadline)).Code);
         Assert.Equal("No such topic as x", Assert.Throws<IllegalArgumentException>(() => sync.SetFetchesRemainingUntilVisible("x", 1)).Message);
 
         AsyncMockAdminClient async = AsyncAdmin();
@@ -494,7 +494,7 @@ public sealed class PublicAdminMockAdminClientTests
         AsyncKafkaFuture<TopicDescription> asyncDescribed =
             async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues!["t"];
         UnknownTopicOrPartitionException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => asyncDescribed.Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => asyncDescribed.Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, asyncFailure.Code);
         Assert.Equal("No such topic as x", Assert.Throws<IllegalArgumentException>(() => async.SetFetchesRemainingUntilVisible("x", 1)).Message);
     }
@@ -528,13 +528,13 @@ public sealed class PublicAdminMockAdminClientTests
         MockAdminClient sync = MockAdminClient.Create().Brokers(brokers).BrokerLogDirs(logDirs).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         KafkaFuture syncCreated = sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values["t"];
-        Assert.Equal("Broker 0 has no log directories.", Assert.Throws<IllegalArgumentException>(() => syncCreated.Get(s_deadline)).Message);
+        Assert.Equal("Broker 0 has no log directories.", FutureAssert.Throws<IllegalArgumentException>(() => syncCreated.Get(s_deadline)).Message);
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Brokers(brokers).BrokerLogDirs(logDirs).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AsyncKafkaFuture asyncCreated = async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values["t"];
         IllegalArgumentException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<IllegalArgumentException>(() => asyncCreated.Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<IllegalArgumentException>(() => asyncCreated.Get()), s_deadline);
         Assert.Equal("Broker 0 has no log directories.", asyncFailure.Message);
     }
 
@@ -549,7 +549,7 @@ public sealed class PublicAdminMockAdminClientTests
         sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(s_deadline);
         sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/b" }).Values[replica].Get(s_deadline);
         KafkaFuture syncOffline = sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values[replica];
-        KafkaStorageException syncFailure = Assert.Throws<KafkaStorageException>(() => syncOffline.Get(s_deadline));
+        KafkaStorageException syncFailure = FutureAssert.Throws<KafkaStorageException>(() => syncOffline.Get(s_deadline));
         Assert.Equal(KafkaStorageErrorCode, syncFailure.Code);
         Assert.Equal("Log directory /c is offline", syncFailure.Message);
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo syncInfo =
@@ -566,7 +566,7 @@ public sealed class PublicAdminMockAdminClientTests
         AsyncKafkaFuture asyncOffline =
             async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values[replica];
         KafkaStorageException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaStorageException>(() => asyncOffline.Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => asyncOffline.Get()), s_deadline);
         Assert.Equal(KafkaStorageErrorCode, asyncFailure.Code);
         Assert.Equal("Log directory /c is offline", asyncFailure.Message);
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo asyncInfo = await TestTimeout.Run(

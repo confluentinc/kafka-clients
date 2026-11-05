@@ -69,10 +69,10 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (TopicPartition partition in s_partitions)
         {
-            AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.PartitionResult(partition).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.PartitionResult(partition).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -85,10 +85,10 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.Description(id).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.Description(id).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public sealed class PublicAdminTransactionsTests
 
         AbortTransactionResult result = admin.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 1000 });
 
-        AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -113,12 +113,12 @@ public sealed class PublicAdminTransactionsTests
         Assert.Equal(s_transactionalIds.Length, result.FencedProducers.Count);
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.FencedProducers[id].Get(s_deadline)));
-            AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.ProducerId(id).Get(s_deadline)));
-            AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.EpochId(id).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.FencedProducers[id].Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.ProducerId(id).Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.EpochId(id).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -130,7 +130,7 @@ public sealed class PublicAdminTransactionsTests
         TerminateTransactionResult result =
             admin.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 1000 });
 
-        AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => result.Result().Get(s_deadline)));
+        AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.Result().Get(s_deadline)));
     }
 
     [Fact]
@@ -147,21 +147,21 @@ public sealed class PublicAdminTransactionsTests
         foreach (TopicPartition partition in s_partitions)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => producers.PartitionResult(partition).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => producers.PartitionResult(partition).Get()), s_deadline));
         }
 
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => transactions.Description(id).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => transactions.Description(id).Get()), s_deadline));
         }
 
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => producers.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => producers.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => transactions.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => transactions.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => abort.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => abort.All().Get()), s_deadline));
     }
 
     [Fact]
@@ -176,17 +176,17 @@ public sealed class PublicAdminTransactionsTests
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers[id].Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => fence.ProducerId(id).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.ProducerId(id).Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => fence.EpochId(id).Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.EpochId(id).Get()), s_deadline));
         }
 
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => fence.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => terminate.Result().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => terminate.Result().Get()), s_deadline));
     }
 
     [Fact]
@@ -221,15 +221,15 @@ public sealed class PublicAdminTransactionsTests
 
             if (round == 0)
             {
-                AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => producers.All().Get(s_deadline)));
-                AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => transactions.All().Get(s_deadline)));
-                AssertNotImplemented(Assert.Throws<UnsupportedOperationException>(() => abort.All().Get(s_deadline)));
+                AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => producers.All().Get(s_deadline)));
+                AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => transactions.All().Get(s_deadline)));
+                AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => abort.All().Get(s_deadline)));
                 AssertNotImplemented(await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<UnsupportedOperationException>(() => asyncProducers.All().Get()), s_deadline));
+                    () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => asyncProducers.All().Get()), s_deadline));
                 AssertNotImplemented(await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<UnsupportedOperationException>(() => asyncTransactions.All().Get()), s_deadline));
+                    () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => asyncTransactions.All().Get()), s_deadline));
                 AssertNotImplemented(await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<UnsupportedOperationException>(() => asyncAbort.All().Get()), s_deadline));
+                    () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => asyncAbort.All().Get()), s_deadline));
             }
         }
 
@@ -289,15 +289,15 @@ public sealed class PublicAdminTransactionsTests
         AsyncAbortTransactionResult asyncAbort =
             async.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 10 });
 
-        AssertTimedOut(ProducersCall, Assert.Throws<KafkaTimeoutException>(() => producers.All().Get(s_deadline)));
-        AssertTimedOut(TransactionsCall, Assert.Throws<KafkaTimeoutException>(() => transactions.All().Get(s_deadline)));
-        AssertTimedOut(AbortCall, Assert.Throws<KafkaTimeoutException>(() => abort.All().Get(s_deadline)));
+        AssertTimedOut(ProducersCall, FutureAssert.Throws<KafkaTimeoutException>(() => producers.All().Get(s_deadline)));
+        AssertTimedOut(TransactionsCall, FutureAssert.Throws<KafkaTimeoutException>(() => transactions.All().Get(s_deadline)));
+        AssertTimedOut(AbortCall, FutureAssert.Throws<KafkaTimeoutException>(() => abort.All().Get(s_deadline)));
         AssertTimedOut(ProducersCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncProducers.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncProducers.All().Get()), s_deadline));
         AssertTimedOut(TransactionsCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncTransactions.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncTransactions.All().Get()), s_deadline));
         AssertTimedOut(AbortCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncAbort.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncAbort.All().Get()), s_deadline));
     }
 
     [Fact]
@@ -318,19 +318,19 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (string id in s_transactionalIds)
         {
-            AssertTimedOut(FenceCall, Assert.Throws<KafkaTimeoutException>(() => fence.FencedProducers[id].Get(s_deadline)));
-            AssertTimedOut(FenceCall, Assert.Throws<KafkaTimeoutException>(() => fence.ProducerId(id).Get(s_deadline)));
-            AssertTimedOut(FenceCall, Assert.Throws<KafkaTimeoutException>(() => fence.EpochId(id).Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.FencedProducers[id].Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.ProducerId(id).Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.EpochId(id).Get(s_deadline)));
             AssertTimedOut(FenceCall, await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers[id].Get()), s_deadline));
         }
 
-        AssertTimedOut(FenceCall, Assert.Throws<KafkaTimeoutException>(() => fence.All().Get(s_deadline)));
-        AssertTimedOut(FenceCall, Assert.Throws<KafkaTimeoutException>(() => terminate.Result().Get(s_deadline)));
+        AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.All().Get(s_deadline)));
+        AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => terminate.Result().Get(s_deadline)));
         AssertTimedOut(FenceCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.All().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.All().Get()), s_deadline));
         AssertTimedOut(FenceCall, await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncTerminate.Result().Get()), s_deadline));
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncTerminate.Result().Get()), s_deadline));
     }
 
     [Fact]

@@ -111,7 +111,7 @@ public sealed class AsyncListConsumerGroupOffsetsResult
             Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> offsets = new Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in futures)
             {
-                offsets.Add(entry.Key, entry.Value.GetNow(null!));
+                offsets.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return offsets;

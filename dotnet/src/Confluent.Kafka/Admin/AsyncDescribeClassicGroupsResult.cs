@@ -73,7 +73,7 @@ public sealed class AsyncDescribeClassicGroupsResult
             Dictionary<string, ClassicGroupDescription> descriptions = new Dictionary<string, ClassicGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;

@@ -32,8 +32,8 @@ namespace Confluent.Kafka.Producer;
 /// <see cref="KafkaFuture{T}"/> once the producer has the record, as Java's <c>send</c> does. It blocks only
 /// while the producer waits for the topic's metadata or for buffer memory, up to <c>max.block.ms</c>, and
 /// the key and value buffers can be reused when it returns. <see cref="KafkaFuture{T}.Get()"/> blocks until
-/// the cluster acknowledges the record, or rethrows its failure unwrapped. A discarded future leaks nothing,
-/// and a callback passed to <c>Send</c> still runs.
+/// the cluster acknowledges the record, or throws an <c>ExecutionException</c> around its failure. A discarded
+/// future leaks nothing, and a callback passed to <c>Send</c> still runs.
 /// </para>
 /// <para>
 /// On <see cref="KafkaProducer{TKey, TValue}"/>, a serializer that throws an <see cref="ApiException"/> fails the
@@ -69,7 +69,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </summary>
     /// <param name="record">The record to publish.</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
-    /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
+    /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
+    /// failure.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged.</exception>
@@ -95,7 +96,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <param name="record">The record to publish.</param>
     /// <param name="callback">The delivery callback (non-null).</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
-    /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
+    /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
+    /// failure.</returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>

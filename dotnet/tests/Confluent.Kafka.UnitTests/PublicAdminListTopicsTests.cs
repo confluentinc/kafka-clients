@@ -499,7 +499,7 @@ public sealed class PublicAdminListTopicsTests
 
     private static void AssertThreadExited(Exception? thrown)
     {
-        KafkaTimeoutException error = Assert.IsType<KafkaTimeoutException>(thrown);
+        KafkaTimeoutException error = FutureAssert.Cause<KafkaTimeoutException>(Assert.IsAssignableFrom<Exception>(thrown));
         Assert.Equal(7, error.Code);
         Assert.Equal(ThreadExited, error.Message);
         Assert.IsAssignableFrom<Common.Errors.RetriableException>(error);

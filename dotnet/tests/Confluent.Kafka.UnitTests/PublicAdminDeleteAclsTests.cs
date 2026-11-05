@@ -51,7 +51,7 @@ public sealed class PublicAdminDeleteAclsTests
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
         Assert.True(result.Values.ContainsKey(lookup));
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -82,7 +82,7 @@ public sealed class PublicAdminDeleteAclsTests
             Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Host);
         }
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -107,9 +107,9 @@ public sealed class PublicAdminDeleteAclsTests
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
-        await Assert.ThrowsAsync<UnsupportedOperationException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
@@ -122,12 +122,12 @@ public sealed class PublicAdminDeleteAclsTests
         AclBindingFilter first = Filter("solo-first");
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { first, Filter("solo-second") });
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public sealed class PublicAdminDeleteAclsTests
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("dup"), Filter("dup") });
 
         Assert.Single(result.Values);
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -164,7 +164,7 @@ public sealed class PublicAdminDeleteAclsTests
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { filter });
 
         Assert.Equal("tópico-café-日本", Assert.Single(result.Values).Key.PatternFilter.Name);
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]

@@ -145,7 +145,7 @@ public sealed class PublicAdminConfigsTests
         await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-absent", failure.Message);
     }
 
@@ -250,7 +250,7 @@ public sealed class PublicAdminConfigsTests
                 [absent] = Array.Empty<AlterConfigOp>(),
             });
         UnknownTopicOrPartitionException zeroOpsFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => zeroOps.Values[absent].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => zeroOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
         // The same absent resource with one operation is sent, so the core rejects it.
@@ -260,7 +260,7 @@ public sealed class PublicAdminConfigsTests
                 [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values[absent].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
     }
 
@@ -278,7 +278,7 @@ public sealed class PublicAdminConfigsTests
         Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
 
         UnsupportedOperationException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Values[undefined].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Values[undefined].Get()), s_deadline);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 

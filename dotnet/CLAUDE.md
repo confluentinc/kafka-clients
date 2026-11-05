@@ -302,7 +302,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
         bool autoComplete = true);
     public bool CompleteNext();
-    public bool ErrorNext(Exception exception);   // Java errorNext(RuntimeException); Get and the callback see the same instance
+    public bool ErrorNext(Exception exception);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
     public void Clear();
 }
@@ -722,10 +722,18 @@ not transfer). **If you cannot check, assume it blocks.** (Since M19/P1 `seek` a
   `AsyncKafkaFuture<T>` inside `AsyncCreateTopicsResult`, against `KafkaFuture<T>` inside
   `CreateTopicsResult`.
 
-**Futures (M19/P1, decisions 18 and 32).** A failed `KafkaFuture.Get()` rethrows the original
-exception, as `await` on an `AsyncKafkaFuture` does. It is not wrapped in an `ExecutionException`
-/ `AggregateException`. This is a recorded deviation from Java and Python (both wrap); adding a
-wrapper later would break callers (decision 18).
+**Futures (M19/P1, decision 32).** As in Java and Python, a failed future's `Get()`,
+`Get(TimeSpan)`, `Get(CancellationToken)` and `GetNow` throw
+`Confluent.Kafka.Java.Util.Concurrent.ExecutionException`, and the async `Get` tasks fault with
+it: its `InnerException` is the stored failure and its message the failure's Java `toString()`
+(`<class>: <message>`, the class alone when there is no message). This replaces the earlier
+rethrow-unchanged deviation (decision 18). An `OperationCanceledException` given as the error of
+an ordinary future cancels it, so it is thrown as it is, as Java's `KafkaFutureImpl.get` throws a
+stored `CancellationException`. A send's future cannot be cancelled, so there it is a failure like
+any other and goes inside the `ExecutionException`, as Java's `FutureRecordMetadata` wraps every
+error (an `ErrorNext(new OperationCanceledException())` included). `WhenComplete` actions, `ThenApply`
+functions' dependants, the delivery and commit callbacks and `ToCompletionStage()` see the failure
+itself, never the wrapper.
 
 *(Decision 32 = yes, Agreed 2026-10-17.)* `KafkaFuture<T>`, `KafkaFuture`, `AsyncKafkaFuture<T>` and
 `AsyncKafkaFuture` are `readonly struct`s that carry Java's `KafkaFuture` members, in Java's order:
@@ -738,10 +746,15 @@ Java's `KafkaFutureImpl` format. `BaseFunction` and `BiConsumer` are delegates n
   their `WhenComplete` an `Action<Exception?>`, because .NET has no `Void`. `KafkaFuture<T>`
   converts implicitly to `KafkaFuture` (the same future), so `AllOf` takes mixed types, and
   `AllOf<T>(params KafkaFuture<T>[])` takes an array of one type. The async structs match.
-- `ToCompletionStage()` exists on the async structs only and returns the same `Task` as `Get()`.
-  The sync structs hand out no `Task`. *(Q13 = (a), ledger 45: the line stands.)*
+- `ToCompletionStage()` exists on the async structs only. It returns the future's own `Task`, the
+  same on every call, which faults with the failure itself; `Get()` returns a different `Task`,
+  which faults with the `ExecutionException`. The sync structs hand out no `Task`. *(Q13 = (a),
+  ledger 45.)*
 - The async `Get` forms return a `Task`; no struct has a `GetAwaiter`.
-- A timeout throws `System.TimeoutException`. A negative or zero timeout checks once, as Java;
+- A timeout throws Java's `TimeoutException` (`Confluent.Kafka.Java.Util.Concurrent`, a
+  `System.TimeoutException`): with no message, as `CompletableFuture.get`, and for a send's
+  future with `FutureRecordMetadata`'s "Timeout after waiting for <ms> ms.", the milliseconds
+  truncated. A negative or zero timeout checks once, as Java;
   `Timeout.InfiniteTimeSpan` waits like `Get()`. A cancelled future throws
   `OperationCanceledException`.
 - A send's future is the same type. Its `Cancel(bool)` returns `false` and changes nothing, and

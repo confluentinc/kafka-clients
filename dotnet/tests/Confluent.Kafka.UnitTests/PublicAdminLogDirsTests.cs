@@ -159,7 +159,7 @@ public sealed class PublicAdminLogDirsTests
             new Dictionary<TopicPartitionReplica, string> { [replica] = "/mnt/absent" });
 
         KafkaStorageException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaStorageException>(() => result.Values[replica].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => result.Values[replica].Get()), s_deadline);
         Assert.Equal("Log directory /mnt/absent is offline", failure.Message);
     }
 
@@ -176,7 +176,7 @@ public sealed class PublicAdminLogDirsTests
             new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir });
 
         ReplicaNotAvailableException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values[replica].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values[replica].Get()), s_deadline);
 
         // The core renders the replica into this message, which is why ToString is topic-partition-brokerId.
         Assert.Equal($"Can't find {replica}", failure.Message);

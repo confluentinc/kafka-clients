@@ -218,7 +218,7 @@ public sealed class AdminStringsTests
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
                 admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.All().Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
         }
@@ -242,7 +242,7 @@ public sealed class AdminStringsTests
 
             AsyncDescribeClientQuotasResult result =
                 AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: null));
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
             Assert.Equal("Not implement yet", failure.Message);
         }
@@ -291,7 +291,7 @@ public sealed class AdminStringsTests
             Assert.Equal("userName", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Description("alice").Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
         }

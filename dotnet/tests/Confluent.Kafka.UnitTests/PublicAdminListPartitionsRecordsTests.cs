@@ -90,12 +90,12 @@ public sealed class PublicAdminListPartitionsRecordsTests
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
         Task perTopic = Assert.Single(result.Values).Value.Get();
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             });
 
         Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value.Get();
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perPartition, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
@@ -212,7 +212,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             };
         Assert.Equal(2, offsets.Count);
         AsyncListOffsetsResult listed = admin.ListOffsets(offsets);
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => listed.PartitionResult(new TopicPartition(Topic, 0)).Get(), s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }
@@ -343,7 +343,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline));
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(
                 () => admin.CreatePartitions(
                     new Dictionary<string, NewPartitions> { ["p2b-smoke"] = NewPartitions.IncreaseTo(2) }).All().Get(),

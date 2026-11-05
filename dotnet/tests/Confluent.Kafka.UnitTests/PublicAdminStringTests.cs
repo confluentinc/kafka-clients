@@ -354,7 +354,7 @@ public sealed class PublicAdminStringTests
 
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
-        UnknownTopicOrPartitionException absent = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException absent = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 

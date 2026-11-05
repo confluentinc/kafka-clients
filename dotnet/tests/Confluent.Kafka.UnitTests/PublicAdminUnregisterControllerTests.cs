@@ -56,7 +56,7 @@ public sealed class PublicAdminUnregisterControllerTests
         UnregisterControllerResult result = admin.UnregisterController(
             controllerId, withOptions ? new UnregisterControllerOptions { TimeoutMs = 1000 } : null);
 
-        UnsupportedVersionException failure = Assert.Throws<UnsupportedVersionException>(() => result.All().Get(s_deadline));
+        UnsupportedVersionException failure = FutureAssert.Throws<UnsupportedVersionException>(() => result.All().Get(s_deadline));
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(string.Empty, failure.Message);
     }
@@ -76,7 +76,7 @@ public sealed class PublicAdminUnregisterControllerTests
             controllerId, withOptions ? new UnregisterControllerOptions { TimeoutMs = 1000 } : null);
 
         UnsupportedVersionException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedVersionException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedVersionException>(() => result.All().Get()), s_deadline);
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(string.Empty, failure.Message);
     }
@@ -121,9 +121,9 @@ public sealed class PublicAdminUnregisterControllerTests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().UsingRaftController(false).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        UnsupportedVersionException syncFailure = Assert.Throws<UnsupportedVersionException>(() => sync.UnregisterController(1).All().Get(s_deadline));
+        UnsupportedVersionException syncFailure = FutureAssert.Throws<UnsupportedVersionException>(() => sync.UnregisterController(1).All().Get(s_deadline));
         UnsupportedVersionException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedVersionException>(() => async.UnregisterController(1).All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedVersionException>(() => async.UnregisterController(1).All().Get()), s_deadline);
 
         Assert.Equal(UnsupportedVersionCode, syncFailure.Code);
         Assert.Equal(string.Empty, syncFailure.Message);
@@ -144,8 +144,8 @@ public sealed class PublicAdminUnregisterControllerTests
         Assert.True(syncResult.All() == syncResult.All());
         Assert.True(asyncResult.All() == asyncResult.All());
 
-        Assert.Throws<UnsupportedVersionException>(() => syncResult.All().Get(s_deadline));
-        await TestTimeout.Run(() => Assert.ThrowsAsync<UnsupportedVersionException>(() => asyncResult.All().Get()), s_deadline);
+        FutureAssert.Throws<UnsupportedVersionException>(() => syncResult.All().Get(s_deadline));
+        await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedVersionException>(() => asyncResult.All().Get()), s_deadline);
 
         Assert.True(syncResult.All() == syncResult.All());
         Assert.True(asyncResult.All() == asyncResult.All());
@@ -166,9 +166,9 @@ public sealed class PublicAdminUnregisterControllerTests
         AsyncUnregisterControllerResult asyncResult =
             async.UnregisterController(1, new UnregisterControllerOptions { TimeoutMs = 10 });
 
-        KafkaTimeoutException syncFailure = Assert.Throws<KafkaTimeoutException>(() => syncResult.All().Get(s_deadline));
+        KafkaTimeoutException syncFailure = FutureAssert.Throws<KafkaTimeoutException>(() => syncResult.All().Get(s_deadline));
         KafkaTimeoutException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(() => asyncResult.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncResult.All().Get()), s_deadline);
 
         Assert.Equal(RequestTimedOutCode, syncFailure.Code);
         Assert.IsAssignableFrom<Common.Errors.RetriableException>(syncFailure);
