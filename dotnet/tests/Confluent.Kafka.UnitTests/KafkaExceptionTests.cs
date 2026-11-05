@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -32,7 +33,7 @@ public sealed class KafkaExceptionTests
     private const string ClassicUnsupported =
         "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848).";
 
-    private static Dictionary<string, string> BaseConfig() => new()
+    private static Dictionary<string, object?> BaseConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
     };
@@ -40,7 +41,7 @@ public sealed class KafkaExceptionTests
     [Fact]
     public void ClassicGroupProtocol_ThrowsNotSupportedException()
     {
-        Dictionary<string, string> config = BaseConfig();
+        Dictionary<string, object?> config = BaseConfig();
         config["group.protocol"] = "classic";
 
         NotSupportedException ex = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(config));
@@ -59,12 +60,17 @@ public sealed class KafkaExceptionTests
     [Fact]
     public void NonAsciiInvalidConfigValue_ErrorMessageEchoesValue()
     {
-        Dictionary<string, string> config = BaseConfig();
+        Dictionary<string, object?> config = BaseConfig();
         config["group.protocol"] = "café";
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => NativeConsumer.Create(config));
+        ConfigException ex = Assert.Throws<ConfigException>(() => NativeConsumer.Create(config));
 
-        Assert.Contains("café", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            "Invalid value café for configuration group.protocol: "
+            + "String must be one of (case insensitive): CONSUMER, CLASSIC",
+            ex.Message);
+        Assert.Equal(-10, ex.Code);
+        Assert.False(ex.IsRetriable);
     }
 
     [Fact]

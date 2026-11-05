@@ -113,7 +113,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public void RealProducers_DeclareTheCallbackOverload()
     {
         // The real clients cannot be driven broker-free, so this pins only that the overload is callable on them.
-        Dictionary<string, string> config = new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" };
+        Dictionary<string, object?> config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
 
         AsyncKafkaProducer<byte[], byte[]> asyncProducer =
             new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);

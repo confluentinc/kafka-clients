@@ -36,7 +36,7 @@ internal sealed class ConsumerScript
     private int _polls;
     private bool _disposedAsync;
 
-    internal IReadOnlyDictionary<string, string>? Config { get; set; }
+    internal IReadOnlyDictionary<string, object?>? Config { get; set; }
 
     internal ConsumerHandle? Handle { get; set; }
 

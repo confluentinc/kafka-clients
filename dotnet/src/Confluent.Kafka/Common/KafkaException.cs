@@ -14,6 +14,7 @@
 
 using System;
 
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Common;
@@ -34,6 +35,8 @@ public class KafkaException : Exception
     private const int LocalIllegalState = -4;
 
     private const int LocalTimeout = -5;
+
+    private protected const int Config = -10;
 
     private const int LocalUnsupportedOperation = -31;
 
@@ -176,6 +179,7 @@ public class KafkaException : Exception
                 LocalIllegalArgument => new ArgumentException(message, inner),
                 LocalTimeout => new TimeoutException(message, inner),
                 LocalUnsupportedOperation => new NotSupportedException(message, inner),
+                Config => ConfigException.FromCore(message, inner),
                 _ => new KafkaException(code, message, isRetriable, inner),
             };
         }

@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
@@ -43,7 +44,7 @@ public sealed class KafkaExceptionCauseTests
 
     private static KafkaException CreateWithBadBootstrap() =>
         Assert.Throws<KafkaException>(
-            () => new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = BadBootstrap }));
+            () => new KafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = BadBootstrap }));
 
     [Fact]
     public void AdminClientCreate_BadBootstrap_CarriesTheCoreCauseAsInnerException()
@@ -54,7 +55,7 @@ public sealed class KafkaExceptionCauseTests
         Assert.Equal("Failed to create new KafkaAdminClient", outer.Message);
         Assert.False(outer.IsRetriable);
 
-        KafkaException inner = Assert.IsType<KafkaException>(outer.InnerException);
+        ConfigException inner = Assert.IsType<ConfigException>(outer.InnerException);
         Assert.Equal(ConfigErrorCode, inner.Code);
         Assert.Equal("Invalid url in bootstrap.servers: " + BadBootstrap, inner.Message);
         Assert.False(inner.IsRetriable);

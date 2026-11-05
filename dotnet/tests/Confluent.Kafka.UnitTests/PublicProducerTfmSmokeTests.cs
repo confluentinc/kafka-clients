@@ -67,7 +67,7 @@ public sealed class PublicProducerTfmSmokeTests
     public async Task RealProducer_CreateDisposeAsync_RoundTrips()
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 

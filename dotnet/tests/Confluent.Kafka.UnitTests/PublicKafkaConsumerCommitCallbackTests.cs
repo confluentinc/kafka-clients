@@ -433,7 +433,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
 
     private static KafkaConsumer<byte[], byte[]> NewConsumer(bool? enableAutoCommit = null)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>
+        Dictionary<string, object?> config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["group.protocol"] = "consumer",

@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -34,8 +35,8 @@ public sealed class PublicAdminTeardownTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Fact]
     public void Dispose_IsIdempotent()
@@ -153,8 +154,8 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public void SaslPlaintextWithoutAMechanism_FailsWithTheCoresConfigError()
     {
-        KafkaException failure = Assert.Throws<KafkaException>(() => new KafkaAdminClient(
-            new Dictionary<string, string>(StringComparer.Ordinal)
+        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(
+            new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["bootstrap.servers"] = "127.0.0.1:1",
                 ["security.protocol"] = "SASL_PLAINTEXT",
@@ -186,7 +187,7 @@ public sealed class PublicAdminTeardownTests
             Assert.Throws<ObjectDisposedException>(() => mock.ListTopics()).ObjectName);
 
         KafkaAdminClient real = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         TestTimeout.Run(real.Dispose, s_deadline);
         Assert.Equal(
             nameof(KafkaAdminClient),
@@ -233,24 +234,48 @@ public sealed class PublicAdminTeardownTests
     public async Task RealClient_ConstructsAndTearsDownWithoutABroker()
     {
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
     }
 
     [Fact]
-    public void RealClient_RejectsANullConfigValue()
+    public void RealClient_RejectsANullConfigValueItsValidatorRefuses()
     {
-        ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = null! }));
-        Assert.Equal("config", failure.ParamName);
-        Assert.StartsWith(
-            "Configuration value for key 'bootstrap.servers' must not be null.",
-            failure.Message,
-            StringComparison.Ordinal);
+        ConfigException failure = Assert.Throws<ConfigException>(
+            () => new KafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = null }));
 
+        Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", failure.Message);
+        Assert.Equal(-10, failure.Code);
+        Assert.False(failure.IsRetriable);
+    }
+
+    [Fact]
+    public void RealClient_LeavesANullConfigValueWithNoValidatorUnset()
+    {
+        var config = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9092",
+            ["sasl.login.connect.timeout.ms"] = null,
+        };
+
+        KafkaAdminClient admin = new KafkaAdminClient(config);
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+
+        config["sasl.login.connect.timeout.ms"] = "";
+        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(config));
         Assert.Equal(
-            "config",
+            "Invalid value  for configuration sasl.login.connect.timeout.ms: Not a number of type INT",
+            failure.Message);
+        Assert.Equal(-10, failure.Code);
+    }
+
+    [Fact]
+    public void RealClient_RejectsANullConfigMap()
+    {
+        Assert.Equal(
+            "configs",
             Assert.Throws<ArgumentNullException>(() => new KafkaAdminClient(null!)).ParamName);
     }
 }

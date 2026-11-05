@@ -98,8 +98,14 @@ only if that friction bites — cheap and non-breaking.
     `kafka_common_Error_source_err` is borrowed and never destroyed. `int8_t` returns marshal as
     `sbyte`. A managed exception crosses the core only as a `local_callback` error whose opaque is
     a `GCHandle`, freed by the release callback.
-  - Prefer `ProducerProperties_put` / `ConsumerProperties_put` over `_from_configs`
-    (avoids marshalling a `const char *const *`).
+  - A client's configuration crosses as one `kafka_Map_t` of NUL-terminated UTF-8 keys and values
+    (`kafka_Map_new_err`, `kafka_Map_put_err`), read by the client's config constructor
+    (`kafka_producer_ProducerConfig_new`, `kafka_consumer_ConsumerConfig_new`,
+    `kafka_admin_AdminClientConfig_new`) and freed, with the config, after the client's
+    constructor. The ABI takes text only, so each value is checked and converted to Java's text
+    first (`dotnet/CLAUDE.md` §4 **Config**). A `NULL` value reads as `""`
+    (`rust/src/ffi/util.rs:97-111` at `95aa08565`), so a key that is not set is left out, never
+    passed as `NULL`. One marshaller builds the map for the three clients.
 
 **Why:** the floor predates the modern interop surface, so classic `DllImport` is
 the only portable option — the same reason confluent-kafka-dotnet (also net462)
@@ -767,6 +773,11 @@ standard .NET exceptions — never `KafkaException`.
     producer). **Mandatory**, not optional: the ABI doesn't validate preconditions
     (CLAUDE.md §3) and some functions `assert!`/panic on violation — a panic
     across FFI is UB.
+  - **Configuration errors are not preconditions.** A value of a type its key does not accept, a
+    `null` its key's validator refuses, or a `null` key throws `ConfigException`
+    (`Confluent.Kafka.Common.Config`, code −10) with Java's message, before any P/Invoke; the core's
+    own configuration errors (ranges, valid strings, number text) arrive as the same type
+    (`dotnet/CLAUDE.md` §4 **Config**). A `null` map stays `ArgumentNullException`.
 
 **Why:** a flat `KafkaException` matches what the ABI exposes and the Python
 sibling. Preconditions are a separate surface because they are programmer errors,
@@ -799,6 +810,9 @@ exceptions are unchanged.
   - Null topic/record → `ArgumentNullException`; post-`Dispose` →
     `ObjectDisposedException`; negative partition or timestamp → `ArgumentOutOfRangeException` with Java's text —
     each before any native call.
+  - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
+    Java's exact message, before any native call; a configuration the core refuses →
+    `ConfigException` too.
 
 ---
 
@@ -1906,7 +1920,13 @@ shapes: **wakeup** and **concurrent use**.
     panic on a closed consumer
     (`rust/src/consumer/internals/async_kafka_consumer.rs:3928-3931` at `3f8a5bc6`),
     which the closed check keeps from reaching C.
-  - **`GroupMetadata()` without `group.id` (ledger 105).** The core panics there too
+  - **Configuration errors are not preconditions.** A value of a type its key does not accept, a
+    `null` its key's validator refuses, or a `null` key throws `ConfigException`
+    (`Confluent.Kafka.Common.Config`, code −10) with Java's message, before any P/Invoke; the core's
+    own configuration errors (ranges, valid strings, number text) arrive as the same type
+    (`dotnet/CLAUDE.md` §4 **Config**). A `null` map stays `ArgumentNullException`.
+  - **`GroupMetadata()` without `group.id` (ledger 105; a `null` value counts as without, as in
+    Python, M22/P1).** The core panics there too
     (`rust/src/consumer/internals/async_kafka_consumer.rs:4026-4032` at `3f8a5bc6`), so
     .NET makes Java's check itself: after its closed check and before calling C, it
     throws the `INVALID_GROUP_ID` (24) `KafkaException` with Java's message, "To use the
@@ -2052,6 +2072,9 @@ the precondition exceptions are unchanged.
     handle is freed exactly once; a non-ASCII message round-trips.
   - Null topic/partition → `ArgumentNullException`; post-`Dispose` →
     `ObjectDisposedException`; each before any native call.
+  - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
+    Java's exact message, before any native call; a configuration the core refuses →
+    `ConfigException` too.
   - `GroupMetadata()` without `group.id` throws `KafkaException` with code 24 and Java's
     exact message; after `Dispose` it still throws `ObjectDisposedException` (ledger 105).
   - `wakeup()` → the next `poll`/`commit` throws `KafkaException` (Wakeup)

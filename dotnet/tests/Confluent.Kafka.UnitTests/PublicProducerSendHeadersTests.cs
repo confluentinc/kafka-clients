@@ -209,8 +209,8 @@ public sealed class PublicProducerSendHeadersTests
     private static ProducerRecord<string, string> Record() =>
         new ProducerRecord<string, string>(Topic, "value", "key", headers: new[] { new Header("h", Bytes("1")) });
 
-    private static Dictionary<string, string> Unreachable() =>
-        new Dictionary<string, string>
+    private static Dictionary<string, object?> Unreachable() =>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["max.block.ms"] = "5",

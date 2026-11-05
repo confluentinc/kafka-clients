@@ -151,24 +151,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
-    internal static NativeConsumer Create(IReadOnlyDictionary<string, string> config, bool withPump = true)
+    internal static NativeConsumer Create(IReadOnlyDictionary<string, object?> configs, bool withPump = true)
     {
-        if (config is null)
-        {
-            throw new ArgumentNullException(nameof(config));
-        }
-
-        foreach (KeyValuePair<string, string> entry in config)
-        {
-            if (entry.Value is null)
-            {
-                throw new ArgumentException(
-                    $"Configuration value for key '{entry.Key}' must not be null.",
-                    nameof(config));
-            }
-        }
-
-        IntPtr classPointer = NewKafkaConsumer(config);
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
+        IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
         IntPtr outErr = IntPtr.Zero;
         IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
         if (outErr != IntPtr.Zero)
@@ -179,7 +165,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeKafkaConsumerHandle(view, classPointer), config.ContainsKey(GroupIdConfig), withPump);
+        return Start(
+            new SafeKafkaConsumerHandle(view, classPointer),
+            groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+            withPump);
     }
 
     internal static NativeConsumer CreateMock(string? autoOffsetReset = null, bool withPump = true)
@@ -202,54 +191,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump);
-    }
-
-    private static IntPtr NewKafkaConsumer(IReadOnlyDictionary<string, string> config)
-    {
-        List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(config.Count * 2);
-        IntPtr map = IntPtr.Zero;
-        IntPtr consumerConfig = IntPtr.Zero;
-        IntPtr outErr = IntPtr.Zero;
-        try
-        {
-            map = NativeMethods.MapNew(ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            foreach (KeyValuePair<string, string> entry in config)
-            {
-                Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
-                pins.Add(key);
-                Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
-                pins.Add(value);
-                NativeMethods.MapPut(map, key.Pointer, value.Pointer, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-            }
-
-            consumerConfig = NativeMethods.ConsumerConfigNew(map, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            IntPtr consumer = NativeMethods.KafkaConsumerNew(consumerConfig, IntPtr.Zero, IntPtr.Zero, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            return consumer;
-        }
-        finally
-        {
-            IntPtr destroyErr = IntPtr.Zero;
-            if (consumerConfig != IntPtr.Zero)
-            {
-                NativeMethods.ConsumerConfigDestroy(consumerConfig, ref destroyErr);
-                FreeError(ref destroyErr);
-            }
-
-            foreach (Utf8Marshal.PinnedUtf8String pin in pins)
-            {
-                pin.Dispose();
-            }
-
-            if (map != IntPtr.Zero)
-            {
-                NativeMethods.MapDestroy(map, ref destroyErr);
-                FreeError(ref destroyErr);
-            }
-        }
     }
 
     internal void Seek(string topic, int partition, long offset)

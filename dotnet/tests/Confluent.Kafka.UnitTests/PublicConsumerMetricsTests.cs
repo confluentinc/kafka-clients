@@ -33,7 +33,7 @@ public sealed class PublicConsumerMetricsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static Dictionary<string, string> RealConfig(string groupId) => new()
+    private static Dictionary<string, object?> RealConfig(string groupId) => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
         ["group.protocol"] = "consumer",

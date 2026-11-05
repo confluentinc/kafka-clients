@@ -1379,7 +1379,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
         new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:1",
         ["group.protocol"] = "consumer",

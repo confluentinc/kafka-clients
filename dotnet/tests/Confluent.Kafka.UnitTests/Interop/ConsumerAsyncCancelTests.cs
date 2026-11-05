@@ -334,7 +334,7 @@ public sealed class ConsumerAsyncCancelTests
         TimedOutMessage.AssertCallerOrReaper("Failed to get offsets by times in 1500ms", ended.Message);
     }
 
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:1",
         ["group.protocol"] = "consumer",

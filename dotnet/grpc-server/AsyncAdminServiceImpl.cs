@@ -65,14 +65,13 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
     public override Task<Proto.CreateAdminResponse> CreateAdmin(Proto.CreateAdminRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         int numBrokers = request.HasNumBrokers ? request.NumBrokers : 1;
         IAsyncAdmin admin;
         try
         {
-            admin = TranslateAdmin.SelectsMock(config)
+            admin = TranslateAdmin.SelectsMock(request.Config)
                 ? AsyncMockAdminClient.Create().NumBrokers(numBrokers).Build()
-                : (IAsyncAdmin)new AsyncKafkaAdminClient(config);
+                : (IAsyncAdmin)new AsyncKafkaAdminClient(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception ex)
         {

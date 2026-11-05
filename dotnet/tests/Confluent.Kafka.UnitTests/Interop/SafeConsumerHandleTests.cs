@@ -155,7 +155,7 @@ public sealed class SafeConsumerHandleTests
     [Fact]
     public void Create_WithTheClassicProtocol_ThrowsTheCoreError()
     {
-        Dictionary<string, string> config = Config();
+        Dictionary<string, object?> config = Config();
         config["group.protocol"] = "classic";
 
         for (int i = 0; i < 50; i++)
@@ -299,7 +299,7 @@ public sealed class SafeConsumerHandleTests
         Assert.Equal(0, probe.Count);
     }
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:9092",
         ["group.protocol"] = "consumer",

@@ -336,7 +336,7 @@ public sealed class PublicConsumerOwnerCheckTests
     private static Dictionary<TopicPartition, OffsetAndMetadata> Empty() =>
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:1",
         ["group.protocol"] = "consumer",
