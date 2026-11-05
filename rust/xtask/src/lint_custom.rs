@@ -23,6 +23,7 @@ mod api_docs;
 mod baseline;
 mod derive_translation;
 mod doc_fill;
+mod ffi_null_checks;
 mod ffi_translation;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,12 +92,13 @@ fn rules(ctx: &Context) -> Vec<Box<dyn Rule>> {
         Box::new(derive_translation::DeriveTranslation::new(ctx)),
         Box::new(derive_translation::ThreadSafetyProbe::new()),
         Box::new(ffi_translation::FfiTranslation::new(ctx)),
+        Box::new(ffi_null_checks::FfiNullChecks),
         Box::new(api_docs::ApiDocs::new(ctx)),
     ]
 }
 
 /// Runs every rule — or the one `args` names — and fails if any of them
-/// reports a finding. `--no-baseline` shows the `check-ffi-translation` and
+/// reports a finding. `--no-baseline` shows the `check-ffi-translation`, `check-ffi-null-checks` and
 /// `check-api-docs` findings their baselines waive.
 pub fn lint_custom(args: &[String]) -> anyhow::Result<()> {
     let mut only: Option<&str> = None;

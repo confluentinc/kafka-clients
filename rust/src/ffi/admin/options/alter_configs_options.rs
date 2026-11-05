@@ -21,6 +21,7 @@
 
 use crate::admin::AlterConfigsOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`AlterConfigsOptions`], owned by the caller and freed with
 /// [`kafka_admin_AlterConfigsOptions_destroy`].
@@ -37,12 +38,13 @@ pub struct kafka_admin_AlterConfigsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn alter_configs_options_ref<'a>(
     options: *const kafka_admin_AlterConfigsOptions_t,
+    param: &'static str,
 ) -> &'a AlterConfigsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_AlterConfigsOptions_t` is the
     // `Box::into_raw` of a `Box<AlterConfigsOptions>` (`boxed`), so the shared reference is to a
     // live `AlterConfigsOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const AlterConfigsOptions) }
+    unsafe { require_ref::<_, AlterConfigsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -51,12 +53,15 @@ pub(crate) unsafe fn alter_configs_options_ref<'a>(
 ///
 /// `options` must be a live handle, kept alive for `'a`, to which no other
 /// reference is live meanwhile.
-unsafe fn options_mut<'a>(options: *mut kafka_admin_AlterConfigsOptions_t) -> &'a mut AlterConfigsOptions {
+unsafe fn options_mut<'a>(
+    options: *mut kafka_admin_AlterConfigsOptions_t,
+    param: &'static str,
+) -> &'a mut AlterConfigsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_AlterConfigsOptions_t` is the
     // `Box::into_raw` of a `Box<AlterConfigsOptions>` (`boxed`), so the exclusive reference is to a
     // live `AlterConfigsOptions`.
-    unsafe { &mut *(options as *mut AlterConfigsOptions) }
+    unsafe { require_mut::<_, AlterConfigsOptions>(options, param) }
 }
 
 fn boxed(options: AlterConfigsOptions) -> *mut kafka_admin_AlterConfigsOptions_t {
@@ -95,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -117,7 +122,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `alter_configs_options_ref` requires.
-    unsafe { alter_configs_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { alter_configs_options_ref(self_, "self_") }.timeout_ms().unwrap_or(-1)
 }
 
 /// `AlterConfigsOptions.validateOnly(boolean validateOnly)`.
@@ -138,7 +143,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_set_validate_only(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_validate_only(validate_only != 0);
 }
 
@@ -159,7 +164,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsOptions_should_validate_only(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `alter_configs_options_ref` requires.
-    i8::from(unsafe { alter_configs_options_ref(self_) }.should_validate_only())
+    i8::from(unsafe { alter_configs_options_ref(self_, "self_") }.should_validate_only())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

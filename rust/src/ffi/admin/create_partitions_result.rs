@@ -40,12 +40,15 @@ pub(crate) fn box_create_partitions_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_CreatePartitionsResult_t) -> &'a ResultHandle<CreatePartitionsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_CreatePartitionsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<CreatePartitionsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_CreatePartitionsResult_t` is built by
     // `box_result::<CreatePartitionsResult, _>` (in `box_create_partitions_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a map from topic names to futures, which can be used to check the status of individual
@@ -69,7 +72,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.string_keyed_future_map(h.result.values().iter(), FutureCtx::void_future)
 }
 
@@ -92,7 +95,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

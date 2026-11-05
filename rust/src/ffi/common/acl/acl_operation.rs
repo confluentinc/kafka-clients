@@ -22,7 +22,8 @@ use std::ffi::{c_char, c_void};
 
 use crate::common::acl::AclOperation;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t};
+use crate::ffi::precondition::{require_ref, require_str};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`AclOperation`] singleton.
 #[repr(C)]
@@ -66,6 +67,14 @@ pub enum kafka_common_acl_AclOperation_e {
     kafka_common_acl_AclOperation_DESCRIBE_TOKENS,
     /// `AclOperation::TwoPhaseCommit`: Java's `TWO_PHASE_COMMIT`.
     kafka_common_acl_AclOperation_TWO_PHASE_COMMIT,
+}
+
+/// The value an `_err` twin returning [`kafka_common_acl_AclOperation_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_acl_AclOperation_e {
+    fn fail() -> Self {
+        Self::kafka_common_acl_AclOperation_UNKNOWN
+    }
 }
 
 /// One static instance per value, indexed by `kafka_common_acl_AclOperation_e`.
@@ -125,11 +134,11 @@ pub(crate) fn singleton(value: AclOperation) -> *const kafka_common_acl_AclOpera
 /// # Safety
 ///
 /// `value` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclOperation_t) -> AclOperation {
+pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclOperation_t, param: &'static str) -> AclOperation {
     // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `AclOperation`, which is `Copy` and read out here.
-    unsafe { *(value as *const AclOperation) }
+    *unsafe { require_ref::<_, AclOperation>(value, param) }
 }
 
 /// `AclOperation.UNKNOWN`.
@@ -310,19 +319,17 @@ pub extern "C" fn kafka_common_acl_AclOperation_two_phase_commit() -> *const kaf
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_acl_AclOperation_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_acl_AclOperation_e::kafka_common_acl_AclOperation_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
     self_: *const kafka_common_acl_AclOperation_t,
 ) -> kafka_common_acl_AclOperation_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the code of this operation.
@@ -334,12 +341,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_code(self_: *const kafka_common_acl_AclOperation_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.code()
+    unsafe { value_of(self_, "self_") }.code()
 }
 
 /// Returns all operations, in declaration order.
@@ -393,9 +400,9 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
     str: *const c_char,
 ) -> *const kafka_common_acl_AclOperation_t {
     // SAFETY: Per this function's `# Safety`, `str` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    singleton(AclOperation::from_string(&unsafe { c_str_to_string(str) }))
+    singleton(AclOperation::from_string(&unsafe { require_str(str, "str") }))
 }
 
 /// Returns 1 if this operation is UNKNOWN, else 0.
@@ -408,7 +415,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_is_unknown(self_: *const kafka_common_acl_AclOperation_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    i8::from(unsafe { value_of(self_) }.is_unknown())
+    i8::from(unsafe { value_of(self_, "self_") }.is_unknown())
 }
 
 /// Returns the constant's name.
@@ -424,7 +431,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -458,7 +465,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
             // into the static `VARIANTS` array and is never freed.
             unsafe {
-                assert_eq!(value_of(handle), value);
+                assert_eq!(value_of(handle, "value"), value);
                 assert_eq!(kafka_common_acl_AclOperation__enum(handle) as usize, index);
             }
         }

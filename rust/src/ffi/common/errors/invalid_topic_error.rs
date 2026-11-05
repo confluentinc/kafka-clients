@@ -42,27 +42,31 @@ impl PayloadClass for InvalidTopicError {
 }
 
 /// Returns the payload of an `InvalidTopicException` error, or `NULL` when the error is another
-/// class.
+/// class or `NULL`.
 ///
 /// # Parameters
 ///
-/// - `error` - The error handle.
+/// - `error` - The error handle, or `NULL`.
 ///
 /// # Safety
 ///
-/// `error` must be a valid error handle.
+/// `error` must be a valid error handle, or `NULL`.
 /// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
     error: *const kafka_common_Error_t,
 ) -> *const kafka_common_InvalidTopicError_t {
-    // SAFETY: Per this function's `# Safety`, `error` is a valid error handle: non-null and live,
-    // an owned one from `box_error` or one borrowed from a live owner, as `error_ref` requires. The
-    // reference is used only within this call. The view returned is a `Payload<InvalidTopicError>`
-    // cloned from the variant's payload into the `ErrorInner`'s payload slot, so it lives as long
-    // as the error handle: until the error, or the owner it is borrowed from, is destroyed.
-    let inner = unsafe { error_ref(error) };
+    if error.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: Per this function's `# Safety`, `error` is non-null (checked above) and a valid, live
+    // error handle, an owned one from `box_error` or one borrowed from a live owner, as `error_ref`
+    // requires. The reference is used only within this call. The view returned is a
+    // `Payload<InvalidTopicError>` cloned from the variant's payload into the `ErrorInner`'s
+    // payload slot, so it lives as long as the error handle: until the error, or the owner it is
+    // borrowed from, is destroyed.
+    let inner = unsafe { error_ref(error, "error") };
     match &inner.error {
         Error::InvalidTopic(e) => inner.payload_view(e) as *const kafka_common_InvalidTopicError_t,
         _ => ptr::null(),
@@ -87,7 +91,13 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_new(
     // SAFETY: Per this function's `# Safety`, `invalid_topics` is null or a valid list of
     // NUL-terminated strings, as `list_string_set` requires; the strings are copied into an owned
     // set, so nothing borrows the list after this call.
-    Payload::boxed(InvalidTopicError::new(unsafe { list_string_set(invalid_topics) }))
+    Payload::boxed(InvalidTopicError::new(unsafe {
+        if invalid_topics.is_null() {
+            Default::default()
+        } else {
+            list_string_set(invalid_topics, "invalid_topics")
+        }
+    }))
 }
 
 /// `new InvalidTopicException()` with Java's default message and no topics.
@@ -123,7 +133,13 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_with_message(
         // SAFETY: Per this function's `# Safety`, `invalid_topics` is null or a valid list of
         // NUL-terminated strings, as `list_string_set` requires; the strings are copied into an
         // owned set, so nothing borrows the list after this call.
-        unsafe { list_string_set(invalid_topics) },
+        unsafe {
+            if invalid_topics.is_null() {
+                Default::default()
+            } else {
+                list_string_set(invalid_topics, "invalid_topics")
+            }
+        },
         // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
@@ -147,7 +163,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
         // whose error is alive or an owned handle not yet destroyed, as `Payload::from_ptr`
         // requires (no call mutates a payload of this class). The borrow lasts for this call only:
         // the field is copied into the owned container returned.
-        unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }
+        unsafe { Payload::<InvalidTopicError>::from_ptr(self_, "self_") }
             .value()
             .invalid_topics(),
     )
@@ -159,7 +175,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
 ///
 /// `self_` must be a valid invalid-topic handle.
 /// The returned handle is borrowed, valid until `self_` is destroyed.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
     self_: *const kafka_common_InvalidTopicError_t,
@@ -169,7 +185,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
     // mutates a payload of this class). `source_ptr` returns the cause handle the payload's
     // `source` slot owns, so it lives as long as the handle; that is the rustdoc's "borrowed from
     // the handle".
-    unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }.source_ptr()
+    unsafe { Payload::<InvalidTopicError>::from_ptr(self_, "self_") }.source_ptr()
 }
 
 /// Returns the text form of the error.
@@ -187,7 +203,7 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_to_string(
     // error is alive or an owned handle not yet destroyed, as `Payload::from_ptr` requires (no call
     // mutates a payload of this class). The borrow lasts for this call only: `to_c_string` copies
     // the text into an owned string.
-    unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }.to_c_string()
+    unsafe { Payload::<InvalidTopicError>::from_ptr(self_, "self_") }.to_c_string()
 }
 
 /// Frees an owned handle; `NULL` is a no-op. A view borrowed from a

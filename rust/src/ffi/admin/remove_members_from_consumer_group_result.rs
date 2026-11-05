@@ -46,12 +46,13 @@ pub(crate) fn box_remove_members_from_consumer_group_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<RemoveMembersFromConsumerGroupResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_RemoveMembersFromConsumerGroupResult_t` is built by
     // `box_result::<RemoveMembersFromConsumerGroupResult, _>` (in
     // `box_remove_members_from_consumer_group_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Returns a future which indicates whether the request was 100% success, i.e. no either top level
@@ -74,7 +75,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 
@@ -108,11 +109,11 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `member` is a valid member-to-remove handle, as
     // `member_to_remove_ref` requires; the borrow ends with this call, during which the caller
     // keeps the handle alive.
-    let member = unsafe { member_to_remove_ref(member) };
+    let member = unsafe { member_to_remove_ref(member, "member") };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
     unsafe { deliver_value(h.result.member_result(member), out_err, |f| h.ctx.void_future(&f)) }
 }

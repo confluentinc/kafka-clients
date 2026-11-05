@@ -23,6 +23,9 @@ CLAUDE.md, Python Binding Conventions, Errors:
   ``KafkaError`` carries ``UNKNOWN_SERVER_ERROR`` (-1), which
   ``UnknownServerError`` owns in the ``id -> class`` table; an error class
   without an id (``NoSuchElementError``, a user's own exception) reports -1 too.
+- ``LOCAL_NULL_POINTER`` (-32), Java's ``NullPointerException`` for a ``None``
+  the core rejects, has no class: it is Python's own ``TypeError`` (Types), its
+  message the core's with ``null`` spelled ``None`` (``"topic must not be None"``).
 
 The ``id -> class`` table is derived from the generated registry, every class
 with its own ``_ffi_id``.
@@ -31,6 +34,7 @@ with its own ``_ffi_id``.
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -47,6 +51,10 @@ __all__ = ["class_for_ffi_id", "error_classes", "from_borrowed_ffi_error", "from
 
 #: The FFI id the core reports for a bare ``KafkaException``.
 UNKNOWN_SERVER_ERROR = -1
+
+#: The FFI id the core reports for a ``NULL`` mandatory argument
+#: (``kafka_common_Error_LOCAL_NULL_POINTER``, Java's ``NullPointerException``).
+LOCAL_NULL_POINTER = -32
 
 _classes: list[type[BaseException]] | None = None
 _by_id: dict[int, type[BaseException]] | None = None
@@ -80,9 +88,12 @@ def _table() -> dict[int, type[BaseException]]:
 
 
 def class_for_ffi_id(ffi_id: int) -> type[BaseException]:
-    """The class of an FFI id; the base ``KafkaError`` when the id is unknown."""
+    """The class of an FFI id: ``TypeError`` for ``LOCAL_NULL_POINTER``, the base
+    ``KafkaError`` when the id is unknown."""
     from .common.kafka_error import KafkaError
 
+    if ffi_id == LOCAL_NULL_POINTER:
+        return TypeError
     return _table().get(ffi_id, KafkaError)
 
 
@@ -270,6 +281,13 @@ def _build(ffi_id: int, message: str | None, payload: dict[str, Any] | None,
            is_api_error: bool, cause: BaseException | None) -> BaseException:
     """The error of ``ffi_id`` built from what the core reported, ``cause`` as its
     ``__cause__``."""
+    if ffi_id == LOCAL_NULL_POINTER:
+        # Java's NullPointerException is Python's TypeError; the core's text
+        # spells Java's null, which Python's messages spell None (Types).
+        null_error = TypeError(re.sub(r"\bnull\b", "None", message or ""))
+        if cause is not None:
+            null_error.__cause__ = cause
+        return null_error
     cls = class_for_ffi_id(ffi_id)
     if ffi_id == UNKNOWN_SERVER_ERROR and not is_api_error:
         # A bare KafkaException shares UnknownServerException's id; only the

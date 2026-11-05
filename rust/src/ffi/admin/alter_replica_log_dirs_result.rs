@@ -50,12 +50,13 @@ pub(crate) fn box_alter_replica_log_dirs_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_AlterReplicaLogDirsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<AlterReplicaLogDirsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_AlterReplicaLogDirsResult_t` is built by
     // `box_result::<AlterReplicaLogDirsResult, _>` (in `box_alter_replica_log_dirs_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// An owned `kafka_common_TopicPartitionReplica_t *` key for `replica`,
@@ -135,7 +136,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&TopicPartitionReplica, &KafkaFuture<()>)> = h.result.values().iter().collect();
     entries.sort_by(|a, b| {
         (a.0.topic(), a.0.partition(), a.0.broker_id()).cmp(&(b.0.topic(), b.0.partition(), b.0.broker_id()))
@@ -170,7 +171,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

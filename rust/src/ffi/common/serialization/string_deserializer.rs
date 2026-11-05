@@ -94,12 +94,15 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
 /// # Safety
 ///
 /// `self_` must be a valid string-deserializer handle, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringDeserializer_t) -> &'a DeserializerHandle {
+unsafe fn handle<'a>(
+    self_: *const kafka_common_serialization_StringDeserializer_t,
+    param: &'static str,
+) -> &'a DeserializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid string-deserializer handle alive
     // for `'a`, the `DeserializerHandle::boxed` of
     // `kafka_common_serialization_StringDeserializer_new`, as `DeserializerHandle::from_ptr`
     // requires.
-    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle) }
+    unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle, param) }
 }
 
 /// `new StringDeserializer()`.
@@ -138,7 +141,7 @@ pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer__as_Deser
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_deserializer()
+    unsafe { handle(self_, "self_") }.as_deserializer()
 }
 
 /// Frees an owned handle; null is a no-op.
@@ -162,6 +165,12 @@ pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer_destroy(
 mod tests {
     use std::ffi::{CStr, CString, c_char};
     use std::ptr;
+
+    /// An empty configuration map, shared by the tests of this module and never freed.
+    fn no_configs() -> *const crate::ffi::util::kafka_Map_t {
+        static MAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *MAP.get_or_init(|| crate::ffi::util::kafka_Map_new() as usize) as *const crate::ffi::util::kafka_Map_t
+    }
 
     use super::*;
     use crate::ffi::common::header::internals::record_headers::{
@@ -196,7 +205,7 @@ mod tests {
         // `box_record_headers` and is destroyed once, after the last call reading it; `topic`,
         // `source` and the arrays outlive the calls reading them; `err` is a valid slot pointing at
         // null, left null by every call (asserted), and every value returned is an owned string
-        // that `take_string` frees once; `configure` gets a null map, which reads as empty.
+        // that `take_string` frees once; `configure` gets an empty map.
         unsafe {
             let view = kafka_common_serialization_StringDeserializer__as_Deserializer(handle);
             assert_eq!(view, kafka_common_serialization_StringDeserializer__as_Deserializer(handle));
@@ -243,7 +252,7 @@ mod tests {
             assert_eq!(take_string(out), "a\u{FFFD}b");
 
             // The Java defaults: nothing to observe, nothing crashes.
-            kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1, &raw mut err);
+            kafka_common_serialization_Deserializer_configure(view, no_configs(), 1, &raw mut err);
             assert!(err.is_null());
             kafka_common_serialization_Deserializer_close(view, &raw mut err);
             assert!(err.is_null());

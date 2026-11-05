@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 
 use crate::common::GroupType;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`GroupType`] singleton.
@@ -40,6 +41,14 @@ pub enum kafka_common_GroupType_e {
     kafka_common_GroupType_CLASSIC,
     kafka_common_GroupType_SHARE,
     kafka_common_GroupType_STREAMS,
+}
+
+/// The value an `_err` twin returning [`kafka_common_GroupType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_GroupType_e {
+    fn fail() -> Self {
+        Self::kafka_common_GroupType_UNKNOWN
+    }
 }
 
 /// One static instance per value, indexed by `kafka_common_GroupType_e`.
@@ -76,11 +85,11 @@ pub(crate) fn singleton(group_type: GroupType) -> *const kafka_common_GroupType_
 /// # Safety
 ///
 /// `group_type` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(group_type: *const kafka_common_GroupType_t) -> GroupType {
+pub(crate) unsafe fn value_of(group_type: *const kafka_common_GroupType_t, param: &'static str) -> GroupType {
     // SAFETY: Per this function's `# Safety`, `group_type` is a singleton returned by this module,
     // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
     // a live, initialised `GroupType`, which is `Copy` and read out here.
-    unsafe { *(group_type as *const GroupType) }
+    *unsafe { require_ref::<_, GroupType>(group_type, param) }
 }
 
 /// Returns `GroupType.UNKNOWN`, a static singleton never freed.
@@ -120,19 +129,17 @@ pub extern "C" fn kafka_common_GroupType_streams() -> *const kafka_common_GroupT
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_GroupType_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_GroupType_e::kafka_common_GroupType_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType__enum(
     self_: *const kafka_common_GroupType_t,
 ) -> kafka_common_GroupType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the name of this enum constant, exactly as declared in Java (`CONSUMER`), Java's
@@ -148,7 +155,7 @@ pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
     // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Parse a string into a consumer group type, in a case-insensitive manner.
@@ -184,7 +191,7 @@ pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *c
 pub unsafe extern "C" fn kafka_common_GroupType_to_string(self_: *const kafka_common_GroupType_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its text copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -202,7 +209,7 @@ mod tests {
             // into the static `VARIANTS` array and is never freed, and the names read are owned by
             // the static `NAMES`.
             unsafe {
-                assert_eq!(value_of(handle), group_type);
+                assert_eq!(value_of(handle, "value"), group_type);
                 assert_eq!(kafka_common_GroupType__enum(handle) as usize, index);
                 assert_eq!(
                     CStr::from_ptr(kafka_common_GroupType_name(handle)).to_str().unwrap(),

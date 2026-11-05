@@ -18,12 +18,13 @@
 //! The handle owns a [`MetricName`] plus the NUL-terminated copies of its
 //! three strings the borrowed getters hand out.
 
+use crate::ffi::precondition::{require_ref, require_str};
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::MetricName;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_string_map, c_str_to_string, into_c_string, kafka_Map_t, map_strings, owned_c_string};
+use crate::ffi::util::{box_string_map, into_c_string, kafka_Map_t, map_strings, owned_c_string};
 
 /// Opaque handle to a [`MetricName`].
 #[repr(C)]
@@ -69,13 +70,16 @@ pub(crate) fn box_metric_name(name: MetricName) -> *mut kafka_common_MetricName_
 /// # Safety
 ///
 /// `name` must be a valid metric-name handle, alive for `'a`.
-pub(crate) unsafe fn metric_name_ref<'a>(name: *const kafka_common_MetricName_t) -> &'a MetricName {
+pub(crate) unsafe fn metric_name_ref<'a>(
+    name: *const kafka_common_MetricName_t,
+    param: &'static str,
+) -> &'a MetricName {
     // SAFETY: Per this function's `# Safety`, `name` is a valid metric-name handle alive for `'a`,
     // so it points at a live `MetricNameInner`: the `Box::into_raw` of `box_metric_name`, or one a
     // holder (a metric, a named measurable, a `QuotaViolationError` payload) stores and hands out
     // through `MetricNameInner::as_ptr`, which lives as long as that holder. No call mutates a
     // `MetricNameInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(name as *const MetricNameInner) }.metric_name()
+    unsafe { require_ref::<_, MetricNameInner>(name, param) }.metric_name()
 }
 
 /// What a handle points at.
@@ -83,13 +87,13 @@ pub(crate) unsafe fn metric_name_ref<'a>(name: *const kafka_common_MetricName_t)
 /// # Safety
 ///
 /// `self_` must be a valid metric-name handle, alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_common_MetricName_t) -> &'a MetricNameInner {
+unsafe fn inner<'a>(self_: *const kafka_common_MetricName_t, param: &'static str) -> &'a MetricNameInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-name handle alive for `'a`,
     // so it points at a live `MetricNameInner`: the `Box::into_raw` of `box_metric_name`, or one a
     // holder (a metric, a named measurable, a `QuotaViolationError` payload) stores and hands out
     // through `MetricNameInner::as_ptr`, which lives as long as that holder. No call mutates a
     // `MetricNameInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(self_ as *const MetricNameInner) }
+    unsafe { require_ref::<_, MetricNameInner>(self_, param) }
 }
 
 /// `new MetricName(String name, String group, String description, Map<String, String> tags)`:
@@ -104,7 +108,7 @@ unsafe fn inner<'a>(self_: *const kafka_common_MetricName_t) -> &'a MetricNameIn
 ///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings and `tags` null or a
+/// The strings must be valid NUL-terminated strings and `tags` a
 /// valid map of NUL-terminated strings.
 ///
 /// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
@@ -116,23 +120,23 @@ pub unsafe extern "C" fn kafka_common_MetricName_new(
     description: *const c_char,
     tags: *const kafka_Map_t,
 ) -> *mut kafka_common_MetricName_t {
-    // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
     // strings, as `map_strings` requires; the strings are copied into owned pairs, so nothing
     // borrows the map after this call.
-    let tags: BTreeMap<String, String> = unsafe { map_strings(tags) }.into_iter().collect();
+    let tags: BTreeMap<String, String> = unsafe { map_strings(tags, "tags") }.into_iter().collect();
     box_metric_name(MetricName::new(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `group` is a valid NUL-terminated string, as
         // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(group) },
+        unsafe { require_str(group, "group") },
         // SAFETY: Per this function's `# Safety`, `description` is a valid NUL-terminated string,
-        // as `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // as `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(description) },
+        unsafe { require_str(description, "description") },
         tags,
     ))
 }
@@ -149,7 +153,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_name(self_: *const kafka_common
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-name handle, as `inner`
     // requires. The string returned is the inner's own `name_c`, so it lives as long as the handle;
     // that is the rustdoc's "borrowed from the handle, valid as long as it is".
-    unsafe { inner(self_) }.name_c.as_ptr()
+    unsafe { inner(self_, "self_") }.name_c.as_ptr()
 }
 
 /// Returns the logical group name of the metric.
@@ -164,7 +168,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_group(self_: *const kafka_commo
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-name handle, as `inner`
     // requires. The string returned is the inner's own `group_c`, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle, valid as long as it is".
-    unsafe { inner(self_) }.group_c.as_ptr()
+    unsafe { inner(self_, "self_") }.group_c.as_ptr()
 }
 
 /// Returns the human-readable description of the metric.
@@ -179,7 +183,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_description(self_: *const kafka
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-name handle, as `inner`
     // requires. The string returned is the inner's own `description_c`, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle, valid as long as it is".
-    unsafe { inner(self_) }.description_c.as_ptr()
+    unsafe { inner(self_, "self_") }.description_c.as_ptr()
 }
 
 /// Returns the tags of the metric, a map of `char *` to `char *` sorted by key.
@@ -194,7 +198,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_tags(self_: *const kafka_common
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-name handle, as
     // `metric_name_ref` requires; the reference is used only within this call; the tags are copied
     // into the owned map returned.
-    box_string_map(unsafe { metric_name_ref(self_) }.tags())
+    box_string_map(unsafe { metric_name_ref(self_, "self_") }.tags())
 }
 
 /// Returns the text form of the metric name.
@@ -209,7 +213,7 @@ pub unsafe extern "C" fn kafka_common_MetricName_to_string(self_: *const kafka_c
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-name handle, as
     // `metric_name_ref` requires; the reference is used only within this call, and the text is
     // copied into an owned string.
-    into_c_string(&unsafe { metric_name_ref(self_) }.to_string())
+    into_c_string(&unsafe { metric_name_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned metric-name handle; null is a no-op. A handle borrowed
@@ -284,7 +288,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             );
-            assert_eq!(metric_name_ref(handle), &expected);
+            assert_eq!(metric_name_ref(handle, "handle"), &expected);
             assert_eq!(
                 CStr::from_ptr(kafka_common_MetricName_name(handle)).to_str().unwrap(),
                 "records-sent"
@@ -318,8 +322,10 @@ mod tests {
             kafka_string_destroy(s);
             kafka_common_MetricName_destroy(handle);
 
-            let bare = kafka_common_MetricName_new(name.as_ptr(), group.as_ptr(), description.as_ptr(), ptr::null());
-            assert!(metric_name_ref(bare).tags().is_empty());
+            let no_tags = kafka_Map_new();
+            let bare = kafka_common_MetricName_new(name.as_ptr(), group.as_ptr(), description.as_ptr(), no_tags);
+            kafka_Map_destroy(no_tags);
+            assert!(metric_name_ref(bare, "bare").tags().is_empty());
             kafka_common_MetricName_destroy(bare);
             kafka_common_MetricName_destroy(ptr::null_mut());
         }

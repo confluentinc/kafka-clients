@@ -26,7 +26,8 @@ use crate::common::record::TimestampType;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::precondition::require_ref;
+use crate::ffi::util::{c_str_to_option, into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TimestampType`] singleton.
 #[repr(C)]
@@ -41,6 +42,14 @@ pub enum kafka_common_record_TimestampType_e {
     kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE,
     kafka_common_record_TimestampType_CREATE_TIME,
     kafka_common_record_TimestampType_LOG_APPEND_TIME,
+}
+
+/// The value an `_err` twin returning [`kafka_common_record_TimestampType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_record_TimestampType_e {
+    fn fail() -> Self {
+        Self::kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE
+    }
 }
 
 /// One static instance per value, indexed by
@@ -78,11 +87,14 @@ pub(crate) fn singleton(timestamp_type: TimestampType) -> *const kafka_common_re
 /// # Safety
 ///
 /// `timestamp_type` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(timestamp_type: *const kafka_common_record_TimestampType_t) -> TimestampType {
+pub(crate) unsafe fn value_of(
+    timestamp_type: *const kafka_common_record_TimestampType_t,
+    param: &'static str,
+) -> TimestampType {
     // SAFETY: Per this function's `# Safety`, `timestamp_type` is a singleton returned by this
     // module, i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it
     // points at a live, initialised `TimestampType`, which is `Copy` and read out here.
-    unsafe { *(timestamp_type as *const TimestampType) }
+    *unsafe { require_ref::<_, TimestampType>(timestamp_type, param) }
 }
 
 /// Returns the `TimestampType.NO_TIMESTAMP_TYPE` singleton.
@@ -120,38 +132,32 @@ pub extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const 
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_record_TimestampType_e::kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
     self_: *const kafka_common_record_TimestampType_t,
 ) -> kafka_common_record_TimestampType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the id of the type (Java's `id` field): `-1`, `0` or `1`.
 ///
-/// A caught Rust panic returns -2, which is no id of this enum: its ids are -1, 0 and 1.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
     self_: *const kafka_common_record_TimestampType_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.id()
+    unsafe { value_of(self_, "self_") }.id()
 }
 
 /// Returns the name of the type (Java's `name` field).
@@ -168,14 +174,15 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the name returned is owned by the `static`
     // `NAMES`, which is never dropped, so it is never freed, as the rustdoc states.
-    NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
+    NAMES[enum_of(unsafe { value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// Returns the type whose name is `name` (`TimestampType.forName(String name)`).
 ///
 /// # Parameters
 ///
-/// - `name` - The name of the type, as `kafka_common_record_TimestampType_to_string` prints it.
+/// - `name` - The name of the type, as `kafka_common_record_TimestampType_to_string` prints it, or `NULL`,
+///   which matches no type.
 ///
 /// # Errors
 ///
@@ -185,8 +192,8 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `out_err` a valid slot
-/// pointing at `NULL`. The returned singleton is static, never freed, and comparable
+/// `name` must be `NULL` or a valid NUL-terminated string and `out_err` a valid
+/// slot pointing at `NULL`. The returned singleton is static, never freed, and comparable
 /// with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -194,10 +201,11 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
     name: *const c_char,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const kafka_common_record_TimestampType_t {
-    // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
-    // this call.
-    match TimestampType::for_name(&unsafe { c_str_to_string(name) }) {
+    // SAFETY: Per this function's `# Safety`, `name` is NULL or a valid NUL-terminated string, as
+    // `c_str_to_option` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call. Java's `forName(null)` matches no constant and prints `null` in its error, which
+    // is what the name `null`, matching none either, gives.
+    match TimestampType::for_name(unsafe { c_str_to_option(name) }.as_deref().unwrap_or("null")) {
         Ok(timestamp_type) => singleton(timestamp_type),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -217,7 +225,7 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -226,7 +234,7 @@ mod tests {
     use std::ptr;
 
     use super::*;
-    use crate::ffi::common::kafka_common_Error_destroy;
+    use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::util::kafka_string_destroy;
 
     #[test]
@@ -237,7 +245,7 @@ mod tests {
             // static `VARIANTS` array and is never freed, and the names read are owned by the
             // static `NAMES`.
             unsafe {
-                assert_eq!(value_of(handle), timestamp_type);
+                assert_eq!(value_of(handle, "value"), timestamp_type);
                 assert_eq!(kafka_common_record_TimestampType__enum(handle) as usize, index);
                 assert_eq!(kafka_common_record_TimestampType_id(handle), timestamp_type.id());
                 assert_eq!(
@@ -275,6 +283,14 @@ mod tests {
             let unknown = kafka_common_record_TimestampType_for_name(bogus.as_ptr(), &mut error);
             assert!(unknown.is_null());
             assert!(!error.is_null());
+            kafka_common_Error_destroy(error);
+            // Java's `forName(null)` prints `null` in its error.
+            error = ptr::null_mut();
+            assert!(kafka_common_record_TimestampType_for_name(ptr::null(), &mut error).is_null());
+            assert_eq!(
+                CStr::from_ptr(kafka_common_Error_message(error)).to_str().unwrap(),
+                "Invalid timestamp type null"
+            );
             kafka_common_Error_destroy(error);
 
             let s = kafka_common_record_TimestampType_to_string(kafka_common_record_TimestampType_log_append_time());

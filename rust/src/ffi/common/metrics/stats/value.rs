@@ -35,11 +35,11 @@ pub struct kafka_common_metrics_stats_Value_t {
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_Value_t) -> &'a StatHandle<Value> {
+unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_Value_t, param: &'static str) -> &'a StatHandle<Value> {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class alive for
     // `'a`, so it points at the `StatHandle<Value>` one of this class's constructors boxed, as
     // `StatHandle::from_ptr` requires.
-    unsafe { StatHandle::from_ptr(self_ as *const StatHandle<Value>) }
+    unsafe { StatHandle::from_ptr(self_ as *const StatHandle<Value>, param) }
 }
 
 /// `new Value()`.
@@ -70,7 +70,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Value__as_Stat(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_stat()
+    unsafe { handle(self_, "self_") }.as_stat()
 }
 
 /// Returns the stat as the `Measurable` interface.
@@ -88,7 +88,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Value__as_Measurable(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_measurable()
+    unsafe { handle(self_, "self_") }.as_measurable()
 }
 
 /// Returns the stat as the `MetricValueProvider` interface (Java's `Measurable` extends it).
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Value__as_MetricValueProvide
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_metric_value_provider()
+    unsafe { handle(self_, "self_") }.as_metric_value_provider()
 }
 
 /// Returns the stat as the `MeasurableStat` interface (what
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Value__as_MeasurableStat(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle of this class, as `handle`
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
-    unsafe { handle(self_) }.as_measurable_stat()
+    unsafe { handle(self_, "self_") }.as_measurable_stat()
 }
 
 /// Frees an owned handle; null is a no-op. A sensor the stat was added to

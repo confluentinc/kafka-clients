@@ -245,7 +245,7 @@ def test_subscription_on_null_topic_collection() -> None:
     # Java's null, so (topics) with a null collection (Signatures).
     with new_consumer() as consumer, pytest.raises(IllegalArgumentError) as e:
         consumer.subscribe(topics=None)  # type: ignore[arg-type]
-    assert str(e.value) == "Topic collection to subscribe to cannot be None"
+    assert str(e.value) == "Topic collection to subscribe to cannot be null"
 
 
 def test_subscription_on_empty_topic() -> None:
@@ -292,7 +292,7 @@ def test_assign_on_empty_topic_partition() -> None:
 def test_assign_on_null_topic_partition() -> None:
     with new_consumer(None) as consumer, pytest.raises(IllegalArgumentError) as e:
         consumer.assign(partitions=None)  # type: ignore[arg-type]
-    assert str(e.value) == "Topic partitions collection to assign to cannot be None"
+    assert str(e.value) == "Topic partitions collection to assign to cannot be null"
 
 
 def test_assign_on_null_topic_partition_after_close() -> None:
@@ -304,19 +304,19 @@ def test_assign_on_null_topic_partition_after_close() -> None:
     assert str(e.value) == CLOSED
 
 
-# AsyncKafkaConsumer's null checks of an argument the FFI cannot take as None
-# (CLAUDE.md, Python Binding Conventions, Implementation over the FFI,
-# exception 4): the method, its keyword, Java's error class and message.
+# AsyncKafkaConsumer's null checks, made by the core once the None reaches it as
+# NULL: the method, its keyword, Java's error class and message (a
+# NullPointerException as TypeError, its "null" spelled None).
 NULL_ARGUMENT_CASES: list[tuple[str, str, type[Exception], str]] = [
-    ("pause", "partitions", TypeError, "partitions must not be None"),
-    ("resume", "partitions", TypeError, "partitions must not be None"),
+    ("pause", "partitions", TypeError, "The partitions to pause must be nonnull"),
+    ("resume", "partitions", TypeError, "The partitions to resume must be nonnull"),
     ("offsets_for_times", "timestamps_to_search", TypeError,
-     "timestamps_to_search must not be None"),
+     "Timestamps to search cannot be None"),
     ("seek_to_beginning", "partitions", IllegalArgumentError,
-     "Partitions collection cannot be None"),
-    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be None"),
-    ("beginning_offsets", "partitions", TypeError, "partitions must not be None"),
-    ("end_offsets", "partitions", TypeError, "partitions must not be None"),
+     "Partitions collection cannot be null"),
+    ("seek_to_end", "partitions", IllegalArgumentError, "Partitions collection cannot be null"),
+    ("beginning_offsets", "partitions", TypeError, "Partitions cannot be None"),
+    ("end_offsets", "partitions", TypeError, "Partitions cannot be None"),
     # Java dereferences the null with no check of its own (TopicMetadataEvent's
     # Objects.requireNonNull(topic)): the same TypeError.
     ("partitions_for", "topic", TypeError, "topic must not be None"),
@@ -2364,7 +2364,7 @@ def test_async_consumer_surface_without_a_broker() -> None:
                                 "empty topic")
         with pytest.raises(IllegalArgumentError) as e:
             await consumer.assign(partitions=None)  # type: ignore[arg-type]
-        assert str(e.value) == "Topic partitions collection to assign to cannot be None"
+        assert str(e.value) == "Topic partitions collection to assign to cannot be null"
         with pytest.raises(IllegalArgumentError) as e:
             await consumer.assign(partitions=[None])  # type: ignore[list-item]
         assert str(e.value) == "Topic partitions to assign to cannot have null or empty topic"
@@ -3186,8 +3186,8 @@ def test_only_the_calls_java_wakes_are_woken() -> None:
             "partitions_for": c._partitions_for_spec(TOPIC),
             "list_topics": c._list_topics_spec(),
             "commit_nowait": c._commit_nowait_spec(None, None),
-            "subscribe_topics": c._subscribe_topics_spec([TOPIC], None),
-            "subscribe_pattern": c._subscribe_pattern_spec("t.*", None),
+            "subscribe_topics": c._subscribe_topics_spec([TOPIC], None, False),
+            "subscribe_pattern": c._subscribe_pattern_spec("t.*", None, False),
             "seek": c._seek_spec(TP0, 0, None),
             "seek_with_metadata": c._seek_spec(TP0, None, OffsetAndMetadata(offset=0)),
             "assign_and_partition_ops": c._void_spec(_lib.Consumer_assign_cb, []),

@@ -2753,8 +2753,10 @@ fn print_help() {
                     check-thread-safety-probe             src/api_promises.rs asserts every public type's auto traits
                     check-ffi-translation                 every public Rust item has its C counterpart
                     check-api-docs                        public API docs list parameters, returns and errors
+                    check-ffi-null-checks                 no C argument is read before its NULL check
                   With a rule name only that rule runs; `--no-baseline` ignores
-                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every finding is shown
+                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every
+                  finding is shown
   ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   doc-baseline    Rewrite xtask/doc-baseline.txt with the current check-api-docs findings
   javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit

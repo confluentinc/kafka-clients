@@ -51,6 +51,9 @@ public sealed class KafkaExceptionFfiErrorTests
         ["local_illegal_argument"] = (NativeMethods.ErrorLocalIllegalArgument, -3, typeof(ArgumentException)),
         ["local_illegal_state"] = (NativeMethods.ErrorLocalIllegalState, -4, typeof(InvalidOperationException)),
         ["local_timeout"] = (NativeMethods.ErrorLocalTimeout, -5, typeof(TimeoutException)),
+        ["local_unsupported_operation"] =
+            (NativeMethods.ErrorLocalUnsupportedOperation, -31, typeof(NotSupportedException)),
+        ["local_null_pointer"] = (NativeMethods.ErrorLocalNullPointer, -32, typeof(ArgumentNullException)),
     };
 
     [Theory]
@@ -58,6 +61,8 @@ public sealed class KafkaExceptionFfiErrorTests
     [InlineData("local_illegal_argument")]
     [InlineData("local_illegal_state")]
     [InlineData("local_timeout")]
+    [InlineData("local_unsupported_operation")]
+    [InlineData("local_null_pointer")]
     public void LocalCode_IsItsDotNetBuiltIn_WithTheCoreMessage(string row)
     {
         (MessageFactory factory, int code, Type expected) = s_localRows[row];
@@ -69,6 +74,11 @@ public sealed class KafkaExceptionFfiErrorTests
 
         Assert.IsType(expected, read);
         Assert.Equal(NonAsciiMessage, coreMessage);
+        if (read is ArgumentException argument)
+        {
+            Assert.Null(argument.ParamName);
+        }
+
         Assert.Equal(coreMessage, read.Message);
         Assert.Null(read.InnerException);
     }

@@ -19,6 +19,7 @@
 //! handle in place, so `set_x(self, x)` on the handle is Java's
 //! `options.x(x)` with the result stored back.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::c_char;
 
 use crate::admin::FenceProducersOptions;
@@ -40,12 +41,13 @@ pub struct kafka_admin_FenceProducersOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn fence_producers_options_ref<'a>(
     options: *const kafka_admin_FenceProducersOptions_t,
+    param: &'static str,
 ) -> &'a FenceProducersOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_FenceProducersOptions_t` is the
     // `Box::into_raw` of a `Box<FenceProducersOptions>` (`boxed`), so the shared reference is to a
     // live `FenceProducersOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const FenceProducersOptions) }
+    unsafe { require_ref::<_, FenceProducersOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -54,12 +56,15 @@ pub(crate) unsafe fn fence_producers_options_ref<'a>(
 ///
 /// `options` must be a live handle, kept alive for `'a`, to which no other
 /// reference is live meanwhile.
-unsafe fn options_mut<'a>(options: *mut kafka_admin_FenceProducersOptions_t) -> &'a mut FenceProducersOptions {
+unsafe fn options_mut<'a>(
+    options: *mut kafka_admin_FenceProducersOptions_t,
+    param: &'static str,
+) -> &'a mut FenceProducersOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_FenceProducersOptions_t` is
     // the `Box::into_raw` of a `Box<FenceProducersOptions>` (`boxed`), so the exclusive reference
     // is to a live `FenceProducersOptions`.
-    unsafe { &mut *(options as *mut FenceProducersOptions) }
+    unsafe { require_mut::<_, FenceProducersOptions>(options, param) }
 }
 
 fn boxed(options: FenceProducersOptions) -> *mut kafka_admin_FenceProducersOptions_t {
@@ -98,7 +103,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -120,7 +125,9 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `fence_producers_options_ref` requires.
-    unsafe { fence_producers_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { fence_producers_options_ref(self_, "self_") }
+        .timeout_ms()
+        .unwrap_or(-1)
 }
 
 /// Returns the options' `toString()` form.
@@ -137,7 +144,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersOptions_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `fence_producers_options_ref` requires.
-    into_c_string(&unsafe { fence_producers_options_ref(self_) }.to_string())
+    into_c_string(&unsafe { fence_producers_options_ref(self_, "self_") }.to_string())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

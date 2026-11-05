@@ -46,7 +46,8 @@ use crate::ffi::consumer::{
     kafka_consumer_Consumer_t,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{GenericValue, c_str_to_string, kafka_List_t, kafka_Map_t};
+use crate::ffi::precondition::{require_fn, require_ref, require_str, require_str_or};
+use crate::ffi::util::{GenericValue, kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`MockConsumer`] over `void *` key and value.
 #[repr(C)]
@@ -78,7 +79,7 @@ unsafe fn with_mock<T>(
     // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
     // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
     // requires. Exclusive access to the consumer comes from `acquire`, not from this reference.
-    let mut guard = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) }.acquire()?;
+    let mut guard = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t, "self_") }.acquire()?;
     Ok(f(mock_of(&mut guard)?))
 }
 
@@ -123,8 +124,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_MockConsumer_t {
     // SAFETY: Per this function's `# Safety`, `offset_reset_strategy` is a valid NUL-terminated
-    // string, as `c_str_to_string` requires; it is copied, so the borrow lasts for this call only.
-    let strategy = unsafe { c_str_to_string(offset_reset_strategy) };
+    // string, as `require_str` requires; it is copied, so the borrow lasts for this call only.
+    let strategy = unsafe {
+        require_str_or(offset_reset_strategy, "offset_reset_strategy", || {
+            Error::local_illegal_argument("Auto offset reset strategy is null")
+        })
+    };
     // No deserializers: the `void *`s are whatever `add_record` was given.
     let result = ConsumerClassHandle::new(Owns { key: false, value: false }, || {
         Mock::new(&strategy).map(|mock| ConsumerKind::Mock(Box::new(mock)))
@@ -157,7 +162,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, i.e. a
     // `Box<ConsumerClassHandle>` from `kafka_consumer_MockConsumer_new` not yet destroyed, alive
     // for this expression, the only use of the reference; `as_consumer` only takes its address.
-    unsafe { &*(self_ as *const ConsumerClassHandle) }.as_consumer()
+    unsafe { require_ref::<_, ConsumerClassHandle>(self_, "self_") }.as_consumer()
 }
 
 /// Frees the handle as `kafka_consumer_KafkaConsumer_destroy` does; null is a
@@ -212,7 +217,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     // expression, the only use of the reference, as `consumer_record_ref` requires. The clone
     // copies the `void *`s without owning them: the mock was built with
     // `Owns { key: false, value: false }`.
-    let record = unsafe { consumer_record_ref(record) }.clone();
+    let record = unsafe { consumer_record_ref(record, "record") }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
     // requires.
     let result = unsafe { with_mock(self_, |mock| mock.add_record(record)) }.and_then(|r| r);
@@ -240,7 +245,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
     // SAFETY: Per this function's `# Safety`, `new_offsets` is a valid map of topic-partition
     // handles to `int64_t *`, as `map_topic_partition_i64` requires; the entries are copied, so the
     // borrow lasts for this call only.
-    let offsets = unsafe { map_topic_partition_i64(new_offsets) };
+    let offsets = unsafe { map_topic_partition_i64(new_offsets, "new_offsets") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock_void`
     // requires.
     unsafe { with_mock_void(self_, "updateBeginningOffsets", |mock| mock.update_beginning_offsets(offsets)) }
@@ -265,7 +270,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
     // SAFETY: Per this function's `# Safety`, `new_offsets` is a valid map of topic-partition
     // handles to `int64_t *`, as `map_topic_partition_i64` requires; the entries are copied, so the
     // borrow lasts for this call only.
-    let offsets = unsafe { map_topic_partition_i64(new_offsets) };
+    let offsets = unsafe { map_topic_partition_i64(new_offsets, "new_offsets") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock_void`
     // requires.
     unsafe { with_mock_void(self_, "updateEndOffsets", |mock| mock.update_end_offsets(offsets)) }
@@ -290,7 +295,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
     // SAFETY: Per this function's `# Safety`, `new_offsets` is a valid map of topic-partition
     // handles to `int64_t *`, as `map_topic_partition_i64` requires; the entries are copied, so the
     // borrow lasts for this call only.
-    let offsets = unsafe { map_topic_partition_i64(new_offsets) };
+    let offsets = unsafe { map_topic_partition_i64(new_offsets, "new_offsets") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock_void`
     // requires.
     unsafe { with_mock_void(self_, "updateDurationOffsets", |mock| mock.update_duration_offsets(offsets)) }
@@ -307,6 +312,14 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
 ///
 /// - `kafka_common_Error_is_local_illegal_state_error` if the consumer is closed
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topic` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topic` panics.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle, `topic` a valid string and `partitions` a
@@ -321,12 +334,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_PartitionInfo_t *`, as `list_partition_infos` requires; the values are copied,
     // so the borrow lasts for this call only.
-    let partitions = unsafe { list_partition_infos(partitions) };
+    let partitions = unsafe { list_partition_infos(partitions, "partitions") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, as `with_mock`
     // requires.
     let result = unsafe { with_mock(self_, |mock| mock.update_partitions(&topic, partitions)) }.and_then(|r| r);
@@ -424,7 +437,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_assignment` null or a valid list of
+/// `self_` must be a live handle and `new_assignment` a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
 #[ffi_guard]
@@ -435,15 +448,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // Blocking: the registered listener's callbacks run on the calling thread.
-    // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `new_assignment` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(new_assignment) };
+    let partitions = unsafe { list_topic_partitions(new_assignment, "new_assignment") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for this
     // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
     // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
     // requires. Exclusive access to the consumer comes from `acquire`, not from this reference.
-    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t, "self_") };
     let result = client.acquire().and_then(|mut guard| {
         let mock = mock_of(&mut guard)?;
         client.block_on(mock.rebalance(&partitions))
@@ -454,7 +467,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 
 /// The completion of [`kafka_consumer_MockConsumer_rebalance_cb`].
 pub type kafka_consumer_MockConsumer_rebalance_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// Simulate a rebalance event.
 ///
@@ -490,17 +503,18 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
     cb: kafka_consumer_MockConsumer_rebalance_cb_t,
     opaque: *mut c_void,
 ) {
-    // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
+    let cb = require_fn(cb, "cb");
+    // SAFETY: Per this function's `# Safety`, `new_assignment` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(new_assignment) };
+    let partitions = unsafe { list_topic_partitions(new_assignment, "new_assignment") };
     let opaque = SendPtr(opaque);
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for this
     // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
     // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
     // requires. The spawned task holds its own `Arc` clones, so it does not depend on the handle
     // staying alive.
-    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t, "self_") };
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
     match client.acquire() {
@@ -540,7 +554,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `partitions_lost` null or a valid list of
+/// `self_` must be a live handle and `partitions_lost` a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
 #[ffi_guard]
@@ -550,15 +564,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
     partitions_lost: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `partitions_lost` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions_lost) };
+    let partitions = unsafe { list_topic_partitions(partitions_lost, "partitions_lost") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for this
     // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
     // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
     // requires. Exclusive access to the consumer comes from `acquire`, not from this reference.
-    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t, "self_") };
     let result = client.acquire().and_then(|mut guard| {
         let mock = mock_of(&mut guard)?;
         client.block_on(mock.lose_partitions(&partitions))
@@ -569,7 +583,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions(
 
 /// The completion of [`kafka_consumer_MockConsumer_lose_partitions_cb`].
 pub type kafka_consumer_MockConsumer_lose_partitions_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// Non-blocking `lose_partitions`: the listener's callbacks and `cb` are queued
 /// for `kafka_consumer_Consumer__execute_callbacks`.
@@ -603,17 +617,18 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions_cb(
     cb: kafka_consumer_MockConsumer_lose_partitions_cb_t,
     opaque: *mut c_void,
 ) {
-    // SAFETY: Per this function's `# Safety`, `partitions_lost` is null or a valid list of
+    let cb = require_fn(cb, "cb");
+    // SAFETY: Per this function's `# Safety`, `partitions_lost` is a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions_lost) };
+    let partitions = unsafe { list_topic_partitions(partitions_lost, "partitions_lost") };
     let opaque = SendPtr(opaque);
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for this
     // call; the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the
     // same one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
     // requires. The spawned task holds its own `Arc` clones, so it does not depend on the handle
     // staying alive.
-    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) };
+    let client = unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t, "self_") };
     #[cfg(test)]
     crate::ffi::common::fail_point::hit();
     match client.acquire() {
@@ -643,12 +658,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_lose_partitions_cb(
 /// # Safety
 ///
 /// `self_` must be a live mock handle, kept alive for `'a`.
-unsafe fn mock_handle<'a>(self_: *const kafka_consumer_MockConsumer_t) -> &'a ConsumerHandle {
+unsafe fn mock_handle<'a>(self_: *const kafka_consumer_MockConsumer_t, param: &'static str) -> &'a ConsumerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, kept alive for `'a`;
     // the `kafka_consumer_MockConsumer_t` pointer is the `ConsumerClassHandle` pointer, the same
     // one its `__as_Consumer` view is (`ConsumerClassHandle::as_consumer`), as `client_ref`
     // requires. The handle is shared state, never the mock an operation may be borrowing.
-    unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) }.handle()
+    unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t, param) }.handle()
 }
 
 /// Return whether the consumer has been closed.
@@ -665,7 +680,7 @@ unsafe fn mock_handle<'a>(self_: *const kafka_consumer_MockConsumer_t) -> &'a Co
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(self_: *const kafka_consumer_MockConsumer_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
     // expression, as `mock_handle` requires.
-    let handle = unsafe { mock_handle(self_) };
+    let handle = unsafe { mock_handle(self_, "self_") };
     // Read through the mock's handle, not the single-owner flag, so it answers while another
     // call holds the mock: Java's `MockConsumer.closed()` waits on the monitor and never throws.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the `None` arm is unreachable.
@@ -688,7 +703,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
     // expression, as `mock_handle` requires.
-    let handle = unsafe { mock_handle(self_) };
+    let handle = unsafe { mock_handle(self_, "self_") };
     // Read through the mock's handle, not the single-owner flag, so it answers while another
     // call holds the mock, as Java's unsynchronized `MockConsumer.shouldRebalance()` does.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the `None` arm is unreachable.
@@ -726,24 +741,22 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
 ///
 /// # Returns
 ///
-/// The last poll timeout in milliseconds, or `-1` if `poll` has not been called; `-2` on a
-/// caught Rust panic.
+/// The last poll timeout in milliseconds, or `-1` if `poll` has not been called.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     self_: *const kafka_consumer_MockConsumer_t,
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
     // expression, as `mock_handle` requires.
-    let handle = unsafe { mock_handle(self_) };
+    let handle = unsafe { mock_handle(self_, "self_") };
     // Read through the mock's handle, not the single-owner flag, so it answers while another
     // call holds the mock, as Java's unsynchronized `MockConsumer.lastPollTimeout()` does. `-1`
-    // is Java's `null`; `-2` (the panic fallback) is no poll timeout, as `poll` rejects a
-    // negative one.
+    // is Java's `null`.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the outer `None` is unreachable.
     handle
         .mock_last_poll_timeout()
@@ -916,8 +929,12 @@ mod tests {
     /// been copied.
     unsafe fn subscribe(consumer: *mut kafka_consumer_Consumer_t, probe: &ListenerProbe) {
         probe.consumer.store(consumer, SeqCst);
-        let listener =
-            kafka_consumer_ConsumerRebalanceListener_new(probe.as_self(), probe_revoked, probe_assigned, None);
+        let listener = kafka_consumer_ConsumerRebalanceListener_new(
+            probe.as_self(),
+            Some(probe_revoked),
+            Some(probe_assigned),
+            None,
+        );
         let topics = kafka_List_new();
         // SAFETY: Test code: `topics` is a live list and the element a static NUL-terminated
         // literal.
@@ -988,7 +1005,7 @@ mod tests {
         unsafe {
             kafka_consumer_Consumer__set_callbacks_notify(
                 consumer,
-                count_notify,
+                Some(count_notify),
                 &notifies as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1004,7 +1021,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1109,7 +1126,7 @@ mod tests {
         unsafe {
             kafka_consumer_Consumer__set_callbacks_notify(
                 consumer,
-                count_notify,
+                Some(count_notify),
                 &notifies as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1128,7 +1145,7 @@ mod tests {
             kafka_consumer_MockConsumer_lose_partitions_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1151,7 +1168,7 @@ mod tests {
             kafka_consumer_MockConsumer_lose_partitions_cb(
                 mock,
                 assignment,
-                store_completion,
+                Some(store_completion),
                 &failed as *const Mutex<Option<Option<Error>>> as *mut c_void,
             )
         };
@@ -1189,7 +1206,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1294,7 +1311,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1408,7 +1425,7 @@ mod tests {
             kafka_consumer_MockConsumer_rebalance_cb(
                 mock,
                 assignment,
-                count_completion,
+                Some(count_completion),
                 &completed as *const AtomicI32 as *mut c_void,
             )
         };
@@ -1508,7 +1525,7 @@ mod tests {
         unsafe {
             let void = Probe::default();
             fail_point::arm();
-            kafka_consumer_Consumer_commit_sync_cb(consumer, on_error, void.as_opaque());
+            kafka_consumer_Consumer_commit_sync_cb(consumer, Some(on_error), void.as_opaque());
             assert!(void.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             void.assert_one_panic("kafka_consumer_Consumer_commit_sync_cb", fail_point::MESSAGE);
@@ -1516,21 +1533,21 @@ mod tests {
 
             let int = Probe::default();
             fail_point::arm();
-            kafka_consumer_Consumer_position_cb(consumer, tp, on_i64, int.as_opaque());
+            kafka_consumer_Consumer_position_cb(consumer, tp, Some(on_i64), int.as_opaque());
             assert!(int.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             int.assert_one_panic("kafka_consumer_Consumer_position_cb", fail_point::MESSAGE);
 
             let value = Probe::default();
             fail_point::arm();
-            kafka_consumer_Consumer_poll_cb(consumer, 0, on_value, value.as_opaque());
+            kafka_consumer_Consumer_poll_cb(consumer, 0, Some(on_value), value.as_opaque());
             assert!(value.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             value.assert_one_panic("kafka_consumer_Consumer_poll_cb", fail_point::MESSAGE);
 
             let mock_void = Probe::default();
             fail_point::arm();
-            kafka_consumer_MockConsumer_rebalance_cb(mock, partitions, on_error, mock_void.as_opaque());
+            kafka_consumer_MockConsumer_rebalance_cb(mock, partitions, Some(on_error), mock_void.as_opaque());
             assert!(mock_void.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 1);
             mock_void.assert_one_panic("kafka_consumer_MockConsumer_rebalance_cb", fail_point::MESSAGE);
@@ -1559,7 +1576,7 @@ mod tests {
             with_mock(mock, |m| m.schedule_poll_task(Box::new(|_| panic!("poll task panicked"))))
                 .expect("no other call in flight");
             let probe = Probe::default();
-            kafka_consumer_Consumer_poll_cb(consumer, 0, on_value, probe.as_opaque());
+            kafka_consumer_Consumer_poll_cb(consumer, 0, Some(on_value), probe.as_opaque());
             drain_one(consumer, &probe);
             probe.assert_one_panic("kafka_consumer_Consumer_poll_cb", "poll task panicked");
 
@@ -1582,10 +1599,10 @@ mod tests {
             let handle = kafka_consumer_Consumer_handle(consumer);
             let queued = Probe::default();
             fail_point::arm();
-            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, on_error, queued.as_opaque());
+            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, Some(on_error), queued.as_opaque());
             let int = Probe::default();
             fail_point::arm();
-            kafka_consumer_ConsumerHandle_position_cb(handle, tp, on_i64, int.as_opaque());
+            kafka_consumer_ConsumerHandle_position_cb(handle, tp, Some(on_i64), int.as_opaque());
             assert!(queued.fired().is_empty() && int.fired().is_empty(), "queued, not fired");
             assert_eq!(kafka_consumer_Consumer__execute_callbacks(consumer), 2);
             queued.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
@@ -1594,7 +1611,7 @@ mod tests {
 
             let inline = Probe::default();
             fail_point::arm();
-            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, on_error, inline.as_opaque());
+            kafka_consumer_ConsumerHandle_pause_cb(handle, partitions, Some(on_error), inline.as_opaque());
             inline.assert_one_panic("kafka_consumer_ConsumerHandle_pause_cb", fail_point::MESSAGE);
             assert_eq!(queued.fired().len() + int.fired().len(), 2, "no second completion");
 
@@ -1662,7 +1679,7 @@ mod tests {
 
             let ran = std::sync::Arc::new(AtomicI32::new(0));
             let counter = std::sync::Arc::clone(&ran);
-            client_ref(consumer).delivery().invoke(Box::new(move || {
+            client_ref(consumer, "consumer").delivery().invoke(Box::new(move || {
                 counter.fetch_add(1, SeqCst);
             }));
             assert_eq!(ran.load(SeqCst), 0, "queued, not run inline");
@@ -1725,7 +1742,7 @@ mod tests {
             kafka_consumer_Consumer_current_lag_cb(
                 consumer,
                 tp,
-                record_lag,
+                Some(record_lag),
                 &fired as *const Mutex<Vec<(i8, i64, bool)>> as *mut c_void,
             );
         }
@@ -1756,7 +1773,7 @@ mod tests {
         unsafe {
             kafka_consumer_Consumer_close_cb(
                 kafka_consumer_MockConsumer__as_Consumer(mock),
-                on_fired,
+                Some(on_fired),
                 fired.as_opaque(),
             );
             let mock = mock as usize;

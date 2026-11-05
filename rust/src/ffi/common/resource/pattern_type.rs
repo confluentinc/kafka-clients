@@ -22,6 +22,7 @@ use std::ffi::{c_char, c_void};
 
 use crate::common::resource::PatternType;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`PatternType`] singleton.
@@ -44,6 +45,14 @@ pub enum kafka_common_resource_PatternType_e {
     kafka_common_resource_PatternType_LITERAL,
     /// `PatternType::Prefixed`: Java's `PREFIXED`.
     kafka_common_resource_PatternType_PREFIXED,
+}
+
+/// The value an `_err` twin returning [`kafka_common_resource_PatternType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_resource_PatternType_e {
+    fn fail() -> Self {
+        Self::kafka_common_resource_PatternType_UNKNOWN
+    }
 }
 
 /// One static instance per value, indexed by `kafka_common_resource_PatternType_e`.
@@ -77,11 +86,11 @@ pub(crate) fn singleton(value: PatternType) -> *const kafka_common_resource_Patt
 /// # Safety
 ///
 /// `value` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(value: *const kafka_common_resource_PatternType_t) -> PatternType {
+pub(crate) unsafe fn value_of(value: *const kafka_common_resource_PatternType_t, param: &'static str) -> PatternType {
     // SAFETY: Per this function's `# Safety`, `value` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a
     // live, initialised `PatternType`, which is `Copy` and read out here.
-    unsafe { *(value as *const PatternType) }
+    *unsafe { require_ref::<_, PatternType>(value, param) }
 }
 
 /// `PatternType.UNKNOWN`.
@@ -141,19 +150,17 @@ pub extern "C" fn kafka_common_resource_PatternType_prefixed() -> *const kafka_c
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_resource_PatternType_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_resource_PatternType_e::kafka_common_resource_PatternType_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType__enum(
     self_: *const kafka_common_resource_PatternType_t,
 ) -> kafka_common_resource_PatternType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the code of this resource.
@@ -161,16 +168,14 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType__enum(
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-// A caught Rust panic returns -1, which is no code of this Java `byte` enum: its 0 is the
-// valid `UNKNOWN`.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_code(
     self_: *const kafka_common_resource_PatternType_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.code()
+    unsafe { value_of(self_, "self_") }.code()
 }
 
 /// Returns 1 if this pattern type is UNKNOWN, else 0.
@@ -185,7 +190,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_is_unknown(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    i8::from(unsafe { value_of(self_) }.is_unknown())
+    i8::from(unsafe { value_of(self_, "self_") }.is_unknown())
 }
 
 /// `isSpecific()`.
@@ -205,7 +210,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_is_specific(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    i8::from(unsafe { value_of(self_) }.is_specific())
+    i8::from(unsafe { value_of(self_, "self_") }.is_specific())
 }
 
 /// Return the PatternType with the provided code or `UNKNOWN` if one cannot be found.
@@ -276,7 +281,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 #[cfg(test)]
@@ -293,7 +298,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
             // into the static `VARIANTS` array and is never freed.
             unsafe {
-                assert_eq!(value_of(handle), value);
+                assert_eq!(value_of(handle, "value"), value);
                 assert_eq!(kafka_common_resource_PatternType__enum(handle) as usize, index);
             }
         }

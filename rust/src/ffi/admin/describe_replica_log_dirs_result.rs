@@ -18,6 +18,7 @@
 //! §4). Replicas cross as `kafka_common_TopicPartitionReplica_t *` map keys,
 //! built and compared through that type's own C functions.
 
+use crate::ffi::precondition::require_ref;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -69,6 +70,7 @@ impl ReplicaLogDirInfoInner {
 /// `info` must be a live replica-log-dir-info handle, kept alive for `'a`.
 unsafe fn info_inner_ref<'a>(
     info: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
+    param: &'static str,
 ) -> &'a ReplicaLogDirInfoInner {
     // SAFETY: Per this function's `# Safety`, `info` is a live replica-log-dir-info handle kept
     // alive for `'a`. Every `kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t` is the
@@ -76,7 +78,7 @@ unsafe fn info_inner_ref<'a>(
     // place one is made, for an owned handle or a value a map or future owns), so it points at a
     // live `ReplicaLogDirInfoInner`. Nothing takes a `&mut` to it: only the destroy takes the box
     // back, and its `# Safety` excludes any other use at the same time or afterwards.
-    unsafe { &*(info as *const ReplicaLogDirInfoInner) }
+    unsafe { require_ref::<_, ReplicaLogDirInfoInner>(info, param) }
 }
 
 /// A borrowed `char *` for an optional NUL-terminated copy, `NULL` for none.
@@ -99,10 +101,11 @@ pub(crate) fn box_replica_log_dir_info(
 /// `info` must be a live replica-log-dir-info handle, kept alive for `'a`.
 pub(crate) unsafe fn replica_log_dir_info_ref<'a>(
     info: *const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t,
+    param: &'static str,
 ) -> &'a ReplicaLogDirInfo {
     // SAFETY: Per this function's `# Safety`, `info` is a live replica-log-dir-info handle kept
     // alive for `'a`, as `info_inner_ref` requires.
-    &unsafe { info_inner_ref(info) }.info
+    &unsafe { info_inner_ref(info, param) }.info
 }
 
 /// Frees a `kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t *`
@@ -144,7 +147,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     // SAFETY: Per this function's `# Safety`, `self_` is a live replica-log-dir-info handle, kept
     // alive for this call, as `info_inner_ref` requires. The pointer handed out borrows the
     // handle's own copy, which lives as long as the handle.
-    optional_c_str(&unsafe { info_inner_ref(self_) }.current_replica_log_dir_c)
+    optional_c_str(&unsafe { info_inner_ref(self_, "self_") }.current_replica_log_dir_c)
 }
 
 /// Defined as max(HW of partition - LEO of the replica, 0).
@@ -163,7 +166,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live replica-log-dir-info handle, kept
     // alive for this call, as `replica_log_dir_info_ref` requires; the borrow ends with the getter.
-    unsafe { replica_log_dir_info_ref(self_) }.current_replica_offset_lag()
+    unsafe { replica_log_dir_info_ref(self_, "self_") }.current_replica_offset_lag()
 }
 
 /// The future log directory of the replica of this partition on the given broker. Null if the
@@ -186,7 +189,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     // SAFETY: Per this function's `# Safety`, `self_` is a live replica-log-dir-info handle, kept
     // alive for this call, as `info_inner_ref` requires. The pointer handed out borrows the
     // handle's own copy, which lives as long as the handle.
-    optional_c_str(&unsafe { info_inner_ref(self_) }.future_replica_log_dir_c)
+    optional_c_str(&unsafe { info_inner_ref(self_, "self_") }.future_replica_log_dir_c)
 }
 
 /// The LEO of the replica - LEO of the future log of this replica in the destination log
@@ -207,7 +210,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live replica-log-dir-info handle, kept
     // alive for this call, as `replica_log_dir_info_ref` requires; the borrow ends with the getter.
-    unsafe { replica_log_dir_info_ref(self_) }.future_replica_offset_lag()
+    unsafe { replica_log_dir_info_ref(self_, "self_") }.future_replica_offset_lag()
 }
 
 /// Returns as a string.
@@ -225,7 +228,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     // SAFETY: Per this function's `# Safety`, `self_` is a live replica-log-dir-info handle, kept
     // alive for this call, as `replica_log_dir_info_ref` requires; the borrow ends with
     // `to_string`.
-    into_c_string(&unsafe { replica_log_dir_info_ref(self_) }.to_string())
+    into_c_string(&unsafe { replica_log_dir_info_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned replica-log-dir-info handle; `NULL` is a no-op.
@@ -357,12 +360,13 @@ pub(crate) fn box_describe_replica_log_dirs_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeReplicaLogDirsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<DescribeReplicaLogDirsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeReplicaLogDirsResult_t` is built by
     // `box_result::<DescribeReplicaLogDirsResult, _>` (in `box_describe_replica_log_dirs_result`),
     // as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a map from replica to future which can be used to check the log directory information of
@@ -387,7 +391,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&TopicPartitionReplica, &KafkaFuture<ReplicaLogDirInfo>)> =
         h.result.values().iter().collect();
     entries.sort_by(|(a, _), (b, _)| replica_order(a, b));
@@ -433,7 +437,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `infos_map` makes through `box_map`, and
     // the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.

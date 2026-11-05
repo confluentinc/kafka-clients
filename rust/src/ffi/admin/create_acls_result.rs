@@ -44,11 +44,14 @@ pub(crate) fn box_create_acls_result(result: CreateAclsResult, ctx: &FutureCtx) 
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_CreateAclsResult_t) -> &'a ResultHandle<CreateAclsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_CreateAclsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<CreateAclsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_CreateAclsResult_t` is built by `box_result::<CreateAclsResult, _>`
     // (in `box_create_acls_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Frees a `kafka_common_acl_AclBinding_t *` key of an owned map.
@@ -71,8 +74,8 @@ unsafe fn acl_binding_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     // SAFETY: Per this function's `# Safety`, `a` and `b` are valid ACL-binding handles, alive for
     // this call, as `acl_binding_ref` requires; both borrows end with the comparison.
     unsafe {
-        acl_binding_ref(a as *const kafka_common_acl_AclBinding_t)
-            == acl_binding_ref(b as *const kafka_common_acl_AclBinding_t)
+        acl_binding_ref(a as *const kafka_common_acl_AclBinding_t, "a")
+            == acl_binding_ref(b as *const kafka_common_acl_AclBinding_t, "b")
     }
 }
 
@@ -98,7 +101,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&AclBinding, &KafkaFuture<()>)> = h.result.values().iter().collect();
     entries.sort_by_cached_key(|(binding, _)| binding.to_string());
     h.ctx.keyed_future_map(
@@ -128,7 +131,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

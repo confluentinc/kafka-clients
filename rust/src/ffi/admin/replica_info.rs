@@ -15,6 +15,7 @@
 //! `kafka_admin_ReplicaInfo_t`: `org.apache.kafka.clients.admin.ReplicaInfo`
 //! (CLAUDE.md §4). A plain value class: the handle points at the Rust value.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::admin::ReplicaInfo;
@@ -38,12 +39,15 @@ pub(crate) fn box_replica_info(info: ReplicaInfo) -> *mut kafka_admin_ReplicaInf
 /// # Safety
 ///
 /// `info` must be a valid replica-info handle, kept alive for `'a`.
-pub(crate) unsafe fn replica_info_ref<'a>(info: *const kafka_admin_ReplicaInfo_t) -> &'a ReplicaInfo {
+pub(crate) unsafe fn replica_info_ref<'a>(
+    info: *const kafka_admin_ReplicaInfo_t,
+    param: &'static str,
+) -> &'a ReplicaInfo {
     // SAFETY: Per this function's `# Safety`, `info` is a valid replica-info handle kept alive for
     // `'a`; every `kafka_admin_ReplicaInfo_t` is the `Box::into_raw` of a `Box<ReplicaInfo>`
     // (`box_replica_info`, the only producer), so the shared reference is to a live `ReplicaInfo`,
     // which no entry point mutates.
-    unsafe { &*(info as *const ReplicaInfo) }
+    unsafe { require_ref::<_, ReplicaInfo>(info, param) }
 }
 
 /// Frees a `kafka_admin_ReplicaInfo_t *` element of an owned container.
@@ -88,17 +92,15 @@ pub extern "C" fn kafka_admin_ReplicaInfo_new(
 /// Returns the total size of the log segments in this replica in bytes. This value does not
 /// include the size of data stored in remote storage.
 ///
-/// A caught Rust panic returns -1, which no replica size is.
-///
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
     // for this call, as `replica_info_ref` requires.
-    unsafe { replica_info_ref(self_) }.size()
+    unsafe { replica_info_ref(self_, "self_") }.size()
 }
 
 /// Returns the lag of the log's LEO with respect to the partition's high watermark (if it is the
@@ -113,7 +115,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_admin_ReplicaInfo_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
     // for this call, as `replica_info_ref` requires.
-    unsafe { replica_info_ref(self_) }.offset_lag()
+    unsafe { replica_info_ref(self_, "self_") }.offset_lag()
 }
 
 /// `isFuture()`: whether this replica has been created by an
@@ -132,7 +134,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_admin_ReplicaInfo_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
     // for this call, as `replica_info_ref` requires.
-    i8::from(unsafe { replica_info_ref(self_) }.is_future())
+    i8::from(unsafe { replica_info_ref(self_, "self_") }.is_future())
 }
 
 /// Returns the text form of the replica info.
@@ -146,7 +148,7 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_a
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_admin_ReplicaInfo_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid replica-info handle, kept alive
     // for this call, as `replica_info_ref` requires.
-    into_c_string(&unsafe { replica_info_ref(self_) }.to_string())
+    into_c_string(&unsafe { replica_info_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned replica-info handle; `NULL` is a no-op.

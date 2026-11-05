@@ -23,6 +23,8 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_mut, require_ref};
 use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::time::Duration;
@@ -49,6 +51,14 @@ pub enum kafka_consumer_CloseOptions_GroupMembershipOperation_e {
     kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP,
     kafka_consumer_CloseOptions_GroupMembershipOperation_REMAIN_IN_GROUP,
     kafka_consumer_CloseOptions_GroupMembershipOperation_DEFAULT,
+}
+
+/// The value an `_err` twin returning [`kafka_consumer_CloseOptions_GroupMembershipOperation_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_consumer_CloseOptions_GroupMembershipOperation_e {
+    fn fail() -> Self {
+        Self::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP
+    }
 }
 
 /// One static instance per value, indexed by
@@ -84,11 +94,12 @@ fn singleton(operation: GroupMembershipOperation) -> *const kafka_consumer_Close
 /// `operation` must be a singleton returned by this module.
 unsafe fn value_of(
     operation: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
+    param: &'static str,
 ) -> GroupMembershipOperation {
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at
     // a live, initialised `GroupMembershipOperation`, which is `Copy` and read out here.
-    unsafe { *(operation as *const GroupMembershipOperation) }
+    *unsafe { require_ref::<_, GroupMembershipOperation>(operation, param) }
 }
 
 /// The options behind a handle.
@@ -97,13 +108,16 @@ unsafe fn value_of(
 ///
 /// `options` must be a valid close-options handle, kept alive and not modified
 /// for `'a`.
-pub(crate) unsafe fn close_options_ref<'a>(options: *const kafka_consumer_CloseOptions_t) -> &'a CloseOptions {
+pub(crate) unsafe fn close_options_ref<'a>(
+    options: *const kafka_consumer_CloseOptions_t,
+    param: &'static str,
+) -> &'a CloseOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a valid close-options handle kept alive
     // and unmodified for `'a`: a `Box<CloseOptions>` from `Box::into_raw` in
     // `kafka_consumer_CloseOptions_new_with_timeout` or
     // `kafka_consumer_CloseOptions_with_operation`, the only constructors, so the shared reference
     // is to a live `CloseOptions`.
-    unsafe { &*(options as *const CloseOptions) }
+    unsafe { require_ref::<_, CloseOptions>(options, param) }
 }
 
 /// A Java `Duration` in milliseconds; a negative value is clamped to zero,
@@ -139,21 +153,17 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_default()
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP`,
-/// the first enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from
-/// that value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__enum(
     self_: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
 ) -> kafka_consumer_CloseOptions_GroupMembershipOperation_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// `toString()`, Java's inherited `Enum.toString()`.
@@ -173,7 +183,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_to
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 /// `CloseOptions.timeout(Duration timeout)`, the static factory: a handle
@@ -209,6 +219,10 @@ pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> 
 ///
 /// A new `CloseOptions` instance with the specified group membership operation.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("operation should not be null") if `operation` is `NULL`.
+///
 /// # Safety
 ///
 /// `operation` must be a singleton returned by this module.
@@ -219,10 +233,14 @@ pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> 
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
     operation: *const kafka_consumer_CloseOptions_GroupMembershipOperation_t,
 ) -> *mut kafka_consumer_CloseOptions_t {
+    if operation.is_null() {
+        fail(Error::local_null_pointer("operation should not be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // as `value_of` requires; the value is copied out.
-    Box::into_raw(Box::new(CloseOptions::with_operation(unsafe { value_of(operation) })))
-        as *mut kafka_consumer_CloseOptions_t
+    Box::into_raw(Box::new(CloseOptions::with_operation(unsafe {
+        value_of(operation, "operation")
+    }))) as *mut kafka_consumer_CloseOptions_t
 }
 
 /// `withTimeout(Duration timeout)`, applied in place.
@@ -243,7 +261,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a `Box<CloseOptions>`
     // from one of the two constructors, and no other call uses it at the same time, so the
     // exclusive reference is sound for this call, its only use.
-    let slot = unsafe { &mut *(self_ as *mut CloseOptions) };
+    let slot = unsafe { require_mut::<_, CloseOptions>(self_, "self_") };
     *slot = slot.clone().with_timeout(duration_ms(timeout));
 }
 
@@ -254,6 +272,10 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
 ///
 /// - `operation` - The group membership operation to apply. Must be one of `LEAVE_GROUP`,
 ///   `REMAIN_IN_GROUP`, or `DEFAULT`.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("operation should not be null") if `operation` is `NULL`.
 ///
 /// # Safety
 ///
@@ -268,15 +290,18 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, i.e. a `Box<CloseOptions>`
     // from one of the two constructors, and no other call uses it at the same time, so the
     // exclusive reference is sound for this call, its only use.
-    let slot = unsafe { &mut *(self_ as *mut CloseOptions) };
+    let slot = unsafe { require_mut::<_, CloseOptions>(self_, "self_") };
+    if operation.is_null() {
+        fail(Error::local_null_pointer("operation should not be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `operation` is a singleton returned by this module,
     // as `value_of` requires; the value is copied out.
-    *slot = slot.clone().with_group_membership_operation(unsafe { value_of(operation) });
+    *slot = slot
+        .clone()
+        .with_group_membership_operation(unsafe { value_of(operation, "operation") });
 }
 
 /// `timeout()`: the timeout configured for this close.
-///
-/// A caught Rust panic returns -2, which is no close timeout: Java's `close` rejects a negative one.
 ///
 /// # Returns
 ///
@@ -285,14 +310,14 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka_consumer_CloseOptions_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, and no setter runs on it
     // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
     // time, so `close_options_ref`'s requirement holds for this expression, the only use of the
     // reference.
-    unsafe { close_options_ref(self_) }
+    unsafe { close_options_ref(self_, "self_") }
         .timeout()
         .map_or(-1, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
@@ -316,7 +341,7 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_group_membership_operation(
     // meanwhile, since the setters' `# Safety` excludes any other call using the handle at the same
     // time, so `close_options_ref`'s requirement holds for this expression, the only use of the
     // reference.
-    singleton(unsafe { close_options_ref(self_) }.group_membership_operation())
+    singleton(unsafe { close_options_ref(self_, "self_") }.group_membership_operation())
 }
 
 /// Frees a handle; a null pointer is a no-op.
@@ -359,7 +384,7 @@ mod tests {
             kafka_consumer_CloseOptions_with_timeout(options, 10);
             assert_eq!(kafka_consumer_CloseOptions_timeout(options), 10);
             assert_eq!(
-                close_options_ref(options).group_membership_operation(),
+                close_options_ref(options, "options").group_membership_operation(),
                 GroupMembershipOperation::RemainInGroup
             );
             kafka_consumer_CloseOptions_destroy(options);
@@ -375,6 +400,25 @@ mod tests {
                 kafka_consumer_CloseOptions_GroupMembershipOperation_e::kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP
             );
             kafka_consumer_CloseOptions_destroy(by_op);
+        }
+    }
+
+    #[test]
+    fn a_null_operation_is_javas_null_pointer_error() {
+        // SAFETY: Test code: `options` is an owned handle destroyed once; each call gets a `NULL`
+        // operation and a valid `err` slot pointing at null, whose error `stored` frees.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_consumer_CloseOptions_with_operation_err(std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "operation should not be null");
+
+            let options = kafka_consumer_CloseOptions_new_with_timeout(1000);
+            let mut err = std::ptr::null_mut();
+            kafka_consumer_CloseOptions_with_group_membership_operation_err(options, std::ptr::null(), &mut err);
+            assert_eq!(crate::ffi::precondition::stored(err).message(), "operation should not be null");
+            kafka_consumer_CloseOptions_destroy(options);
         }
     }
 }

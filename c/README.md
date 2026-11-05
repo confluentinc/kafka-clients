@@ -15,7 +15,14 @@ the multilanguage tests.
   take a trailing `kafka_common_Error_t **out_err`, which must point to NULL on
   entry; on failure they store an owned error there (free it with
   `kafka_common_Error_destroy`) and return NULL, 0 or -1, so test `*out_err`,
-  not the value. Blocking operations come twice: the
+  not the value. A NULL mandatory argument (a handle, a string, a list) is
+  reported like any other failure, with the error Java throws there
+  (`kafka_common_Error_LOCAL_NULL_POINTER`, "<parameter> must not be null",
+  unless Java's own check names another); a function with no `out_err`
+  aborts the process instead, as does a fallible one given a NULL `out_err`
+  when it has an error to store. `_destroy(NULL)` is a no-op. Language
+  bindings include `confluent_kafka_bindings.h`, where every function reports
+  through `out_err`. Blocking operations come twice: the
   blocking function and a `*_cb` variant that takes a `*_cb_t` plus an opaque
   pointer and returns at once. No Rust thread ever runs a C callback: `_cb`
   completions and delivery callbacks are queued on the client, and

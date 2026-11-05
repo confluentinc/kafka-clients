@@ -764,9 +764,11 @@ standard .NET exceptions — never `KafkaException`.
     `ArgumentOutOfRangeException` (a **negative partition** or a **negative
     timestamp** — the ABI silently maps either to "unset", so the binding must reject it,
     with Java's texts, ledger 284 — or a negative timeout), or `ObjectDisposedException` / `InvalidOperationException` (closed
-    producer). **Mandatory**, not optional: the ABI doesn't validate preconditions
-    (CLAUDE.md §3) and some functions `assert!`/panic on violation — a panic
-    across FFI is UB.
+    producer). **Mandatory**, not optional: the core reports a `NULL` mandatory
+    pointer as -32 "<param> must not be null" (→ `ArgumentNullException`, without
+    the binding's `ParamName`) and any other panic as -4 (→
+    `InvalidOperationException`), neither of them Java's error; the binding's
+    own check throws Java's.
 
 **Why:** a flat `KafkaException` matches what the ABI exposes and the Python
 sibling. Preconditions are a separate surface because they are programmer errors,
@@ -1897,13 +1899,14 @@ shapes: **wakeup** and **concurrent use**.
     `ArgumentNullException` (null topic/partition/config),
     `ArgumentOutOfRangeException` (a negative timeout), or `ObjectDisposedException`
     / `InvalidOperationException` (closed consumer). **Mandatory**, not optional:
-    the ABI doesn't validate preconditions (CLAUDE.md §3), and a `NULL` where the
-    header asks for a live handle is undefined behavior. A panic in the core does not
-    cross the boundary: the `_err` twin stores it as -4 with a message beginning "Rust
-    panic caught at the FFI boundary in <function>" (`rust/ffi-macros/src/lib.rs:87-88`
-    at `3f8a5bc6`), which the error table maps to `InvalidOperationException`, not to
-    Java's error; so a check the binding skips surfaces as that panic. The core's getters
-    panic on a closed consumer
+    a `NULL` where the header asks for a mandatory pointer comes back as -32 "<param>
+    must not be null" (`LocalNullPointerError`), which the error table maps to
+    `ArgumentNullException` with the core's message and no `ParamName`. Any other
+    panic in the core does not cross the boundary either: the `_err` twin stores it as -4
+    with a message beginning "Rust panic caught at the FFI boundary in <function>"
+    (`rust/ffi-macros/src/lib.rs:87-88` at `3f8a5bc6`), which the error table maps to
+    `InvalidOperationException`, not to Java's error; so a check the binding skips
+    surfaces as one of those two errors. The core's getters panic on a closed consumer
     (`rust/src/consumer/internals/async_kafka_consumer.rs:3928-3931` at `3f8a5bc6`),
     which the closed check keeps from reaching C.
   - **`GroupMetadata()` without `group.id` (ledger 105).** The core panics there too
@@ -1981,7 +1984,8 @@ shapes: **wakeup** and **concurrent use**.
     (`rust/src/ffi/consumer/consumer_handle.rs:37-46` at `3f8a5bc6`).
   - **The core's local codes map by the error table (decision 14, M19/P1).** -2 and -4 →
     `InvalidOperationException`, -3 → `ArgumentException`, -5 → `System.TimeoutException`,
-    -31 → `NotSupportedException`, each with the core's message; a `local_callback` error → the carried instance; every
+    -31 → `NotSupportedException`, -32 → `ArgumentNullException` (no `ParamName`), each
+    with the core's message; a `local_callback` error → the carried instance; every
     other code → `KafkaException`. This holds on every surface, the `ConsumerHandle`
     included, so a handle op and the same consumer op throw the same type
     (`HandleAndConsumer_ReportTheSameCoreError_Identically` keeps asserting it). It
@@ -2004,11 +2008,11 @@ shapes: **wakeup** and **concurrent use**.
 exposes (decision 14), and the codes that stand for Java built-ins get their .NET type now,
 so typed subclasses can come later without a break. Preconditions are a separate surface
 because they are programmer errors, not Kafka outcomes — Java raises
-`IllegalArgument`/`IllegalState`, Python its Java-named errors (`NullPointerError`,
-`IllegalArgumentError`; root `CLAUDE.md:431` at `3f8a5bc6`), all before the native call;
-ours must too, *and must* because the ABI would otherwise reach undefined behavior or a
-core panic. The wakeup shape keeps Java's once-only semantics on the flat type (Java's
-`WakeupException` and Python's `WakeupError` become a subclass later, the Note below).
+`IllegalArgument`/`IllegalState`, Python `TypeError` and its Java-named errors
+(`IllegalArgumentError`), all before the native call; ours must too, *and must* because
+the ABI would otherwise answer with its own -32 or -4 error instead of Java's. The wakeup
+shape keeps Java's once-only semantics on the flat type (Java's `WakeupException` and
+Python's `WakeupError` become a subclass later, the Note below).
 Concurrent use is refused by the binding's owner check, as Java's `acquire()` and Python's use
 table refuse it, and behind it by the core (ledger 136); since M19/P1 every rejection is the
 same `InvalidOperationException`, sync or async (decision 17).
@@ -2183,10 +2187,11 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     (`python/_confluentkafka.c:3881-3892`, `:5246-5262`, `:4312-4316` at `3f8a5bc6`).
   - Destroy the `OffsetCommitCallback_t` handle right after the call: the call copied the
     registration (BH:29628-29646 at `3f8a5bc6`).
-  - **Java's `commitAsync(Map, null)`:** `callback` must be a live handle; `NULL` is
-    undefined behavior (`rust/src/ffi/consumer/offset_commit_callback.rs:155-185` at
-    `3f8a5bc6`). Pass a registration with no user callback, built by the same helper over
-    the same per-call state, whose `on_complete` only reports `NULL` through
+  - **Java's `commitAsync(Map, null)`:** `callback` must be a live handle; `NULL` comes
+    back as -32 "callback must not be null", not as Java's commit without a callback
+    (`commit_callback_registration`, `rust/src/ffi/consumer/offset_commit_callback.rs`).
+    Pass a registration with no user callback, built by the same helper over the same
+    per-call state, whose `on_complete` only reports `NULL` through
     `__set_callback_result` on the consumer that state names, since the report needs the
     consumer (BH:29168-29209 at `3f8a5bc6`). Python does the same, with a `NULL` adapter
     in the same context (`python/_confluentkafka.c:3887-3888`, `:5246` at `3f8a5bc6`).
