@@ -179,3 +179,19 @@ dotnet_naming_rule.private_static_fields_are_s_camel_case.severity = warning
 
 # CA1715: Identifiers should have correct prefix (I-prefix on interfaces). CLAUDE.md §7.2 / §4.
 dotnet_diagnostic.CA1715.severity = warning
+
+#### The binding's own analyzers (analyzers/Confluent.Kafka.Analyzers) ####
+
+# CKRDA0001: a TaskCompletionSource runs its continuations asynchronously (ffi-marshalling.md §A7, §B7, §C1).
+# Off by default; on in src/, grpc-server/ and tests/.
+[*.cs]
+dotnet_diagnostic.CKRDA0001.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0001.severity = warning
+
+[grpc-server/**.cs]
+dotnet_diagnostic.CKRDA0001.severity = warning
+
+[tests/**.cs]
+dotnet_diagnostic.CKRDA0001.severity = warning
