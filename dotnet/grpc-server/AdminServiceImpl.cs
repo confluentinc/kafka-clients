@@ -65,14 +65,13 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
     public override Task<Proto.CreateAdminResponse> CreateAdmin(Proto.CreateAdminRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         int numBrokers = request.HasNumBrokers ? request.NumBrokers : 1;
         IAdmin admin;
         try
         {
-            admin = TranslateAdmin.SelectsMock(config)
+            admin = TranslateAdmin.SelectsMock(request.Config)
                 ? MockAdminClient.Create().NumBrokers(numBrokers).Build()
-                : (IAdmin)new KafkaAdminClient(config);
+                : (IAdmin)new KafkaAdminClient(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception ex)
         {

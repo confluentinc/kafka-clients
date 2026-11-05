@@ -69,18 +69,17 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
     public override Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IConsumer<byte[], byte[]> consumer;
         try
         {
             // An empty or all-blank config selects a MockConsumer, as Python's servicer does.
-            if (IsEmptyConfig(config))
+            if (IsEmptyConfig(request.Config))
             {
                 consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
             }
             else
             {
-                consumer = new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
             }
         }
         catch (Exception ex)

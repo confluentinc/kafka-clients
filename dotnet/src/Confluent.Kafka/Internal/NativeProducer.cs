@@ -91,25 +91,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     internal static NativeProducer Create(
-        IReadOnlyDictionary<string, string> config,
+        IReadOnlyDictionary<string, object?> configs,
         string completionThreadName = CompletionThreadName)
     {
-        if (config is null)
-        {
-            throw new ArgumentNullException(nameof(config));
-        }
-
-        foreach (KeyValuePair<string, string> entry in config)
-        {
-            if (entry.Value is null)
-            {
-                throw new ArgumentException(
-                    $"Configuration value for key '{entry.Key}' must not be null.",
-                    nameof(config));
-            }
-        }
-
-        IntPtr classPointer = NewKafkaProducer(config);
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
+        IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
         IntPtr outErr = IntPtr.Zero;
         IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
         if (outErr != IntPtr.Zero)
@@ -120,7 +106,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(config));
+        return Start(new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared));
     }
 
     internal static NativeProducer CreateMock(
@@ -504,57 +490,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
     }
 
-    private static IntPtr NewKafkaProducer(IReadOnlyDictionary<string, string> config)
-    {
-        List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(config.Count * 2);
-        IntPtr map = IntPtr.Zero;
-        IntPtr producerConfig = IntPtr.Zero;
-        IntPtr outErr = IntPtr.Zero;
-        try
-        {
-            map = NativeMethods.MapNew(ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            foreach (KeyValuePair<string, string> entry in config)
-            {
-                Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
-                pins.Add(key);
-                Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
-                pins.Add(value);
-                NativeMethods.MapPut(map, key.Pointer, value.Pointer, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-            }
-
-            producerConfig = NativeMethods.ProducerConfigNew(map, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            IntPtr producer = NativeMethods.KafkaProducerNew(producerConfig, IntPtr.Zero, IntPtr.Zero, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            return producer;
-        }
-        finally
-        {
-            IntPtr destroyErr = IntPtr.Zero;
-            if (producerConfig != IntPtr.Zero)
-            {
-                NativeMethods.ProducerConfigDestroy(producerConfig, ref destroyErr);
-                FreeError(ref destroyErr);
-            }
-
-            foreach (Utf8Marshal.PinnedUtf8String pin in pins)
-            {
-                pin.Dispose();
-            }
-
-            if (map != IntPtr.Zero)
-            {
-                NativeMethods.MapDestroy(map, ref destroyErr);
-                FreeError(ref destroyErr);
-            }
-        }
-    }
-
-    private static long MaxBlockMsOf(IReadOnlyDictionary<string, string> config) =>
-        config.TryGetValue(MaxBlockMsConfig, out string? value)
-        && long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long maxBlockMs)
+    private static long MaxBlockMsOf(IReadOnlyList<KeyValuePair<string, string>> configs) =>
+        long.TryParse(
+            ConfigMarshal.TextOf(configs, MaxBlockMsConfig),
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out long maxBlockMs)
             ? maxBlockMs
             : DefaultMaxBlockMs;
 

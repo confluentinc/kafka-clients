@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -25,19 +26,23 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Tests the config marshalling into <c>kafka_Map_t</c> and <c>ProducerConfig_new</c>: a valid config builds a
-/// producer without a broker, a config the core rejects throws its <see cref="KafkaException"/>, and a bad argument
-/// throws a .NET exception before any native call.
+/// producer without a broker; a config the core rejects throws its <see cref="ConfigException"/> (code -10); a
+/// <c>null</c> value its key's validator refuses throws <see cref="ConfigException"/> before any native call, and one
+/// with no validator leaves its key unset; a <c>null</c> map throws <see cref="ArgumentNullException"/>.
 /// </summary>
 public sealed class ProducerConfigMarshalTests
 {
     private const int ConfigErrorCode = -10;
+
+    private const string UnparseableBatchSize =
+        "Invalid value not-a-number for configuration batch.size: Not a number of type INT";
 
     private static readonly TimeSpan s_disposeDeadline = TimeSpan.FromSeconds(30);
 
     [Fact]
     public void Create_ValidConfig_Succeeds()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["client.id"] = "producer-foundation-test",
@@ -52,7 +57,7 @@ public sealed class ProducerConfigMarshalTests
     [Fact]
     public void Create_NonAsciiConfigValue_Succeeds()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["client.id"] = "グループ-クライアント",
@@ -65,10 +70,10 @@ public sealed class ProducerConfigMarshalTests
     }
 
     [Fact]
-    public void Create_MissingBootstrapServers_ThrowsKafkaException()
+    public void Create_MissingBootstrapServers_ThrowsConfigException()
     {
-        KafkaException failure = Assert.Throws<KafkaException>(
-            () => NativeProducer.Create(new Dictionary<string, string>()));
+        ConfigException failure = Assert.Throws<ConfigException>(
+            () => NativeProducer.Create(new Dictionary<string, object?>()));
 
         Assert.Equal(
             "Missing required configuration \"bootstrap.servers\" which has no default value.",
@@ -78,17 +83,17 @@ public sealed class ProducerConfigMarshalTests
     }
 
     [Fact]
-    public void Create_UnparseableConfigValue_ThrowsKafkaException()
+    public void Create_UnparseableConfigValue_ThrowsConfigException()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["batch.size"] = "not-a-number",
         };
 
-        KafkaException failure = Assert.Throws<KafkaException>(() => NativeProducer.Create(config));
+        ConfigException failure = Assert.Throws<ConfigException>(() => NativeProducer.Create(config));
 
-        Assert.Contains("Invalid value not-a-number for configuration batch.size", failure.Message, StringComparison.Ordinal);
+        Assert.Equal(UnparseableBatchSize, failure.Message);
         Assert.Equal(ConfigErrorCode, failure.Code);
         Assert.False(failure.IsRetriable);
     }
@@ -96,7 +101,7 @@ public sealed class ProducerConfigMarshalTests
     [Fact]
     public void Create_UnparseableConfigValue_Repeatedly_ThrowsEachTime()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["batch.size"] = "not-a-number",
@@ -104,8 +109,9 @@ public sealed class ProducerConfigMarshalTests
 
         for (int i = 0; i < 50; i++)
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => NativeProducer.Create(config));
-            Assert.Contains("Invalid value not-a-number for configuration batch.size", failure.Message, StringComparison.Ordinal);
+            ConfigException failure = Assert.Throws<ConfigException>(() => NativeProducer.Create(config));
+            Assert.Equal(UnparseableBatchSize, failure.Message);
+            Assert.Equal(ConfigErrorCode, failure.Code);
         }
     }
 
@@ -114,24 +120,44 @@ public sealed class ProducerConfigMarshalTests
     {
         ArgumentNullException failure = Assert.Throws<ArgumentNullException>(() => NativeProducer.Create(null!));
 
-        Assert.Equal("config", failure.ParamName);
+        Assert.Equal("configs", failure.ParamName);
     }
 
     [Fact]
-    public void Create_ConfigWithNullValue_ThrowsArgumentException()
+    public void Create_NullValueItsValidatorRefuses_ThrowsConfigException()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
-            ["bootstrap.servers"] = null!,
+            ["bootstrap.servers"] = null,
         };
 
-        ArgumentException failure = Assert.Throws<ArgumentException>(() => NativeProducer.Create(config));
+        ConfigException failure = Assert.Throws<ConfigException>(() => NativeProducer.Create(config));
 
-        Assert.Equal("config", failure.ParamName);
-        Assert.StartsWith(
-            "Configuration value for key 'bootstrap.servers' must not be null.",
-            failure.Message,
-            StringComparison.Ordinal);
+        Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", failure.Message);
+        Assert.Equal(ConfigErrorCode, failure.Code);
+        Assert.False(failure.IsRetriable);
+    }
+
+    [Fact]
+    public void Create_NullValueWithNoValidator_LeavesTheKeyUnset()
+    {
+        var config = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9092",
+            ["sasl.login.connect.timeout.ms"] = null,
+        };
+
+        NativeProducer producer = NativeProducer.Create(config);
+
+        Assert.False(producer.Handle.IsInvalid);
+        TestTimeout.Run(producer.Dispose, s_disposeDeadline);
+
+        config["sasl.login.connect.timeout.ms"] = "";
+        ConfigException failure = Assert.Throws<ConfigException>(() => NativeProducer.Create(config));
+        Assert.Equal(
+            "Invalid value  for configuration sasl.login.connect.timeout.ms: Not a number of type INT",
+            failure.Message);
+        Assert.Equal(ConfigErrorCode, failure.Code);
     }
 
     [Fact]

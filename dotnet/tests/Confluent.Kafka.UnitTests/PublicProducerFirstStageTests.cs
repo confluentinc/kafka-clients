@@ -261,7 +261,7 @@ public sealed class PublicProducerFirstStageTests
 
     private static AsyncKafkaProducer<byte[], byte[]> Unreachable(int maxBlockMs) =>
         new AsyncKafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string>
+            new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",
                 ["max.block.ms"] = maxBlockMs.ToString(System.Globalization.CultureInfo.InvariantCulture),

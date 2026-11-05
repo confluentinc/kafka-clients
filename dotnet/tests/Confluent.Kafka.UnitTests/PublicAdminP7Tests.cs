@@ -42,8 +42,8 @@ public sealed class PublicAdminP7Tests
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Fact]
     public async Task CreateDelegationToken_ReturnsATokenWithItsMetadata()
@@ -218,7 +218,7 @@ public sealed class PublicAdminP7Tests
     public void G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap()
     {
         KafkaAdminClient admin = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
@@ -251,7 +251,7 @@ public sealed class PublicAdminP7Tests
     public void UpdateFeatures_RejectsABlankFeatureName(string feature)
     {
         KafkaAdminClient admin = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(

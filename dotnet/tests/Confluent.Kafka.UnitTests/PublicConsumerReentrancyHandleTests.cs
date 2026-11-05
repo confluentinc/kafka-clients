@@ -785,7 +785,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
         new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-    private static Dictionary<string, string> Config(string groupId) => new()
+    private static Dictionary<string, object?> Config(string groupId) => new()
     {
         ["bootstrap.servers"] = "localhost:1",
         ["group.protocol"] = "consumer",

@@ -553,9 +553,9 @@ public sealed class PublicConsumerCheckOrderTests
         _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray),
     };
 
-    private static Dictionary<string, string> Config(bool groupId)
+    private static Dictionary<string, object?> Config(bool groupId)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>
+        Dictionary<string, object?> config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["group.protocol"] = "consumer",

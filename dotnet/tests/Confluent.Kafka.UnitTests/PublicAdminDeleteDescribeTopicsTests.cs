@@ -342,7 +342,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
 
         IAdmin real = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         try
         {
             Assert.NotNull(real.DeleteTopics(TopicCollection.OfTopicNames(Array.Empty<string>())));
@@ -430,7 +430,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     public async Task G1_10_TheNameCollectionForms_ForwardTheirOptions()
     {
         IAsyncAdmin real = new AsyncKafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
             string[] names = { "alpha" };
@@ -465,7 +465,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     {
         IAdmin mock = MockAdminClient.Create().Build();
         IAdmin real = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         try
         {
             foreach (IAdmin admin in new[] { mock, real })

@@ -31,7 +31,7 @@ public sealed class PublicProducerSendClosedCheckTests
 {
     private const string Topic = "closed-check-topic";
 
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
     };

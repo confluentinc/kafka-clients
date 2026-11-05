@@ -216,7 +216,7 @@ public sealed class PublicAsyncConsumerCloseTests
 
     private static AsyncKafkaConsumer<byte[], byte[]> Real(string? groupId = null)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>
+        Dictionary<string, object?> config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "127.0.0.1:1",
             ["group.protocol"] = "consumer",

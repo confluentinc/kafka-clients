@@ -555,8 +555,8 @@ fn generate_error_codes() -> anyhow::Result<()> {
     println!("🔧 Generating the Python error hierarchy from the Java sources...");
     error_hierarchy::generate(Path::new(REPO_ROOT))?;
 
-    // And the ConfigDef type of every producer / consumer config key.
-    println!("🔧 Generating the Python config key types from the Java sources...");
+    // And the ConfigDef type of every producer / consumer / admin config key.
+    println!("🔧 Generating the Python and .NET config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
@@ -601,17 +601,19 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
 
     // The Python exception hierarchy generated from the Java sources.
-    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
-    // The config key types generated from ProducerConfig / ConsumerConfig.
-    hierarchy_stale.extend(config_types::check_up_to_date(Path::new(REPO_ROOT))?);
+    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The Python and .NET config tables generated from the Java config classes.
+    let config_stale = config_types::check_up_to_date(Path::new(REPO_ROOT))?;
 
-    if codes_stale || !hierarchy_stale.is_empty() {
+    if codes_stale || !hierarchy_stale.is_empty() || !config_stale.is_empty() {
         if codes_stale {
             eprintln!("\n❌ Stale generated error-code constants: {ERROR_CODE_RS}");
         }
-        if !hierarchy_stale.is_empty() {
-            let files: Vec<String> = hierarchy_stale.iter().map(|p| p.display().to_string()).collect();
-            eprintln!("\n❌ Stale generated error hierarchy: {}", files.join(", "));
+        for (what, stale) in [("error hierarchy", &hierarchy_stale), ("config tables", &config_stale)] {
+            if !stale.is_empty() {
+                let files: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+                eprintln!("\n❌ Stale generated {what}: {}", files.join(", "));
+            }
         }
         eprintln!("   Run: cargo xtask generate-error-codes");
         exit(1);
@@ -619,6 +621,7 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
 
     println!("✅ Error-code constants are up to date ({} codes)", codes.len());
     println!("✅ Generated error hierarchy is up to date");
+    println!("✅ Generated config tables are up to date");
     Ok(())
 }
 

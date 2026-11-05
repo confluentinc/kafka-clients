@@ -47,7 +47,7 @@ public sealed class PublicConsumerApiTests
 
     private static string[] ProofTopic() => new[] { "proof-topic" };
 
-    private static Dictionary<string, string> RealConfig(string groupId) => new()
+    private static Dictionary<string, object?> RealConfig(string groupId) => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
         ["group.protocol"] = "consumer",
@@ -254,7 +254,7 @@ public sealed class PublicConsumerApiTests
     [InlineData(false)]
     public void Ctor_InvalidGroupInstanceId_WithoutClientId_ThrowsInvalidConfig(bool sync)
     {
-        Dictionary<string, string> config = ConfigWithoutGroupId();
+        Dictionary<string, object?> config = ConfigWithoutGroupId();
         config["group.id"] = "clientid-invalid";
         config["group.instance.id"] = "bad/id";
 
@@ -270,7 +270,7 @@ public sealed class PublicConsumerApiTests
     [InlineData(false)]
     public void Ctor_InvalidGroupInstanceId_WithExplicitClientId_ThrowsFailedToConstructWithTheCause(bool sync)
     {
-        Dictionary<string, string> config = ConfigWithoutGroupId();
+        Dictionary<string, object?> config = ConfigWithoutGroupId();
         config["group.id"] = "clientid-invalid";
         config["group.instance.id"] = "bad/id";
         config["client.id"] = "explicit-client";
@@ -283,13 +283,13 @@ public sealed class PublicConsumerApiTests
         Assert.Equal(InvalidConfigCode, cause.Code);
     }
 
-    private static Dictionary<string, string> ConfigWithoutGroupId() => new()
+    private static Dictionary<string, object?> ConfigWithoutGroupId() => new()
     {
         ["bootstrap.servers"] = UnreachableBootstrap,
         ["group.protocol"] = "consumer",
     };
 
-    private static IConsumerCommon CreateRealConsumer(bool sync, IReadOnlyDictionary<string, string> config) => sync
+    private static IConsumerCommon CreateRealConsumer(bool sync, IReadOnlyDictionary<string, object?> config) => sync
         ? new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray)
         : new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
 

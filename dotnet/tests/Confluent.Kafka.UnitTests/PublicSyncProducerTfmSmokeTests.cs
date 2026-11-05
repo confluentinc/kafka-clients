@@ -92,7 +92,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 

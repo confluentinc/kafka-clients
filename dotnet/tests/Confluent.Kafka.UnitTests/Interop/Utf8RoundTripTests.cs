@@ -34,7 +34,7 @@ public sealed class Utf8RoundTripTests
     {
         const string groupId = "café-Ω-日本語-😀";
 
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["group.protocol"] = "consumer",

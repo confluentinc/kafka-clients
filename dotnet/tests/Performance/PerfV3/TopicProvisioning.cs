@@ -36,7 +36,7 @@ internal static class TopicProvisioning
 
     internal static void RecreateTopic(string bootstrapServers, string topic, int partitions)
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = bootstrapServers,
         };
