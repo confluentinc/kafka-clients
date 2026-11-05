@@ -746,7 +746,7 @@ per-message allocation CLAUDE.md §12 exists to prevent.
 `kafka_common_Error_t` handle → the class of the error's id, mirroring Java and the Python
 sibling: a generated Kafka class under `KafkaException`, or a Java-named class for a Java
 built-in, which derives from the .NET built-in (`dotnet/CLAUDE.md` §2, §3; this replaced
-decision 14's flat `KafkaException`, `dotnet/design/current/PLAN-error-hierarchy-parity.md`).
+decision 14's flat `KafkaException`, `dotnet/design/history/M22/P1-error-hierarchy-parity/PLAN.md`).
 **Precondition errors** (bad argument / state) are validated in the binding *before* the FFI
 call and raise the class Java raises there — never `KafkaException`.
 
