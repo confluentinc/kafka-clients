@@ -338,8 +338,8 @@ public sealed class PublicProducerSendWithCallbackTests
     private static ProducerRecord<byte[], byte[]> Record(string topic) =>
         new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"));
 
-    private static Dictionary<string, string> Unreachable(int maxBlockMs) =>
-        new Dictionary<string, string>
+    private static Dictionary<string, object?> Unreachable(int maxBlockMs) =>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["max.block.ms"] = maxBlockMs.ToString(System.Globalization.CultureInfo.InvariantCulture),

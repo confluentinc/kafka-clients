@@ -45,6 +45,17 @@ internal static class Translate
 
     internal static string OffsetKey(string topic, int partition) => $"{topic}-{partition}";
 
+    internal static Dictionary<string, object?> ConfigsFromProto(IReadOnlyDictionary<string, string> config)
+    {
+        var configs = new Dictionary<string, object?>(config.Count);
+        foreach (KeyValuePair<string, string> entry in config)
+        {
+            configs.Add(entry.Key, entry.Value);
+        }
+
+        return configs;
+    }
+
     internal static Proto.CallbackLogPartition CallbackLogPartitionToProto(TopicPartition partition) =>
         new Proto.CallbackLogPartition
         {

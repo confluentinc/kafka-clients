@@ -33,10 +33,10 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
     private static string[] ProofTopic() => new[] { "proof-topic" };
 
-    private static Dictionary<string, string> RealConsumerConfig(
+    private static Dictionary<string, object?> RealConsumerConfig(
         string groupId, string? groupInstanceId = null)
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["group.protocol"] = "consumer",

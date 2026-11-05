@@ -42,9 +42,15 @@ internal static class UnreachableProducers
     internal static readonly TimeSpan Settle = TimeSpan.FromMilliseconds(300);
 
     internal static KafkaProducer<byte[], byte[]> Sync(int maxBlockMs) =>
+        Sync((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
+
+    internal static KafkaProducer<byte[], byte[]> Sync(object maxBlockMs) =>
         new KafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
 
     internal static AsyncKafkaProducer<byte[], byte[]> Async(int maxBlockMs) =>
+        Async((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
+
+    internal static AsyncKafkaProducer<byte[], byte[]> Async(object maxBlockMs) =>
         new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
 
     internal static string Topic(string prefix) => prefix + "-" + Guid.NewGuid().ToString("N");
@@ -73,11 +79,11 @@ internal static class UnreachableProducers
         return log;
     }
 
-    private static Dictionary<string, string> Config(int maxBlockMs) =>
-        new Dictionary<string, string>
+    private static Dictionary<string, object?> Config(object maxBlockMs) =>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
-            ["max.block.ms"] = maxBlockMs.ToString(CultureInfo.InvariantCulture),
+            ["max.block.ms"] = maxBlockMs,
         };
 
     /// <summary>The threads a producer's native handle was destroyed on, with what had happened before.</summary>

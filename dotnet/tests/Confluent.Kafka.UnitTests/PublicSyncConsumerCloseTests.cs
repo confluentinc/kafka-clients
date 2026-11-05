@@ -277,7 +277,7 @@ public sealed class PublicSyncConsumerCloseTests
     private static MockConsumer<byte[], byte[]> Mock() => new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
     private static KafkaConsumer<byte[], byte[]> Real() => new KafkaConsumer<byte[], byte[]>(
-        new Dictionary<string, string>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "127.0.0.1:1",
             ["group.protocol"] = "consumer",

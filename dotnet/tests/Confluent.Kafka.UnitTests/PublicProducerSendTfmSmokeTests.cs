@@ -85,7 +85,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            new System.Collections.Generic.Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new System.Collections.Generic.Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 

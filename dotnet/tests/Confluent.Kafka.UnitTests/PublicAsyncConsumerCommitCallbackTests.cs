@@ -837,7 +837,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         bool? enableAutoCommit = null,
         int? defaultApiTimeoutMs = null)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>
+        Dictionary<string, object?> config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["group.protocol"] = "consumer",

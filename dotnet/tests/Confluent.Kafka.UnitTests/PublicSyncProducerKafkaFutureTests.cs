@@ -161,7 +161,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
         // A real producer whose bootstrap refuses connections: the metadata wait times out after max.block.ms, and the
         // failure reaches the callback and Get rather than Send, as Java's doSend catch (ApiException) does.
         const string ApiTopic = "sync-future-api-failure-topic";
-        Dictionary<string, string> config = new Dictionary<string, string>
+        Dictionary<string, object?> config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "127.0.0.1:1",
             ["max.block.ms"] = "200",

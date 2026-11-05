@@ -202,7 +202,7 @@ internal static class VerifyConsumed
 
     private static KafkaConsumer<byte[], byte[]> NewVerifier(string bootstrapServers, string groupPrefix)
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = bootstrapServers,
             ["group.id"] = $"{groupPrefix}-{Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture)}",

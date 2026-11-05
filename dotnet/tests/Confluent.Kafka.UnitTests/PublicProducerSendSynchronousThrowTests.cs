@@ -161,7 +161,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         client == Mock
             ? new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, valueSerializer ?? Serdes.ByteArray)
             : new AsyncKafkaProducer<byte[], byte[]>(
-                new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1" },
+                new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1" },
                 Serdes.ByteArray,
                 valueSerializer ?? Serdes.ByteArray);
 

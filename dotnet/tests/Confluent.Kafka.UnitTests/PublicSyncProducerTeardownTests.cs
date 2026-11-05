@@ -122,7 +122,7 @@ public sealed class PublicSyncProducerTeardownTests
     {
         // The real KafkaProducer with no broker tears down without hanging.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 

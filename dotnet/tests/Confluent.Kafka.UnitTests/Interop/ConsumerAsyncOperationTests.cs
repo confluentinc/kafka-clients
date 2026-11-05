@@ -36,7 +36,7 @@ public sealed class ConsumerAsyncOperationTests
 
     private static string[] ProofTopic() => new[] { "proof-topic" };
 
-    private static Dictionary<string, string> RealConsumerConfig(string groupId) => new()
+    private static Dictionary<string, object?> RealConsumerConfig(string groupId) => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
         ["group.protocol"] = "consumer",

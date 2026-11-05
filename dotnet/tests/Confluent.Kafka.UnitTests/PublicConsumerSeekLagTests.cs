@@ -357,7 +357,7 @@ public sealed class PublicConsumerSeekLagTests
         Assert.NotNull(lag);
     }
 
-    private static Dictionary<string, string> RealConfig() => new Dictionary<string, string>
+    private static Dictionary<string, object?> RealConfig() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "127.0.0.1:1",
         ["group.protocol"] = "consumer",

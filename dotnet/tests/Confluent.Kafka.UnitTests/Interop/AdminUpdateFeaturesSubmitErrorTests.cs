@@ -32,8 +32,8 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Theory]
     [InlineData(false)]

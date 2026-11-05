@@ -72,7 +72,7 @@ public sealed class PublicAdminTfmSmokeTests
     public async Task RealAdminClient_CreateDisposeAsync_RoundTrips()
     {
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
     }

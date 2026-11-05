@@ -87,21 +87,37 @@ public sealed class PublicProducerInCallbackTests
     }
 
     [Theory]
-    [InlineData(SyncFlavor)]
-    [InlineData(AsyncFlavor)]
-    public async Task PartitionsFor_FromADeliveryCallback_EndsAfterMaxBlockMs_WithTheCallbackTimeout(string flavor)
+    [InlineData(SyncFlavor, "string")]
+    [InlineData(SyncFlavor, "int")]
+    [InlineData(SyncFlavor, "long")]
+    [InlineData(AsyncFlavor, "string")]
+    [InlineData(AsyncFlavor, "int")]
+    [InlineData(AsyncFlavor, "long")]
+    public async Task PartitionsFor_FromADeliveryCallback_EndsAfterMaxBlockMs_WithTheCallbackTimeout(
+        string flavor,
+        string maxBlockMsType)
     {
         string topic = Topic("in-callback-partitions-for");
         Exception? timedOut = null;
         long elapsedMs = 0;
-        await Run(flavor, "in-callback-partitions-for-vehicle", producer =>
+        object maxBlockMs = maxBlockMsType switch
         {
-            Stopwatch elapsed = Stopwatch.StartNew();
-            timedOut = producer is KafkaProducer<byte[], byte[]> sync
-                ? Record(() => sync.PartitionsFor(topic))
-                : Record(() => WaitFor(((AsyncKafkaProducer<byte[], byte[]>)producer).PartitionsFor(topic)));
-            elapsedMs = elapsed.ElapsedMilliseconds;
-        });
+            "int" => (object)MaxBlockMs,
+            "long" => (object)(long)MaxBlockMs,
+            _ => MaxBlockMs.ToString(CultureInfo.InvariantCulture),
+        };
+        await Run(
+            flavor,
+            "in-callback-partitions-for-vehicle",
+            producer =>
+            {
+                Stopwatch elapsed = Stopwatch.StartNew();
+                timedOut = producer is KafkaProducer<byte[], byte[]> sync
+                    ? Record(() => sync.PartitionsFor(topic))
+                    : Record(() => WaitFor(((AsyncKafkaProducer<byte[], byte[]>)producer).PartitionsFor(topic)));
+                elapsedMs = elapsed.ElapsedMilliseconds;
+            },
+            maxBlockMs: maxBlockMs);
 
         KafkaException error = Assert.IsType<KafkaException>(timedOut);
         Assert.Equal(7, error.Code);
@@ -235,9 +251,11 @@ public sealed class PublicProducerInCallbackTests
         string flavor,
         string topicPrefix,
         Action<object> inCallback,
-        Action<object>? beforeSend = null)
+        Action<object>? beforeSend = null,
+        object? maxBlockMs = null)
     {
-        object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : Async(MaxBlockMs);
+        object maxBlock = maxBlockMs ?? MaxBlockMs.ToString(CultureInfo.InvariantCulture);
+        object producer = flavor == SyncFlavor ? Sync(maxBlock) : Async(maxBlock);
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback(producer));
         try
         {

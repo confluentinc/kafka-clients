@@ -38,8 +38,8 @@ namespace Confluent.Kafka.GrpcServer;
 internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.ChaosWorkloadServiceBase, IDisposable
 {
     private readonly ChaosRegistry _registry = new ChaosRegistry();
-    private readonly Func<IReadOnlyDictionary<string, string>, IAsyncProducer<byte[], byte[]>> _producerFactory;
-    private readonly Func<IReadOnlyDictionary<string, string>, IAsyncConsumer<byte[], byte[]>> _consumerFactory;
+    private readonly Func<IReadOnlyDictionary<string, object?>, IAsyncProducer<byte[], byte[]>> _producerFactory;
+    private readonly Func<IReadOnlyDictionary<string, object?>, IAsyncConsumer<byte[], byte[]>> _consumerFactory;
 
     public AsyncChaosWorkloadServiceImpl()
         : this(
@@ -51,8 +51,8 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
     // The unit tests' seam: DI activates only the public constructor, so production always gets the
     // real clients.
     internal AsyncChaosWorkloadServiceImpl(
-        Func<IReadOnlyDictionary<string, string>, IAsyncProducer<byte[], byte[]>> producerFactory,
-        Func<IReadOnlyDictionary<string, string>, IAsyncConsumer<byte[], byte[]>> consumerFactory)
+        Func<IReadOnlyDictionary<string, object?>, IAsyncProducer<byte[], byte[]>> producerFactory,
+        Func<IReadOnlyDictionary<string, object?>, IAsyncConsumer<byte[], byte[]>> consumerFactory)
     {
         _producerFactory = producerFactory;
         _consumerFactory = consumerFactory;
@@ -105,7 +105,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
         IAsyncProducer<byte[], byte[]> producer;
         try
         {
-            producer = _producerFactory(new Dictionary<string, string>(request.Config));
+            producer = _producerFactory(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception e)
         {
@@ -187,7 +187,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
         IAsyncConsumer<byte[], byte[]> consumer;
         try
         {
-            consumer = _consumerFactory(new Dictionary<string, string>(request.Config));
+            consumer = _consumerFactory(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception e)
         {

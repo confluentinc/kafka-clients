@@ -89,13 +89,13 @@ internal static class Program
 
         foreach (string codec in new[] { "gzip", "snappy", "lz4", "zstd" })
         {
-            CloseProducer(new Dictionary<string, string> { ["bootstrap.servers"] = BootstrapServers, ["compression.type"] = codec });
+            CloseProducer(new Dictionary<string, object?> { ["bootstrap.servers"] = BootstrapServers, ["compression.type"] = codec });
             Console.WriteLine($"OK: compression {codec}");
         }
-        CloseProducer(new Dictionary<string, string> { ["bootstrap.servers"] = BootstrapServers, ["security.protocol"] = "SSL" });
+        CloseProducer(new Dictionary<string, object?> { ["bootstrap.servers"] = BootstrapServers, ["security.protocol"] = "SSL" });
         Console.WriteLine("OK: security.protocol=SSL");
 
-        var consumerConfig = new Dictionary<string, string>
+        var consumerConfig = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = BootstrapServers,
             ["group.id"] = "package-smoke",
@@ -109,7 +109,7 @@ internal static class Program
         return 0;
     }
 
-    private static void CloseProducer(Dictionary<string, string> config)
+    private static void CloseProducer(Dictionary<string, object?> config)
     {
         using var producer = new KafkaProducer<string, string>(config, Serdes.String, Serdes.String);
         producer.Close(TimeSpan.FromSeconds(10));

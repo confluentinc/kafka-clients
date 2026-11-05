@@ -119,5 +119,16 @@ internal static class V3Config
         }
     }
 
+    internal static Dictionary<string, object?> ClientConfigs(IReadOnlyDictionary<string, string> conf)
+    {
+        var configs = new Dictionary<string, object?>(conf.Count);
+        foreach (KeyValuePair<string, string> kv in conf)
+        {
+            configs[kv.Key] = kv.Value;
+        }
+
+        return configs;
+    }
+
     private static string Str(int value) => value.ToString(CultureInfo.InvariantCulture);
 }

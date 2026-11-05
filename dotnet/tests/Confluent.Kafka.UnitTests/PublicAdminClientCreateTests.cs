@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -51,7 +52,7 @@ public sealed class PublicAdminClientCreateTests
     {
         AssertCreateFails(
             async,
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["default.api.timeout.ms"] = "500" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1", ["default.api.timeout.ms"] = "500" },
             "The specified value of default.api.timeout.ms must be no smaller than the value of request.timeout.ms.");
     }
 
@@ -62,7 +63,7 @@ public sealed class PublicAdminClientCreateTests
     {
         AssertCreateFails(
             async,
-            new Dictionary<string, string>(),
+            new Dictionary<string, object?>(),
             "You must set either bootstrap.servers or bootstrap.controllers");
     }
 
@@ -73,7 +74,7 @@ public sealed class PublicAdminClientCreateTests
     {
         AssertCreateFails(
             async,
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:1", ["bootstrap.controllers"] = "localhost:2" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1", ["bootstrap.controllers"] = "localhost:2" },
             "You cannot set both bootstrap.servers and bootstrap.controllers");
     }
 
@@ -96,23 +97,23 @@ public sealed class PublicAdminClientCreateTests
             () => TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline)));
     }
 
-    private static Dictionary<string, string> ControllersOnly() =>
-        new Dictionary<string, string> { ["bootstrap.controllers"] = "localhost:1" };
+    private static Dictionary<string, object?> ControllersOnly() =>
+        new Dictionary<string, object?> { ["bootstrap.controllers"] = "localhost:1" };
 
-    private static void AssertCreateFails(bool async, IReadOnlyDictionary<string, string> config, string causeMessage)
+    private static void AssertCreateFails(bool async, IReadOnlyDictionary<string, object?> config, string causeMessage)
     {
         KafkaException outer = Assert.Throws<KafkaException>(() => Create(async, config));
 
         Assert.Equal(UnknownServerErrorCode, outer.Code);
         Assert.Equal(CreateFailed, outer.Message);
 
-        KafkaException cause = Assert.IsType<KafkaException>(outer.InnerException);
+        ConfigException cause = Assert.IsType<ConfigException>(outer.InnerException);
         Assert.Equal(ConfigErrorCode, cause.Code);
         Assert.Equal(causeMessage, cause.Message);
         Assert.False(cause.IsRetriable);
     }
 
-    private static object Create(bool async, IReadOnlyDictionary<string, string> config) =>
+    private static object Create(bool async, IReadOnlyDictionary<string, object?> config) =>
         async ? new AsyncKafkaAdminClient(config) : new KafkaAdminClient(config);
 
     private static void AssertUnsupportedEndpointType(KafkaException failure)
