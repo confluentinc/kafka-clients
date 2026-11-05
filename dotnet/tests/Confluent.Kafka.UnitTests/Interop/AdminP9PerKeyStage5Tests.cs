@@ -62,7 +62,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(bindings.Length, result.Values.Count);
         foreach (AclBinding binding in bindings)
         {
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Values[binding].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -83,7 +83,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, result.Values.Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
         {
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Values[entity].Get(), s_deadline));
 
             // The core mock's own wording, typo included.
@@ -109,7 +109,7 @@ public sealed class AdminP9PerKeyStage5Tests
 
         foreach (Uuid id in new[] { first, second })
         {
-            UnknownTopicOrPartitionException failure = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+            UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
                 () => TestTimeout.Run(() => values[id].Get(), s_deadline));
             Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
             Assert.Equal($"Topic {id} does not exist.", failure.Message);
@@ -139,12 +139,12 @@ public sealed class AdminP9PerKeyStage5Tests
 
         Assert.Equal(2, result.Values.Count);
 
-        KafkaStorageException zeroFailure = await Assert.ThrowsAsync<KafkaStorageException>(
+        KafkaStorageException zeroFailure = await FutureAssert.ThrowsAsync<KafkaStorageException>(
             () => TestTimeout.Run(() => result.Values[zero].Get(), s_deadline));
         Assert.Equal(KafkaStorageErrorCode, zeroFailure.Code);
         Assert.Equal("Log directory /cp6-offline-zero is offline", zeroFailure.Message);
 
-        KafkaStorageException oneFailure = await Assert.ThrowsAsync<KafkaStorageException>(
+        KafkaStorageException oneFailure = await FutureAssert.ThrowsAsync<KafkaStorageException>(
             () => TestTimeout.Run(() => result.Values[one].Get(), s_deadline));
         Assert.Equal("Log directory /cp6-offline-one is offline", oneFailure.Message);
     }
@@ -172,7 +172,7 @@ public sealed class AdminP9PerKeyStage5Tests
 
         await TestTimeout.Run(() => result.Values[inRange].Get(), s_deadline);
 
-        UnknownTopicOrPartitionException failure = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => result.Values[outOfRange].Get(), s_deadline));
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
     }
@@ -189,7 +189,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, groups.DeletedGroups.Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
         {
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => groups.DeletedGroups[group].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -213,7 +213,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, result.Values.Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })
         {
-            UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Values[user].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }

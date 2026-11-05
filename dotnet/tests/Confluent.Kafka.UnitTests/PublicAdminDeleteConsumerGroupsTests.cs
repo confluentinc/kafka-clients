@@ -49,12 +49,12 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.DeletedGroups)
         {
             UnsupportedOperationException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => entry.Value.Get()), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => entry.Value.Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -68,7 +68,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         Assert.Equal(new[] { "p5-group-a", "p5-group-b" }, result.DeletedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -106,7 +106,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         await TestTimeout.Run(() => result.DeletedGroups["good"].Get(), s_deadline);
 
         ControllerMovedException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<ControllerMovedException>(() => result.DeletedGroups["bad"].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<ControllerMovedException>(() => result.DeletedGroups["bad"].Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 
@@ -124,7 +124,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         AsyncDeleteConsumerGroupsResult mixed = new AsyncDeleteConsumerGroupsResult(sources);
 
         ControllerMovedException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<ControllerMovedException>(() => mixed.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<ControllerMovedException>(() => mixed.All().Get()), s_deadline);
         Assert.Same(error, thrown);
 
         AsyncDeleteConsumerGroupsResult clean = new AsyncDeleteConsumerGroupsResult(

@@ -187,7 +187,7 @@ public sealed class PublicProducerFirstStageTests
             Assert.True(elapsed.ElapsedMilliseconds < 1000, $"Send took {elapsed.ElapsedMilliseconds} ms");
 
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
-            KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(
+            KafkaException failure = await FutureAssert.ThrowsAnyAsync<KafkaException>(
                 () => TestTimeout.Run(() => future.Get(), s_deadline));
             Assert.Equal(7, failure.Code);
             Assert.Equal($"Topic {topic} not present in metadata after 1000 ms.", failure.Message);

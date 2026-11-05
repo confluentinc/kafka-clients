@@ -70,7 +70,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -84,7 +84,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
         Assert.Same(result.Entities().Get(), result.Entities().Get());
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
     }
 
@@ -109,7 +109,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
             ClientQuotaFilter.ContainsOnly(new[] { component }));
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

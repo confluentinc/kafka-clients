@@ -78,7 +78,7 @@ public sealed class PublicProducerSendTfmSmokeTests
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
-        await Assert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
     }
 
     [Fact]

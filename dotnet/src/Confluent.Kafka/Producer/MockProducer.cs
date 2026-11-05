@@ -131,7 +131,8 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     /// <summary>
     /// Fails the earliest uncompleted send with <paramref name="exception"/> (Java <c>MockProducer.errorNext</c>); its
-    /// delivery callback and its future's <see cref="KafkaFuture{T}.Get()"/> receive the same instance.
+    /// delivery callback receives the same instance, and its future's <see cref="KafkaFuture{T}.Get()"/> throws an
+    /// <see cref="Java.Util.Concurrent.ExecutionException"/> around it.
     /// </summary>
     /// <param name="exception">The exception to fail the send with.</param>
     /// <returns><see langword="true"/> if a pending send was failed; otherwise <see langword="false"/>.</returns>

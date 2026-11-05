@@ -83,7 +83,7 @@ public sealed class PublicProducerSendTests
 
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("boom-corrupt-message")));
 
-        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             () => WithTimeout(sendTask));
 
         Assert.Equal(2, failure.Code);
@@ -103,7 +103,7 @@ public sealed class PublicProducerSendTests
         KafkaException injected = new Common.Errors.CorruptRecordException("the injected instance");
         Assert.True(producer.ErrorNext(injected));
 
-        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(() => WithTimeout(sendTask));
         Assert.Same(injected, failure);
     }
 

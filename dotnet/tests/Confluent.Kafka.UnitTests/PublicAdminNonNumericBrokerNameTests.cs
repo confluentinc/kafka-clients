@@ -146,7 +146,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private static async Task AssertTimedOut(Task outcome, string call)
     {
-        KafkaTimeoutException failure = await Assert.ThrowsAsync<KafkaTimeoutException>(
+        KafkaTimeoutException failure = await FutureAssert.ThrowsAsync<KafkaTimeoutException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(RequestTimedOutCode, failure.Code);
         Assert.IsAssignableFrom<Common.Errors.RetriableException>(failure);
@@ -155,7 +155,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private static async Task AssertInvalidRequest(Task outcome, string message)
     {
-        InvalidRequestException failure = await Assert.ThrowsAsync<InvalidRequestException>(
+        InvalidRequestException failure = await FutureAssert.ThrowsAsync<InvalidRequestException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(InvalidRequestCode, failure.Code);
         Assert.Equal(message, failure.Message);
@@ -163,7 +163,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private static async Task AssertNotSupported(Task outcome, string message)
     {
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(message, failure.Message);
     }

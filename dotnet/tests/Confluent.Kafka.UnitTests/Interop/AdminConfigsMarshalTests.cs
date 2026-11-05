@@ -202,11 +202,11 @@ public sealed class AdminConfigsMarshalTests
         Assert.NotNull(await TestTimeout.Run(() => result.Values[present].Get(), s_deadline));
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal("Resource ConfigResource(type=TOPIC, name='cfg-absent-topic') not found.", failure.Message);
 
         UnknownTopicOrPartitionException all = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.All().Get()), s_deadline);
         Assert.Equal(failure.Message, all.Message);
     }
 

@@ -18,6 +18,7 @@ using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Requests;
 using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Java.Util;
+using Confluent.Kafka.Java.Util.Concurrent;
 using Xunit;
 
 using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
@@ -43,6 +44,16 @@ public sealed class SoakErrorClassificationTests
     {
         Assert.Equal(-1, SoakClient.ErrorCode(new KafkaException("x")));
         Assert.Equal(16, SoakClient.ErrorCode(new NotCoordinatorException("coordinator moved")));
+    }
+
+    [Fact]
+    public void FailureOfUnwrapsAnExecutionExceptionOnly()
+    {
+        var cause = new NotCoordinatorException("x");
+        Assert.Same(cause, SoakClient.FailureOf(new ExecutionException(cause)));
+        Assert.Same(cause, SoakClient.FailureOf(cause));
+        var empty = new ExecutionException((Exception?)null);
+        Assert.Same(empty, SoakClient.FailureOf(empty));
     }
 
     [Fact]

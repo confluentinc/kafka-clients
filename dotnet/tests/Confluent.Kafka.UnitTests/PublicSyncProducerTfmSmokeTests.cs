@@ -85,7 +85,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
-        await Assert.ThrowsAsync<CorruptRecordException>(() => TestTimeout.Run(() => sendTask, s_deadline));
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(() => TestTimeout.Run(() => sendTask, s_deadline));
     }
 
     [Fact]

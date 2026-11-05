@@ -75,7 +75,7 @@ public sealed class PublicProducerMockControlTests
 
         Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("mock-error")));
 
-        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             async () => await sendTask);
         Assert.Equal(2, failure.Code);
         Assert.Contains("mock-error", failure.Message, StringComparison.Ordinal);

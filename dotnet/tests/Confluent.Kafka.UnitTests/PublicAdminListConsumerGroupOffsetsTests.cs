@@ -85,7 +85,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         foreach (Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future in futures)
         {
             UnsupportedOperationException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => future), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => future), s_deadline);
 
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -109,7 +109,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             });
 
         UnsupportedOperationException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -282,7 +282,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
 
         KafkaTimeoutException batched = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => real.ListConsumerGroupOffsets(
                     new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                     {
@@ -291,7 +291,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     options).All().Get()),
             s_deadline);
         KafkaTimeoutException single = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => real.ListConsumerGroupOffsets("p5-lcgo-forward", options).All().Get()),
             s_deadline);
 

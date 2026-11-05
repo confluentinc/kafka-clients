@@ -97,7 +97,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
 
     private static async Task AssertNotImplemented(AsyncKafkaFuture future)
     {
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => future.Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

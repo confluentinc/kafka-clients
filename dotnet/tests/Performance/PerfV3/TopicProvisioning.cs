@@ -19,6 +19,7 @@ using System.Threading;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Util.Concurrent;
 
 namespace Confluent.Kafka.Performance.V3;
 
@@ -53,7 +54,7 @@ internal static class TopicProvisioning
             deleteResult.TopicNameValues![topic].Get();
             Console.WriteLine($">>> deleted '{topic}'");
         }
-        catch (UnknownTopicOrPartitionException)
+        catch (ExecutionException e) when (e.InnerException is UnknownTopicOrPartitionException)
         {
             Console.WriteLine($">>> '{topic}' did not exist (ok)");
         }
@@ -72,7 +73,7 @@ internal static class TopicProvisioning
             createResult.Values[topic].Get();
             Console.WriteLine($">>> created '{topic}'");
         }
-        catch (TopicExistsException)
+        catch (ExecutionException e) when (e.InnerException is TopicExistsException)
         {
             Console.WriteLine($">>> '{topic}' already exists (ok)");
         }

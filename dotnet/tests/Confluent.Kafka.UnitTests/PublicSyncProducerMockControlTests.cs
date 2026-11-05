@@ -76,7 +76,7 @@ public sealed class PublicSyncProducerMockControlTests
 
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
-        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
         Assert.Equal(2, failure.Code);
         Assert.Contains("sync-mock-error", failure.Message, StringComparison.Ordinal);

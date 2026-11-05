@@ -210,7 +210,7 @@ public sealed class PublicRecordMetadataTests
                 if (fail)
                 {
                     Assert.True(producer.ErrorNext(new CorruptRecordException("metadata-failure")));
-                    Assert.Throws<CorruptRecordException>(() => future.Get());
+                    FutureAssert.Throws<CorruptRecordException>(() => future.Get());
                 }
                 else
                 {
@@ -234,7 +234,7 @@ public sealed class PublicRecordMetadataTests
                 if (fail)
                 {
                     Assert.True(producer.ErrorNext(new CorruptRecordException("metadata-failure")));
-                    await Assert.ThrowsAsync<CorruptRecordException>(() => future.Get());
+                    await FutureAssert.ThrowsAsync<CorruptRecordException>(() => future.Get());
                 }
                 else
                 {

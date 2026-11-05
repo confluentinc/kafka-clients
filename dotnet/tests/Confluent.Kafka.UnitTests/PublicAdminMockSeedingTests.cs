@@ -49,7 +49,7 @@ public class PublicAdminMockSeedingTests
         admin.TimeoutNextRequest(1);
 
         KafkaTimeoutException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaTimeoutException>(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-b", 1, 1) }).All().Get()),
             s_deadline);
         Assert.Equal("The mock timed out the request.", failure.Message);

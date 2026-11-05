@@ -254,7 +254,7 @@ public sealed class AdminP6ResultMarshalTests
         AsyncDescribeClientQuotasResult result =
             AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(ClientQuotaFilter.All(), options: null));
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }

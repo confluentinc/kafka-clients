@@ -109,7 +109,7 @@ public sealed class PublicSyncProducerSendTests
         DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
         // Get throws the injected KafkaException, code and message included.
-        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
         Assert.Equal(2, failure.Code);
         Assert.Contains("sync-mock-error", failure.Message, StringComparison.Ordinal);

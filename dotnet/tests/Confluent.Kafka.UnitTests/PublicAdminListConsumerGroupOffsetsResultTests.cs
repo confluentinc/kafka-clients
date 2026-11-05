@@ -244,8 +244,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
 
         Assert.Same(
             failure,
-            await Assert.ThrowsAsync<KafkaException>(() => result.PartitionsToOffsetAndMetadata("bad").Get()));
-        Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+            await FutureAssert.ThrowsAsync<KafkaException>(() => result.PartitionsToOffsetAndMetadata("bad").Get()));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -261,7 +261,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.False(all.IsCompleted);
 
         slow.Complete(Offsets(3));
-        await Assert.ThrowsAsync<KafkaException>(() => all);
+        await FutureAssert.ThrowsAsync<KafkaException>(() => all);
     }
 
     [Fact]

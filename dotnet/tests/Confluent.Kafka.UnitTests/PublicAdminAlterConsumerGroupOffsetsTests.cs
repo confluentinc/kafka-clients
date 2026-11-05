@@ -47,11 +47,11 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(10) });
 
         UnsupportedOperationException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(tp).Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
         UnsupportedOperationException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -86,7 +86,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         foreach (TopicPartition partition in new[] { requested, new TopicPartition("p5-unknown", 7) })
         {
             UnsupportedOperationException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(partition).Get()), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(partition).Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }
@@ -100,7 +100,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         Task all = admin.AlterConsumerGroupOffsets("p5-group", new Dictionary<TopicPartition, OffsetAndMetadata>()).All().Get();
 
         Assert.NotEqual(TaskStatus.RanToCompletion, all.Status);
-        UnsupportedOperationException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<UnsupportedOperationException>(() => all), s_deadline);
+        UnsupportedOperationException thrown = await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => all), s_deadline);
         Assert.Equal(NotImplemented, thrown.Message);
     }
 
@@ -117,7 +117,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 
         foreach (Action get in new Action[] { () => result.All().Get(), () => result.PartitionResult(tp).Get(), () => empty.All().Get() })
         {
-            UnsupportedOperationException thrown = Assert.Throws<UnsupportedOperationException>(get);
+            UnsupportedOperationException thrown = FutureAssert.Throws<UnsupportedOperationException>(get);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }

@@ -86,7 +86,7 @@ public sealed class AsyncDescribeProducersResult
                     new Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>(futures.Count);
                 foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> entry in futures)
                 {
-                    states.Add(entry.Key, entry.Value.GetNow(null!));
+                    states.Add(entry.Key, entry.Value.Impl.GetNow(null!));
                 }
 
                 return states;

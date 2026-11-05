@@ -25,6 +25,7 @@ using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
 
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
@@ -48,7 +49,7 @@ public sealed class PublicProducerUnfinishedSendTests
             Assert.False(future.IsDone);
 
             release();
-            KafkaTimeoutException failure = Assert.Throws<KafkaTimeoutException>(() => future.Get(Deadline));
+            KafkaTimeoutException failure = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline));
             Assert.Equal(7, failure.Code);
             Assert.False(future.IsCancelled);
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
@@ -61,11 +62,13 @@ public sealed class PublicProducerUnfinishedSendTests
     {
         WithUnfinishedSend((future, callback, release) =>
         {
-            Assert.IsType<TimeoutException>(Record(() => future.Get(TimeSpan.Zero)));
+            Assert.Equal(
+                "Timeout after waiting for 0 ms.",
+                Assert.IsType<JavaTimeoutException>(Record(() => future.Get(TimeSpan.Zero))).Message);
             Assert.False(future.IsDone);
 
             release();
-            KafkaTimeoutException failure = Assert.Throws<KafkaTimeoutException>(() => future.Get(Deadline));
+            KafkaTimeoutException failure = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline));
             Assert.Equal(7, failure.Code);
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Equal(1, callback.Calls);
@@ -90,7 +93,7 @@ public sealed class PublicProducerUnfinishedSendTests
             release();
             Assert.True(applied.Wait(Deadline), "the derived future never completed");
             Assert.Equal(NativeProducer.CompletionThreadName, appliedOn);
-            Assert.Equal(7, Assert.Throws<KafkaTimeoutException>(() => offset.Get(Deadline)).Code);
+            Assert.Equal(7, FutureAssert.Throws<KafkaTimeoutException>(() => offset.Get(Deadline)).Code);
         });
     }
 
@@ -116,7 +119,7 @@ public sealed class PublicProducerUnfinishedSendTests
             Assert.False(future.IsCancelled);
 
             release();
-            Assert.Equal(7, Assert.Throws<KafkaTimeoutException>(() => future.Get(Deadline)).Code);
+            Assert.Equal(7, FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline)).Code);
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Equal(1, callback.Calls);
         });
@@ -179,7 +182,8 @@ public sealed class PublicProducerUnfinishedSendTests
     {
         await WithUnfinishedAsyncSend(async (producer, future, callback) =>
         {
-            _ = await Assert.ThrowsAsync<TimeoutException>(() => future.Get(TimeSpan.Zero));
+            JavaTimeoutException timedOut = await Assert.ThrowsAsync<JavaTimeoutException>(() => future.Get(TimeSpan.Zero));
+            Assert.Equal("Timeout after waiting for 0 ms.", timedOut.Message);
             Assert.False(future.IsDone);
 
             Assert.True(producer.CompleteNext());

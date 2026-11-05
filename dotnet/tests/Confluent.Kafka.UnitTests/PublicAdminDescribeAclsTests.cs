@@ -69,7 +69,7 @@ public sealed class PublicAdminDescribeAclsTests
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -83,7 +83,7 @@ public sealed class PublicAdminDescribeAclsTests
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
         Assert.Same(result.Values().Get(), result.Values().Get());
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
     }
 
@@ -98,7 +98,7 @@ public sealed class PublicAdminDescribeAclsTests
                 new ResourcePatternFilter(ResourceType.ANY, null, PatternType.ANY),
                 new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY)));
 
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

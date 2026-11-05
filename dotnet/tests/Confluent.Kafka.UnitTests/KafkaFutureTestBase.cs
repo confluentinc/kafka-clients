@@ -20,6 +20,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
 using Xunit;
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -64,7 +65,7 @@ public abstract class KafkaFutureTestBase
         AssertIsFailed(futureFail);
         Assert.False(failImpl.CompleteWithError(new InvalidOperationException("We require more minerals")));
         Assert.False(futureFail.Cancel(true));
-        Exception thrown = Assert.IsType<InvalidOperationException>(await Thrown(futureFail.Get()));
+        Exception thrown = FutureAssert.Cause<InvalidOperationException>(await Thrown(futureFail.Get()));
         Assert.Equal("We require more vespene gas", thrown.Message);
 
         var trickyImpl = new KafkaFutureImpl<int>();
@@ -497,7 +498,7 @@ public abstract class KafkaFutureTestBase
             Assert.Null(completerThreads[i].TestException);
             if (i == lastIndex)
             {
-                Exception waiterException = Assert.IsType<InvalidOperationException>(await Thrown(waiters[i]));
+                Exception waiterException = FutureAssert.Cause<InvalidOperationException>(await Thrown(waiters[i]));
                 Assert.Equal("Last one failed", waiterException.Message);
             }
             else
@@ -521,7 +522,7 @@ public abstract class KafkaFutureTestBase
     public async Task TestFutureTimeoutWithZeroWait()
     {
         FutureView<string> future = Wrap(new KafkaFutureImpl<string>());
-        Assert.IsType<TimeoutException>(await Thrown(future.Get(TimeSpan.Zero)));
+        Assert.Equal(string.Empty, Assert.IsType<JavaTimeoutException>(await Thrown(future.Get(TimeSpan.Zero))).Message);
     }
 
     [Fact]
@@ -539,8 +540,8 @@ public abstract class KafkaFutureTestBase
         };
         foreach (TimeSpan timeout in timeouts)
         {
-            Exception thrown = Assert.IsType<TimeoutException>(await Thrown(future.Get(timeout)));
-            Assert.Equal(new TimeoutException().Message, thrown.Message);
+            Exception thrown = Assert.IsType<JavaTimeoutException>(await Thrown(future.Get(timeout)));
+            Assert.Equal(string.Empty, thrown.Message);
         }
 
         Assert.False(future.IsDone);
@@ -605,7 +606,7 @@ public abstract class KafkaFutureTestBase
         FutureView allFuture = AllOf(d1, d2);
         Assert.True(impl.Complete(1));
         Assert.Equal(2, d2.GetNow(-1));
-        Assert.Same(raised, Assert.Throws<InvalidOperationException>(() => d1.GetNow(-1)));
+        Assert.Same(raised, FutureAssert.Throws<InvalidOperationException>(() => d1.GetNow(-1)));
         Assert.True(allFuture.IsDone);
         Assert.Equal(3, await Value(innerD2.Get()));
     }
@@ -691,11 +692,10 @@ public abstract class KafkaFutureTestBase
     private static async Task<Exception> AwaitAndAssertFailure(
         FutureView future, Type expectedException, string expectedMessage)
     {
-        Exception timed = await Thrown(future.Wait(s_longWait));
-        Assert.IsType(expectedException, timed);
+        Exception timed = FutureAssert.Cause<Exception>(await Thrown(future.Wait(s_longWait)), expectedException);
         Assert.Equal(expectedMessage, timed.Message);
-        Assert.Same(timed, await Thrown(future.Wait()));
-        Exception now = Assert.Throws(expectedException, future.WaitNow);
+        Assert.Same(timed, FutureAssert.Cause<Exception>(await Thrown(future.Wait()), expectedException));
+        Exception now = FutureAssert.Cause<Exception>(Assert.ThrowsAny<Exception>(future.WaitNow), expectedException);
         Assert.Same(timed, now);
         return now;
     }

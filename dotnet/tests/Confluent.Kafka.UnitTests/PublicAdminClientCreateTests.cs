@@ -85,7 +85,7 @@ public sealed class PublicAdminClientCreateTests
         KafkaAdminClient admin = new KafkaAdminClient(ControllersOnly());
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AssertUnsupportedEndpointType(Assert.Throws<UnsupportedEndpointTypeException>(() => admin.ListTopics().Names().Get(s_deadline)));
+        AssertUnsupportedEndpointType(FutureAssert.Throws<UnsupportedEndpointTypeException>(() => admin.ListTopics().Names().Get(s_deadline)));
     }
 
     [Fact]
@@ -94,7 +94,7 @@ public sealed class PublicAdminClientCreateTests
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(ControllersOnly());
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
-        AssertUnsupportedEndpointType(await Assert.ThrowsAsync<UnsupportedEndpointTypeException>(
+        AssertUnsupportedEndpointType(await FutureAssert.ThrowsAsync<UnsupportedEndpointTypeException>(
             () => TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline)));
     }
 

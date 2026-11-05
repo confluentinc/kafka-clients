@@ -125,7 +125,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
     private static async Task AssertNotImplemented(Task outcome)
     {
-        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => outcome, s_deadline));
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 

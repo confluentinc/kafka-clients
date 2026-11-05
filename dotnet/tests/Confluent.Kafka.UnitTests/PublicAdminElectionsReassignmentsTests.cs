@@ -59,11 +59,11 @@ public sealed class PublicAdminElectionsReassignmentsTests
             AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.PREFERRED, selection);
 
             UnsupportedOperationException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Partitions().Get()), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Partitions().Get()), s_deadline);
             Assert.Equal(NotImplemented, failure.Message);
 
             UnsupportedOperationException fromAll = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
             Assert.Equal(NotImplemented, fromAll.Message);
         }
     }
@@ -77,7 +77,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         UnsupportedOperationException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => admin.ElectLeaders(type, new[] { new TopicPartition("p4-type", 0) }).Partitions().Get()),
             s_deadline);
 
@@ -93,7 +93,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         Assert.Same(result.Partitions().Get(), result.Partitions().Get());
 
-        await TestTimeout.Run(() => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Partitions().Get()), s_deadline);
+        await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Partitions().Get()), s_deadline);
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         // All fails with the first present failure and does not inspect the rest, as Java's all() does.
         ControllerMovedException thrown =
-            await TestTimeout.Run(() => Assert.ThrowsAsync<ControllerMovedException>(() => mixed.All().Get()), s_deadline);
+            await TestTimeout.Run(() => FutureAssert.ThrowsAsync<ControllerMovedException>(() => mixed.All().Get()), s_deadline);
         Assert.Same(map.Values.First(value => value is not null), thrown);
 
         AsyncElectLeadersResult clean = ElectionOf(new Dictionary<TopicPartition, Exception?> { [good] = null });
@@ -156,10 +156,10 @@ public sealed class PublicAdminElectionsReassignmentsTests
         await TestTimeout.Run(() => result.Values[one].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
 
-        await TestTimeout.Run(() => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.All().Get()), s_deadline);
+        await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]
@@ -236,7 +236,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
         IAsyncAdmin admin = mock;
 
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnsupportedOperationException>(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => admin.ElectLeaders(ElectionType.PREFERRED, null).Partitions().Get()),
             s_deadline);
 

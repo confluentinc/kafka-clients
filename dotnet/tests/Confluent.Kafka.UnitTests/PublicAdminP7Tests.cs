@@ -111,7 +111,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        await Assert.ThrowsAsync<DelegationTokenNotFoundException>(
+        await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(
             () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
     }
 
@@ -123,12 +123,12 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertTokenNotFound(Assert.Throws<DelegationTokenNotFoundException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
-        AssertTokenNotFound(Assert.Throws<DelegationTokenNotFoundException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(FutureAssert.Throws<DelegationTokenNotFoundException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(FutureAssert.Throws<DelegationTokenNotFoundException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+            await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+            await FutureAssert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
     }
 
     [Fact]
@@ -194,10 +194,10 @@ public sealed class PublicAdminP7Tests
             new[] { "group.version", "metadata.version" },
             result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
 
-        await Assert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
+        await FutureAssert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
         foreach (AsyncKafkaFuture value in result.Values.Values)
         {
-            await Assert.ThrowsAsync<InvalidRequestException>(() => value.Get());
+            await FutureAssert.ThrowsAsync<InvalidRequestException>(() => value.Get());
         }
     }
 
@@ -330,7 +330,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        UnsupportedOperationException error = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -345,7 +345,7 @@ public sealed class PublicAdminP7Tests
         AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
 
-        UnsupportedOperationException error = await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
         Assert.Equal("Not implemented yet", error.Message);
     }
 
@@ -355,7 +355,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        UnsupportedOperationException error = await Assert.ThrowsAsync<UnsupportedOperationException>(
+        UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.AlterUserScramCredentials(
                 new[] { new UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256) }).All().Get());
 
@@ -370,9 +370,9 @@ public sealed class PublicAdminP7Tests
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Users().Get());
-        await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Description("alice").Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Users().Get());
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Description("alice").Get());
     }
 
     [Fact]

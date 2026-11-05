@@ -129,6 +129,28 @@ public sealed class TranslateTests
     }
 
     [Fact]
+    public void AFuturesExecutionException_IsSentAsTheFailureItCarries()
+    {
+        KafkaException cause = TestValues.Coded(27, "rebalance in progress");
+
+        AssertBare(new ExecutionException(cause), 27, "rebalance in progress");
+        AssertBare(new ExecutionException(new IllegalStateException("closed")), -4, "closed");
+        Assert.Same(cause, Translate.Unwrapped(new ExecutionException(cause)));
+        Assert.Same(cause, Translate.Unwrapped(cause));
+    }
+
+    [Fact]
+    public void AnExecutionExceptionWithoutACause_IsTheServerFallback()
+    {
+        ExecutionException error = new ExecutionException((Exception?)null);
+
+        Proto.KafkaError proto = Translate.ToProto(error);
+
+        Assert.Equal(-4, proto.Code);
+        Assert.Equal($"dotnet server: ExecutionException: {error.Message}", proto.Message);
+    }
+
+    [Fact]
     public void ARecordMetadata_IsSentWithItsSerializedSizes()
     {
         RecordMetadata metadata =
@@ -201,7 +223,6 @@ public sealed class TranslateTests
         new System.TimeoutException("Timeout expired after 500ms"),
         new NoSuchElementException("no such element"),
         new IndexOutOfBoundsException("index 3 out of bounds"),
-        new ExecutionException(new KafkaException("the cause")),
         new FormatException("not a number"),
     };
 

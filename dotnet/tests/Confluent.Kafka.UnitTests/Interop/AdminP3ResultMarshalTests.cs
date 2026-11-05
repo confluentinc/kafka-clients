@@ -253,5 +253,5 @@ public sealed class AdminP3ResultMarshalTests
     }
 
     private static Task<KafkaTimeoutException> Failure(Func<Task> call) =>
-        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
+        TestTimeout.Run(() => FutureAssert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
 }

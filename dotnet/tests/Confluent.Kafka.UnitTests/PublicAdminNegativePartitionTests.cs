@@ -67,7 +67,7 @@ public sealed class PublicAdminNegativePartitionTests
         await TestTimeout.Run(() => result.Values[zero].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[negative].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[negative].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
         Assert.Equal(UnknownTopicOrPartitionMessage, failure.Message);
     }
@@ -82,7 +82,7 @@ public sealed class PublicAdminNegativePartitionTests
             admin.ListPartitionReassignments(new[] { new TopicPartition("neg-lpr", -1) });
 
         InvalidTopicException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<InvalidTopicException>(() => result.Reassignments().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.Reassignments().Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
     }
@@ -103,12 +103,12 @@ public sealed class PublicAdminNegativePartitionTests
         Assert.Contains(negative, result.Values.Keys);
 
         InvalidTopicException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<InvalidTopicException>(() => result.Values[negative].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.Values[negative].Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
 
         InvalidTopicException allFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<InvalidTopicException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.All().Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, allFailure.Code);
         Assert.Equal(InvalidPartitionMessage, allFailure.Message);
     }

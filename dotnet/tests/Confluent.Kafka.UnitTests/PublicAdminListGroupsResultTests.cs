@@ -46,7 +46,7 @@ public sealed class PublicAdminListGroupsResultTests
 
         ListGroupsResult result = ListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
-        Assert.Same(failures.First(), Assert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
+        Assert.Same(failures.First(), FutureAssert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
         Assert.Same(listings, result.Valid().Get(s_deadline));
         Assert.Same(failures, result.Errors().Get(s_deadline));
     }
@@ -62,7 +62,7 @@ public sealed class PublicAdminListGroupsResultTests
 
         AsyncListGroupsResult result = AsyncListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
-        Assert.Same(failures.First(), await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+        Assert.Same(failures.First(), await FutureAssert.ThrowsAsync<KafkaException>(() => result.All().Get()));
         Assert.Same(listings, await result.Valid().Get());
         Assert.Same(failures, await result.Errors().Get());
     }

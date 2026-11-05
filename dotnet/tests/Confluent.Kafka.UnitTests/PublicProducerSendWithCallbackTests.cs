@@ -67,7 +67,7 @@ public sealed class PublicProducerSendWithCallbackTests
                 {
                     KafkaFuture<RecordMetadata> future = default;
                     TestTimeout.Run(() => future = producer.Send(Record(topic), callback), s_deadline);
-                    failures[topic] = Capture(() => future.Get());
+                    failures[topic] = FutureAssert.Unwrapped(Capture(() => future.Get()));
                 }
             }
             finally
@@ -85,8 +85,8 @@ public sealed class PublicProducerSendWithCallbackTests
                 for (int i = 0; i < topics.Length; i++)
                 {
                     AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stages[i].AsTask(), s_deadline);
-                    failures[topics[i]] = await Assert.ThrowsAnyAsync<Exception>(
-                        () => TestTimeout.Run(() => future.Get(), s_deadline));
+                    failures[topics[i]] = FutureAssert.Unwrapped(await Assert.ThrowsAnyAsync<Exception>(
+                        () => TestTimeout.Run(() => future.Get(), s_deadline)));
                 }
             }
             finally
@@ -223,14 +223,14 @@ public sealed class PublicProducerSendWithCallbackTests
             }
         }
 
-        KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(outcome);
+        KafkaException timeout = FutureAssert.CauseAny<KafkaException>(outcome);
         Assert.Equal(7, timeout.Code);
         Assert.Equal($"Topic {topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
         Assert.Equal(1, throwing.Count);
 
         (RecordMetadata otherMetadata, Exception? otherDelivered) = Assert.Single(next.Calls());
         Assert.Equal(other, otherMetadata.Topic);
-        Assert.Same(otherOutcome, otherDelivered);
+        Assert.Same(FutureAssert.Unwrapped(otherOutcome), otherDelivered);
 
         Assert.Single(trace.LinesContaining(marker));
     }
@@ -276,7 +276,7 @@ public sealed class PublicProducerSendWithCallbackTests
             }
         }
 
-        KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(failure);
+        KafkaException timeout = FutureAssert.CauseAny<KafkaException>(failure);
         Assert.Equal(7, timeout.Code);
         Assert.IsAssignableFrom<Common.Errors.RetriableException>(timeout);
         Assert.Equal($"Topic {topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
@@ -314,7 +314,7 @@ public sealed class PublicProducerSendWithCallbackTests
             int index = 1;
             foreach (Exception outcome in new[] { firstOutcome, secondOutcome, thirdOutcome })
             {
-                KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(outcome);
+                KafkaException timeout = FutureAssert.CauseAny<KafkaException>(outcome);
                 Assert.Equal(7, timeout.Code);
                 Assert.Equal($"Topic {prefix}{index} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
                 index++;
@@ -324,7 +324,7 @@ public sealed class PublicProducerSendWithCallbackTests
             Assert.Equal(NativeProducer.CompletionThreadName, middle.ThreadName);
             (RecordMetadata metadata, Exception? delivered) = Assert.Single(last.Calls());
             Assert.Equal(prefix + "3", metadata.Topic);
-            Assert.Same(thirdOutcome, delivered);
+            Assert.Same(FutureAssert.Unwrapped(thirdOutcome), delivered);
         }
         finally
         {

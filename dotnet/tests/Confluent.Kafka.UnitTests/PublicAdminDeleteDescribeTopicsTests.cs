@@ -128,22 +128,22 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
 
-        UnknownTopicOrPartitionException failure = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", failure.Message);
 
-        await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
 
         AsyncDescribeTopicsResult described =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Absent, StillPresent }));
         Assert.Equal(StillPresent, (await TestTimeout.Run(
             () => described.TopicNameValues![StillPresent].Get(), s_deadline)).Name);
 
-        UnknownTopicOrPartitionException describeFailure = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException describeFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
-        await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline));
     }
 
@@ -413,19 +413,19 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Equal(collected.Partitions.Count, named.Partitions.Count);
         Assert.Equal(collected.TopicId, named.TopicId);
 
-        UnknownTopicOrPartitionException describeFailure = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException describeFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => byName.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
         AsyncDeleteTopicsResult deleted = admin.DeleteTopics(new[] { Present, Absent }, new DeleteTopicsOptions());
         Assert.Null(deleted.TopicIdValues);
         await TestTimeout.Run(() => deleted.TopicNameValues![Present].Get(), s_deadline);
-        UnknownTopicOrPartitionException deleteFailure = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException deleteFailure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", deleteFailure.Message);
 
         AsyncDescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
-        UnknownTopicOrPartitionException gone = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
+        UnknownTopicOrPartitionException gone = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present].Get(), s_deadline));
         Assert.Equal($"Topic {Present} not found.", gone.Message);
     }
@@ -455,7 +455,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     }
 
     private static Task<KafkaTimeoutException> Failure(Func<Task> call) =>
-        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
+        TestTimeout.Run(() => FutureAssert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
 
     private static void AssertSameTimeout(KafkaTimeoutException expected, KafkaTimeoutException actual)
     {
