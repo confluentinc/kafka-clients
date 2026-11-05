@@ -37,8 +37,7 @@ public class KafkaException : Exception, IJavaThrowable
     private readonly string? _javaMessage;
 
     /// <summary>
-    /// Initializes an exception with no message, so <see cref="Exception.Message"/> is empty; <see cref="Code"/> is
-    /// <c>-1</c>.
+    /// Initializes an exception with no message, so <see cref="Exception.Message"/> is empty.
     /// </summary>
     public KafkaException()
         : base(string.Empty)
@@ -47,7 +46,7 @@ public class KafkaException : Exception, IJavaThrowable
 
     /// <summary>
     /// Initializes an exception with a message, an empty <see cref="Exception.Message"/> for
-    /// <see langword="null"/>; <see cref="Code"/> is <c>-1</c>.
+    /// <see langword="null"/>.
     /// </summary>
     public KafkaException(string? message)
         : base(message ?? string.Empty)
@@ -57,7 +56,7 @@ public class KafkaException : Exception, IJavaThrowable
 
     /// <summary>
     /// Initializes an exception with a message, an empty <see cref="Exception.Message"/> for
-    /// <see langword="null"/>, and a cause; <see cref="Code"/> is <c>-1</c>.
+    /// <see langword="null"/>, and a cause.
     /// </summary>
     public KafkaException(string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
@@ -68,7 +67,7 @@ public class KafkaException : Exception, IJavaThrowable
     /// <summary>
     /// Initializes an exception with a cause, whose Java <c>toString()</c>, its type's full name followed by
     /// <c>": "</c> and its message when it has one, becomes the message, or no message for a
-    /// <see langword="null"/> cause; <see cref="Code"/> is <c>-1</c>.
+    /// <see langword="null"/> cause.
     /// </summary>
     public KafkaException(Exception? innerException)
         : this(innerException is null ? null : JavaText.ToString(innerException), innerException)
@@ -84,9 +83,32 @@ public class KafkaException : Exception, IJavaThrowable
     /// The C ABI's id for the error's Java exception class; <c>-1</c>, the id of a bare Java
     /// <c>KafkaException</c>, for a class without an id of its own.
     /// </summary>
-    public int Code => FfiId;
+    internal int Code => FfiId;
 
     internal virtual int FfiId => UnknownServerError;
+
+    /// <summary>
+    /// The C id of any exception, as Python reads a class's <c>_ffi_id</c>: a <see cref="KafkaException"/>'s
+    /// <see cref="Code"/>, else the id of the nearest type in its chain that has one (the Java-named classes,
+    /// <see cref="Requests.CorrelationIdMismatchException"/>); <see langword="null"/> when none has an id.
+    /// </summary>
+    internal static int? FfiIdOf(Exception error)
+    {
+        if (error is KafkaException kafka)
+        {
+            return kafka.Code;
+        }
+
+        for (Type? type = error.GetType(); type is not null; type = type.BaseType)
+        {
+            if (ErrorClasses.Ids.TryGetValue(type, out int id))
+            {
+                return id;
+            }
+        }
+
+        return null;
+    }
 
     internal virtual string JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
 

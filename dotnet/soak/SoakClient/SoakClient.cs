@@ -304,7 +304,9 @@ internal sealed class SoakClient : IDisposable
         return built;
     }
 
-    internal static int? ErrorCode(Exception ex) => ex is KafkaException kafka ? kafka.Code : (int?)null;
+    // The error's C id, as Python's soak reads a class's _ffi_id: a KafkaException's Code, or the id the
+    // generated lookup gives a Java-named class or CorrelationIdMismatchException.
+    internal static int? ErrorCode(Exception ex) => KafkaException.FfiIdOf(ex);
 
     internal static string ErrorMessage(Exception ex) => ex.Message;
 

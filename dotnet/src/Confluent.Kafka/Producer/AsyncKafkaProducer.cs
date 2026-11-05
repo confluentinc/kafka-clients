@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
@@ -117,8 +118,15 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
 
-        SerializedProducerRecord serialized =
-            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
+        SerializedProducerRecord serialized;
+        try
+        {
+            serialized = SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: true);
+        }
+        catch (ApiException error)
+        {
+            return FutureFailure.SendAsync(record.Topic, record.Partition, error, callback, asyncCallback, cancellationToken);
+        }
 
         // As Java's doSend, the headers turn read-only once the serializers ran; the mocks leave them writable.
         record.Headers.SetReadOnly();

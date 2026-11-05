@@ -832,6 +832,12 @@ which decision 7 makes the closing thread, or the `CompletionThread` after its d
 pump, outside `__execute_callbacks` (ledger 54, B9; the async delivery callback paragraph at the
 end of this section).
 
+One producer callback runs on none of these threads and crosses no ABI: when a serializer throws an
+`ApiException` on `KafkaProducer` / `AsyncKafkaProducer`, the record never reaches the core, and the
+binding runs the user's delivery callback itself, once, inside `Send` on the caller's thread, with
+Java's placeholder metadata, before it returns the failed future (CLAUDE.md §3, as Java's `doSend`).
+The mocks rethrow that exception from `Send`, as Java's `MockProducer` does.
+
   - **The `_cb` completions:** the async `Send`'s handover `cb`, `flush_cb`, `close_cb` /
     `close_with_timeout_cb`, the transaction `_cb`s, `partitions_for_cb`. Each fires once with the
     `opaque` the binding passed. No registration handle.

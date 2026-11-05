@@ -110,12 +110,11 @@ public sealed class PublicProducerSendSynchronousThrowTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        SerializationException error = Assert.Throws<SerializationException>(
+        // A throw that is neither an ApiException nor an InvalidCastException leaves Send as it is, as Java's.
+        ThrowingSerializer<byte[]>.BoomException error = Assert.Throws<ThrowingSerializer<byte[]>.BoomException>(
             () => { _ = Send(producer, overload, Record(), callback, CancellationToken.None); });
 
-        Assert.Contains("value", error.Message, StringComparison.Ordinal);
-        Assert.Contains(Topic, error.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<byte[]>.BoomException>(error.InnerException);
+        Assert.Same(throwing.LastThrown, error);
         Assert.Equal(1, throwing.InvocationCount);
         Assert.Equal(0, callback.Count);
     }
