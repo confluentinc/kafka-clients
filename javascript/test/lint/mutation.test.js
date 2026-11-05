@@ -41,6 +41,9 @@ const LICENSE_END = 'limitations under the License.\n';
 function realCopy() {
   const root = project({});
   for (const rel of ['lib', 'src', 'tsconfig.json', 'CLAUDE.md', 'lint-baseline.txt']) copy(ROOT, root, rel);
+  // The test that calls the test-only registration probe (check-native-registry).
+  fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
+  copy(ROOT, root, 'test/unit/_native.test.js');
   fs.mkdirSync(path.join(root, 'build'));
   copy(ROOT, root, 'build/java-index.json');
   // The bindings header, where the lint helper looks for it.
@@ -216,6 +219,75 @@ MUTATIONS.push(
     rule: 'check-type-mapping',
     what: 'a non-blocking method returning a Promise',
     apply: (root) => edit(root, 'lib/common/kafka_future.ts', 'isDone(): boolean {', 'isDone(): Promise<boolean> {'),
+  },
+  {
+    rule: 'check-cb-twin-only',
+    what: 'a blocking flush instead of its _cb twin',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_producer_Producer_flush(p->view, &ffi_err));\n    }\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+      ),
+  },
+  {
+    rule: 'check-out-err',
+    what: 'an FFI_ERR dropped',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '        err = FFI_ERR(kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err));',
+        '        kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err);',
+      ),
+  },
+  {
+    rule: 'check-notify-hook',
+    what: 'a call added in cbq_notify',
+    apply: (root) =>
+      edit(root, 'src/callback_queue.c', '    pthread_mutex_unlock(&q->notify_mtx);\n}\n\nvoid cbq_schedule', '    pthread_mutex_unlock(&q->notify_mtx);\n    cbq_schedule(q);\n}\n\nvoid cbq_schedule'),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: '__execute_callbacks_err called outside cbq_drain',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (p->kp != NULL) cbq_drain(env, &p->queue);',
+        '    if (p->kp != NULL) cbq_drain(env, &p->queue);\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_producer_Producer__execute_callbacks_err(p->view, &ffi_err));',
+      ),
+  },
+  {
+    rule: 'check-completion-order',
+    what: 'the future completed before the user callback',
+    apply: (root) => {
+      edit(root, 'lib/producer/kafka_producer.ts', "      future['_complete'](metadata, error);\n", '');
+      edit(root, 'lib/producer/kafka_producer.ts', '      let failure: string | undefined;\n', "      let failure: string | undefined;\n      future['_complete'](metadata, error);\n");
+    },
+  },
+  {
+    rule: 'check-ownership',
+    what: 'a configuration never destroyed',
+    apply: (root) =>
+      edit(root, 'src/producer.c', '    if (config != NULL) FFI_DISCARD(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err));\n', ''),
+  },
+  {
+    rule: 'check-zero-copy',
+    what: 'a memcpy of the key',
+    apply: (root) =>
+      edit(root, 'src/record.c', '    out->bytes.len = (int32_t)length;', '    out->bytes.len = (int32_t)length;\n    memcpy((void*)out->bytes.data, data, length);'),
+  },
+  {
+    rule: 'check-no-binding-queue',
+    what: 'a mutex in producer.c',
+    apply: (root) => edit(root, 'src/producer.c', 'typedef struct SendCtx SendCtx;', 'static pthread_mutex_t producer_lock = PTHREAD_MUTEX_INITIALIZER;\n\ntypedef struct SendCtx SendCtx;'),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: 'the producer destroyed in its close completion',
+    apply: (root) => edit(root, 'src/producer.c', '    p->close_error = error;\n', '    p->close_error = error;\n    producer_destroy(env, p);\n'),
   },
   {
     rule: 'check-java-tags',

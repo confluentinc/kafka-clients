@@ -315,10 +315,13 @@ function propertyDescriptors(text) {
 
 /**
  * The function prototypes of the bindings header, by name: `{name,
- * returnType, params}`, each parameter `{type, name}` (a function-pointer
- * parameter's whole text as its type), `params` empty for `(void)`.
+ * returnType, params, doc}`, each parameter `{type, name}` (a function-pointer
+ * parameter's whole text as its type), `params` empty for `(void)`, `doc` the
+ * text of the `/** ... *\/` comment right before the declaration (`''` for
+ * none).
  */
 function prototypes(header) {
+  const docs = declarationDocs(header);
   const code = stripComments(header);
   const out = new Map();
   const re = /^([A-Za-z_][\w \t*]*?)\b(kafka_\w+)\s*\(/gm;
@@ -335,12 +338,46 @@ function prototypes(header) {
         const pm = /^(.*?)\b([A-Za-z_]\w*)$/.exec(p);
         return pm && !/\(/.test(p) ? { type: collapse(pm[1]), name: pm[2] } : { type: p, name: '' };
       });
-    out.set(m[2], { name: m[2], returnType, params });
+    out.set(m[2], { name: m[2], returnType, params, doc: docs.get(m[2]) || '' });
   }
   return out;
 }
 
+/** The doc comment right before each column-0 `kafka_*` declaration of `header`, by name. */
+function declarationDocs(header) {
+  const out = new Map();
+  // The comment matched never holds a `*/`: it is the last one before the declaration (a
+  // typedef's doc comment before it is not taken for the function's).
+  const re = /\/\*\*((?:(?!\*\/)[\s\S])*?)\*\/\s*\n([A-Za-z_][\w \t*]*?\b(kafka_\w+)\s*\()/g;
+  let m;
+  while ((m = re.exec(header)) !== null) {
+    const text = m[1].slice(m[1].lastIndexOf('/**') + 1);
+    out.set(m[3], (m[1].includes('/**') ? text.replace(/^\*\*/, '') : m[1]).replace(/^\s*\* ?/gm, '').trim());
+    re.lastIndex = m.index + m[0].length;
+  }
+  return out;
+}
+
+/**
+ * The parameters of a C function from its signature text (`static void f(int
+ * a, const char* b)`): `[{type, name}]`, empty for `(void)` or none.
+ */
+function signatureParams(signature) {
+  const open = signature.indexOf('(');
+  const close = signature.lastIndexOf(')');
+  if (open < 0 || close < open) return [];
+  const inner = signature.slice(open + 1, close);
+  return splitArgs(inner, inner, 0, inner.length)
+    .filter((p) => p !== '' && p !== 'void')
+    .map((p) => {
+      const pm = /^(.*?)\b([A-Za-z_]\w*)$/.exec(p);
+      return pm && !/\(/.test(p) ? { type: collapse(pm[1]), name: pm[2] } : { type: p, name: '' };
+    });
+}
+
 module.exports = {
+  signatureParams,
+  matching,
   stripComments,
   calledFunctions,
   declaredFunctions,

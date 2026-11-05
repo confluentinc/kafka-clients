@@ -48,6 +48,14 @@ const RULES = [
   require('./lint/rules/type_mapping'),
   require('./lint/rules/waiting_call_promise'),
   require('./lint/rules/native_registry'),
+  require('./lint/rules/out_err'),
+  require('./lint/rules/cb_twin_only'),
+  require('./lint/rules/notify_hook'),
+  require('./lint/rules/single_drainer'),
+  require('./lint/rules/completion_order'),
+  require('./lint/rules/ownership'),
+  require('./lint/rules/zero_copy'),
+  require('./lint/rules/no_binding_queue'),
 ];
 
 /** The baseline file, relative to the client's directory. */

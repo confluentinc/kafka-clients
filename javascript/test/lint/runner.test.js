@@ -56,6 +56,14 @@ test('every rule has a name, kinds, needs, a hint and a check', () => {
     'check-type-mapping',
     'check-waiting-call-promise',
     'check-native-registry',
+    'check-out-err',
+    'check-cb-twin-only',
+    'check-notify-hook',
+    'check-single-drainer',
+    'check-completion-order',
+    'check-ownership',
+    'check-zero-copy',
+    'check-no-binding-queue',
   ]);
   // No two rules share a finding kind, so a baseline line belongs to one rule.
   const kinds = RULES.flatMap((r) => r.kinds);
