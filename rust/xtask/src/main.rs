@@ -21,6 +21,7 @@ mod error_predicates;
 mod java;
 mod java_parse;
 mod javadoc;
+mod javascript_gen;
 mod lint_custom;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -558,6 +559,11 @@ fn generate_error_codes() -> anyhow::Result<()> {
     // And the ConfigDef type of every producer / consumer config key.
     println!("🔧 Generating the Python config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
+
+    // And the Node.js client's error hierarchy, config classes and key types,
+    // from the same sources.
+    println!("🔧 Generating the Node.js error hierarchy and config modules from the Java sources...");
+    javascript_gen::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
 
@@ -604,6 +610,8 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
     // The config key types generated from ProducerConfig / ConsumerConfig.
     hierarchy_stale.extend(config_types::check_up_to_date(Path::new(REPO_ROOT))?);
+    // The Node.js client's generated modules, from the same sources.
+    hierarchy_stale.extend(javascript_gen::check_up_to_date(Path::new(REPO_ROOT))?);
 
     if codes_stale || !hierarchy_stale.is_empty() {
         if codes_stale {
@@ -2717,6 +2725,9 @@ fn print_help() {
                     --dotnet-version SEMVER sets the .NET package's version
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too
+                    --javascript-version SEMVER sets the Node.js package's version
+                    (javascript/package.json and its lockfile), 4.0.0 or higher, a fourth
+                    line, left as it is without it; it only moves up too
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2770,7 +2781,7 @@ Usage:
   cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER] [--javascript-version SEMVER]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
