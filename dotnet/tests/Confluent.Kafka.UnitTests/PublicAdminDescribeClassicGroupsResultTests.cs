@@ -177,7 +177,7 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
                 ["broken"] = new KafkaFuture<ClassicGroupDescription>(broken),
             });
         Assert.Same(healthy, result.DescribedGroups["healthy"].Get(s_deadline));
-        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => result.All().Get(s_deadline)));
+        Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => result.All().Get(s_deadline)));
 
         AsyncDescribeClassicGroupsResult asyncResult = new AsyncDescribeClassicGroupsResult(
             new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>
@@ -186,7 +186,7 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
                 ["broken"] = new AsyncKafkaFuture<ClassicGroupDescription>(broken),
             });
         Assert.Same(healthy, await asyncResult.DescribedGroups["healthy"].Get());
-        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => asyncResult.All().Get()));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => asyncResult.All().Get()));
     }
 
     [Fact]
@@ -216,8 +216,8 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
 
         stillRunning.Complete(Description("still-running"));
 
-        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => all.Get(s_deadline)));
-        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => asyncAll.Get()));
+        Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => all.Get(s_deadline)));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => asyncAll.Get()));
     }
 
     private static ClassicGroupDescription Description(string groupId) => new ClassicGroupDescription(groupId, "consumer", "range", null, ClassicGroupState.STABLE, null);

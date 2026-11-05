@@ -20,6 +20,7 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -45,12 +46,12 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             "p5-group",
             new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(10) });
 
-        NotSupportedException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(tp).Get()), s_deadline);
+        UnsupportedOperationException fromPartitionResult = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -60,7 +61,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.AlterConsumerGroupOffsets(
+        Assert.Throws<IllegalStateException>(() => admin.AlterConsumerGroupOffsets(
             "p5-group",
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
@@ -84,8 +85,8 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 
         foreach (TopicPartition partition in new[] { requested, new TopicPartition("p5-unknown", 7) })
         {
-            NotSupportedException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(partition).Get()), s_deadline);
+            UnsupportedOperationException thrown = await TestTimeout.Run(
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.PartitionResult(partition).Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }
@@ -99,7 +100,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         Task all = admin.AlterConsumerGroupOffsets("p5-group", new Dictionary<TopicPartition, OffsetAndMetadata>()).All().Get();
 
         Assert.NotEqual(TaskStatus.RanToCompletion, all.Status);
-        NotSupportedException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => all), s_deadline);
+        UnsupportedOperationException thrown = await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => all), s_deadline);
         Assert.Equal(NotImplemented, thrown.Message);
     }
 
@@ -116,7 +117,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 
         foreach (Action get in new Action[] { () => result.All().Get(), () => result.PartitionResult(tp).Get(), () => empty.All().Get() })
         {
-            NotSupportedException thrown = Assert.Throws<NotSupportedException>(get);
+            UnsupportedOperationException thrown = FutureAssert.Throws<UnsupportedOperationException>(get);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }

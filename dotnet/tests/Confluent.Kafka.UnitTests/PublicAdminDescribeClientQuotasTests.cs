@@ -22,6 +22,7 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Quota;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -69,7 +70,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -83,7 +84,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
         Assert.Same(result.Entities().Get(), result.Entities().Get());
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
     }
 
@@ -108,7 +109,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
             ClientQuotaFilter.ContainsOnly(new[] { component }));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -136,7 +137,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.DescribeClientQuotas(ClientQuotaFilter.All()));
     }
 

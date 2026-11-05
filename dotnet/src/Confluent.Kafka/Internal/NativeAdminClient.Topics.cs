@@ -20,6 +20,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Internal;
 
@@ -834,7 +835,7 @@ internal sealed partial class NativeAdminClient
                 }
 
             default:
-                throw new ArgumentException(
+                throw new IllegalArgumentException(
                     "The TopicCollection: null provided did not match any supported classes for " + operation + ".");
         }
     }

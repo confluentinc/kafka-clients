@@ -30,7 +30,8 @@ internal static class FeatureMetadataMarshal
     {
         if (metadata == IntPtr.Zero)
         {
-            throw new KafkaException("The describeFeatures result produced no feature metadata.");
+            // Python's binding reads missing metadata as None, so the future completes with null.
+            return null!;
         }
 
         IntPtr outErr = IntPtr.Zero;
@@ -115,8 +116,8 @@ internal static class FeatureMetadataMarshal
         IntPtr outErr = IntPtr.Zero;
         IntPtr name = NativeMethods.MapKey(map, index, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        return Utf8Marshal.PtrToString(name)
-            ?? throw new KafkaException("The describeFeatures result produced a feature with no name.");
+        // Python's binding reads a missing feature name as an empty string.
+        return Utf8Marshal.PtrToString(name) ?? string.Empty;
     }
 
     private static void DestroyMap(IntPtr map)

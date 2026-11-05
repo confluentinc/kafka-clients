@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -93,7 +94,7 @@ public sealed class PublicAdminP4ShapeParityTests
             nameof(ElectLeadersResult.Partitions), Type.EmptyTypes)!;
         MethodInfo all = typeof(ElectLeadersResult).GetMethod(nameof(ElectLeadersResult.All), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, KafkaException>>), partitions.ReturnType);
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, Exception>>), partitions.ReturnType);
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
         // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = the map's value.
@@ -189,18 +190,13 @@ public sealed class PublicAdminP4ShapeParityTests
         replicas.Add(9);
         Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas);
 
-        // Java throws IllegalArgumentException for both; the .NET family splits null out.
-        ArgumentException empty =
-            Assert.Throws<ArgumentException>(() => new NewPartitionReassignment(Array.Empty<int>()));
-        Assert.Equal("targetReplicas", empty.ParamName);
-        Assert.Contains("Cannot create a new partition reassignment without any replicas", empty.Message);
+        IllegalArgumentException empty =
+            Assert.Throws<IllegalArgumentException>(() => new NewPartitionReassignment(Array.Empty<int>()));
+        Assert.Equal("Cannot create a new partition reassignment without any replicas", empty.Message);
 
-        ArgumentNullException missing =
-            Assert.Throws<ArgumentNullException>(() => new NewPartitionReassignment(null!));
-        Assert.Equal("targetReplicas", missing.ParamName);
-        Assert.Contains("Cannot create a new partition reassignment without any replicas", missing.Message);
-
-        Assert.IsAssignableFrom<ArgumentException>(missing);
+        IllegalArgumentException missing =
+            Assert.Throws<IllegalArgumentException>(() => new NewPartitionReassignment(null!));
+        Assert.Equal("Cannot create a new partition reassignment without any replicas", missing.Message);
     }
 
     [Fact]

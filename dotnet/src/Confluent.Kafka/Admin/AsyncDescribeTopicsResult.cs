@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -75,12 +76,12 @@ public sealed class AsyncDescribeTopicsResult
     {
         if (topicIdFutures is not null && nameFutures is not null)
         {
-            throw new ArgumentException("topicIdFutures and nameFutures cannot both be specified.");
+            throw new IllegalArgumentException("topicIdFutures and nameFutures cannot both be specified.");
         }
 
         if (topicIdFutures is null && nameFutures is null)
         {
-            throw new ArgumentException("topicIdFutures and nameFutures cannot both be null.");
+            throw new IllegalArgumentException("topicIdFutures and nameFutures cannot both be null.");
         }
 
         _topicIdValues = topicIdFutures;

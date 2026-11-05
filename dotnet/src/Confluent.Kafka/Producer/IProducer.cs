@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -31,8 +32,17 @@ namespace Confluent.Kafka.Producer;
 /// <see cref="KafkaFuture{T}"/> once the producer has the record, as Java's <c>send</c> does. It blocks only
 /// while the producer waits for the topic's metadata or for buffer memory, up to <c>max.block.ms</c>, and
 /// the key and value buffers can be reused when it returns. <see cref="KafkaFuture{T}.Get()"/> blocks until
-/// the cluster acknowledges the record, or rethrows its failure unwrapped. A discarded future leaks nothing,
-/// and a callback passed to <c>Send</c> still runs.
+/// the cluster acknowledges the record, or throws an <c>ExecutionException</c> around its failure. A discarded
+/// future leaks nothing, and a callback passed to <c>Send</c> still runs.
+/// </para>
+/// <para>
+/// On <see cref="KafkaProducer{TKey, TValue}"/>, a serializer that throws an <see cref="ApiException"/> fails the
+/// record, as Java's <c>doSend</c> does: <c>Send</c> calls the delivery callback, if any, once on the caller's
+/// thread, with metadata whose offset is <c>-1</c> and that exception, and returns a future failed with it. An
+/// <see cref="InvalidCastException"/> is wrapped in a <see cref="SerializationException"/>, and any other throw
+/// leaves <c>Send</c> unchanged, as does a delivery callback's own throw on that path. On
+/// <see cref="MockProducer{TKey, TValue}"/>, every serializer throw leaves <c>Send</c> unchanged, as Java's
+/// <c>MockProducer</c> lets it.
 /// </para>
 /// <para>
 /// Concurrent <c>Send</c> from several threads is safe; add no lock of your own.
@@ -59,12 +69,16 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </summary>
     /// <param name="record">The record to publish.</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
-    /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
+    /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
+    /// failure.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged.</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="SerializationException">On <c>KafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value; any other serializer throw except an
+    /// <see cref="ApiException"/>, and every serializer throw on <c>MockProducer</c>, is rethrown unchanged (see the
+    /// type's remarks).</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
     KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record);
@@ -82,14 +96,18 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <param name="record">The record to publish.</param>
     /// <param name="callback">The delivery callback (non-null).</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
-    /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
+    /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
+    /// failure.</returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
     /// surrogate, which the native client cannot receive unchanged.</exception>
-    /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="SerializationException">On <c>KafkaProducer</c>, a serializer threw an
+    /// <see cref="InvalidCastException"/> while encoding the key or value; any other serializer throw except an
+    /// <see cref="ApiException"/>, and every serializer throw on <c>MockProducer</c>, is rethrown unchanged (see the
+    /// type's remarks).</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
     KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback);
@@ -99,7 +117,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// delivery callback has run (Java <c>flush()</c>). A <c>Send</c> still waiting for metadata or buffer
     /// memory on another thread is not waited for.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a flush failure.</exception>
     void Flush();
 
@@ -111,7 +129,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <param name="topic">The topic whose partition metadata to read.</param>
     /// <returns>The topic's partitions (empty on a <see cref="MockProducer{TKey, TValue}"/>).</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 
@@ -121,7 +139,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// snapshot.
     /// </summary>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 
     /// <summary>

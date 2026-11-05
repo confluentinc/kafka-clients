@@ -20,6 +20,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -96,7 +97,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
 
     private static async Task AssertNotImplemented(AsyncKafkaFuture future)
     {
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => future.Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

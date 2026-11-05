@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -292,8 +293,7 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Equal(typeof(long?), typeof(LogDirDescription).GetProperty("TotalBytes")!.PropertyType);
         Assert.Equal(typeof(long?), typeof(LogDirDescription).GetProperty("UsableBytes")!.PropertyType);
 
-        // Java's ApiException maps to the binding's one KafkaException, null for a healthy directory.
-        Assert.Equal(typeof(KafkaException), typeof(LogDirDescription).GetProperty("Error")!.PropertyType);
+        Assert.Equal(typeof(ApiException), typeof(LogDirDescription).GetProperty("Error")!.PropertyType);
         Assert.Equal(
             NullableAnnotation.Annotated,
             NullableAnnotation.Flag(typeof(LogDirDescription).GetProperty("Error")!));

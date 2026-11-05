@@ -27,6 +27,7 @@ using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -217,7 +218,7 @@ public sealed class AdminStringsTests
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
                 admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.All().Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
         }
@@ -241,7 +242,7 @@ public sealed class AdminStringsTests
 
             AsyncDescribeClientQuotasResult result =
                 AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: null));
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
             Assert.Equal("Not implement yet", failure.Message);
         }
@@ -290,7 +291,7 @@ public sealed class AdminStringsTests
             Assert.Equal("userName", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Description("alice").Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
         }

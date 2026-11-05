@@ -67,7 +67,7 @@ public sealed class AdminFenceProducersCombineTests
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
         KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
-        KafkaException failure = new KafkaException(47, "the producer id failed", isRetriable: false);
+        KafkaException failure = new Common.Errors.InvalidProducerEpochException("the producer id failed");
 
         producerId.CompleteWithError(failure);
         Assert.False(combined.IsSettled);
@@ -83,8 +83,8 @@ public sealed class AdminFenceProducersCombineTests
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
         KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
-        KafkaException epochFailure = new KafkaException(48, "the epoch failed", isRetriable: true);
-        KafkaException producerIdFailure = new KafkaException(47, "the producer id failed", isRetriable: false);
+        KafkaException epochFailure = new Common.Errors.InvalidTxnStateException("the epoch failed");
+        KafkaException producerIdFailure = new Common.Errors.InvalidProducerEpochException("the producer id failed");
 
         epoch.CompleteWithError(epochFailure);
         Assert.False(combined.IsSettled);
@@ -99,7 +99,7 @@ public sealed class AdminFenceProducersCombineTests
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
         KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
-        KafkaException failure = new KafkaException(48, "the epoch failed", isRetriable: true);
+        KafkaException failure = new Common.Errors.InvalidTxnStateException("the epoch failed");
 
         epoch.CompleteWithError(failure);
         producerId.Complete(1L);

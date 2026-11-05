@@ -14,13 +14,13 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -57,12 +57,12 @@ public sealed class AsyncListConsumerGroupOffsetsResult
     /// The offsets of the one group requested — Java's <c>partitionsToOffsetAndMetadata()</c>.
     /// </summary>
     /// <returns>That group's future.</returns>
-    /// <exception cref="InvalidOperationException">The request did not name exactly one group; Java's message.</exception>
+    /// <exception cref="IllegalStateException">The request did not name exactly one group; Java's message.</exception>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata()
     {
         if (_futures.Count != 1)
         {
-            throw new InvalidOperationException(
+            throw new IllegalStateException(
                 "Offsets from multiple consumer groups were requested. " +
                 "Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.");
         }
@@ -75,20 +75,17 @@ public sealed class AsyncListConsumerGroupOffsetsResult
     /// </summary>
     /// <param name="groupId">A group id from the request.</param>
     /// <returns>That group's future, the same one on every call.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
-    /// <exception cref="ArgumentException"><paramref name="groupId"/> was not part of the request.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="groupId"/> was not part of the request, or is null; Java's message.
+    /// </exception>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata(string groupId)
     {
-        if (groupId is null)
+        // Java's map holds no null key, so a null group id was not requested either.
+        if (groupId is null ||
+            !_futures.TryGetValue(groupId, out AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future))
         {
-            throw new ArgumentNullException(nameof(groupId));
-        }
-
-        if (!_futures.TryGetValue(groupId, out AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future))
-        {
-            throw new ArgumentException(
-                string.Format(CultureInfo.InvariantCulture, "Offsets for consumer group '{0}' were not requested.", groupId),
-                nameof(groupId));
+            throw new IllegalArgumentException(
+                "Offsets for consumer group '" + JavaText.ValueOf(groupId) + "' were not requested.");
         }
 
         return future;
@@ -114,7 +111,7 @@ public sealed class AsyncListConsumerGroupOffsetsResult
             Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> offsets = new Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in futures)
             {
-                offsets.Add(entry.Key, entry.Value.GetNow(null!));
+                offsets.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return offsets;

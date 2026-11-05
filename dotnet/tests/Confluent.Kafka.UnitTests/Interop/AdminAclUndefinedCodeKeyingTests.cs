@@ -19,6 +19,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -124,7 +125,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
     private static async Task AssertNotImplemented(Task outcome)
     {
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => outcome, s_deadline));
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 

@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -85,7 +86,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Assert.True(seen.Elapsed < s_quickly, $"Dispose took {seen.Elapsed.TotalMilliseconds} ms");
         Assert.Equal(0, seen.PendingCallsAtReturn);
         Assert.True(seen.PendingCompleted, "the pending send did not complete");
-        Assert.IsType<ObjectDisposedException>(seen.AfterClose);
+        Assert.IsType<IllegalStateException>(seen.AfterClose);
         await Task.Delay(Settle);
         Assert.Equal(1, seen.FlushingCalls);
         Assert.Equal(1, seen.PendingCalls());

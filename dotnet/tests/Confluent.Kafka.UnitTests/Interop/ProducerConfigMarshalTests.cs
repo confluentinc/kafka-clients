@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -67,7 +68,7 @@ public sealed class ProducerConfigMarshalTests
     [Fact]
     public void Create_MissingBootstrapServers_ThrowsKafkaException()
     {
-        KafkaException failure = Assert.Throws<KafkaException>(
+        ConfigException failure = Assert.Throws<ConfigException>(
             () => NativeProducer.Create(new Dictionary<string, string>()));
 
         Assert.Equal(
@@ -86,11 +87,10 @@ public sealed class ProducerConfigMarshalTests
             ["batch.size"] = "not-a-number",
         };
 
-        KafkaException failure = Assert.Throws<KafkaException>(() => NativeProducer.Create(config));
+        ConfigException failure = Assert.Throws<ConfigException>(() => NativeProducer.Create(config));
 
         Assert.Contains("Invalid value not-a-number for configuration batch.size", failure.Message, StringComparison.Ordinal);
         Assert.Equal(ConfigErrorCode, failure.Code);
-        Assert.False(failure.IsRetriable);
     }
 
     [Fact]
@@ -104,7 +104,7 @@ public sealed class ProducerConfigMarshalTests
 
         for (int i = 0; i < 50; i++)
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => NativeProducer.Create(config));
+            ConfigException failure = Assert.Throws<ConfigException>(() => NativeProducer.Create(config));
             Assert.Contains("Invalid value not-a-number for configuration batch.size", failure.Message, StringComparison.Ordinal);
         }
     }

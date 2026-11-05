@@ -23,6 +23,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -300,7 +301,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         consumer.Unsubscribe();
         consumer.Assign(new[] { new TopicPartition(Topic, 0) });
 
-        Assert.Throws<InvalidOperationException>(() => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
+        Assert.Throws<IllegalStateException>(() => consumer.Subscribe(new[] { Topic }, new RecordingListener()));
 
         Assert.Same(kept, consumer.CurrentListenerRegistration);
         Assert.False(kept.IsReleased);
@@ -316,7 +317,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         await consumer.UnsubscribeWithCallback();
         await consumer.AssignWithCallback(new[] { new TopicPartition(Topic, 0) });
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.SubscribeWithCallback(new[] { Topic }, new RecordingListener()));
 
         Assert.Same(kept, consumer.CurrentListenerRegistration);

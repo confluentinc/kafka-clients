@@ -20,7 +20,10 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -45,8 +48,8 @@ public class PublicAdminMockSeedingTests
 
         admin.TimeoutNextRequest(1);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-b", 1, 1) }).All().Get()),
             s_deadline);
         Assert.Equal("The mock timed out the request.", failure.Message);
@@ -196,17 +199,17 @@ public class PublicAdminMockSeedingTests
     }
 
     [Fact]
-    public void SeedingAfterDisposeThrowsObjectDisposed()
+    public void SeedingAfterDisposeThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.TimeoutNextRequest(1));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.TimeoutNextRequest(1));
+        Assert.Throws<IllegalStateException>(
             () => admin.UpdateBeginningOffsets(new Dictionary<TopicPartition, long>()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.UpdateEndOffsets(new Dictionary<TopicPartition, long>()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.UpdateConsumerGroupOffsets(new Dictionary<TopicPartition, long>()));
     }
 

@@ -18,6 +18,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -59,7 +60,7 @@ public sealed class AsyncDescribeClientQuotasResult
     /// <returns>
     /// A future yielding the map, or faulting with the call's own
     /// <see cref="KafkaException"/>; on <see cref="AsyncMockAdminClient"/>, which does not implement the
-    /// call, with a <see cref="NotSupportedException"/>.
+    /// call, with an <see cref="UnsupportedOperationException"/>.
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities() => _future;

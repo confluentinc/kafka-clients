@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -163,35 +164,35 @@ public sealed class PublicConsumerSyncReadTests
     }
 
     [Fact]
-    public void Assignment_AfterDispose_ThrowsObjectDisposed()
+    public void Assignment_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
-    public void Subscription_AfterDispose_ThrowsObjectDisposed()
+    public void Subscription_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
+        Assert.Throws<IllegalStateException>(() => consumer.Subscription());
     }
 
     [Fact]
-    public void Paused_AfterDispose_ThrowsObjectDisposed()
+    public void Paused_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Paused());
+        Assert.Throws<IllegalStateException>(() => consumer.Paused());
     }
 
     [Fact]
-    public void EnforceRebalance_AfterDispose_ThrowsObjectDisposed()
+    public void EnforceRebalance_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.EnforceRebalance());
+        Assert.Throws<IllegalStateException>(() => consumer.EnforceRebalance());
     }
 
     [Fact]

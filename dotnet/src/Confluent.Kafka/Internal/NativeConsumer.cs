@@ -25,6 +25,10 @@ using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.Internal;
 
@@ -44,13 +48,22 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const int WakeupCode = -18;
 
-    private const int InvalidGroupIdCode = 24;
-
-    private const int RequestTimedOutCode = 7;
-
     private const string CloseNegativeTimeoutMessage = "The timeout cannot be negative.";
 
     private const string ConcurrentAccessMessage = "KafkaConsumer is not safe for multi-threaded access.";
+
+    private const string ClosedMessage = "This consumer has already been closed.";
+
+    private const string NullSubscribeTopicsMessage = "Topic collection to subscribe to cannot be null";
+
+    private const string NullSubscribeTopicMessage =
+        "Topic collection to subscribe to cannot contain null or empty topic";
+
+    private const string NullListenerMessage = "RebalanceListener cannot be null";
+
+    private const string NullAssignPartitionsMessage = "Topic partitions collection to assign to cannot be null";
+
+    private const string NullAssignTopicMessage = "Topic partitions to assign to cannot have null or empty topic";
 
     private const int Open = 0;
 
@@ -273,8 +286,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (offset < 0)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(offset), offset, "seek offset must not be a negative number");
+            throw new IllegalArgumentException("seek offset must not be a negative number");
         }
     }
 
@@ -553,7 +565,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void Subscribe(IReadOnlyCollection<string> topics)
     {
-        string[] topicArray = SnapshotTopics(topics);
+        string[] topicArray = CheckAfterAcquire(() => SnapshotTopics(topics));
         RefuseInsideACallback();
         CallSync(arguments =>
         {
@@ -566,17 +578,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
-        if (listener is null)
-        {
-            throw new ArgumentNullException(nameof(listener));
-        }
-
-        string[] topicArray = SnapshotTopics(topics);
+        RequireListener(listener);
+        string[] topicArray = CheckAfterAcquire(() => SnapshotTopics(topics));
         RefuseInsideACallback();
         CallSync(arguments =>
         {
@@ -639,11 +642,24 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    private static string[] SnapshotTopics(IReadOnlyCollection<string> topics)
+    // Java checks the listener before the topics.
+    private static void RequireListener(object listener)
+    {
+        if (listener is null)
+        {
+            throw new IllegalArgumentException(NullListenerMessage);
+        }
+    }
+
+    // KafkaConsumer refuses a null collection or topic with Java's messages, and the core refuses a blank topic
+    // with the same text. Java's MockConsumer has no check of its own (a null is its NullPointerException).
+    private string[] SnapshotTopics(IReadOnlyCollection<string> topics)
     {
         if (topics is null)
         {
-            throw new ArgumentNullException(nameof(topics));
+            throw IsMock
+                ? (ArgumentException)new ArgumentNullException(nameof(topics))
+                : new IllegalArgumentException(NullSubscribeTopicsMessage);
         }
 
         string[] topicArray = new string[topics.Count];
@@ -652,7 +668,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             if (topic is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(topics));
+                throw IsMock
+                    ? new ArgumentException("Topic names must not be null.", nameof(topics))
+                    : (ArgumentException)new IllegalArgumentException(NullSubscribeTopicMessage);
             }
 
             topicArray[index++] = topic;
@@ -673,7 +691,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     internal void Assign(IReadOnlyCollection<TopicPartition> partitions) =>
-        RunPartitionsSync(SnapshotPartitions(partitions), NativeMethods.ConsumerAssign);
+        RunPartitionsSync(CheckAfterAcquire(() => SnapshotAssignPartitions(partitions)), NativeMethods.ConsumerAssign);
 
     internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
@@ -689,13 +707,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckWhenOpen(() => SnapshotPartitions(partitions)),
+            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
             NativeMethods.ConsumerSeekToBeginning,
             (handle, snapshot) => handle.SeekToBeginning(snapshot));
 
     internal void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckWhenOpen(() => SnapshotPartitions(partitions)),
+            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
             NativeMethods.ConsumerSeekToEnd,
             (handle, snapshot) => handle.SeekToEnd(snapshot));
 
@@ -929,6 +947,20 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         checks();
     }
 
+    // Java's KafkaConsumer checks subscribe's and assign's arguments after acquireAndEnsureOpen(): after the closed
+    // check, the refusal inside a callback and the owner check. Java's MockConsumer checks them after
+    // ensureNotClosed(), which the mock's use makes.
+    private T CheckAfterAcquire<T>(Func<T> checks)
+    {
+        if (IsMock)
+        {
+            return CheckInAUse(checks);
+        }
+
+        RefuseInsideACallback();
+        return CheckInAUse(checks);
+    }
+
     private T CheckWhenOpen<T>(Func<T> checks)
     {
         if (IsMock)
@@ -998,7 +1030,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         if (timeoutMs == 0 && !IsMock)
         {
-            throw new KafkaException(RequestTimedOutCode, string.Empty, isRetriable: true);
+            throw new KafkaTimeoutException(string.Empty);
         }
 
         throw new ArgumentNullException(nameof(topic));
@@ -1015,8 +1047,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool GroupIdMissing => !IsMock && !_groupIdDefined;
 
-    private static KafkaException GroupIdNotDefined() =>
-        new KafkaException(InvalidGroupIdCode, GroupIdNotDefinedMessage, isRetriable: false);
+    private static InvalidGroupIdException GroupIdNotDefined() => new InvalidGroupIdException(GroupIdNotDefinedMessage);
 
     private static long? OptionalTimeoutMs(TimeSpan? timeout) => timeout is TimeSpan value ? TimeoutMs(value) : null;
 
@@ -1224,10 +1255,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         if (IsClosed())
         {
-            throw new ObjectDisposedException(nameof(NativeConsumer));
+            throw new IllegalStateException(ClosedMessage);
         }
 
-        throw new InvalidOperationException(ConcurrentAccessMessage);
+        throw new ConcurrentModificationException(ConcurrentAccessMessage);
     }
 
     // Inside a callback a call is refused as closed only once the close has ended, so a listener the close runs can
@@ -1281,7 +1312,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (timeout < TimeSpan.Zero)
         {
-            throw new ArgumentOutOfRangeException(nameof(timeout), timeout, "Timeout must not be negative");
+            throw new IllegalArgumentException("Timeout must not be negative");
         }
 
         return (long)timeout.TotalMilliseconds;
@@ -1292,9 +1323,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (timeout < TimeSpan.Zero)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(timeout),
-                timeout,
+            throw new IllegalArgumentException(
                 "Invalid negative timeout " + ((long)Math.Floor(timeout.TotalMilliseconds)).ToString(CultureInfo.InvariantCulture));
         }
 
@@ -1353,7 +1382,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         if (option.Timeout() < TimeSpan.Zero && !IsMock)
         {
-            throw new ArgumentOutOfRangeException(nameof(option), CloseNegativeTimeoutMessage);
+            throw new IllegalArgumentException(CloseNegativeTimeoutMessage);
         }
     }
 
@@ -1998,7 +2027,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (Volatile.Read(ref _closed) != Closing)
         {
-            throw new InvalidOperationException(ConcurrentAccessMessage);
+            throw new ConcurrentModificationException(ConcurrentAccessMessage);
         }
     }
 
@@ -2115,6 +2144,42 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return new CommitOffsetsSnapshot(topics, partitions, offsetValues, leaderEpochs, metadata, count);
+    }
+
+    // KafkaConsumer refuses a null collection, or a partition with a null topic, with Java's messages, and the core
+    // refuses a blank topic with the same text. Java's MockConsumer has no check of its own (a null is its
+    // NullPointerException).
+    private (string Topic, int Partition)[] SnapshotAssignPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (!IsMock)
+        {
+            if (partitions is null)
+            {
+                throw new IllegalArgumentException(NullAssignPartitionsMessage);
+            }
+
+            foreach (TopicPartition tp in partitions)
+            {
+                if (tp.Topic is null)
+                {
+                    throw new IllegalArgumentException(NullAssignTopicMessage);
+                }
+            }
+        }
+
+        return SnapshotPartitions(partitions!);
+    }
+
+    // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message; Java's
+    // MockConsumer has no check of its own.
+    private (string Topic, int Partition)[] SnapshotSeekPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (partitions is null && !IsMock)
+        {
+            throw new IllegalArgumentException("Partitions collection cannot be null");
+        }
+
+        return SnapshotPartitions(partitions!);
     }
 
     // A negative partition is refused, although Java's assign accepts one.
@@ -2278,7 +2343,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
                 if (RefusedWhileBusy)
                 {
-                    throw new InvalidOperationException(ConcurrentAccessMessage);
+                    throw new ConcurrentModificationException(ConcurrentAccessMessage);
                 }
 
                 Monitor.Wait(_owner);
@@ -2332,7 +2397,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (!TryEnterUse(out int owner, kind, thread))
         {
-            throw new ObjectDisposedException(nameof(NativeConsumer));
+            throw new IllegalStateException(ClosedMessage);
         }
 
         return owner;
@@ -2390,7 +2455,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             owner = 0;
             if (refused)
             {
-                throw new InvalidOperationException(ConcurrentAccessMessage);
+                throw new ConcurrentModificationException(ConcurrentAccessMessage);
             }
 
             return false;
@@ -2437,7 +2502,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 (Volatile.Read(ref _closed) == Open && HeldByAnotherThread(UseKind.Owned, thread));
             if (busy && RefusedWhileBusy)
             {
-                throw new InvalidOperationException(ConcurrentAccessMessage);
+                throw new ConcurrentModificationException(ConcurrentAccessMessage);
             }
         }
     }
@@ -2461,13 +2526,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             refused = closingElsewhere && RefusedWhileBusy;
             if (!closingElsewhere && IsClosed())
             {
-                throw new ObjectDisposedException(nameof(NativeConsumer));
+                throw new IllegalStateException(ClosedMessage);
             }
         }
 
         if (refused)
         {
-            throw new InvalidOperationException(ConcurrentAccessMessage);
+            throw new ConcurrentModificationException(ConcurrentAccessMessage);
         }
     }
 

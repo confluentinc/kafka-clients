@@ -22,6 +22,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -561,7 +562,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static void AssertNotImplemented(Exception? outcome)
     {
-        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
+        UnsupportedOperationException failure = FutureAssert.Cause<UnsupportedOperationException>(
+            Assert.IsAssignableFrom<Exception>(outcome));
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
