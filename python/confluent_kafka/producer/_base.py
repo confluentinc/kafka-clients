@@ -82,7 +82,6 @@ from confluent_kafka.common.node import Node
 from confluent_kafka.common.partition_info import PartitionInfo
 from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.serialization._supply import close_if_defined, resolve_serde
-from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 from confluent_kafka.unsupported_operation_error import UnsupportedOperationError
 
@@ -104,11 +103,6 @@ CLOSED_MESSAGE = "Cannot perform operation after producer has been closed"
 # Java's KafkaProducer.flush() message for a flush from a delivery callback.
 FLUSH_IN_CALLBACK_MESSAGE = ("KafkaProducer.flush() invocation inside a callback is not "
                              "permitted because it may lead to deadlock.")
-
-# Java's KafkaProducer.throwIfInvalidGroupMetadata() message for a null argument;
-# the core cannot receive a null, so the binding checks it.
-NULL_GROUP_METADATA_MESSAGE = "Consumer group metadata could not be None"
-
 
 def _construct_failure(exc: Exception) -> BaseException:
     """Java's ``KafkaException("Failed to construct kafka producer", t)`` for a
@@ -198,22 +192,29 @@ def to_partition_info(raw: tuple[Any, ...]) -> PartitionInfo:
 
 
 def offsets_to_spec(
-        offsets: Mapping[TopicPartition, OffsetAndMetadata]) -> list[tuple[str, int, int, int, str]]:
+        offsets: Mapping[TopicPartition, OffsetAndMetadata] | None
+) -> list[tuple[str, int, int, int, str]] | None:
     """``{TopicPartition: OffsetAndMetadata}`` as the ``(topic, partition,
     offset, leader_epoch, metadata)`` tuples the FFI takes (a missing leader
-    epoch is -1)."""
+    epoch is -1); a ``None`` map stays ``None``, which the FFI receives as
+    ``NULL`` and answers with Java's error."""
+    if offsets is None:
+        return None
     return [(tp.topic(), tp.partition(), oam.offset(),
              -1 if oam.leader_epoch() is None else cast(int, oam.leader_epoch()),
              oam.metadata())
             for tp, oam in offsets.items()]
 
 
-def group_metadata_handle(group_metadata: ConsumerGroupMetadata) -> object:
+def group_metadata_handle(group_metadata: ConsumerGroupMetadata | None) -> object:
     """The core's handle a ``KafkaConsumer``'s ``group_metadata()`` carries,
-    which the FFI takes in place of the four fields. Metadata without one (a
-    mock consumer's) raises ``UnsupportedOperationError``, as the FFI has no
-    constructor to build a handle from the fields; Java sends any
-    ``ConsumerGroupMetadata``."""
+    which the FFI takes in place of the four fields; a ``None`` stays ``None``,
+    which the FFI receives as ``NULL`` and answers with Java's
+    ``IllegalArgumentError``. Metadata without one (a mock consumer's) raises
+    ``UnsupportedOperationError``, as the FFI has no constructor to build a
+    handle from the fields; Java sends any ``ConsumerGroupMetadata``."""
+    if group_metadata is None:
+        return None
     native = group_metadata._native
     if native is None:
         raise UnsupportedOperationError(message=NO_GROUP_METADATA_HANDLE_MESSAGE)
@@ -231,21 +232,6 @@ def close_timeout_ms(timeout: Duration) -> int | None:
     if timeout is None:
         raise TypeError("timeout must not be None")
     return duration_to_ms(timeout, default_ms=0)
-
-
-def check_record(record: object) -> None:
-    """``send(null)``: Java's ``org.apache.kafka.clients.producer.KafkaProducer#doSend`` reads
-    ``record.topic()`` after the closed check, a ``NullPointerException``
-    (``TypeError``, CLAUDE.md, Types)."""
-    if record is None:
-        raise TypeError("record must not be None")
-
-
-def check_offsets(offsets: object) -> None:
-    """``sendOffsetsToTransaction(null, groupMetadata)``: Java's
-    ``offsets.isEmpty()`` after the group-metadata and closed checks."""
-    if offsets is None:
-        raise TypeError("offsets must not be None")
 
 
 def serialize(serializer: Callable[..., object], topic: str, data: object,
@@ -535,12 +521,17 @@ class _ProducerState:
         if self._closed:
             raise IllegalStateError(message=CLOSED_MESSAGE)
 
-    def _native_parts(self, record: ProducerRecord[Any, Any]) -> tuple[Any, str, int | None]:
+    def _native_parts(self, record: ProducerRecord[Any, Any] | None
+                      ) -> tuple[Any, str | None, int | None]:
         """Serialize the record on the caller's thread and build the native
         ``_confluentkafka.ProducerRecord`` the send path reads: it holds the
         serialized ``bytes`` and the record's header values without copying
         them (CLAUDE.md §12). Returns it with the record's topic and partition,
-        which the completion needs, so they are read once."""
+        which the completion needs, so they are read once. A ``None`` record
+        (Java's ``send(null)``) is sent as ``None``, which the FFI receives as
+        a ``NULL`` record and refuses with Java's ``NullPointerException``."""
+        if record is None:
+            return None, None, None
         topic = record.topic()
         headers = record.headers()
         key = serialize(self._key_serialize, topic, record.key(), headers)
@@ -574,11 +565,3 @@ class _ProducerState:
         ``close()`` is logged, never raised."""
         close_if_defined(self._key_serializer)
         close_if_defined(self._value_serializer)
-
-
-def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
-    """The null arm of Java's
-    ``org.apache.kafka.clients.producer.KafkaProducer#throwIfInvalidGroupMetadata``, which the core cannot
-    receive; the generation / member id arm is the core's."""
-    if group_metadata is None:
-        raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)

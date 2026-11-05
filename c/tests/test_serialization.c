@@ -405,12 +405,14 @@ static void test_async_c_serializer_reporting_later_from_another_thread(void) {
     // `configure` and `close` left NULL are the Java defaults: nothing is
     // called, and each `_cb` completion fires before it returns.
     kafka_common_Error_t *error = NULL;
-    kafka_common_serialization_Serializer_configure(serializer, NULL, 1, &error);
+    kafka_Map_t *configs = kafka_Map_new();
+    kafka_common_serialization_Serializer_configure(serializer, configs, 1, &error);
     TEST_ASSERT_NULL(error);
     completion_t configured = {0};
-    kafka_common_serialization_Serializer_configure_cb(serializer, NULL, 1, on_serializer_done, &configured);
+    kafka_common_serialization_Serializer_configure_cb(serializer, configs, 1, on_serializer_done, &configured);
     TEST_ASSERT_TRUE(completion_fired(&configured));
     TEST_ASSERT_NULL(configured.error);
+    kafka_Map_destroy(configs);
     kafka_common_serialization_Serializer_close(serializer, &error);
     TEST_ASSERT_NULL(error);
     completion_t closed = {0};

@@ -87,8 +87,9 @@ use crate::common::protocol::Errors;
 use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{PreconditionPanic, require_ref};
 use crate::ffi::util::{c_str_to_option, c_str_to_string, kafka_List_t, list_strings};
-// The 168 enumerators are spelled out in full (see
+// The 169 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
 use kafka_common_Error_e::*;
@@ -111,21 +112,22 @@ pub(crate) fn init_default_logger() {
 // Panic guard
 // ---------------------------------------------------------------------------
 
-/// Runs the body of an `extern "C"` entry point, turning a Rust panic into the
-/// entry point's failure value instead of letting it unwind into the C caller.
+/// Runs the body of an `extern "C"` entry point that has an error channel,
+/// turning a Rust panic into an error instead of letting it unwind into the C
+/// caller.
 ///
-/// This is the runtime half of [`ffi_guard`](crate::ffi::ffi_guard): the
-/// attribute rewrites each entry point's body into
-/// `ffi_guard_or("<name>", <on-panic closure>, move || <body>)`. A panic that
-/// reached the `extern "C"` frame would abort the whole process — the release
-/// profile keeps `panic = "unwind"` because std `Mutex` poisoning relies on it,
-/// so the abort would come from the shim the compiler inserts at the boundary.
-/// Here the panic is caught instead, turned into an [`Error`] by
-/// [`panic_error`], logged at `error` level, and handed to `on_panic`, whose
-/// value the entry point returns.
+/// This is the runtime half of [`ffi_guard`](crate::ffi::ffi_guard) for a
+/// fallible entry point, an `_err` twin and a `_cb` entry point: the attribute
+/// rewrites each body into `ffi_guard_or("<name>", <on-panic closure>, move ||
+/// <body>)`. The panic is caught, turned into an [`Error`] by [`panic_error`]
+/// and handed to `on_panic`, which stores it in `*out_err` or delivers it
+/// through the completion, and whose value the entry point returns. A type
+/// precondition ([`precondition`](crate::ffi::precondition)) arrives as the
+/// error it carries; any other panic is a bug of this crate, and the default
+/// panic hook has already printed its "thread … panicked at …" line.
 ///
-/// The default panic hook is left alone, so the usual "thread … panicked at …"
-/// line still reaches stderr before the error is logged.
+/// An entry point without an error channel runs under [`ffi_guard_abort`]
+/// instead.
 ///
 /// # Unwind safety
 ///
@@ -134,7 +136,8 @@ pub(crate) fn init_default_logger() {
 /// later call on the handle, which then fails with the poison message instead
 /// of reading the state. That is intended: such a handle should be destroyed
 /// and recreated, as the generated C header says, and the poison is not
-/// cleared anywhere.
+/// cleared anywhere. A precondition panic is raised before the body touches
+/// any state, so it leaves nothing half-updated.
 ///
 /// `on_panic` must not panic itself: nothing is left to catch it.
 ///
@@ -148,12 +151,17 @@ pub(crate) fn ffi_guard_or<R>(fn_name: &'static str, on_panic: impl FnOnce(Error
 
 /// The [`Error`] a panic caught by [`ffi_guard_or`] is reported as.
 ///
-/// An [`Error::LocalIllegalState`] whose message is
+/// A type precondition's [`PreconditionPanic`] is reported as the error it
+/// carries, unchanged. Any other panic is an [`Error::LocalIllegalState`] whose
+/// message is
 /// `Rust panic caught at the FFI boundary in <fn_name>: <panic message>`. The
 /// panic message is the payload when it is a `&str` or a `String`, which is
 /// what `panic!`, `assert!`, `unwrap` and `expect` produce, and
 /// `non-string panic payload` otherwise (`std::panic::panic_any`).
 pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
+    if let Some(precondition) = payload.downcast_ref::<PreconditionPanic>() {
+        return precondition.0.clone();
+    }
     let message = if let Some(message) = payload.downcast_ref::<&'static str>() {
         message
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -162,6 +170,39 @@ pub(crate) fn panic_error(fn_name: &str, payload: &(dyn Any + Send)) -> Error {
         "non-string panic payload"
     };
     Error::local_illegal_state(format!("Rust panic caught at the FFI boundary in {fn_name}: {message}"))
+}
+
+/// Runs the body of an `extern "C"` entry point without an error channel (a
+/// function of `confluent_kafka.h` that is neither fallible nor a `_cb`),
+/// aborting the process if it panics.
+///
+/// This is the runtime half of [`ffi_guard`](crate::ffi::ffi_guard) for such an
+/// entry point. Nothing can carry the error to the caller, and returning a
+/// made-up value would let the C program go on with a wrong one, so the panic
+/// error ([`panic_error`]) is printed to stderr and logged, and the process
+/// aborts, as `confluent_kafka.h` documents. A language binding calls the
+/// `_err` twin, which stores the same error in `*out_err` instead.
+///
+/// No Java counterpart: Java has no C boundary.
+pub(crate) fn ffi_guard_abort<R>(fn_name: &'static str, body: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        // The payload is not dropped: nothing runs after the abort.
+        Err(payload) => abort_without_error_channel(
+            fn_name,
+            &panic_error(fn_name, &*payload),
+            "the functions of confluent_kafka.h have no error channel, language bindings call the _err twin",
+        ),
+    }
+}
+
+/// Prints and logs `error`, raised in `fn_name` where nothing can carry it to
+/// the caller, and aborts the process; `why` says why nothing can.
+pub(crate) fn abort_without_error_channel(fn_name: &str, error: &Error, why: &str) -> ! {
+    let line = format!("confluent_kafka: {fn_name}: {}: aborting; {why}", error.message());
+    log::error!("{line}");
+    eprintln!("{line}");
+    std::process::abort()
 }
 
 /// Spawns the task a callback-style entry point hands its callback to,
@@ -243,16 +284,20 @@ pub(crate) type OpaqueCompletion = unsafe extern "C" fn(opaque: *mut c_void);
 /// task, the queue, the submission channel or the C method) as its last step,
 /// after which nothing can panic.
 ///
+/// A NULL `cb` leaves nothing to deliver the error through, so the process
+/// aborts ([`abort_without_error_channel`]).
+///
 /// # Safety
 ///
 /// `cb` and `opaque` must be the pair the C caller passed to the entry point,
 /// which has not fired `cb`.
 pub(crate) unsafe fn deliver_panic(
     complete: impl FnOnce(CallbackJob),
-    cb: ErrorCompletion,
+    cb: impl Into<Option<ErrorCompletion>>,
     opaque: *mut c_void,
     error: Error,
 ) {
+    let cb = require_completion(cb.into(), &error);
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
     complete(Box::new(move || {
@@ -273,10 +318,11 @@ pub(crate) unsafe fn deliver_panic(
 /// As [`deliver_panic`].
 pub(crate) unsafe fn deliver_panic_value<P: 'static>(
     complete: impl FnOnce(CallbackJob),
-    cb: unsafe extern "C" fn(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void),
+    cb: impl Into<Option<unsafe extern "C" fn(value: *mut P, error: *mut kafka_common_Error_t, opaque: *mut c_void)>>,
     opaque: *mut c_void,
     error: Error,
 ) {
+    let cb = require_completion(cb.into(), &error);
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
     complete(Box::new(move || {
@@ -297,10 +343,11 @@ pub(crate) unsafe fn deliver_panic_value<P: 'static>(
 /// As [`deliver_panic`].
 pub(crate) unsafe fn deliver_panic_i64(
     complete: impl FnOnce(CallbackJob),
-    cb: I64Completion,
+    cb: impl Into<Option<I64Completion>>,
     opaque: *mut c_void,
     error: Error,
 ) {
+    let cb = require_completion(cb.into(), &error);
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
     complete(Box::new(move || {
@@ -321,10 +368,11 @@ pub(crate) unsafe fn deliver_panic_i64(
 /// As [`deliver_panic`].
 pub(crate) unsafe fn deliver_panic_optional_i64(
     complete: impl FnOnce(CallbackJob),
-    cb: OptionalI64Completion,
+    cb: impl Into<Option<OptionalI64Completion>>,
     opaque: *mut c_void,
     error: Error,
 ) {
+    let cb = require_completion(cb.into(), &error);
     let error = SendPtr(box_error(error) as *mut c_void);
     let opaque = SendPtr(opaque);
     complete(Box::new(move || {
@@ -346,10 +394,11 @@ pub(crate) unsafe fn deliver_panic_optional_i64(
 /// As [`deliver_panic`].
 pub(crate) unsafe fn deliver_panic_opaque(
     complete: impl FnOnce(CallbackJob),
-    cb: OpaqueCompletion,
+    cb: impl Into<Option<OpaqueCompletion>>,
     opaque: *mut c_void,
     error: Error,
 ) {
+    let cb = require_completion(cb.into(), &error);
     drop(error);
     let opaque = SendPtr(opaque);
     complete(Box::new(move || {
@@ -359,6 +408,16 @@ pub(crate) unsafe fn deliver_panic_opaque(
         // exactly once.
         unsafe { cb(opaque.get()) }
     }));
+}
+
+/// The completion `cb` a `deliver_panic*` helper fires, or, when the C caller
+/// passed NULL for it, an abort reporting `error`: a `_cb` entry point whose
+/// completion is NULL has no channel left for it.
+fn require_completion<F>(cb: Option<F>, error: &Error) -> F {
+    match cb {
+        Some(cb) => cb,
+        None => abort_without_error_channel("cb", error, "the completion is NULL"),
+    }
 }
 
 /// The completion sink of a handle with no callbacks vector: runs the
@@ -446,16 +505,24 @@ where
     }
 }
 
-/// The [`panic_error`] for a caught `payload`, logged at `error` level, with
+/// The [`panic_error`] for a caught `payload`, logged at `error` level (at
+/// `debug` for a type precondition, which the caller receives as its error), with
 /// the payload dropped under a second guard: a payload's destructor is
 /// arbitrary code, and one that panicked would unwind out of the catching
 /// frame after all, so whatever that second panic carries is leaked.
 pub(crate) fn caught_panic_error(fn_name: &'static str, payload: Box<dyn Any + Send>) -> Error {
+    let precondition = payload.is::<PreconditionPanic>();
     let error = panic_error(fn_name, &*payload);
     if let Err(nested) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(payload))) {
         std::mem::forget(nested);
     }
-    log::error!("{}", error.message());
+    // A precondition is the caller's mistake, reported to it as an error; any
+    // other panic is a bug of this crate.
+    if precondition {
+        log::debug!("{fn_name}: {}", error.message());
+    } else {
+        log::error!("{}", error.message());
+    }
     error
 }
 
@@ -553,6 +620,7 @@ pub(crate) mod panic_probe {
     use std::sync::Mutex;
 
     use super::{kafka_common_Error_t, take_error};
+    use crate::ffi::precondition::require_ref;
 
     /// What each completion fired with, in firing order: the error message,
     /// or `"<no error>"` for a completion without one.
@@ -599,11 +667,11 @@ pub(crate) mod panic_probe {
     /// # Safety
     ///
     /// `opaque` must be [`Probe::as_opaque`] of a `Probe` that outlives `'a`.
-    unsafe fn probe<'a>(opaque: *mut c_void) -> &'a Probe {
+    unsafe fn probe<'a>(opaque: *mut c_void, param: &'static str) -> &'a Probe {
         // SAFETY: Test code: per this function's `# Safety`, `opaque` came from
         // `Probe::as_opaque` of a live `Probe` that outlives `'a`; the reference is shared, and
         // `Probe` mutates only through its `Mutex`.
-        unsafe { &*(opaque as *const Probe) }
+        unsafe { require_ref::<_, Probe>(opaque, param) }
     }
 
     /// An `(error, opaque)` completion.
@@ -611,7 +679,7 @@ pub(crate) mod panic_probe {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired, and a completion owns
         // the error handle it receives.
-        unsafe { probe(opaque).record(error) }
+        unsafe { probe(opaque, "opaque").record(error) }
     }
 
     /// A `(value *, error, opaque)` completion: a failure has a NULL value.
@@ -620,7 +688,7 @@ pub(crate) mod panic_probe {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired, and a completion owns
         // the error handle it receives.
-        unsafe { probe(opaque).record(error) }
+        unsafe { probe(opaque, "opaque").record(error) }
     }
 
     /// An `(int64_t value, error, opaque)` completion: a failure has -1.
@@ -629,14 +697,18 @@ pub(crate) mod panic_probe {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired, and a completion owns
         // the error handle it receives.
-        unsafe { probe(opaque).record(error) }
+        unsafe { probe(opaque, "opaque").record(error) }
     }
 
     /// An `(opaque)` completion, which carries no error.
     pub(crate) unsafe extern "C" fn on_opaque(opaque: *mut c_void) {
         // SAFETY: Test code: every test registering this completion passes `Probe::as_opaque`
         // of a `Probe` it keeps alive until the completion has fired.
-        unsafe { probe(opaque) }.fired.lock().unwrap().push("<no error>".to_string());
+        unsafe { probe(opaque, "opaque") }
+            .fired
+            .lock()
+            .unwrap()
+            .push("<no error>".to_string());
     }
 }
 
@@ -708,11 +780,12 @@ pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
     Box::into_raw(Box::new(ErrorInner::new(error))) as *mut kafka_common_Error_t
 }
 
-/// What a fallible entry point returns beside the error it stored in
-/// `*out_err`: null for a pointer, a null `kafka_Bytes_t`, `0` for an
-/// `int8_t`, `-1` for any wider integer. `#[ffi_guard]` returns the same value
-/// for a caught panic, so a failure and a panic cannot be told apart by the
-/// value, which the caller never reads: it tests `*out_err`.
+/// What a fallible entry point or an `_err` twin returns beside the error it
+/// stored in `*out_err`: null for a pointer, a null `kafka_Bytes_t`, `0` for an
+/// `int8_t`, `-1` for any wider integer, `NaN` for a `double`, `false`, and for
+/// a C enum the enumerator its file names. `#[ffi_guard]` returns the same
+/// value for a caught panic, so a failure and a panic cannot be told apart by
+/// the value, which the caller never reads: it tests `*out_err`.
 ///
 /// No Java counterpart: Java has no C boundary.
 pub(crate) trait FailValue {
@@ -760,6 +833,24 @@ impl FailValue for i64 {
     }
 }
 
+impl FailValue for bool {
+    fn fail() -> Self {
+        false
+    }
+}
+
+impl FailValue for f64 {
+    fn fail() -> Self {
+        f64::NAN
+    }
+}
+
+impl FailValue for kafka_common_Error_e {
+    fn fail() -> Self {
+        Self::kafka_common_Error_UNKNOWN_SERVER_ERROR
+    }
+}
+
 impl FailValue for crate::ffi::util::kafka_Bytes_t {
     fn fail() -> Self {
         Self::NULL
@@ -768,11 +859,17 @@ impl FailValue for crate::ffi::util::kafka_Bytes_t {
 
 /// Stores `error` in `*out_err`, as an owned handle the caller frees.
 ///
+/// A NULL `out_err` (CLAUDE.md §4 makes it mandatory) leaves nothing to carry
+/// the error, so the process aborts ([`abort_without_error_channel`]).
+///
 /// # Safety
 ///
-/// `out_err` must be valid for one write. It should point at null, as every
-/// entry point taking it requires, or the handle there leaks.
+/// `out_err` must be NULL or valid for one write. It should point at null, as
+/// every entry point taking it requires, or the handle there leaks.
 pub(crate) unsafe fn store_error(out_err: *mut *mut kafka_common_Error_t, error: Error) {
+    if out_err.is_null() {
+        abort_without_error_channel("out_err", &error, "out_err is NULL");
+    }
     // SAFETY: Per this function's `# Safety`, `out_err` is valid for one write. A raw pointer has
     // no drop glue, so the write reads nothing from the slot.
     unsafe { out_err.write(box_error(error)) }
@@ -831,7 +928,7 @@ pub(crate) unsafe fn deliver_unit(result: Result<(), Error>, out_err: *mut *mut 
 /// (not passed to `kafka_common_Error_destroy` nor consumed by
 /// [`take_error`]) for as long as the returned reference, or anything borrowed
 /// from it, is used: the `'static` lifetime is not real.
-pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
+pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t, param: &'static str) -> &'static ErrorInner {
     // SAFETY: Per this function's `# Safety`, `error` is non-null and points at a live
     // `ErrorInner`: an owned handle (the `Box::into_raw` of `box_error`) or one borrowed from
     // a live owner (an `ErrorInner` held inside another handle). Either way the cast targets
@@ -839,7 +936,7 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static E
     // contract makes the caller
     // keep the handle alive while it uses the reference, which is shared, so nothing writes
     // the `ErrorInner` under it (its lazy slots are `OnceLock`s).
-    unsafe { &*(error as *const ErrorInner) }
+    unsafe { require_ref::<_, ErrorInner>(error, param) }
 }
 
 // ---------------------------------------------------------------------------
@@ -882,10 +979,14 @@ unsafe fn owned_source(source: *mut kafka_common_Error_t) -> Error {
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
 unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
+    // Java's error stores a null set, which reads here as an empty one.
+    if topics.is_null() {
+        return HashSet::new();
+    }
     // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of
     // NUL-terminated strings, as `list_strings` requires; the names are copied out, so
     // nothing borrows the list after this call.
-    unsafe { list_strings(topics) }.into_iter().collect()
+    unsafe { list_strings(topics, "topics") }.into_iter().collect()
 }
 
 /// `new KafkaException()`: the bare Kafka error with the default message.
@@ -1433,6 +1534,31 @@ pub unsafe extern "C" fn kafka_common_Error_local_unsupported_operation(
     box_error(Error::local_unsupported_operation(unsafe { c_str_to_string(message) }))
 }
 
+/// `new NullPointerException(String message)` — the JDK
+/// `java.lang.NullPointerException`, the error a `NULL` mandatory argument reports.
+///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
+/// # Safety
+///
+/// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_local_null_pointer(message: *const c_char) -> *mut kafka_common_Error_t {
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(Error::local_null_pointer(unsafe { c_str_to_string(message) }))
+}
+
 /// `new TimeoutException(String message)` — the retriable
 /// `org.apache.kafka.common.errors.TimeoutException`.
 ///
@@ -1918,11 +2044,11 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 ///
 /// # Injectivity and ABI
 ///
-/// The 168 values are pairwise distinct — the code alone identifies the class,
+/// The 169 values are pairwise distinct — the code alone identifies the class,
 /// which is what lets a C caller use it as its sole discriminator. The
 /// negatives are ABI once published: a new class **appends at the most-negative
 /// end**, because inserting one mid-list would silently renumber every class
-/// after it. A table test pins all 30 literally so a renumbering cannot pass.
+/// after it. A table test pins all 31 literally so a renumbering cannot pass.
 // Implementation notes for Rust readers, kept out of the generated header.
 //
 // **Why the negatives live here and not in `common::protocol::Errors`.**
@@ -1962,7 +2088,7 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 // typedef, so `config.style` is not respected" (`ir/enumeration.rs`). The ABI
 // is identical: a fieldless `#[repr(C)]` enum takes the target C ABI's default
 // enum size, which is `int` on every target Rust supports, and a C enum
-// spanning -31..=136 is `int` too. Naming the enum in the typedef is what lets
+// spanning -32..=136 is `int` too. Naming the enum in the typedef is what lets
 // a C or C++ caller switch on the real type and get the compiler's
 // exhaustiveness warning.
 #[repr(C)]
@@ -2151,6 +2277,9 @@ pub enum kafka_common_Error_e {
     // JDK-derived (`java.lang.UnsupportedOperationException`), appended after
     // publication because the negatives are ABI.
     kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION = -31,
+    // JDK-derived (`java.lang.NullPointerException`): a `NULL` mandatory argument at the C
+    // boundary. Appended after publication because the negatives are ABI.
+    kafka_common_Error_LOCAL_NULL_POINTER = -32,
 }
 
 /// The `kafka_common_Error_e` of the class that owns a protocol code.
@@ -2210,6 +2339,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
         Error::LocalTimeout(_) => kafka_common_Error_LOCAL_TIMEOUT,
         Error::LocalCallback(_) => kafka_common_Error_LOCAL_CALLBACK,
         Error::LocalUnsupportedOperation(_) => kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION,
+        Error::LocalNullPointer(_) => kafka_common_Error_LOCAL_NULL_POINTER,
         Error::Api(_) => kafka_common_Error_API,
         Error::Authentication(_) => kafka_common_Error_AUTHENTICATION,
         Error::Authorization(_) => kafka_common_Error_AUTHORIZATION,
@@ -2411,7 +2541,7 @@ pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Err
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The `&'static ErrorInner` is used only to read `.error` for the duration of this
     // call, during which the C caller keeps the handle alive.
-    error_code_of(&unsafe { error_ref(error) }.error)
+    error_code_of(&unsafe { error_ref(error, "error") }.error)
 }
 
 /// Returns the error message as a null-terminated C string.
@@ -2446,7 +2576,7 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
     // this function's rustdoc states, it stays valid while the handle does: until
     // `kafka_common_Error_destroy` is called on it, or, for a borrowed one, until its owner
     // is destroyed by that owner's own `_destroy`.
-    unsafe { error_ref(error) }.message_cstring.as_ptr()
+    unsafe { error_ref(error, "error") }.message_cstring.as_ptr()
 }
 
 /// Returns the error's cause (`Throwable.getCause()`), or null when it has
@@ -2465,7 +2595,7 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
 /// The returned handle is borrowed: it is owned by `error` and valid until
 /// `kafka_common_Error_destroy` is called on `error`. It must not be passed to
 /// `kafka_common_Error_destroy` itself.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Error_t) -> *const kafka_common_Error_t {
     if error.is_null() {
@@ -2476,16 +2606,12 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The returned cause is a borrowed handle owned by that `ErrorInner` (its `source`
     // slot), so, as this function's rustdoc states, it stays valid while `error` does.
-    unsafe { error_ref(error) }.source_ptr()
+    unsafe { error_ref(error, "error") }.source_ptr()
 }
 
 /// Returns the throttle time the broker reported with this error
 /// (`ThrottlingQuotaExceededException.throttleTimeMs()`), or `-1` when the
 /// error carries none.
-///
-/// A caught Rust panic returns -1, as for no throttle time: Java's
-/// `ThrottlingQuotaExceededException(int, String)` stores any `int`, and the C
-/// constructors pass it through, so no value is outside its domain.
 ///
 /// # Parameters
 ///
@@ -2504,7 +2630,7 @@ pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka
     // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The borrow lasts only for this call, while the caller keeps the handle alive.
-    unsafe { error_ref(error) }.error.throttle_time_ms().unwrap_or(-1)
+    unsafe { error_ref(error, "error") }.error.throttle_time_ms().unwrap_or(-1)
 }
 
 // NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported
@@ -2573,7 +2699,7 @@ mod tests {
     const FIRST_CODE: i16 = -1;
     const LAST_CODE: i16 = Errors::MAX_CODE;
 
-    /// The 30 classes that own no Java code, each paired with the enumerator it
+    /// The 31 classes that own no Java code, each paired with the enumerator it
     /// must map to and that enumerator's literal value.
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
@@ -2702,6 +2828,8 @@ mod tests {
                 kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION,
                 -31,
             ),
+            // -32: JDK-derived class appended after publication.
+            (Error::local_null_pointer("m"), kafka_common_Error_LOCAL_NULL_POINTER, -32),
         ]
     }
 
@@ -2796,7 +2924,7 @@ mod tests {
         );
     }
 
-    /// The 168 values are pairwise distinct, so the code alone identifies the
+    /// The 169 values are pairwise distinct, so the code alone identifies the
     /// class. A C caller has no other discriminator, and the gRPC test harness
     /// derives the error type from this value — a collision would silently
     /// misclassify one of the two classes involved.
@@ -2825,10 +2953,10 @@ mod tests {
             }
         }
 
-        assert_eq!(seen.len(), 168, "expected 168 distinct error codes");
+        assert_eq!(seen.len(), 169, "expected 169 distinct error codes");
     }
 
-    /// One instance of each of the 168 error classes: the owner of every Java code,
+    /// One instance of each of the 169 error classes: the owner of every Java code,
     /// the client-side classes, and the bare `KafkaException`, which reports
     /// `UNKNOWN_SERVER_ERROR` rather than a code of its own. The codes are pairwise
     /// distinct ([`ffi_error_code_values_are_injective`]), so no class appears twice.
@@ -2897,7 +3025,7 @@ mod tests {
             .into_iter()
             .map(|error| (class_predicate(ErrorName::name(&error)), box_error(error)))
             .collect();
-        assert_eq!(errors.len(), 168, "expected one error per class");
+        assert_eq!(errors.len(), 169, "expected one error per class");
 
         let owners: HashSet<&str> = errors.iter().map(|(own, _)| own.as_str()).collect();
         assert_eq!(owners.len(), errors.len(), "two classes share a predicate name");
@@ -2948,7 +3076,7 @@ mod tests {
         }
     }
 
-    /// The 30 Rust-local negatives keep the values they were published with, and
+    /// The 31 Rust-local negatives keep the values they were published with, and
     /// each client-side class maps to the enumerator named after it.
     ///
     /// These values are ABI (see `kafka_common_Error_e`): a new class
@@ -2957,7 +3085,7 @@ mod tests {
     #[test]
     fn ffi_error_code_client_side_negatives_are_stable() {
         let classes = client_side_classes();
-        assert_eq!(classes.len(), 30, "expected 30 classes with no Java code");
+        assert_eq!(classes.len(), 31, "expected 31 classes with no Java code");
 
         for (error, expected, value) in classes {
             assert_eq!(expected as i32, value, "{expected:?} moved off its published value");
@@ -3034,8 +3162,6 @@ mod tests {
     }
 
     thread_local! {
-        /// Set by `guarded_unit` just before it panics.
-        static UNIT_BODY_RAN: RefCell<bool> = const { RefCell::new(false) };
         /// What `guarded_on_panic`'s closure received.
         static ON_PANIC_SAW: RefCell<Option<(String, kafka_common_Error_e)>> = const { RefCell::new(None) };
     }
@@ -3046,7 +3172,6 @@ mod tests {
     /// shape; the function takes no pointer, so the caller has nothing to uphold.
     #[ffi_guard]
     unsafe extern "C" fn guarded_unit() {
-        UNIT_BODY_RAN.with(|ran| *ran.borrow_mut() = true);
         panic!("unit boom");
     }
 
@@ -3213,7 +3338,7 @@ mod tests {
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
     /// shape; the function takes no pointer, so the caller has nothing to uphold.
-    #[ffi_guard(fallback = -1)]
+    #[ffi_guard]
     unsafe extern "C" fn guarded_byte_code(panic: bool) -> i8 {
         if panic {
             panic!("byte code boom");
@@ -3249,7 +3374,7 @@ mod tests {
     ///
     /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
     /// shape; the function takes no pointer, so the caller has nothing to uphold.
-    #[ffi_guard(fallback = kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED)]
+    #[ffi_guard]
     unsafe extern "C" fn guarded_enum(panic: bool) -> kafka_common_IsolationLevel_e {
         if panic {
             panic!("enum boom");
@@ -3273,15 +3398,6 @@ mod tests {
             return unsafe { fail_with(out_err, Error::local_illegal_argument("constructor failed")) };
         }
         std::ptr::dangling_mut()
-    }
-
-    /// # Safety
-    ///
-    /// `unsafe` only because `#[ffi_guard]` requires the `unsafe extern "C"` entry-point
-    /// shape; the function takes no pointer, so the caller has nothing to uphold.
-    #[ffi_guard(fallback = 42)]
-    unsafe extern "C" fn guarded_fallback() -> i32 {
-        panic!("fallback boom");
     }
 
     /// # Safety
@@ -3368,139 +3484,295 @@ mod tests {
         6
     }
 
-    #[test]
-    fn ffi_guard_unit_return_is_logged_only() {
-        // SAFETY: Test code: `guarded_unit` is a parameterless `extern "C"` test function
-        // under `#[ffi_guard]`; the call is `unsafe` only because the function is declared
-        // `unsafe extern "C"`, and it has no pointer arguments or preconditions to uphold.
-        // The guard catches its panic, so nothing unwinds into this frame.
-        unsafe { guarded_unit() };
-        assert!(UNIT_BODY_RAN.with(|ran| *ran.borrow()), "the body ran up to its panic");
+    /// A NULL check in the shape the exports use.
+    ///
+    /// # Safety
+    ///
+    /// `value` must be null or point at a live `i32`.
+    #[ffi_guard]
+    unsafe extern "C" fn guarded_requires(value: *const i32) -> i32 {
+        // SAFETY: Per this function's `# Safety`.
+        let value: &i32 = unsafe { crate::ffi::precondition::require_ref(value, "value") };
+        value + 1
     }
 
-    #[test]
-    fn ffi_guard_scalar_fallbacks() {
-        // SAFETY: Test code: every `guarded_*` function called here is an `extern "C"` test
-        // function under `#[ffi_guard]` taking only a `bool`; the calls are `unsafe` solely
-        // because the functions are declared `unsafe extern "C"`, and there are no pointer
-        // arguments or preconditions to uphold. The guard turns each requested panic into
-        // the documented fallback value.
-        unsafe {
-            assert!(!guarded_bool(true));
-            assert_eq!(guarded_i16(true), -1);
-            assert_eq!(guarded_i32(true), -1);
-            assert_eq!(guarded_i64(true), -1);
-            assert!(guarded_f64(true).is_nan());
+    /// Runs the test `test` again in a child process with `CONFLUENT_KAFKA_ABORT_CHILD`
+    /// set, so the child takes the branch that aborts, and asserts the child aborted
+    /// with `ffi_guard_abort`'s line for `fn_name` and `message`.
+    fn assert_child_aborts(test: &str, fn_name: &str, message: &str) {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(ABORT_CHILD, "1")
+            .output()
+            .expect("run the child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = format!("confluent_kafka: {fn_name}: {message}: aborting");
+        assert!(stderr.contains(&expected), "no `{expected}` in the child:\n{stderr}");
+        assert!(!stdout.contains("returned"), "the entry point returned:\n{stdout}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // SIGABRT (6 on Linux and macOS), which `std::process::abort` raises.
+            assert_eq!(
+                output.status.signal(),
+                Some(6),
+                "child exited with {}:\n{stderr}",
+                output.status
+            );
         }
+        #[cfg(not(unix))]
+        assert!(!output.status.success(), "child exited with {}", output.status);
     }
 
+    /// Set in the child process `assert_child_aborts` starts.
+    const ABORT_CHILD: &str = "CONFLUENT_KAFKA_ABORT_CHILD";
+
+    /// A function of `confluent_kafka.h` without an error channel aborts on a panic:
+    /// it has no failure value to return.
     #[test]
-    fn ffi_guard_count_fallback_is_zero() {
-        // SAFETY: Test code: `guarded_topics_count` and `guarded_offsets_count` are `extern
-        // "C"` test functions under `#[ffi_guard]` taking only a `bool`; the calls are
-        // `unsafe` solely because the functions are declared `unsafe extern "C"`, with no
-        // pointer arguments or preconditions to uphold. The guard turns the requested panic
-        // into the documented `0` count fallback.
-        unsafe {
-            assert_eq!(guarded_topics_count(true), 0);
-            assert_eq!(guarded_offsets_count(true), 0);
+    fn ffi_guard_plain_export_aborts_on_a_panic() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: `guarded_i32` takes only a `bool`; the call is `unsafe`
+            // solely because it is declared `unsafe extern "C"`.
+            unsafe { guarded_i32(true) };
+            println!("returned");
+            return;
         }
-    }
-
-    #[test]
-    fn ffi_guard_error_code_fallback_is_unknown_server_error() {
-        // SAFETY: Test code: `guarded_error_code` is an `extern "C"` test function under
-        // `#[ffi_guard]` taking only a `bool`; the call is `unsafe` solely because it is
-        // declared `unsafe extern "C"`, with no pointer arguments or preconditions to
-        // uphold. The guard turns the requested panic into the documented error-code
-        // fallback.
-        let code = unsafe { guarded_error_code(true) };
-        // The enumerator `error_code_of` produces for `Errors::UnknownServerError`.
-        assert_eq!(code, code_owned_by(Errors::UnknownServerError));
-        assert_eq!(code, kafka_common_Error_UNKNOWN_SERVER_ERROR);
-    }
-
-    #[test]
-    fn ffi_guard_error_return_reports_the_panic() {
-        // SAFETY: Test code: `guarded_error_return(true)` takes only a `bool` and panics,
-        // so the guard returns a fresh `box_error(panic_error(..))` handle (the `*mut
-        // kafka_common_Error_t` fallback in `ffi-macros`), which satisfies `take_error`'s
-        // expectation of a non-null, not yet destroyed handle; `take_error` asserts
-        // non-null and frees it exactly once.
-        let (message, code) = unsafe { take_error(guarded_error_return(true)) };
-        assert_eq!(message, panic_message("guarded_error_return", "error boom"));
-        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
-    }
-
-    #[test]
-    fn ffi_guard_borrowed_error_return_reports_the_panic() {
-        // SAFETY: Test code: `guarded_borrowed_error(true)` takes only a `bool`; on its
-        // panic the guard returns a fresh `box_error(..)` handle cast to `*const`, leaked
-        // by design for a borrowing accessor (the `*const kafka_common_Error_t` fallback in
-        // `ffi-macros`), so nothing else owns or frees it.
-        let error = unsafe { guarded_borrowed_error(true) };
-        // The handle is leaked by design (the caller of a borrowing accessor
-        // never frees); the test knows it is fresh and frees it.
-        // SAFETY: Test code: `error` is the fresh, never-freed handle the guard built on
-        // the previous line, so casting away `const` and consuming it via `take_error`
-        // (which asserts non-null) is the single, final use, as the comment above records.
-        let (message, code) = unsafe { take_error(error as *mut kafka_common_Error_t) };
-        assert_eq!(message, panic_message("guarded_borrowed_error", "borrowed boom"));
-        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
-    }
-
-    #[test]
-    fn ffi_guard_pointer_fallbacks_are_null() {
-        // SAFETY: Test code: `guarded_mut_pointer` and `guarded_const_pointer` are `extern
-        // "C"` test functions under `#[ffi_guard]` taking only a `bool`; the calls are
-        // `unsafe` solely because the functions are declared `unsafe extern "C"`, with no
-        // pointer arguments or preconditions to uphold. The guard turns the requested panic
-        // into the documented null fallback, and the results are only tested for null,
-        // never dereferenced.
-        unsafe {
-            assert!(guarded_mut_pointer(true).is_null());
-            assert!(guarded_const_pointer(true).is_null());
-        }
-    }
-
-    #[test]
-    fn ffi_guard_i8_size_and_bytes_fallbacks() {
-        // SAFETY: Test code: `guarded_i8`, `guarded_topics_size` and `guarded_bytes` are
-        // `extern "C"` test functions under `#[ffi_guard]` taking only a `bool`; the calls are
-        // `unsafe` solely because the functions are declared `unsafe extern "C"`, with no
-        // pointer arguments or preconditions to uphold. The returned `kafka_Bytes_t` is only
-        // inspected, never dereferenced.
-        unsafe {
-            assert_eq!(guarded_i8(true), 0, "an int8_t boolean reads as false");
-            assert_eq!(guarded_topics_size(true), 0, "a size reads as empty");
-            let bytes = guarded_bytes(true);
-            assert!(bytes.data.is_null(), "Java's null array");
-            assert_eq!(bytes.len, 0);
-        }
-    }
-
-    #[test]
-    fn ffi_guard_byte_code_takes_its_declared_fallback() {
-        // SAFETY: Test code: `guarded_byte_code` is an `extern "C"` test function under
-        // `#[ffi_guard(fallback = -1)]` taking only a `bool`; the calls are `unsafe` solely
-        // because it is declared `unsafe extern "C"`, with no pointer arguments or
-        // preconditions to uphold.
-        unsafe {
-            assert_eq!(guarded_byte_code(false), 0, "0 is a valid code");
-            assert_eq!(guarded_byte_code(true), -1, "a panic is no code");
-        }
-    }
-
-    #[test]
-    fn ffi_guard_enum_takes_the_named_fallback() {
-        // SAFETY: Test code: `guarded_enum` is an `extern "C"` test function under
-        // `#[ffi_guard]` taking only a `bool`; the call is `unsafe` solely because it is
-        // declared `unsafe extern "C"`, with no pointer arguments or preconditions to uphold.
-        let level = unsafe { guarded_enum(true) };
-        assert_eq!(
-            level,
-            kafka_common_IsolationLevel_e::kafka_common_IsolationLevel_READ_UNCOMMITTED
+        assert_child_aborts(
+            "ffi::common::tests::ffi_guard_plain_export_aborts_on_a_panic",
+            "guarded_i32",
+            &panic_message("guarded_i32", "i32 boom"),
         );
+    }
+
+    /// A void function aborts too, after its body ran up to the panic.
+    #[test]
+    fn ffi_guard_unit_return_aborts_on_a_panic() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: `guarded_unit` takes no arguments and has no preconditions.
+            unsafe { guarded_unit() };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::ffi_guard_unit_return_aborts_on_a_panic",
+            "guarded_unit",
+            &panic_message("guarded_unit", "unit boom"),
+        );
+    }
+
+    /// A precondition panic aborts a plain export with Java's message, unwrapped.
+    #[test]
+    fn ffi_guard_plain_export_aborts_on_a_precondition() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: `guarded_requires` takes only a pointer it tests for null.
+            unsafe { guarded_requires(std::ptr::null()) };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::ffi_guard_plain_export_aborts_on_a_precondition",
+            "guarded_requires",
+            "value must not be null",
+        );
+    }
+
+    /// A fallible function given a NULL `out_err` aborts when it has an error to store.
+    #[test]
+    fn ffi_guard_null_out_err_aborts_when_there_is_an_error() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: deliberately breaks `guarded_new`'s `out_err` contract, the
+            // case under test; the guard aborts before anything writes through it.
+            unsafe { guarded_new(false, true, std::ptr::null_mut()) };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::ffi_guard_null_out_err_aborts_when_there_is_an_error",
+            "out_err",
+            "constructor failed",
+        );
+    }
+
+    /// A `_cb` entry point whose completion `cb` is NULL aborts when it has an
+    /// error to deliver: nothing else can carry it.
+    #[test]
+    fn deliver_panic_aborts_on_a_null_completion() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: the NULL completion is the case under test; the helper
+            // aborts before `complete` or `opaque` is used.
+            unsafe {
+                deliver_panic(
+                    |_| println!("queued"),
+                    None::<ErrorCompletion>,
+                    std::ptr::null_mut(),
+                    Error::local_null_pointer("topic must not be null"),
+                )
+            };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::deliver_panic_aborts_on_a_null_completion",
+            "cb",
+            "topic must not be null",
+        );
+    }
+
+    /// A real plain export given a NULL `self_` aborts with Java's message: it has no
+    /// error channel, as a `confluent_kafka.h` caller sees it.
+    #[test]
+    fn a_plain_export_aborts_on_a_null_self() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: the NULL `self_` is the case under test; the export's
+            // precondition check aborts before anything reads through it.
+            unsafe { crate::ffi::common::uuid::kafka_common_Uuid_to_string(std::ptr::null()) };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::a_plain_export_aborts_on_a_null_self",
+            "kafka_common_Uuid_to_string",
+            "self_ must not be null",
+        );
+    }
+
+    /// `kafka_common_KafkaFuture_then_apply` on a NULL future aborts with Java's text,
+    /// never reading through it.
+    #[test]
+    fn then_apply_aborts_on_a_null_self() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: the NULL `self_` is the case under test; the precondition
+            // check aborts before anything reads through either pointer.
+            unsafe {
+                crate::ffi::kafka_future::kafka_common_KafkaFuture_then_apply(std::ptr::null(), std::ptr::null_mut())
+            };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::then_apply_aborts_on_a_null_self",
+            "kafka_common_KafkaFuture_then_apply",
+            "self_ must not be null",
+        );
+    }
+
+    /// `kafka_common_KafkaFuture_all_of` over a list holding NULL aborts with Java's
+    /// element text, never reading through it.
+    #[test]
+    fn all_of_aborts_on_a_null_element() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            let futures = crate::ffi::util::kafka_List_new();
+            // SAFETY: Test code: `futures` is the live list just created; the NULL element is
+            // the case under test, and the precondition check aborts before reading it.
+            unsafe {
+                crate::ffi::util::kafka_List_add(futures, std::ptr::null_mut());
+                crate::ffi::kafka_future::kafka_common_KafkaFuture_all_of(futures);
+            }
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::all_of_aborts_on_a_null_element",
+            "kafka_common_KafkaFuture_all_of",
+            "futures must not contain null",
+        );
+    }
+
+    /// A real fallible export given a NULL argument and a NULL `out_err` aborts: the
+    /// error it would store has nowhere to go.
+    #[test]
+    fn a_fallible_export_aborts_on_a_null_out_err() {
+        if std::env::var_os(ABORT_CHILD).is_some() {
+            // SAFETY: Test code: deliberately breaks the `out_err` contract, the case under
+            // test; the guard aborts before anything writes through it.
+            unsafe { crate::ffi::common::uuid::kafka_common_Uuid_from_string(std::ptr::null(), std::ptr::null_mut()) };
+            println!("returned");
+            return;
+        }
+        assert_child_aborts(
+            "ffi::common::tests::a_fallible_export_aborts_on_a_null_out_err",
+            "out_err",
+            "s must not be null",
+        );
+    }
+
+    /// A NULL `out_err` is never read on success.
+    #[test]
+    fn ffi_guard_null_out_err_is_unread_on_success() {
+        // SAFETY: Test code: `guarded_new` reaches `out_err` only on failure, which this
+        // call does not ask for.
+        let value = unsafe { guarded_new(false, false, std::ptr::null_mut()) };
+        assert_eq!(value, std::ptr::dangling_mut());
+    }
+
+    /// A panic in a function without an error channel reaches the `_err` twin's
+    /// `out_err`, and the twin returns its type's failure value.
+    #[test]
+    fn ffi_guard_err_twins_return_the_failure_value() {
+        /// Consumes the panic `err` holds and checks it is `fn_name`'s `payload`.
+        fn assert_panic(err: *mut kafka_common_Error_t, fn_name: &str, payload: &str) {
+            // SAFETY: Test code: `err` holds the fresh handle the twin stored, not yet
+            // freed by anyone, so `take_error` (which asserts non-null) consumes it once.
+            let (message, code) = unsafe { take_error(err) };
+            assert_eq!(message, panic_message(fn_name, payload));
+            assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
+        }
+        macro_rules! twin {
+            ($f:ident, $payload:literal) => {{
+                let mut err = std::ptr::null_mut();
+                // SAFETY: Test code: `err` is a live local pointing at null, the slot the
+                // twin's `# Safety` asks for; the function takes only a `bool`.
+                let value = unsafe { $f(true, &mut err) };
+                assert_panic(err, stringify!($f), $payload);
+                value
+            }};
+        }
+        assert!(!twin!(guarded_bool_err, "bool boom"));
+        assert_eq!(twin!(guarded_i16_err, "i16 boom"), -1);
+        assert_eq!(twin!(guarded_i32_err, "i32 boom"), -1);
+        assert_eq!(twin!(guarded_i64_err, "i64 boom"), -1);
+        assert_eq!(twin!(guarded_topics_count_err, "count boom"), -1);
+        assert_eq!(twin!(guarded_offsets_count_err, "count boom"), -1);
+        assert!(twin!(guarded_f64_err, "f64 boom").is_nan());
+        assert_eq!(
+            twin!(guarded_error_code_err, "code boom"),
+            kafka_common_Error_UNKNOWN_SERVER_ERROR
+        );
+        assert!(twin!(guarded_error_return_err, "error boom").is_null());
+        assert!(twin!(guarded_borrowed_error_err, "borrowed boom").is_null());
+        assert!(twin!(guarded_mut_pointer_err, "pointer boom").is_null());
+        assert!(twin!(guarded_const_pointer_err, "string boom").is_null());
+        assert_eq!(twin!(guarded_i8_err, "i8 boom"), 0, "an int8_t boolean reads as false");
+        assert_eq!(twin!(guarded_byte_code_err, "byte code boom"), 0);
+        assert_eq!(twin!(guarded_topics_size_err, "size boom"), -1);
+        let bytes = twin!(guarded_bytes_err, "bytes boom");
+        assert!(bytes.data.is_null(), "Java's null array");
+        assert_eq!(bytes.len, 0);
+        let level = twin!(guarded_enum_err, "enum boom");
+        assert_eq!(level, <kafka_common_IsolationLevel_e as FailValue>::fail());
+    }
+
+    /// A precondition panic reaches the twin's `out_err` as the error it carries,
+    /// Java's own class and message, not as a caught panic.
+    #[test]
+    fn ffi_guard_err_twin_stores_a_precondition_unchanged() {
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null; `guarded_requires`
+        // only tests its pointer for null.
+        let value = unsafe { guarded_requires_err(std::ptr::null(), &mut err) };
+        assert_eq!(value, -1);
+        // SAFETY: Test code: `err` holds the fresh handle the twin stored, consumed once.
+        let (message, code) = unsafe { take_error(err) };
+        assert_eq!(message, "value must not be null");
+        assert_eq!(code, kafka_common_Error_LOCAL_NULL_POINTER);
+
+        let mut err = std::ptr::null_mut();
+        let value = 41_i32;
+        // SAFETY: Test code: `value` is a live `i32` for the call's duration.
+        assert_eq!(unsafe { guarded_requires_err(&value, &mut err) }, 42);
+        assert!(err.is_null());
     }
 
     #[test]
@@ -3535,13 +3807,6 @@ mod tests {
     }
 
     #[test]
-    fn ffi_guard_fallback_override_replaces_the_value() {
-        // SAFETY: Test code: `guarded_fallback` takes no arguments and has no preconditions;
-        // the call is `unsafe` solely because it is declared `unsafe extern "C"`.
-        assert_eq!(unsafe { guarded_fallback() }, 42);
-    }
-
-    #[test]
     fn ffi_guard_on_panic_closure_takes_full_control() {
         // SAFETY: Test code: `guarded_on_panic` takes no arguments and has no preconditions;
         // the call is `unsafe` solely because it is declared `unsafe extern "C"`.
@@ -3566,22 +3831,14 @@ mod tests {
         assert_eq!(message, panic_message("guarded_unit_err", "unit boom"));
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
 
-        // A value-returning twin returns the entry point's own panic value.
+        // A value-returning twin returns its type's failure value.
         let mut err = std::ptr::null_mut();
         // SAFETY: Test code: as above, with a fresh slot pointing at null.
-        assert!(!unsafe { guarded_bool_err(true, &mut err) }, "guarded_bool's derived false");
+        assert!(!unsafe { guarded_bool_err(true, &mut err) }, "bool's failure value");
         // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
         let (message, code) = unsafe { take_error(err) };
         assert_eq!(message, panic_message("guarded_bool_err", "bool boom"));
         assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
-
-        // `fallback` is that value too; only `*out_err` tells it from a real 42.
-        let mut err = std::ptr::null_mut();
-        // SAFETY: Test code: as above, with a fresh slot pointing at null.
-        assert_eq!(unsafe { guarded_fallback_err(&mut err) }, 42);
-        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
-        let (message, _) = unsafe { take_error(err) };
-        assert_eq!(message, panic_message("guarded_fallback_err", "fallback boom"));
 
         let mut err = std::ptr::null_mut();
         // SAFETY: Test code: as above, with a fresh slot pointing at null.
@@ -3726,11 +3983,13 @@ mod tests {
         );
         assert_eq!(value, -1);
         assert_eq!(seen.unwrap(), panic_message("formatted", "formatted payload 9"));
-        // SAFETY: Test code: `guarded_formatted` is an `extern "C"` test function under
-        // `#[ffi_guard]` taking only an `i32`; the call is `unsafe` solely because it is
-        // declared `unsafe extern "C"`, with no pointer arguments or preconditions to
-        // uphold. The guard turns its panic into the documented `-1` fallback.
-        assert_eq!(unsafe { guarded_formatted(3) }, -1);
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for; `guarded_formatted` takes only an `i32`.
+        assert_eq!(unsafe { guarded_formatted_err(3, &mut err) }, -1);
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(message, panic_message("guarded_formatted_err", "formatted payload 3"));
 
         // A literal `panic!`, and `unwrap` on `None`, carry a `&'static str`.
         let payload: Box<dyn Any + Send> = Box::new("literal payload");
@@ -3747,11 +4006,16 @@ mod tests {
             seen.unwrap(),
             panic_message("unwrap", "called `Option::unwrap()` on a `None` value")
         );
-        // SAFETY: Test code: `guarded_unwrap` is a parameterless `extern "C"` test function
-        // under `#[ffi_guard]`; the call is `unsafe` solely because it is declared `unsafe
-        // extern "C"`, with no pointer arguments or preconditions to uphold. The guard
-        // turns its `unwrap` panic into the documented `-1` fallback.
-        assert_eq!(unsafe { guarded_unwrap() }, -1);
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for; `guarded_unwrap` takes no other argument.
+        assert_eq!(unsafe { guarded_unwrap_err(&mut err) }, -1);
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(
+            message,
+            panic_message("guarded_unwrap_err", "called `Option::unwrap()` on a `None` value")
+        );
     }
 
     #[test]
@@ -3760,22 +4024,28 @@ mod tests {
         let error = panic_error("f", &*payload);
         assert_eq!(error.message(), panic_message("f", "non-string panic payload"));
         assert_eq!(error_code_of(&error), kafka_common_Error_LOCAL_ILLEGAL_STATE);
-        // SAFETY: Test code: `guarded_non_string_payload` is a parameterless `extern "C"`
-        // test function under `#[ffi_guard]`; the call is `unsafe` solely because it is
-        // declared `unsafe extern "C"`, with no pointer arguments or preconditions to
-        // uphold. The guard turns its `panic_any` payload into the documented `-1`
-        // fallback.
-        assert_eq!(unsafe { guarded_non_string_payload() }, -1);
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for; `guarded_non_string_payload` takes no other argument.
+        assert_eq!(unsafe { guarded_non_string_payload_err(&mut err) }, -1);
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (message, _) = unsafe { take_error(err) };
+        assert_eq!(
+            message,
+            panic_message("guarded_non_string_payload_err", "non-string panic payload")
+        );
     }
 
     #[test]
     fn ffi_guard_survives_a_payload_whose_destructor_panics() {
-        // SAFETY: Test code: `guarded_payload_panics_on_drop` is a parameterless `extern
-        // "C"` test function under `#[ffi_guard]`; the call is `unsafe` solely because it
-        // is declared `unsafe extern "C"`, with no pointer arguments or preconditions to
-        // uphold. The guard catches both the panic and the payload destructor's nested
-        // panic and returns the documented `-1` fallback.
-        assert_eq!(unsafe { guarded_payload_panics_on_drop() }, -1);
+        let mut err = std::ptr::null_mut();
+        // SAFETY: Test code: `err` is a live local pointing at null, the slot the twin's
+        // `# Safety` asks for. The guard catches both the panic and the payload
+        // destructor's nested panic.
+        assert_eq!(unsafe { guarded_payload_panics_on_drop_err(&mut err) }, -1);
+        // SAFETY: Test code: `err` holds the fresh panic handle, consumed exactly once.
+        let (_, code) = unsafe { take_error(err) };
+        assert_eq!(code, kafka_common_Error_LOCAL_ILLEGAL_STATE);
     }
 
     #[test]

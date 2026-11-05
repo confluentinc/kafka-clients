@@ -533,8 +533,21 @@ public sealed class PublicAdminListTopicsTests
             IntPtr mock = handle.DangerousAddRefClass(ref added);
             using Utf8Marshal.PinnedUtf8String text = Utf8Marshal.Pin(name);
             IntPtr outErr = IntPtr.Zero;
-            Native.MockAdminClientAddTopic(mock, isInternal ? (sbyte)1 : (sbyte)0, text.Pointer, IntPtr.Zero, IntPtr.Zero, ref outErr);
+            IntPtr partitions = NativeMethods.ListNew(ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
+            try
+            {
+                // Java's MockAdminClient.addTopic takes a partition list it reads at once;
+                // a topic without partitions is an empty list, not null.
+                Native.MockAdminClientAddTopic(
+                    mock, isInternal ? (sbyte)1 : (sbyte)0, text.Pointer, partitions, IntPtr.Zero, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+            finally
+            {
+                NativeMethods.ListDestroy(partitions, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
         }
         finally
         {

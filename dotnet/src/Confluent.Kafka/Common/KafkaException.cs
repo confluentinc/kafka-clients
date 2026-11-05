@@ -40,6 +40,8 @@ public class KafkaException : Exception
 
     private const int LocalUnsupportedOperation = -31;
 
+    private const int LocalNullPointer = -32;
+
     /// <summary>
     /// Initializes an exception with a default message; <see cref="Code"/> is 0 and <see cref="IsRetriable"/>
     /// is <see langword="false"/>.
@@ -179,6 +181,7 @@ public class KafkaException : Exception
                 LocalIllegalArgument => new ArgumentException(message, inner),
                 LocalTimeout => new TimeoutException(message, inner),
                 LocalUnsupportedOperation => new NotSupportedException(message, inner),
+                LocalNullPointer => new ArgumentNullException(message, inner),
                 Config => ConfigException.FromCore(message, inner),
                 _ => new KafkaException(code, message, isRetriable, inner),
             };

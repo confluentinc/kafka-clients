@@ -16,6 +16,8 @@
 //! (CLAUDE.md §4). The pattern and entry getters return borrowed handles
 //! valid as long as the binding.
 
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref};
 use std::ffi::c_char;
 
 use crate::common::acl::AclBinding;
@@ -64,13 +66,13 @@ impl AclBindingInner {
 /// # Safety
 ///
 /// `binding` must be a valid ACL-binding handle, alive for `'a`.
-unsafe fn inner_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a AclBindingInner {
+unsafe fn inner_ref<'a>(binding: *const kafka_common_acl_AclBinding_t, param: &'static str) -> &'a AclBindingInner {
     // SAFETY: Per this function's `# Safety`, `binding` is a valid ACL-binding handle alive for
     // `'a`, so it points at a live `AclBindingInner`: the `Box::into_raw` of `box_acl_binding`, or
     // one a parent handle embeds and hands out a view on, which lives as long as that parent.
     // Nothing mutates an `AclBindingInner` while a handle to it exists, so the shared reference is
     // sound for `'a`.
-    unsafe { &*(binding as *const AclBindingInner) }
+    unsafe { require_ref::<_, AclBindingInner>(binding, param) }
 }
 
 /// The binding behind a handle.
@@ -78,10 +80,13 @@ unsafe fn inner_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a Ac
 /// # Safety
 ///
 /// `binding` must be a valid ACL-binding handle, alive for `'a`.
-pub(crate) unsafe fn acl_binding_ref<'a>(binding: *const kafka_common_acl_AclBinding_t) -> &'a AclBinding {
+pub(crate) unsafe fn acl_binding_ref<'a>(
+    binding: *const kafka_common_acl_AclBinding_t,
+    param: &'static str,
+) -> &'a AclBinding {
     // SAFETY: Per this function's `# Safety`, `binding` is a valid ACL-binding handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(binding) }.binding
+    &unsafe { inner_ref(binding, param) }.binding
 }
 
 /// Hands `binding` to C as an owned handle, freed with
@@ -108,14 +113,20 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
     pattern: *const kafka_common_resource_ResourcePattern_t,
     entry: *const kafka_common_acl_AccessControlEntry_t,
 ) -> *mut kafka_common_acl_AclBinding_t {
+    if pattern.is_null() {
+        fail(Error::local_null_pointer("pattern"));
+    }
+    if entry.is_null() {
+        fail(Error::local_null_pointer("entry"));
+    }
     box_acl_binding(AclBinding::new(
         // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle, as
         // `resource_pattern_ref` requires; it is cloned, so the borrow lasts for this call only.
-        unsafe { resource_pattern_ref(pattern) }.clone(),
+        unsafe { resource_pattern_ref(pattern, "pattern") }.clone(),
         // SAFETY: Per this function's `# Safety`, `entry` is a valid access-control-entry handle,
         // as `access_control_entry_ref` requires; it is cloned, so the borrow lasts for this call
         // only.
-        unsafe { access_control_entry_ref(entry) }.clone(),
+        unsafe { access_control_entry_ref(entry, "entry") }.clone(),
     ))
 }
 
@@ -133,7 +144,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_is_unknown(self_: *const kafka_common_acl_AclBinding_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as
     // `acl_binding_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { acl_binding_ref(self_) }.is_unknown())
+    i8::from(unsafe { acl_binding_ref(self_, "self_") }.is_unknown())
 }
 
 /// `pattern()`.
@@ -155,7 +166,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
     // requires. The pattern handle returned points at the `ResourcePatternInner` embedded in the
     // binding's `AclBindingInner`, so it lives as long as the binding; that is the rustdoc's "valid
     // as long as the binding".
-    unsafe { inner_ref(self_) }.pattern.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.pattern.as_ptr()
 }
 
 /// `entry()`.
@@ -177,7 +188,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
     // requires. The entry handle returned points at the `AccessControlEntryInner` embedded in the
     // binding's `AclBindingInner`, so it lives as long as the binding; that is the rustdoc's "valid
     // as long as the binding".
-    unsafe { inner_ref(self_) }.entry.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.entry.as_ptr()
 }
 
 /// Create a filter which matches only this AclBinding.
@@ -198,7 +209,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as
     // `acl_binding_ref` requires; the result is copied into an owned value before return, so the
     // borrow lasts for this call only.
-    box_acl_binding_filter(unsafe { acl_binding_ref(self_) }.to_filter())
+    box_acl_binding_filter(unsafe { acl_binding_ref(self_, "self_") }.to_filter())
 }
 
 /// Returns the text form of the binding.
@@ -215,7 +226,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding handle, as
     // `acl_binding_ref` requires; the result is copied into an owned value before return, so the
     // borrow lasts for this call only.
-    into_c_string(&unsafe { acl_binding_ref(self_) }.to_string())
+    into_c_string(&unsafe { acl_binding_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned binding handle; null is a no-op.
@@ -271,7 +282,7 @@ mod tests {
             kafka_common_resource_ResourcePattern_destroy(pattern_handle);
             kafka_common_acl_AccessControlEntry_destroy(entry_handle);
             let expected = AclBinding::new(pattern, entry);
-            assert_eq!(*acl_binding_ref(binding), expected);
+            assert_eq!(*acl_binding_ref(binding, "binding"), expected);
             assert_eq!(kafka_common_acl_AclBinding_is_unknown(binding), 0);
             assert_eq!(
                 CStr::from_ptr(kafka_common_resource_ResourcePattern_name(kafka_common_acl_AclBinding_pattern(
@@ -294,11 +305,24 @@ mod tests {
             kafka_string_destroy(s);
 
             let filter = kafka_common_acl_AclBinding_to_filter(binding);
-            assert_eq!(*acl_binding_filter_ref(filter), expected.to_filter());
+            assert_eq!(*acl_binding_filter_ref(filter, "filter"), expected.to_filter());
             assert_eq!(kafka_common_acl_AclBindingFilter_matches(filter, binding), 1);
             kafka_common_acl_AclBindingFilter_destroy(filter);
             kafka_common_acl_AclBinding_destroy(binding);
             kafka_common_acl_AclBinding_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: both arguments are `NULL`, and `err` is a valid slot pointing at
+        // null; `stored` frees the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_acl_AclBinding_new_err(std::ptr::null(), std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "pattern");
         }
     }
 }

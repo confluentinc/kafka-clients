@@ -15,6 +15,7 @@
 //! `kafka_admin_TransactionListing_t`:
 //! `org.apache.kafka.clients.admin.TransactionListing` (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::TransactionListing;
@@ -22,7 +23,7 @@ use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TransactionListing`].
 #[repr(C)]
@@ -49,12 +50,15 @@ impl TransactionListingInner {
 /// # Safety
 ///
 /// `listing` must be a live transaction-listing handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(listing: *const kafka_admin_TransactionListing_t) -> &'a TransactionListingInner {
+unsafe fn inner_ref<'a>(
+    listing: *const kafka_admin_TransactionListing_t,
+    param: &'static str,
+) -> &'a TransactionListingInner {
     // SAFETY: Per this function's `# Safety`, `listing` is a live transaction-listing handle kept
     // alive for `'a`. Every `kafka_admin_TransactionListing_t` comes from
     // `box_transaction_listing`, which boxes a `TransactionListingInner`, so the cast yields a
     // valid shared reference. The type has no setters, so nothing mutates it while borrowed.
-    unsafe { &*(listing as *const TransactionListingInner) }
+    unsafe { require_ref::<_, TransactionListingInner>(listing, param) }
 }
 
 /// Hands `listing` to C as an owned handle, freed with
@@ -70,10 +74,11 @@ pub(crate) fn box_transaction_listing(listing: TransactionListing) -> *mut kafka
 /// `listing` must be a live transaction-listing handle, kept alive for `'a`.
 pub(crate) unsafe fn transaction_listing_ref<'a>(
     listing: *const kafka_admin_TransactionListing_t,
+    param: &'static str,
 ) -> &'a TransactionListing {
     // SAFETY: Per this function's `# Safety`, `listing` is a live transaction-listing handle kept
     // alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(listing) }.listing
+    &unsafe { inner_ref(listing, param) }.listing
 }
 
 /// Frees a `kafka_admin_TransactionListing_t *` element of an owned
@@ -92,12 +97,19 @@ pub(crate) unsafe fn destroy_transaction_listing_element(element: *mut c_void) {
 
 /// Creates the listing of a transaction.
 ///
+/// WARNING: `NULL` `transactional_id`, `transaction_state` panic; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `transactional_id` - the transactional id.
 /// - `producer_id` - the producer id of the transaction.
 /// - `transaction_state` - the state of the transaction, a `kafka_admin_TransactionState_t`
 ///   singleton.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `transactional_id` is `NULL`
+/// - `LocalNullPointerError` if `transaction_state` is `NULL`
 ///
 /// # Safety
 ///
@@ -113,13 +125,13 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
 ) -> *mut kafka_admin_TransactionListing_t {
     box_transaction_listing(TransactionListing::new(
         // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated
-        // string, as `c_str_to_string` requires.
-        unsafe { c_str_to_string(transactional_id) },
+        // string, as `require_str` requires.
+        unsafe { require_str(transactional_id, "transactional_id") },
         producer_id,
         // SAFETY: Per this function's `# Safety`, `transaction_state` is a transaction-state
         // singleton; only the `transaction_state` module hands those out, as
         // `transaction_state_value_of` requires.
-        unsafe { transaction_state_value_of(transaction_state) },
+        unsafe { transaction_state_value_of(transaction_state, "transaction_state") },
     ))
 }
 
@@ -137,7 +149,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_transactional_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-listing handle, kept
     // alive for this call, as `inner_ref` requires. The returned string is a `CString` the handle
     // owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.transactional_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.transactional_id_c.as_ptr()
 }
 
 /// Returns the producer id of the transaction.
@@ -152,7 +164,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_producer_id(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-listing handle, kept
     // alive for this call, as `transaction_listing_ref` requires.
-    unsafe { transaction_listing_ref(self_) }.producer_id()
+    unsafe { transaction_listing_ref(self_, "self_") }.producer_id()
 }
 
 /// Returns the state of the transaction.
@@ -168,7 +180,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_state(
 ) -> *const kafka_admin_TransactionState_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-listing handle, kept
     // alive for this call, as `transaction_listing_ref` requires.
-    transaction_state_singleton(unsafe { transaction_listing_ref(self_) }.state())
+    transaction_state_singleton(unsafe { transaction_listing_ref(self_, "self_") }.state())
 }
 
 /// Returns the text form of the listing.
@@ -184,7 +196,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid transaction-listing handle, kept
     // alive for this call, as `transaction_listing_ref` requires.
-    into_c_string(&unsafe { transaction_listing_ref(self_) }.to_string())
+    into_c_string(&unsafe { transaction_listing_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned transaction-listing handle; `NULL` is a no-op.

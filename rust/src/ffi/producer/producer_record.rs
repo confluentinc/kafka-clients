@@ -30,6 +30,7 @@
 //! `RecordHeaders`), so the handle passed to a constructor stays the
 //! caller's.
 
+use crate::ffi::precondition::{require_mut, require_ref, require_str_or};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::common::Error;
@@ -41,7 +42,7 @@ use crate::ffi::common::header::internals::record_headers::{
 };
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{GenericValue, c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{GenericValue, into_c_string, owned_c_string};
 use crate::producer::{ProducerRecord, ProducerRecordOptions, ProducerRecordOptionsBuilder};
 
 /// The record type every producer handle works with.
@@ -79,10 +80,13 @@ pub(crate) fn box_producer_record(record: GenericRecord) -> *mut kafka_producer_
 /// # Safety
 ///
 /// `record` must be a live handle, kept alive for `'a`.
-pub(crate) unsafe fn producer_record_ref<'a>(record: *const kafka_producer_ProducerRecord_t) -> &'a GenericRecord {
+pub(crate) unsafe fn producer_record_ref<'a>(
+    record: *const kafka_producer_ProducerRecord_t,
+    param: &'static str,
+) -> &'a GenericRecord {
     // SAFETY: Per this function's `# Safety`, `record` is a live handle kept alive for `'a`, as
     // `inner` requires; the record is a field of the handle, so it lives as long.
-    &unsafe { inner(record) }.record
+    &unsafe { inner(record, param) }.record
 }
 
 /// The state behind a handle.
@@ -90,12 +94,12 @@ pub(crate) unsafe fn producer_record_ref<'a>(record: *const kafka_producer_Produ
 /// # Safety
 ///
 /// `record` must be a live handle, kept alive for `'a`.
-unsafe fn inner<'a>(record: *const kafka_producer_ProducerRecord_t) -> &'a ProducerRecordInner {
+unsafe fn inner<'a>(record: *const kafka_producer_ProducerRecord_t, param: &'static str) -> &'a ProducerRecordInner {
     // SAFETY: Per this function's `# Safety`, `record` is a live handle kept alive for `'a`, i.e.
     // the `Box::into_raw` of a `ProducerRecordInner` in `box_producer_record`, the only
     // constructor. No function mutates a `ProducerRecordInner` after that, so the shared reference
     // is sound.
-    unsafe { &*(record as *const ProducerRecordInner) }
+    unsafe { require_ref::<_, ProducerRecordInner>(record, param) }
 }
 
 fn generic(ptr: *const c_void) -> Option<GenericValue> {
@@ -140,6 +144,10 @@ unsafe fn deliver(
 /// - `topic` - The topic the record will be appended to
 /// - `value` - The record contents
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string.
@@ -153,8 +161,11 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
     value: *const c_void,
 ) -> *mut kafka_producer_ProducerRecord_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    box_producer_record(ProducerRecord::new(unsafe { c_str_to_string(topic) }, generic(value)))
+    // `require_str` requires; it is copied into an owned `String`.
+    box_producer_record(ProducerRecord::new(
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
+        generic(value),
+    ))
 }
 
 /// `new ProducerRecord(String topic, K key, V value)`.
@@ -164,6 +175,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
 /// - `topic` - The topic the record will be appended to
 /// - `key` - The key that will be included in the record
 /// - `value` - The record contents
+///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
 ///
 /// # Safety
 ///
@@ -180,8 +195,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
 ) -> *mut kafka_producer_ProducerRecord_t {
     box_producer_record(ProducerRecord::with_key(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         generic(key),
         generic(value),
     ))
@@ -206,6 +221,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
 ///   FFI boundary
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string and `out_err` a valid slot pointing
@@ -224,8 +243,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
 ) -> *mut kafka_producer_ProducerRecord_t {
     let result = ProducerRecord::with_partition_key(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         optional_partition(partition),
         generic(key),
         generic(value),
@@ -256,6 +275,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
 ///   FFI boundary
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string, `headers` a live handle and
@@ -275,15 +298,15 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_header
 ) -> *mut kafka_producer_ProducerRecord_t {
     let result = ProducerRecord::with_partition_key_headers(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         optional_partition(partition),
         generic(key),
         generic(value),
         // SAFETY: Per this function's `# Safety`, `headers` is a live handle, as
         // `record_headers_ref` requires; the headers are cloned, so the borrow lasts for this
         // expression only.
-        unsafe { record_headers_ref(headers) }.clone(),
+        unsafe { record_headers_ref(headers, "headers") }.clone(),
     )
     .map_err(|e| Error::local_illegal_argument(e.message()));
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as
@@ -312,6 +335,10 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_header
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
 ///   FFI boundary
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string and `out_err` a valid slot pointing
@@ -331,8 +358,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_timestamp_
 ) -> *mut kafka_producer_ProducerRecord_t {
     let result = ProducerRecord::with_partition_timestamp_key(
         // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`.
-        unsafe { c_str_to_string(topic) },
+        // `require_str` requires; it is copied into an owned `String`.
+        unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) },
         optional_partition(partition),
         optional_timestamp(timestamp),
         generic(key),
@@ -372,7 +399,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_options(
 ) -> *mut kafka_producer_ProducerRecord_t {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle, as `options_ref`
     // requires; the options are cloned, so the borrow lasts for this statement only.
-    let options = unsafe { options_ref(options) }.clone();
+    let options = unsafe { options_ref(options, "options") }.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot, as `deliver`
     // requires.
     unsafe {
@@ -399,7 +426,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_topic(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `inner` requires. The
     // string returned points into the handle's `topic_c`, which is never changed and is freed only
     // with the handle, so it is valid until the handle is destroyed, as the rustdoc states.
-    unsafe { inner(self_) }.topic_c.as_ptr()
+    unsafe { inner(self_, "self_") }.topic_c.as_ptr()
 }
 
 /// # Returns
@@ -422,7 +449,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_headers(
     // it: the mutating `Headers_*` functions exclude, by their `# Safety`, a view on a handle the
     // caller received `const`, and `kafka_common_header_internals_RecordHeaders_set_read_only`
     // excludes such a handle.
-    &*unsafe { inner(self_) }.headers as *const RecordHeadersInner
+    &*unsafe { inner(self_, "self_") }.headers as *const RecordHeadersInner
         as *const kafka_common_header_internals_RecordHeaders_t
 }
 
@@ -440,7 +467,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_key(
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`
     // requires; the reference is used only within this call.
-    generic_ptr(unsafe { producer_record_ref(self_) }.key())
+    generic_ptr(unsafe { producer_record_ref(self_, "self_") }.key())
 }
 
 /// # Returns
@@ -458,7 +485,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`
     // requires; the reference is used only within this call.
-    generic_ptr(unsafe { producer_record_ref(self_) }.value())
+    generic_ptr(unsafe { producer_record_ref(self_, "self_") }.value())
 }
 
 /// # Returns
@@ -467,14 +494,13 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle. A caught Rust panic returns -2, which is no
-/// record timestamp: Java's `ProducerRecord` rejects a negative one.
-#[ffi_guard(fallback = -2)]
+/// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const kafka_producer_ProducerRecord_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`
     // requires; the reference is used only within this call.
-    unsafe { producer_record_ref(self_) }.timestamp().unwrap_or(-1)
+    unsafe { producer_record_ref(self_, "self_") }.timestamp().unwrap_or(-1)
 }
 
 /// # Returns
@@ -483,14 +509,13 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const k
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle. A caught Rust panic returns -2, which is no
-/// partition: Java's `ProducerRecord` rejects a negative one.
-#[ffi_guard(fallback = -2)]
+/// `self_` must be a live handle.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const kafka_producer_ProducerRecord_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`
     // requires; the reference is used only within this call.
-    unsafe { producer_record_ref(self_) }.partition().unwrap_or(-1)
+    unsafe { producer_record_ref(self_, "self_") }.partition().unwrap_or(-1)
 }
 
 /// `ProducerRecord.toString()`. Key and value print as the addresses they are.
@@ -510,7 +535,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `producer_record_ref`
     // requires; the reference is used only within this call.
-    into_c_string(&unsafe { producer_record_ref(self_) }.to_string())
+    into_c_string(&unsafe { producer_record_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned handle; null is a no-op. The key and value pointers are the
@@ -561,12 +586,15 @@ type GenericBuilder = ProducerRecordOptionsBuilder<GenericValue, GenericValue>;
 /// # Safety
 ///
 /// `options` must be a live handle, kept alive for `'a`.
-unsafe fn options_ref<'a>(options: *const kafka_producer_ProducerRecordOptions_t) -> &'a GenericOptions {
+unsafe fn options_ref<'a>(
+    options: *const kafka_producer_ProducerRecordOptions_t,
+    param: &'static str,
+) -> &'a GenericOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, i.e.
     // the `Box::into_raw` of a `GenericOptions` in
     // `kafka_producer_ProducerRecordOptionsBuilder_build`, the only constructor. Nothing mutates it
     // after that, so the shared reference is sound.
-    unsafe { &*(options as *const GenericOptions) }
+    unsafe { require_ref::<_, GenericOptions>(options, param) }
 }
 
 /// The Rust builder consumes and returns itself on every setter; the C
@@ -584,7 +612,7 @@ unsafe fn with_builder(
     // of an `Option<GenericBuilder>` in `kafka_producer_ProducerRecordOptionsBuilder_new`, the only
     // constructor, that no other call uses at the same time, so the exclusive reference, used only
     // within this call, aliases nothing.
-    let slot = unsafe { &mut *(builder as *mut Option<GenericBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<GenericBuilder>>(builder, "builder") };
     if let Some(builder) = slot.take() {
         *slot = Some(f(builder));
     }
@@ -613,6 +641,10 @@ pub extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_new() -> *mut kafk
 ///
 /// - `topic` - The topic the record will be appended to
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Topic cannot be null.") if `topic` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time,
@@ -624,8 +656,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_topic(
     topic: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied into an owned `String`.
+    let topic = unsafe { require_str_or(topic, "topic", || Error::local_illegal_argument("Topic cannot be null.")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_topic(topic)) };
@@ -741,7 +773,8 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_headers
     // SAFETY: Per this function's `# Safety`, `headers` is non-null here (checked in the closure)
     // and so a live handle, as `record_headers_ref` requires; the headers are cloned, so the borrow
     // lasts for this statement only.
-    let headers: Option<RecordHeaders> = (!headers.is_null()).then(|| unsafe { record_headers_ref(headers) }.clone());
+    let headers: Option<RecordHeaders> =
+        (!headers.is_null()).then(|| unsafe { record_headers_ref(headers, "headers") }.clone());
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_headers(headers)) };
@@ -774,7 +807,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_build(
     // an `Option<GenericBuilder>` in `kafka_producer_ProducerRecordOptionsBuilder_new`, that no
     // other call uses at the same time, so the exclusive reference, used only within this call,
     // aliases nothing.
-    let slot = unsafe { &mut *(self_ as *mut Option<GenericBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<GenericBuilder>>(self_, "self_") };
     let builder = slot.take().unwrap_or_else(GenericBuilder::new);
     match builder.build() {
         Ok(options) => Box::into_raw(Box::new(options)) as *mut kafka_producer_ProducerRecordOptions_t,
@@ -829,7 +862,7 @@ mod tests {
         kafka_common_header_internals_RecordHeaders_destroy, kafka_common_header_internals_RecordHeaders_new,
     };
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::util::kafka_string_destroy;
+    use crate::ffi::util::{c_str_to_string, kafka_string_destroy};
 
     #[test]
     fn constructors_keep_the_pointers_and_map_null_to_minus_one() {
@@ -847,7 +880,7 @@ mod tests {
             assert_eq!(kafka_producer_ProducerRecord_partition(record), -1);
             assert_eq!(kafka_producer_ProducerRecord_timestamp(record), -1);
             let headers = kafka_producer_ProducerRecord_headers(record);
-            assert!(record_headers_ref(headers).to_array().is_empty());
+            assert!(record_headers_ref(headers, "headers").to_array().is_empty());
             kafka_producer_ProducerRecord_destroy(record);
 
             let record = kafka_producer_ProducerRecord_with_key(
@@ -971,7 +1004,7 @@ mod tests {
 
             assert_eq!(c_str_to_string(kafka_producer_ProducerRecord_topic(record)), "topic");
             assert!(
-                record_headers_ref(kafka_producer_ProducerRecord_headers(record))
+                record_headers_ref(kafka_producer_ProducerRecord_headers(record), "value")
                     .to_array()
                     .is_empty()
             );

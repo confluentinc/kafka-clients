@@ -79,7 +79,8 @@ const BOILERPLATE: &[&str] = &[
     "DoD #",
 ];
 
-/// The `@throws` classes a Rust doc need not name: Rust has no null to pass.
+/// The `@throws` classes a Rust doc need not name: Rust has no null to pass, and a C
+/// export's NULL mandatory argument follows the boundary rule stated once in the header.
 const UNDOCUMENTED_THROWS: &[&str] = &["NullPointerException"];
 
 /// The headings a parameter list may sit under: `# Arguments` in Rust,

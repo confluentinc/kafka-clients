@@ -76,15 +76,22 @@ public sealed class AdminTransactionsMarshalTests
         Assert.Equal(0L, copied.ActiveProducers[2].CurrentTransactionStartOffset);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void CopyOutPartitionProducerState_AnEmptyOrNullList_HasNoProducers(bool buildList)
+    [Fact]
+    public void CopyOutPartitionProducerState_AnEmptyList_HasNoProducers()
     {
         DescribeProducersResult.PartitionProducerState copied =
-            CopyOutBuiltProducers(Array.Empty<ProducerState>(), buildList);
+            CopyOutBuiltProducers(Array.Empty<ProducerState>(), buildList: true);
 
         Assert.Empty(copied.ActiveProducers);
+    }
+
+    [Fact]
+    public void PartitionProducerStateNew_ANullList_IsRefusedWithTheNullPointerError()
+    {
+        ArgumentNullException refused = Assert.Throws<ArgumentNullException>(
+            () => CopyOutBuiltProducers(Array.Empty<ProducerState>(), buildList: false));
+
+        Assert.Equal("active_producers must not be null", refused.Message);
     }
 
     [Fact]
@@ -134,7 +141,7 @@ public sealed class AdminTransactionsMarshalTests
     public void CopyOutTransactionDescription_OnlyANegativeStartTimeIsEmpty(long nativeStartTimeMs, long? expected)
     {
         TransactionDescription copied = CopyOutBuiltDescription(
-            0, s_states["empty"].Singleton(), -1L, -1, 0L, nativeStartTimeMs, partitions: null);
+            0, s_states["empty"].Singleton(), -1L, -1, 0L, nativeStartTimeMs, Array.Empty<TopicPartition>());
 
         Assert.Equal(expected, copied.TransactionStartTimeMs);
         Assert.Empty(copied.TopicPartitions);
@@ -150,6 +157,15 @@ public sealed class AdminTransactionsMarshalTests
         Assert.Null(copied.TransactionStartTimeMs);
     }
 
+    [Fact]
+    public void TransactionDescriptionNew_ANullPartitionList_IsRefusedWithTheNullPointerError()
+    {
+        ArgumentNullException refused = Assert.Throws<ArgumentNullException>(
+            () => CopyOutBuiltDescription(0, s_states["empty"].Singleton(), -1L, -1, 0L, -1L, partitions: null));
+
+        Assert.Equal("topic_partitions must not be null", refused.Message);
+    }
+
     [Theory]
     [MemberData(nameof(StateLabels))]
     public void EveryStateSingleton_MapsToItsState_DirectlyAndThroughADescription(string label)
@@ -159,7 +175,7 @@ public sealed class AdminTransactionsMarshalTests
         Assert.Equal(expected, TransactionDescriptionMarshal.StateFrom(singleton()));
         Assert.Equal(
             expected,
-            CopyOutBuiltDescription(0, singleton(), 0L, 0, 0L, -1L, partitions: null).State);
+            CopyOutBuiltDescription(0, singleton(), 0L, 0, 0L, -1L, Array.Empty<TopicPartition>()).State);
     }
 
     [Fact]

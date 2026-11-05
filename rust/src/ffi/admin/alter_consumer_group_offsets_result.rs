@@ -42,12 +42,13 @@ pub(crate) fn box_alter_consumer_group_offsets_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<AlterConsumerGroupOffsetsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_AlterConsumerGroupOffsetsResult_t` is built by
     // `box_result::<AlterConsumerGroupOffsetsResult, _>` (in
     // `box_alter_consumer_group_offsets_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a future which can be used to check the result for a given partition.
@@ -75,12 +76,14 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_partition_r
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
-    h.ctx
-        // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
-        // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
-        // which the caller keeps the handle alive.
-        .void_future(&h.result.partition_result(unsafe { topic_partition_ref(partition) }))
+    let h = unsafe { handle(self_, "self_") };
+    h.ctx.void_future(
+        &h.result
+            // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
+            // `topic_partition_ref` requires; the borrow ends with the `partition_result` call, during
+            // which the caller keeps the handle alive.
+            .partition_result(unsafe { topic_partition_ref(partition, "partition") }),
+    )
 }
 
 /// Return a future which succeeds if all the alter offsets succeed.
@@ -101,7 +104,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

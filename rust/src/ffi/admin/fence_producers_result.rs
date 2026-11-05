@@ -18,12 +18,13 @@
 use std::ffi::c_char;
 
 use crate::admin::FenceProducersResult;
+use crate::common::Error;
 use crate::ffi::admin::{FutureCtx, ResultHandle, box_result, destroy_result, result_ref};
-use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
+use crate::ffi::common::{deliver_value, fail_with};
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{c_str_to_string, kafka_Map_t};
+use crate::ffi::util::{c_str_to_option, kafka_Map_t};
 
 /// Opaque handle to a [`FenceProducersResult`], owned and freed with
 /// [`kafka_admin_FenceProducersResult_destroy`].
@@ -45,12 +46,15 @@ pub(crate) fn box_fence_producers_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_FenceProducersResult_t) -> &'a ResultHandle<FenceProducersResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_FenceProducersResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<FenceProducersResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_FenceProducersResult_t` is built by
     // `box_result::<FenceProducersResult, _>` (in `box_fence_producers_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a map from transactional ID to futures which can be used to check the status of
@@ -74,7 +78,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let fenced = h.result.fenced_producers();
     h.ctx.string_keyed_future_map(fenced.iter(), |ctx, f| ctx.void_future(f))
 }
@@ -96,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle, `transactional_id` a valid
+/// `self_` must be a live result handle, `transactional_id` `NULL` or a valid
 /// NUL-terminated string and `out_err` a valid slot pointing at `NULL`. The
 /// returned future is owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
@@ -108,10 +112,13 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
-    // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
-    // as `c_str_to_string` requires; it is copied into a `String` during the call.
-    let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    let h = unsafe { handle(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `transactional_id` is NULL or a valid NUL-terminated
+    // string, as `c_str_to_option` requires; it is copied into a `String` during the call.
+    let Some(transactional_id) = (unsafe { c_str_to_option(transactional_id) }) else {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, null_transactional_id()) };
+    };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
     unsafe { deliver_value(h.result.producer_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
@@ -133,7 +140,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle, `transactional_id` a valid
+/// `self_` must be a live result handle, `transactional_id` `NULL` or a valid
 /// NUL-terminated string and `out_err` a valid slot pointing at `NULL`. The
 /// returned future is owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
@@ -145,10 +152,13 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
-    // SAFETY: Per this function's `# Safety`, `transactional_id` is a valid NUL-terminated string,
-    // as `c_str_to_string` requires; it is copied into a `String` during the call.
-    let transactional_id = unsafe { c_str_to_string(transactional_id) };
+    let h = unsafe { handle(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `transactional_id` is NULL or a valid NUL-terminated
+    // string, as `c_str_to_option` requires; it is copied into a `String` during the call.
+    let Some(transactional_id) = (unsafe { c_str_to_option(transactional_id) }) else {
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        return unsafe { fail_with(out_err, null_transactional_id()) };
+    };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires.
     unsafe { deliver_value(h.result.epoch_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
@@ -172,7 +182,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 
@@ -191,4 +201,10 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_destroy(self_: *mut ka
     // `kafka_admin_FenceProducersResult_t` is built by `box_result::<FenceProducersResult, _>`, as
     // `destroy_result` requires.
     unsafe { destroy_result::<FenceProducersResult, _>(self_) }
+}
+
+/// Java's `futures.get(CoordinatorKey.byTransactionalId(null))` misses, so it throws its
+/// `IllegalArgumentException`, printing `null`.
+fn null_transactional_id() -> Error {
+    Error::local_illegal_argument("TransactionalId `null` was not included in the request")
 }

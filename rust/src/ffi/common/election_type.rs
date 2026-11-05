@@ -18,6 +18,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::ffi::c_void;
@@ -42,6 +43,14 @@ pub enum kafka_common_ElectionType_e {
     kafka_common_ElectionType_UNCLEAN,
 }
 
+/// The value an `_err` twin returning [`kafka_common_ElectionType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_ElectionType_e {
+    fn fail() -> Self {
+        Self::kafka_common_ElectionType_PREFERRED
+    }
+}
+
 /// One static instance per value, indexed by `kafka_common_ElectionType_e`.
 static VARIANTS: [ElectionType; 2] = [ElectionType::Preferred, ElectionType::Unclean];
 
@@ -64,11 +73,11 @@ pub(crate) fn singleton(election_type: ElectionType) -> *const kafka_common_Elec
 /// # Safety
 ///
 /// `election_type` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(election_type: *const kafka_common_ElectionType_t) -> ElectionType {
+pub(crate) unsafe fn value_of(election_type: *const kafka_common_ElectionType_t, param: &'static str) -> ElectionType {
     // SAFETY: Per this function's `# Safety`, `election_type` is a singleton returned by this
     // module, i.e. a pointer to an element of the `static` `VARIANTS` array (`singleton`), so it
     // points at a live, initialised `ElectionType`, which is `Copy` and read out here.
-    unsafe { *(election_type as *const ElectionType) }
+    *unsafe { require_ref::<_, ElectionType>(election_type, param) }
 }
 
 /// Returns the `ElectionType.PREFERRED` singleton.
@@ -95,21 +104,17 @@ pub extern "C" fn kafka_common_ElectionType_unclean() -> *const kafka_common_Ele
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_ElectionType_PREFERRED`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_ElectionType_e::kafka_common_ElectionType_PREFERRED)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType__enum(
     self_: *const kafka_common_ElectionType_t,
 ) -> kafka_common_ElectionType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the text form of the type (`toString()`): the constant's name.
@@ -123,23 +128,20 @@ pub unsafe extern "C" fn kafka_common_ElectionType__enum(
 pub unsafe extern "C" fn kafka_common_ElectionType_to_string(self_: *const kafka_common_ElectionType_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { value_of(self_) }.to_string())
+    into_c_string(&unsafe { value_of(self_, "self_") }.to_string())
 }
 
 /// Returns the wire-protocol value of the type (Java's `value` field).
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `PREFERRED`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_common_ElectionType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.value()
+    unsafe { value_of(self_, "self_") }.value()
 }
 
 /// Returns the type whose wire-protocol value is `value` (`ElectionType.valueOf(byte value)`).
@@ -199,7 +201,7 @@ mod tests {
             // SAFETY: Test code: every handle passed is a singleton from `singleton`, which points
             // into the static `VARIANTS` array and is never freed.
             unsafe {
-                assert_eq!(value_of(handle), election_type);
+                assert_eq!(value_of(handle, "value"), election_type);
                 assert_eq!(kafka_common_ElectionType__enum(handle) as usize, index);
             }
         }

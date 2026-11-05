@@ -41,12 +41,13 @@ pub(crate) fn box_unregister_controller_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_UnregisterControllerResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<UnregisterControllerResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_UnregisterControllerResult_t` is built by
     // `box_result::<UnregisterControllerResult, _>` (in `box_unregister_controller_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a future which succeeds if the operation is successful.
@@ -68,7 +69,7 @@ pub unsafe extern "C" fn kafka_admin_UnregisterControllerResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

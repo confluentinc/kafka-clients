@@ -20,6 +20,7 @@
 //! the broker did not report them; `Optional<Integer> groupEpoch()` and
 //! `targetAssignmentEpoch()` cross as `-1` when empty.
 
+use crate::ffi::precondition::{require_element, require_list, require_ref};
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::{ConsumerGroupDescription, MemberDescription};
@@ -31,7 +32,7 @@ use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`ConsumerGroupDescription`].
 #[repr(C)]
@@ -66,13 +67,14 @@ impl ConsumerGroupDescriptionInner {
 /// alive for `'a`.
 unsafe fn inner_ref<'a>(
     description: *const kafka_admin_ConsumerGroupDescription_t,
+    param: &'static str,
 ) -> &'a ConsumerGroupDescriptionInner {
     // SAFETY: Per this function's `# Safety`, `description` is a live consumer-group-description
     // handle kept alive for `'a`. Every `kafka_admin_ConsumerGroupDescription_t` comes from
     // `box_consumer_group_description`, which boxes a `ConsumerGroupDescriptionInner`, so the cast
     // yields a valid shared reference. The type has no setters, so nothing mutates it while
     // borrowed.
-    unsafe { &*(description as *const ConsumerGroupDescriptionInner) }
+    unsafe { require_ref::<_, ConsumerGroupDescriptionInner>(description, param) }
 }
 
 /// Hands `description` to C as an owned handle, freed with
@@ -92,10 +94,11 @@ pub(crate) fn box_consumer_group_description(
 /// alive for `'a`.
 pub(crate) unsafe fn consumer_group_description_ref<'a>(
     description: *const kafka_admin_ConsumerGroupDescription_t,
+    param: &'static str,
 ) -> &'a ConsumerGroupDescription {
     // SAFETY: Per this function's `# Safety`, `description` is a live consumer-group-description
     // handle kept alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(description) }.description
+    &unsafe { inner_ref(description, param) }.description
 }
 
 /// Frees a `kafka_admin_ConsumerGroupDescription_t *` element of an owned
@@ -114,22 +117,30 @@ pub(crate) unsafe fn destroy_consumer_group_description_element(element: *mut c_
 }
 
 /// Reads a list of `const kafka_admin_MemberDescription_t *` into owned
-/// copies; `NULL` reads as empty.
+/// copies; `NULL` reads as empty, as Java's constructors read a null `members`.
 ///
 /// # Safety
 ///
 /// `list` must be `NULL` or a valid list whose elements are member-description
 /// handles, alive and not mutated for this call.
-unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescription> {
-    // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
-    // mutated for this call, as `list_elements` requires; the borrowed slice does not outlive the
-    // call.
-    unsafe { list_elements(list) }
+unsafe fn list_member_descriptions(list: *const kafka_List_t, param: &'static str) -> Vec<MemberDescription> {
+    if list.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `list` is non-null (checked above) and, per this function's `# Safety`, a valid list
+    // handle, alive and not mutated for this call, as `require_list` requires; the borrowed slice
+    // does not outlive the call.
+    unsafe { require_list(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
-        // handle alive for this call, as `member_description_ref` requires; the borrow ends with
-        // the clone.
-        .map(|&element| unsafe { member_description_ref(element as *const kafka_admin_MemberDescription_t) }.clone())
+        .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a member-description
+            // handle alive for this call, as `member_description_ref` requires; the borrow ends with
+            // the clone.
+            unsafe {
+                member_description_ref(require_element(element, param) as *const kafka_admin_MemberDescription_t, param)
+            }
+            .clone()
+        })
         .collect()
 }
 
@@ -145,13 +156,15 @@ fn member_description_list(members: &[MemberDescription]) -> *mut kafka_List_t {
 
 /// Creates the description of a consumer group.
 ///
+/// WARNING: `NULL` `group_type`, `group_state` panic; Java stores `null`.
+///
 /// # Parameters
 ///
-/// - `group_id` - the id of the consumer group.
+/// - `group_id` - the id of the consumer group; `NULL` reads as empty.
 /// - `is_simple_consumer_group` - 1 if the group is simple, else 0.
 /// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
 ///   copied; `NULL` reads as empty.
-/// - `partition_assignor` - the consumer group partition assignor.
+/// - `partition_assignor` - the consumer group partition assignor; `NULL` reads as empty.
 /// - `group_type` - the group type, a singleton.
 /// - `group_state` - the group state, a singleton.
 /// - `coordinator` - the group coordinator, copied; `NULL` if not known.
@@ -160,11 +173,16 @@ fn member_description_list(members: &[MemberDescription]) -> *mut kafka_List_t {
 /// - `group_epoch` - the epoch of the group, `-1` for none.
 /// - `target_assignment_epoch` - the epoch of the target assignment, `-1` for none.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `group_type` is `NULL`
+/// - `LocalNullPointerError` if `group_state` is `NULL`
+///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings, the lists `NULL` or valid borrowed
-/// lists of the documented handles, the enums singletons of their types and
-/// `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
+/// The strings must be valid NUL-terminated strings (`NULL` where it reads as empty), the lists
+/// `NULL` or valid borrowed lists of the documented handles, the enums singletons of their types
+/// and `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
 /// [`kafka_admin_ConsumerGroupDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -181,30 +199,30 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_new(
     target_assignment_epoch: i32,
 ) -> *mut kafka_admin_ConsumerGroupDescription_t {
     box_consumer_group_description(ConsumerGroupDescription::new(
-        // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
+        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
         unsafe { c_str_to_string(group_id) },
         is_simple_consumer_group != 0,
         // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
         // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
         // this call, as `list_member_descriptions` requires.
-        unsafe { list_member_descriptions(members) },
-        // SAFETY: Per this function's `# Safety`, `partition_assignor` is a valid NUL-terminated
-        // string, as `c_str_to_string` requires.
+        unsafe { list_member_descriptions(members, "members") },
+        // SAFETY: Per this function's `# Safety`, `partition_assignor` is null or a valid NUL-terminated string,
+        // as `c_str_to_string` requires; Java reads a null one as empty.
         unsafe { c_str_to_string(partition_assignor) },
         // SAFETY: Per this function's `# Safety`, `group_type` is a `kafka_common_GroupType_t`
         // singleton, as `group_type::value_of` requires.
-        unsafe { group_type::value_of(group_type) },
+        unsafe { group_type::value_of(group_type, "group_type") },
         // SAFETY: Per this function's `# Safety`, `group_state` is a `kafka_common_GroupState_t`
         // singleton, as `group_state::value_of` requires.
-        unsafe { group_state::value_of(group_state) },
+        unsafe { group_state::value_of(group_state, "group_state") },
         // SAFETY: Per this function's `# Safety`, `coordinator` is null or a valid node handle, as
         // `optional_node` requires.
         unsafe { optional_node(coordinator) },
         // SAFETY: Per this function's `# Safety`, `authorized_operations` is null or a valid list
         // of the documented `const kafka_common_acl_AclOperation_t *` singletons, as
         // `list_acl_operations` requires.
-        unsafe { list_acl_operations(authorized_operations) },
+        unsafe { list_acl_operations(authorized_operations, "authorized_operations") },
         (group_epoch >= 0).then_some(group_epoch),
         (target_assignment_epoch >= 0).then_some(target_assignment_epoch),
     ))
@@ -225,7 +243,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned string is a `CString` the
     // handle owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.group_id_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.group_id_c.as_ptr()
 }
 
 /// If consumer group is simple or not.
@@ -244,7 +262,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_is_simple_consumer
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    i8::from(unsafe { consumer_group_description_ref(self_) }.is_simple_consumer_group())
+    i8::from(unsafe { consumer_group_description_ref(self_, "self_") }.is_simple_consumer_group())
 }
 
 /// A list of the members of the consumer group.
@@ -265,7 +283,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_members(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    member_description_list(unsafe { consumer_group_description_ref(self_) }.members())
+    member_description_list(unsafe { consumer_group_description_ref(self_, "self_") }.members())
 }
 
 /// Returns the consumer group partition assignor.
@@ -282,7 +300,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_partition_assignor
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned string is a `CString` the
     // handle owns, so it lives as long as the handle.
-    unsafe { inner_ref(self_) }.partition_assignor_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.partition_assignor_c.as_ptr()
 }
 
 /// Returns the group type (or the protocol) of this consumer group. It defaults to Classic if not
@@ -299,7 +317,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_type(
 ) -> *const kafka_common_GroupType_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    group_type::singleton(unsafe { consumer_group_description_ref(self_) }.r#type())
+    group_type::singleton(unsafe { consumer_group_description_ref(self_, "self_") }.r#type())
 }
 
 /// Returns the group state, or `UNKNOWN` if the state is too new for us to parse.
@@ -315,7 +333,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_state(
 ) -> *const kafka_common_GroupState_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    group_state::singleton(unsafe { consumer_group_description_ref(self_) }.group_state())
+    group_state::singleton(unsafe { consumer_group_description_ref(self_, "self_") }.group_state())
 }
 
 /// The consumer group coordinator, or `NULL` if the coordinator is not known.
@@ -337,7 +355,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `inner_ref` requires. The returned node points at the
     // `NodeInner` the handle owns, so it lives as long as the handle.
-    optional_node_ptr(unsafe { inner_ref(self_) }.coordinator.as_ref())
+    optional_node_ptr(unsafe { inner_ref(self_, "self_") }.coordinator.as_ref())
 }
 
 /// authorizedOperations for this group, or `NULL` if that information is not known.
@@ -358,7 +376,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    acl_operation_list(unsafe { consumer_group_description_ref(self_) }.authorized_operations())
+    acl_operation_list(unsafe { consumer_group_description_ref(self_, "self_") }.authorized_operations())
 }
 
 /// The epoch of the consumer group. The optional is set to an integer if it is a `CONSUMER`
@@ -366,20 +384,21 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
 ///
 /// # Returns
 ///
-/// The epoch, or `-1` for `Optional.empty()`. A caught Rust panic returns -2, which is no group
-/// epoch.
+/// The epoch, or `-1` for `Optional.empty()`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    unsafe { consumer_group_description_ref(self_) }.group_epoch().unwrap_or(-1)
+    unsafe { consumer_group_description_ref(self_, "self_") }
+        .group_epoch()
+        .unwrap_or(-1)
 }
 
 /// The epoch of the target assignment. The optional is set to an integer if it is a `CONSUMER`
@@ -387,20 +406,19 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_group_epoch(
 ///
 /// # Returns
 ///
-/// The epoch, or `-1` for `Optional.empty()`. A caught Rust panic returns -2, which is no
-/// assignment epoch.
+/// The epoch, or `-1` for `Optional.empty()`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid consumer-group-description handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_epoch(
     self_: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid consumer-group-description handle,
     // kept alive for this call, as `consumer_group_description_ref` requires.
-    unsafe { consumer_group_description_ref(self_) }
+    unsafe { consumer_group_description_ref(self_, "self_") }
         .target_assignment_epoch()
         .unwrap_or(-1)
 }
@@ -419,7 +437,7 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a live consumer-group-description handle, kept alive for
     // this call, as `consumer_group_description_ref` requires.
-    into_c_string(&unsafe { consumer_group_description_ref(self_) }.to_string())
+    into_c_string(&unsafe { consumer_group_description_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned consumer-group-description handle; `NULL` is a no-op.

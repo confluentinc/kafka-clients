@@ -466,6 +466,7 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         LOCAL_ILLEGAL_STATE => Error::local_illegal_state(p.message),
         LOCAL_TIMEOUT => Error::local_timeout(p.message),
         LOCAL_UNSUPPORTED_OPERATION => Error::local_unsupported_operation(p.message),
+        LOCAL_NULL_POINTER => Error::local_null_pointer(p.message),
         API => Error::Api(ApiError::new(p.message)),
         AUTHENTICATION => Error::Authentication(AuthenticationError::new(p.message)),
         AUTHORIZATION => Error::Authorization(AuthorizationError::new(p.message)),

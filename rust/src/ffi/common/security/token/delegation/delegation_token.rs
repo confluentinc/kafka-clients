@@ -16,6 +16,7 @@
 //! `org.apache.kafka.common.security.token.delegation.DelegationToken`
 //! (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::common::security::token::delegation::DelegationToken;
@@ -63,6 +64,7 @@ impl DelegationTokenInner {
 /// `token` must be a valid delegation-token handle, alive for `'a`.
 unsafe fn inner_ref<'a>(
     token: *const kafka_common_security_token_delegation_DelegationToken_t,
+    param: &'static str,
 ) -> &'a DelegationTokenInner {
     // SAFETY: Per this function's `# Safety`, `token` is a valid delegation-token handle alive for
     // `'a`, so it points at a live `DelegationTokenInner`: the `Box::into_raw` of
@@ -70,7 +72,7 @@ unsafe fn inner_ref<'a>(
     // `DelegationTokenInner::as_ptr`, which lives as long as that parent (no parent does yet; the
     // admin results will). No call mutates a `DelegationTokenInner`, so the shared reference is
     // sound for `'a`.
-    unsafe { &*(token as *const DelegationTokenInner) }
+    unsafe { require_ref::<_, DelegationTokenInner>(token, param) }
 }
 
 /// The token behind a handle.
@@ -80,10 +82,11 @@ unsafe fn inner_ref<'a>(
 /// `token` must be a valid delegation-token handle, alive for `'a`.
 pub(crate) unsafe fn delegation_token_ref<'a>(
     token: *const kafka_common_security_token_delegation_DelegationToken_t,
+    param: &'static str,
 ) -> &'a DelegationToken {
     // SAFETY: Per this function's `# Safety`, `token` is a valid delegation-token handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(token) }.token
+    &unsafe { inner_ref(token, param) }.token
 }
 
 /// Hands `token` to C as an owned handle, freed with
@@ -117,7 +120,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
         // SAFETY: Per this function's `# Safety`, `token_information` is a valid token-information
         // handle, as `token_information_ref` requires; it is cloned, so the borrow lasts for this
         // call only.
-        unsafe { token_information_ref(token_information) }.clone(),
+        unsafe { token_information_ref(token_information, "token_information") }.clone(),
         // SAFETY: Per this function's `# Safety`, `hmac.data` is null or valid for `hmac.len`
         // bytes, as `kafka_Bytes_t::as_slice` requires; the bytes are copied into an owned `Vec`,
         // so nothing borrows them after this call.
@@ -140,7 +143,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     // `inner_ref` requires. The handle returned is a view on the `TokenInformationInner` the token
     // embeds, so it lives as long as the token handle; that is the rustdoc's "borrowed from the
     // handle; never destroyed".
-    unsafe { inner_ref(self_) }.token_info.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.token_info.as_ptr()
 }
 
 /// Returns the raw MAC bytes. They are **not** NUL-terminated and may contain NUL, so `len` is the
@@ -159,7 +162,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     // SAFETY: Per this function's `# Safety`, `self_` is a valid delegation-token handle, as
     // `delegation_token_ref` requires. The bytes returned are a view on the token's own HMAC, so
     // they live as long as the handle; that is the rustdoc's "borrowed from the handle".
-    kafka_Bytes_t::from_slice(unsafe { delegation_token_ref(self_) }.hmac())
+    kafka_Bytes_t::from_slice(unsafe { delegation_token_ref(self_, "self_") }.hmac())
 }
 
 /// Returns the MAC in Base64, the form most tooling passes back to `renewDelegationToken`.
@@ -176,7 +179,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     // SAFETY: Per this function's `# Safety`, `self_` is a valid delegation-token handle, as
     // `delegation_token_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { delegation_token_ref(self_) }.hmac_as_base64_string())
+    into_c_string(&unsafe { delegation_token_ref(self_, "self_") }.hmac_as_base64_string())
 }
 
 /// Returns the text form of the token.
@@ -193,7 +196,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     // SAFETY: Per this function's `# Safety`, `self_` is a valid delegation-token handle, as
     // `delegation_token_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { delegation_token_ref(self_) }.to_string())
+    into_c_string(&unsafe { delegation_token_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned delegation-token handle. Null is a no-op; a token borrowed
@@ -295,7 +298,7 @@ mod tests {
                 kafka_common_security_token_delegation_DelegationToken_new(info, kafka_Bytes_t::from_slice(&bytes));
             kafka_common_security_token_delegation_TokenInformation_destroy(info);
             assert_eq!(
-                *delegation_token_ref(token),
+                *delegation_token_ref(token, "token"),
                 DelegationToken::new(sample_info(), bytes.to_vec())
             );
             kafka_common_security_token_delegation_DelegationToken_destroy(token);
@@ -304,7 +307,7 @@ mod tests {
             let info = box_token_information(sample_info());
             let empty = kafka_common_security_token_delegation_DelegationToken_new(info, kafka_Bytes_t::NULL);
             kafka_common_security_token_delegation_TokenInformation_destroy(info);
-            assert_eq!(delegation_token_ref(empty).hmac(), &[] as &[u8]);
+            assert_eq!(delegation_token_ref(empty, "empty").hmac(), &[] as &[u8]);
             kafka_common_security_token_delegation_DelegationToken_destroy(empty);
         }
     }

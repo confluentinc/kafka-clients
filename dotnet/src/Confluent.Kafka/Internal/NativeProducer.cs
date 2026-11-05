@@ -604,7 +604,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin(FlushInCallbackMessage);
         IntPtr outErr = IntPtr.Zero;
-        IntPtr error = NativeMethods.ErrorKafkaMessageSource(message.Pointer, IntPtr.Zero, ref outErr);
+        IntPtr error = NativeMethods.ErrorKafkaMessage(message.Pointer, ref outErr);
         return CoreError(error, ref outErr);
     }
 

@@ -842,11 +842,12 @@ enum Shape {
     /// A `#[repr(C)]` enum with exactly these variants.
     CEnum(Vec<String>),
     Fn(Sig),
-    /// A `pub type .. = unsafe extern "C" fn(..)` typedef, declared
-    /// `Option<unsafe extern "C" fn(..)>` when `nullable`.
+    /// A `pub type .. = Option<unsafe extern "C" fn(..)>` typedef: every
+    /// function pointer is declared nullable, so a required one is unwrapped
+    /// with `require_fn` where it is used and a NULL is Java's error, not a
+    /// call through a null pointer.
     FnPtr {
         sig: Sig,
-        nullable: bool,
     },
     /// Must exist; its shape could not be derived (an unmapped Rust type).
     Unknown,
@@ -1805,7 +1806,6 @@ impl FfiTranslation {
                         notify.clone(),
                         Shape::FnPtr {
                             sig: Sig { params: vec![Param::new("opaque", "*mut c_void".to_string())], ret: None },
-                            nullable: false,
                         },
                         file,
                     );
@@ -2284,7 +2284,7 @@ fn expect_method(
     if let Some((_, hook)) = C_RELEASE_HOOKS.iter().find(|(f, _)| *f == name) {
         blocking.params.push(Param::new("release", (*hook).to_string()));
         let sig = Sig { params: vec![Param::new("opaque", "*mut c_void".to_string())], ret: None };
-        out.add((*hook).to_string(), Shape::FnPtr { sig, nullable: true }, file);
+        out.add((*hook).to_string(), Shape::FnPtr { sig }, file);
     }
     out.add(name.clone(), Shape::Fn(blocking), file);
 
@@ -2305,7 +2305,7 @@ fn expect_method(
             typedef.params.push(Param::new("error", CType::error()));
         }
         typedef.params.push(Param::new("opaque", "*mut c_void".to_string()));
-        out.add(cb_t, Shape::FnPtr { sig: typedef, nullable: false }, file);
+        out.add(cb_t, Shape::FnPtr { sig: typedef }, file);
     }
 }
 
@@ -2380,11 +2380,11 @@ fn expect_interface<'a>(
         let mut reported_sig = Sig { params, ret: None };
         reported_sig.params.push(Param::new("callback_id", "i64".to_string()));
         if async_only {
-            out.add(async_fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
+            out.add(async_fn_t, Shape::FnPtr { sig: reported_sig }, file);
         } else if is_async || is_reported(prefix) {
-            out.add(fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
+            out.add(fn_t, Shape::FnPtr { sig: reported_sig }, file);
         } else {
-            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+            out.add(fn_t, Shape::FnPtr { sig: sync_sig }, file);
         }
     }
     let handle = format!("*mut {prefix}_t");
@@ -2596,13 +2596,9 @@ fn fn_ptr_decl(ty: &syn::Type) -> Option<(&syn::TypeBareFn, bool)> {
     }
 }
 
-/// How a function-pointer typedef must be declared.
-fn render_fn_ptr_decl(name: &str, sig: &Sig, nullable: bool) -> String {
-    if nullable {
-        format!("type {name} = Option<unsafe extern \"C\" {}>", sig.render())
-    } else {
-        format!("type {name} = unsafe extern \"C\" {}", sig.render())
-    }
+/// How a function-pointer typedef must be declared: always nullable.
+fn render_fn_ptr_decl(name: &str, sig: &Sig) -> String {
+    format!("type {name} = Option<unsafe extern \"C\" {}>", sig.render())
 }
 
 /// Compares the expected surface with the declared one.
@@ -2694,14 +2690,14 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                     Some(())
                 },
             },
-            Shape::FnPtr { sig, nullable } => match actual.types.get(name) {
+            Shape::FnPtr { sig } => match actual.types.get(name) {
                 None => None,
                 Some(t) => {
-                    let want = render_fn_ptr_decl(name, sig, *nullable);
+                    let want = render_fn_ptr_decl(name, sig);
                     match &t.item {
                         syn::Item::Type(td) => {
                             let ok = fn_ptr_decl(&td.ty).is_some_and(|(f, declared_nullable)| {
-                                declared_nullable == *nullable
+                                declared_nullable
                                     && f.inputs.len() == sig.params.len()
                                     && f.inputs.iter().zip(sig.params.iter()).all(|(a, p)| render_type(&a.ty) == p.ty)
                                     && render_return(&f.output) == sig.ret
@@ -2733,8 +2729,8 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
                 file: exp.file.clone(),
                 detail: match &exp.shape {
                     Shape::Fn(sig) => format!("expected `{}`", sig.render()),
-                    Shape::FnPtr { sig, nullable } => {
-                        format!("expected `{}`", render_fn_ptr_decl(name, sig, *nullable))
+                    Shape::FnPtr { sig } => {
+                        format!("expected `{}`", render_fn_ptr_decl(name, sig))
                     },
                     Shape::Opaque => "expected an opaque `#[repr(C)] struct`".to_string(),
                     Shape::CEnum(v) => format!("expected a `#[repr(C)]` enum with variants [{}]", v.join(", ")),
@@ -3229,7 +3225,7 @@ mod tests {
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_flush(this: *const kafka_producer_Producer_t, out_err: *mut *mut kafka_common_Error_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer_destroy(this: *mut kafka_producer_Producer_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(this: *const kafka_producer_Producer_t) -> i32 { 0 }
-            pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+            pub type kafka_producer_Producer_callbacks_notify_fn_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(this: *const kafka_producer_Producer_t, notify: kafka_producer_Producer_callbacks_notify_fn_t, opaque: *mut c_void) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Producer__set_callback_result(this: *const kafka_producer_Producer_t, callback_id: i64, result: *mut c_void, error: *mut kafka_common_Error_t) {}
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(bootstrap: *const c_char, out_err: *mut *mut kafka_common_Error_t) -> *mut kafka_producer_Producer_t { std::ptr::null_mut() }
@@ -3314,7 +3310,7 @@ mod tests {
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_destroy(this: *mut kafka_common_Cluster_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_id(this: *const kafka_common_Cluster_t) -> i32 { 0 }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_refresh(this: *const kafka_common_Cluster_t, timeout: i64, out_err: *mut *mut kafka_common_Error_t) -> i64 { 0 }
-        pub type kafka_common_Cluster_refresh_cb_t = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        pub type kafka_common_Cluster_refresh_cb_t = Option<unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Cluster_refresh_cb(this: *const kafka_common_Cluster_t, timeout: i64, cb: kafka_common_Cluster_refresh_cb_t, opaque: *mut c_void) {}
     "#;
 
@@ -3340,8 +3336,8 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_refresh_cb_t"),
-            "expected `type kafka_common_Cluster_refresh_cb_t = unsafe extern \"C\" \
-             fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)`"
+            "expected `type kafka_common_Cluster_refresh_cb_t = Option<unsafe extern \"C\" \
+             fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>`"
         );
     }
 
@@ -3365,8 +3361,8 @@ mod tests {
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_refresh_cb_t"),
-            "expected `type kafka_common_Cluster_refresh_cb_t = unsafe extern \"C\" \
-             fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)`"
+            "expected `type kafka_common_Cluster_refresh_cb_t = Option<unsafe extern \"C\" \
+             fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>`"
         );
         assert_eq!(
             detail(&findings, "missing kafka_common_Cluster_refresh"),
@@ -3595,7 +3591,7 @@ mod tests {
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_Map_new() -> *mut kafka_Map_t { std::ptr::null_mut() }
         #[repr(C)] pub struct kafka_producer_Partitioner_t { _p: [u8; 0] }
         pub type kafka_producer_Partitioner_configure_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, configs: *const kafka_Map_t)>;
-        pub type kafka_producer_Partitioner_partition_fn_t = unsafe extern "C" fn(this: *mut c_void, topic: *const c_char, key: *const c_void, key_bytes: kafka_Bytes_t, cluster: *const kafka_common_Cluster_t) -> i32;
+        pub type kafka_producer_Partitioner_partition_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, topic: *const c_char, key: *const c_void, key_bytes: kafka_Bytes_t, cluster: *const kafka_common_Cluster_t) -> i32>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_new(this: *mut c_void, configure: kafka_producer_Partitioner_configure_fn_t, partition: kafka_producer_Partitioner_partition_fn_t) -> *mut kafka_producer_Partitioner_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_destroy(this: *mut kafka_producer_Partitioner_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Partitioner_configure(this: *mut kafka_producer_Partitioner_t, configs: *const kafka_Map_t) {}
@@ -3761,8 +3757,8 @@ mod tests {
                 &findings,
                 "missing kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_fn_t"
             ),
-            "expected `type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_fn_t = unsafe extern \"C\" \
-             fn(self: *mut c_void, partitions: *const kafka_List_t, callback_id: i64)`"
+            "expected `type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_fn_t = Option<unsafe extern \"C\" \
+             fn(self: *mut c_void, partitions: *const kafka_List_t, callback_id: i64)>`"
         );
         assert_eq!(
             detail(&findings, "missing kafka_consumer_Consumer__set_callback_result"),
@@ -3817,8 +3813,8 @@ mod tests {
         assert_eq!(
             detail(&findings, &format!("missing {prefix}_deserialize_async_fn_t")),
             format!(
-                "expected `type {prefix}_deserialize_async_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: \
-                 *const c_char, data: kafka_Bytes_t, callback_id: i64)`"
+                "expected `type {prefix}_deserialize_async_fn_t = Option<unsafe extern \"C\" fn(self: *mut c_void, topic: \
+                 *const c_char, data: kafka_Bytes_t, callback_id: i64)>`"
             )
         );
         assert_eq!(
@@ -3999,19 +3995,19 @@ mod tests {
         #[repr(C)] pub struct kafka_common_metrics_Stat_t { _p: [u8; 0] }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Stat_record(this: *const kafka_common_metrics_Stat_t, value: f64, time_ms: i64) {}
         #[repr(C)] pub struct kafka_common_metrics_Measurable_t { _p: [u8; 0] }
-        pub type kafka_common_metrics_Measurable_measure_fn_t = unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64;
+        pub type kafka_common_metrics_Measurable_measure_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Measurable_new(this: *mut c_void, measure: kafka_common_metrics_Measurable_measure_fn_t) -> *mut kafka_common_metrics_Measurable_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Measurable_measure(this: *const kafka_common_metrics_Measurable_t, now: i64) -> f64 { 0.0 }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Measurable_destroy(this: *mut kafka_common_metrics_Measurable_t) {}
         #[repr(C)] pub struct kafka_common_metrics_MeasurableStat_t { _p: [u8; 0] }
-        pub type kafka_common_metrics_MeasurableStat_record_fn_t = unsafe extern "C" fn(this: *mut c_void, value: f64, time_ms: i64);
-        pub type kafka_common_metrics_MeasurableStat_measure_fn_t = unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64;
+        pub type kafka_common_metrics_MeasurableStat_record_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, value: f64, time_ms: i64)>;
+        pub type kafka_common_metrics_MeasurableStat_measure_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_new(this: *mut c_void, record: kafka_common_metrics_MeasurableStat_record_fn_t, measure: kafka_common_metrics_MeasurableStat_measure_fn_t) -> *mut kafka_common_metrics_MeasurableStat_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_record(this: *const kafka_common_metrics_MeasurableStat_t, value: f64, time_ms: i64) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(this: *const kafka_common_metrics_MeasurableStat_t, now: i64) -> f64 { 0.0 }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_destroy(this: *mut kafka_common_metrics_MeasurableStat_t) {}
         #[repr(C)] pub struct kafka_common_metrics_Gauge_t { _p: [u8; 0] }
-        pub type kafka_common_metrics_Gauge_value_fn_t = unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64;
+        pub type kafka_common_metrics_Gauge_value_fn_t = Option<unsafe extern "C" fn(this: *mut c_void, now: i64) -> f64>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_new(this: *mut c_void, value: kafka_common_metrics_Gauge_value_fn_t) -> *mut kafka_common_metrics_Gauge_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_value(this: *const kafka_common_metrics_Gauge_t, now: i64) -> f64 { 0.0 }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_metrics_Gauge_destroy(this: *mut kafka_common_metrics_Gauge_t) {}
@@ -4087,7 +4083,7 @@ mod tests {
             #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_common_KafkaFuture_BaseFunction_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
-            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = unsafe extern "C" fn(self_: *mut c_void, a: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void;
+            pub type kafka_common_KafkaFuture_BaseFunction_apply_fn_t = Option<unsafe extern "C" fn(self_: *mut c_void, a: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void>;
             #[unsafe(no_mangle)] pub extern "C" fn kafka_common_KafkaFuture_BaseFunction_new(self_: *mut c_void, apply: kafka_common_KafkaFuture_BaseFunction_apply_fn_t) -> *mut kafka_common_KafkaFuture_BaseFunction_t { std::ptr::null_mut() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *const c_void, out_err: *mut *mut kafka_common_Error_t) -> *mut c_void { std::ptr::null_mut() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_destroy(self_: *mut kafka_common_KafkaFuture_BaseFunction_t) {}
@@ -4129,13 +4125,13 @@ mod tests {
 
     #[test]
     fn test_reported_interface_fn_t_takes_callback_id() {
-        let ffi = PRODUCER_CALLBACK_FFI.replace(", callback_id: i64);", ");");
+        let ffi = PRODUCER_CALLBACK_FFI.replace(", callback_id: i64)>;", ")>;");
         let findings = run("callback-fn-t", PRODUCER_CALLBACK_RUST, &ffi);
         assert_eq!(
             detail(&findings, "shape kafka_producer_Callback_on_completion_fn_t"),
-            "expected `type kafka_producer_Callback_on_completion_fn_t = unsafe extern \"C\" fn(self: *mut c_void, \
-             offset: i64, error: *const kafka_common_Error_t, callback_id: i64)`, found `fn(self_: *mut c_void, \
-             offset: i64, error: *const kafka_common_Error_t)`"
+            "expected `type kafka_producer_Callback_on_completion_fn_t = Option<unsafe extern \"C\" fn(self: *mut c_void, \
+             offset: i64, error: *const kafka_common_Error_t, callback_id: i64)>`, found `Option<fn(self_: *mut c_void, \
+             offset: i64, error: *const kafka_common_Error_t)>`"
         );
     }
 
@@ -4190,7 +4186,7 @@ mod tests {
         let ffi = r#"
             #[repr(C)] pub struct kafka_common_KafkaFuture_t { _p: [u8; 0] }
             #[repr(C)] pub struct kafka_common_KafkaFuture_BaseFunction_t { _p: [u8; 0] }
-            pub type kafka_common_KafkaFuture_BaseFunction_apply_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+            pub type kafka_common_KafkaFuture_BaseFunction_apply_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *const c_void) -> *mut c_void { std::ptr::null_mut() }
             #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_KafkaFuture_BaseFunction_apply_cb(self_: *const kafka_common_KafkaFuture_BaseFunction_t, a: *const c_void, cb: kafka_common_KafkaFuture_BaseFunction_apply_cb_t, opaque: *mut c_void) {}
         "#;
@@ -4233,8 +4229,8 @@ mod tests {
         #[repr(C)] pub struct kafka_producer_Producer_t { _p: [u8; 0] }
         #[repr(C)] pub struct kafka_producer_Callback_t { _p: [u8; 0] }
         #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
-        pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(self_: *mut c_void, offset: i64, error: *const kafka_common_Error_t, callback_id: i64);
-        pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+        pub type kafka_producer_Callback_on_completion_fn_t = Option<unsafe extern "C" fn(self_: *mut c_void, offset: i64, error: *const kafka_common_Error_t, callback_id: i64)>;
+        pub type kafka_producer_Callback_on_completion_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
         #[unsafe(no_mangle)] pub extern "C" fn kafka_producer_Callback_new(self_: *mut c_void, on_completion: kafka_producer_Callback_on_completion_fn_t) -> *mut kafka_producer_Callback_t { std::ptr::null_mut() }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion(self_: *mut kafka_producer_Callback_t, offset: i64, error: *const kafka_common_Error_t) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(self_: *mut kafka_producer_Callback_t, offset: i64, error: *const kafka_common_Error_t, cb: kafka_producer_Callback_on_completion_cb_t, opaque: *mut c_void) {}
@@ -4818,13 +4814,13 @@ mod tests {
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_destroy(this: *mut kafka_common_Error_t) {}
         #[repr(C)] pub struct kafka_consumer_Consumer_t { _p: [u8; 0] }
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(self_: *mut kafka_consumer_Consumer_t, partition: i32, out_lag: *mut i64, out_err: *mut *mut kafka_common_Error_t) -> i8 { 0 }
-        pub type kafka_consumer_Consumer_current_lag_cb_t = unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        pub type kafka_consumer_Consumer_current_lag_cb_t = Option<unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(self_: *mut kafka_consumer_Consumer_t, partition: i32, cb: kafka_consumer_Consumer_current_lag_cb_t, opaque: *mut c_void) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag(self_: *mut kafka_consumer_Consumer_t, partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64 { 0 }
-        pub type kafka_consumer_Consumer_client_lag_cb_t = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        pub type kafka_consumer_Consumer_client_lag_cb_t = Option<unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag_cb(self_: *mut kafka_consumer_Consumer_t, partition: i32, cb: kafka_consumer_Consumer_client_lag_cb_t, opaque: *mut c_void) {}
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 { 0 }
-        pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+        pub type kafka_consumer_Consumer_callbacks_notify_fn_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
         #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(self_: *const kafka_consumer_Consumer_t, notify: kafka_consumer_Consumer_callbacks_notify_fn_t, opaque: *mut c_void) {}
     "#;
 

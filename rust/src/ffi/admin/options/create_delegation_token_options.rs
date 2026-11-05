@@ -20,6 +20,7 @@
 //! `options.x(x)` with the result stored back. The handle keeps a cached
 //! owner so `owner()` is a borrowed principal valid as long as the handle.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::c_void;
 use std::ptr;
 
@@ -65,13 +66,14 @@ impl CreateDelegationTokenOptionsInner {
 /// setter runs on it.
 unsafe fn inner_ref<'a>(
     options: *const kafka_admin_CreateDelegationTokenOptions_t,
+    param: &'static str,
 ) -> &'a CreateDelegationTokenOptionsInner {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_CreateDelegationTokenOptions_t` is the
     // `Box::into_raw` of a `Box<CreateDelegationTokenOptionsInner>` (`boxed`), so the shared
     // reference is to a live `CreateDelegationTokenOptionsInner` that nothing mutates while it is
     // used.
-    unsafe { &*(options as *const CreateDelegationTokenOptionsInner) }
+    unsafe { require_ref::<_, CreateDelegationTokenOptionsInner>(options, param) }
 }
 
 /// Mutable access to the handle's state, for the in-place setters.
@@ -82,13 +84,14 @@ unsafe fn inner_ref<'a>(
 /// reference is live meanwhile.
 unsafe fn inner_mut<'a>(
     options: *mut kafka_admin_CreateDelegationTokenOptions_t,
+    param: &'static str,
 ) -> &'a mut CreateDelegationTokenOptionsInner {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every
     // `kafka_admin_CreateDelegationTokenOptions_t` is the `Box::into_raw` of a
     // `Box<CreateDelegationTokenOptionsInner>` (`boxed`), so the exclusive reference is to a live
     // `CreateDelegationTokenOptionsInner`.
-    unsafe { &mut *(options as *mut CreateDelegationTokenOptionsInner) }
+    unsafe { require_mut::<_, CreateDelegationTokenOptionsInner>(options, param) }
 }
 
 /// The options behind a handle.
@@ -99,10 +102,11 @@ unsafe fn inner_mut<'a>(
 /// setter runs on it.
 pub(crate) unsafe fn create_delegation_token_options_ref<'a>(
     options: *const kafka_admin_CreateDelegationTokenOptions_t,
+    param: &'static str,
 ) -> &'a CreateDelegationTokenOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it, as `inner_ref` requires.
-    &unsafe { inner_ref(options) }.options
+    &unsafe { inner_ref(options, param) }.options
 }
 
 fn boxed(options: CreateDelegationTokenOptions) -> *mut kafka_admin_CreateDelegationTokenOptions_t {
@@ -139,15 +143,21 @@ pub extern "C" fn kafka_admin_CreateDelegationTokenOptions_new() -> *mut kafka_a
 
 /// `CreateDelegationTokenOptions.renewers(List<KafkaPrincipal> renewers)`.
 ///
+/// WARNING: `NULL` `renewers` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `renewers` - the principals allowed to renew the token, a `kafka_List_t` of
-///   `kafka_common_security_auth_KafkaPrincipal_t *`; `NULL` reads as an empty list.
+///   `kafka_common_security_auth_KafkaPrincipal_t *`; must not be `NULL`.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `renewers` is `NULL`
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `renewers` must be `NULL` or a valid list whose elements are live
+/// `renewers` must be a valid list whose elements are live
 /// principal handles. The list and its elements are borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -155,13 +165,13 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_renewers(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
     renewers: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `renewers` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `renewers` is a valid list whose elements are
     // live principal handles, as `list_kafka_principals` requires; they are copied during the call.
-    let renewers = unsafe { list_kafka_principals(renewers) };
+    let renewers = unsafe { list_kafka_principals(renewers, "renewers") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
     // `inner_mut` requires.
-    unsafe { inner_mut(self_) }.replace(|options| options.set_renewers(renewers));
+    unsafe { inner_mut(self_, "self_") }.replace(|options| options.set_renewers(renewers));
 }
 
 /// `CreateDelegationTokenOptions.renewers()`.
@@ -183,7 +193,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_renewers(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `create_delegation_token_options_ref` requires.
-    let renewers = unsafe { create_delegation_token_options_ref(self_) }.renewers();
+    let renewers = unsafe { create_delegation_token_options_ref(self_, "self_") }.renewers();
     box_list(
         renewers
             .iter()
@@ -216,12 +226,12 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_owner(
         // SAFETY: `owner` is non-null (checked above) and, per this function's `# Safety`, a valid
         // principal handle, alive for this call, which is as long as the reference is used: it is
         // cloned at once. That is what `kafka_principal_ref` requires.
-        Some(unsafe { kafka_principal_ref(owner) }.clone())
+        Some(unsafe { kafka_principal_ref(owner, "owner") }.clone())
     };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
     // `inner_mut` requires.
-    unsafe { inner_mut(self_) }.replace(|options| options.set_owner(owner));
+    unsafe { inner_mut(self_, "self_") }.replace(|options| options.set_owner(owner));
 }
 
 /// `CreateDelegationTokenOptions.owner()`.
@@ -245,7 +255,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_owner(
     // the handle at the same time. That is what `inner_ref` requires. The returned pointer borrows
     // the cached owner, which stays put until the handle is destroyed or the owner is set again, as
     // documented above.
-    unsafe { inner_ref(self_) }
+    unsafe { inner_ref(self_, "self_") }
         .owner
         .as_ref()
         .map_or(ptr::null(), KafkaPrincipalInner::as_ptr)
@@ -270,7 +280,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_max_lifeti
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
     // `inner_mut` requires.
-    unsafe { inner_mut(self_) }.replace(|options| options.set_max_lifetime_ms(max_lifetime_ms));
+    unsafe { inner_mut(self_, "self_") }.replace(|options| options.set_max_lifetime_ms(max_lifetime_ms));
 }
 
 /// `CreateDelegationTokenOptions.maxlifeTimeMs()`.
@@ -290,7 +300,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_max_lifetime_m
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `create_delegation_token_options_ref` requires.
-    unsafe { create_delegation_token_options_ref(self_) }.max_lifetime_ms()
+    unsafe { create_delegation_token_options_ref(self_, "self_") }.max_lifetime_ms()
 }
 
 /// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
@@ -313,7 +323,8 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_timeout_ms
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
     // `inner_mut` requires.
-    unsafe { inner_mut(self_) }.replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
+    unsafe { inner_mut(self_, "self_") }
+        .replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
 }
 
 /// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
@@ -334,7 +345,9 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `create_delegation_token_options_ref` requires.
-    unsafe { create_delegation_token_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { create_delegation_token_options_ref(self_, "self_") }
+        .timeout_ms()
+        .unwrap_or(-1)
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

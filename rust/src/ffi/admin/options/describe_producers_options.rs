@@ -19,6 +19,7 @@
 //! handle in place, so `set_x(self, x)` on the handle is Java's
 //! `options.x(x)` with the result stored back.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::c_char;
 
 use crate::admin::DescribeProducersOptions;
@@ -40,12 +41,13 @@ pub struct kafka_admin_DescribeProducersOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn describe_producers_options_ref<'a>(
     options: *const kafka_admin_DescribeProducersOptions_t,
+    param: &'static str,
 ) -> &'a DescribeProducersOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_DescribeProducersOptions_t` is the
     // `Box::into_raw` of a `Box<DescribeProducersOptions>` (`boxed`), so the shared reference is to
     // a live `DescribeProducersOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const DescribeProducersOptions) }
+    unsafe { require_ref::<_, DescribeProducersOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -54,12 +56,15 @@ pub(crate) unsafe fn describe_producers_options_ref<'a>(
 ///
 /// `options` must be a live handle, kept alive for `'a`, to which no other
 /// reference is live meanwhile.
-unsafe fn options_mut<'a>(options: *mut kafka_admin_DescribeProducersOptions_t) -> &'a mut DescribeProducersOptions {
+unsafe fn options_mut<'a>(
+    options: *mut kafka_admin_DescribeProducersOptions_t,
+    param: &'static str,
+) -> &'a mut DescribeProducersOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_DescribeProducersOptions_t` is
     // the `Box::into_raw` of a `Box<DescribeProducersOptions>` (`boxed`), so the exclusive
     // reference is to a live `DescribeProducersOptions`.
-    unsafe { &mut *(options as *mut DescribeProducersOptions) }
+    unsafe { require_mut::<_, DescribeProducersOptions>(options, param) }
 }
 
 fn boxed(options: DescribeProducersOptions) -> *mut kafka_admin_DescribeProducersOptions_t {
@@ -98,7 +103,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -120,7 +125,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_producers_options_ref` requires.
-    unsafe { describe_producers_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { describe_producers_options_ref(self_, "self_") }
+        .timeout_ms()
+        .unwrap_or(-1)
 }
 
 /// `DescribeProducersOptions.brokerId(int brokerId)`.
@@ -141,7 +148,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_set_broker_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_broker_id(broker_id);
 }
 
@@ -162,7 +169,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_broker_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_producers_options_ref` requires.
-    unsafe { describe_producers_options_ref(self_) }.broker_id().unwrap_or(-1)
+    unsafe { describe_producers_options_ref(self_, "self_") }
+        .broker_id()
+        .unwrap_or(-1)
 }
 
 /// Returns the options' `toString()` form.
@@ -179,7 +188,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersOptions_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_producers_options_ref` requires.
-    into_c_string(&unsafe { describe_producers_options_ref(self_) }.to_string())
+    into_c_string(&unsafe { describe_producers_options_ref(self_, "self_") }.to_string())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

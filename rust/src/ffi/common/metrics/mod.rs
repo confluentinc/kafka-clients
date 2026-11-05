@@ -34,6 +34,7 @@
 //! `MetricsReporter` callback runs synchronously on the thread calling the
 //! registry (`add_reporter`, `add_metric_*`, `remove_metric`, `close`).
 
+use crate::ffi::precondition::require_ref;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -141,13 +142,13 @@ impl<T: ?Sized> Interface<T> {
     /// # Safety
     ///
     /// `ptr` must be a valid handle of this interface, alive for `'a`.
-    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self, param: &'static str) -> &'a Self {
         // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this interface alive
         // for `'a`: an owned one, the `Box::into_raw` of `Interface::owned`, or a view a class
         // handle caches, which lives as long as that class handle. An `Interface` is never mutated
         // once built (only `take` and `destroy` free an owned one), so the shared reference is
         // sound for `'a`.
-        unsafe { &*ptr }
+        unsafe { require_ref::<_, Self>(ptr, param) }
     }
 
     /// Takes the implementation a `*mut` parameter received: an owned
