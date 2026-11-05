@@ -156,11 +156,15 @@ impl BackendKind {
 
     /// The make target (run from the repository root) that builds this
     /// backend's container image. `build-grpc-images` builds the Python,
-    /// Python-async and C images; the JavaScript image is left out of it on
-    /// purpose (see the root `Makefile`), so it names its own target.
+    /// Python-async, C, .NET and .NET-async images; the JavaScript image is left
+    /// out of it on purpose (see the root `Makefile`), so it names its own target.
     fn image_make_target(self) -> &'static str {
         match self {
-            BackendKind::Python | BackendKind::PythonAsync | BackendKind::C => "build-grpc-images",
+            BackendKind::Python
+            | BackendKind::PythonAsync
+            | BackendKind::C
+            | BackendKind::Dotnet
+            | BackendKind::DotnetAsync => "build-grpc-images",
             BackendKind::Javascript => "build-grpc-images-javascript",
         }
     }
