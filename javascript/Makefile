@@ -55,6 +55,7 @@ export TSC TS_TYPE_ROOTS
 # (test/unit/common/security/auth/), as lib/'s folders are.
 UNIT_TESTS = $(wildcard test/unit/*.test.js test/unit/*/*.test.js test/unit/*/*/*.test.js test/unit/*/*/*/*.test.js)
 STATIC_TESTS = test/static/*.test.js
+LINT_TESTS = test/lint/*.test.js
 TYPING_TESTS = test/typing/*.test.js
 INTEGRATION_TESTS = test/integration/*.test.js
 
@@ -88,7 +89,7 @@ PACK_DIR ?= $(CURDIR)/build/pack
 HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (process.platform === 'linux' ? '-gnu' : '')")
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
-	grpc-image grpc-native test-integration-grpc pack pack-check clean
+	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -119,6 +120,22 @@ test: test-static test-unit test-typing test-integration
 # Header conformance and the package layout: no build needed.
 test-static:
 	$(NODE) --test $(STATIC_TESTS)
+
+# The rule linter (scripts/lint_rules.js; design/current/javascript-rule-linter/PLAN.md):
+# the rules of CLAUDE.md checked from the sources, as `cargo xtask lint-custom`
+# checks the Rust crate's. The Java index comes first: `cargo xtask java-index`
+# writes the Java client's classes into build/java-index.json (it reads the
+# kafka submodule and its Kafka 4.4 ref: `cargo xtask fetch-java-refs`).
+# LINT_RULES_ARGS takes a rule name (check-...) and --no-baseline.
+CARGO ?= cargo
+LINT_RULES_ARGS ?=
+lint-rules:
+	cd $(RUST_PROJECT_ROOT) && $(CARGO) xtask java-index --json $(CURDIR)/build/java-index.json
+	$(NODE) scripts/lint_rules.js $(LINT_RULES_ARGS)
+
+# The rule linter's own tests: no build needed.
+test-lint:
+	$(NODE) --test $(LINT_TESTS)
 
 test-unit: build
 	$(NODE) --test $(UNIT_TESTS)
