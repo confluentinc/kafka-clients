@@ -388,17 +388,26 @@ blocks:
               for ((i = 0; i < ${#refs[@]}; i += 3)); do
                 group=("${refs[@]:i:3}")
                 if ! git push --atomic origin "${group[@]}"; then
-                  if [ "${#pushed[@]}" -eq 0 ]; then
+                  # A push the client saw fail may still have been applied on origin (a
+                  # connection lost after the update), so ask origin which tags of this
+                  # group it has; none existed before this job (checked above).
+                  leftover=("${pushed[@]}")
+                  for ref in "${group[@]}"; do
+                    if git ls-remote --exit-code origin "${ref}" >/dev/null 2>&1; then
+                      leftover+=("${ref}")
+                    fi
+                  done
+                  if [ "${#leftover[@]}" -eq 0 ]; then
                     refuse "could not push ${group[*]} to origin; no tag was pushed"
                   fi
                   deletions=()
-                  for ref in "${pushed[@]}"; do
+                  for ref in "${leftover[@]}"; do
                     deletions+=(":${ref}")
                   done
                   if git push --atomic origin "${deletions[@]}"; then
-                    refuse "could not push ${group[*]} to origin; ${pushed[*]}, pushed before it, were deleted from origin again, so no tag is left"
+                    refuse "could not push ${group[*]} to origin; ${leftover[*]}, already on origin, were deleted from origin again, so no tag is left"
                   fi
-                  refuse "could not push ${group[*]} to origin, nor delete ${pushed[*]}, pushed before it, from origin again: delete those tags on origin by hand before their builds release them"
+                  refuse "could not push ${group[*]} to origin, nor delete ${leftover[*]} from origin again: delete those tags on origin by hand before their builds release them"
                 fi
                 pushed+=("${group[@]}")
               done
