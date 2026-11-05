@@ -32,8 +32,8 @@ Command: `make -C javascript lint-rules`, which runs
 | `test/unit/_config.test.js`, `producer_config.test.js` | config type checks and the constants against Java's literals |
 | `cargo xtask check-generated` | generated `.ts` files are current, none missing, none orphaned |
 
-These keep running. The linter adds what they do not cover. Open decision 14 is whether
-the static tests later move into the runner.
+These keep running. The linter adds what they do not cover. They stay (decision 16),
+pruned only of a check the linter duplicates exactly.
 
 ## 3. Architecture
 
@@ -362,6 +362,11 @@ an entry that waives nothing is the rule's `*-unused-allowance` finding.
 ### D — documentation (TSDoc)
 
 **D1 `check-tsdoc-present`:** every export and public member has a TSDoc comment.
+The items are J1's exports of the public modules and the public members of an exported
+class, interface or object type (J2's); a get / set pair, and a function's or method's
+overload signatures, are one item, which any one comment documents. A comment documents
+the item only when its description (the text before its first block tag) is not blank: an
+empty `/** */`, or a comment of tags only, is `doc-empty`.
 
 **D2 `check-tsdoc-tags`** (JS "Types are TypeScript … TSDoc comments")
 - `@param name -` for every parameter (and each property of an options object).
@@ -370,7 +375,29 @@ an entry that waives nothing is the rule's `*-unused-allowance` finding.
   every class named this way exists in `lib/`.
 - No JSDoc type annotations (`@param {string}`) in `lib/`.
 
-**D3 `check-tsdoc-size`** *(open decision 15)*
+How D2 reads them (P5):
+- It checks the functions, methods and constructors D1 finds documented (D1 reports the
+  others), and the parameters of a function type (a type alias to one, `Callback`, or a
+  function-typed property); a get accessor needs no `@returns`, TSDoc documenting it by
+  its description.
+- An options object is a parameter whose type, without `null` / `undefined`, is an
+  object type that is not a union, an array, a function or a class instance (J6's
+  `isOptions`), nor an interface or class the TypeScript or Node.js libraries declare
+  (`Error`); a library mapped type over an object literal (`Readonly<{ … }>`) is one. Each of
+  its properties is documented when the property's declaration in the type has a TSDoc
+  comment of its own, or when the parameter's `@param` text names it in backquotes
+  (`close`'s `@param options - `timeoutMs`: …`); the bare word does not count. TypeScript
+  attaches a comment to a property only when it stands on its own line before it.
+- The Java `@throws` are those of the live (not deprecated) public overloads of the
+  member J2 maps it to, from the Java index's Javadoc; `XException` becomes `XError`.
+  Every `@throws` starts with its class in backquotes (`throws-form` otherwise), and that
+  class must be one `lib/` exports or a JavaScript built-in error (`TypeError`,
+  `RangeError`, …). On a method returning a Promise, a `@throws` documents a rejection
+  (decision 18).
+- A finding about one parameter, option or error names it after a `/` in its subject
+  (`KafkaProducer.send/KafkaError`), so a baseline line waives that one alone.
+
+**D3 `check-tsdoc-size`** *(not built: decision 15)*
 - The doc is at most 150% of the Javadoc's word count, measured with the same
   `javadoc.rs` count, which reaches JS through `java-index.json`.
 - `words` in `java-index.json` counts a Javadoc as written. A Javadoc that only points
@@ -460,7 +487,7 @@ Each phase runs the Actor / Critic loop of `.claude/rules/agent-roles.md`. Commi
 | P2 | J1, J2, J4, J5, J8; J3 with its baseline | as above, plus the mutation cases for these rules |
 | P3 | J6, J7, A1, A2 | as above |
 | P4 | N1–N8 (decision 13) | as above |
-| P5 | D1, D2 (D3 if decision 15 says so) | as above |
+| P5 | D1, D2 (decision 15: no D3) | as above |
 | P6 | `make -C javascript lint-rules`, `verify-javascript`, Semaphore; a proposal of "(checked by `check-…`)" references for `javascript/CLAUDE.md`, for the user to apply | CI runs it |
 
 ## 8. Decisions
@@ -517,7 +544,7 @@ Answered 2026-11-05, for P3:
 13. **N1–N8 are all built**, the heuristic N5, N7 and N8 included, each with an explicit
     allowlist whose entries carry a reason; an entry that waives nothing is a finding.
 
-Answered 2026-11-06:
+Answered 2026-11-06 (14 to 18):
 
 14. **`error_discard`'s unread slot** on the destroy of a panic error is accepted as the
     end of the chain (retrying could loop): an N1 allowlist entry for exactly that call
@@ -526,11 +553,31 @@ Answered 2026-11-06:
 Also following the Python conventions (root CLAUDE.md, "Signatures"): J6 merges the
 parameters of different forms at one position whose Java types map to one host type into
 one, named after the earliest-declared form (`KafkaProducer(Map configs)` /
-`(Properties properties)` -> `configs`).
+`(Properties properties)` -> `configs`). A type variable is a kind of its own, as in the
+Python rule (`ProducerRecord[K, V]`): `K key` and `V value` never merge, although both
+are `Data` in JavaScript. Decision 10's phrases are read in the Javadoc as rendered
+(`{@code null}` as `null`), and "null indicates" counts as one.
 
-Still open, to be asked when their phase starts:
+15. **Doc depth** (P5): D1 and D2 only. D3 is not built: no size limit for JavaScript
+    docs, and no `WARNING` / `doc-contract-changes.md` flow. The linter writes no prose:
+    a tag whose text Java does not give, or whose wording needs a decision, stays a
+    baseline line with its reason.
+16. **Runner versus tests** (P6, the question earlier numbered 14 here): the static tests
+    stay (`test/static/*.test.js`); only a check the linter duplicates exactly is
+    removed from them, each removal justified in its commit.
+17. **Config-constant docs are generated from Java's own documentation**
+    (`rust/xtask/src/config_consts/js.rs`), translated as a Javadoc is (a list one item per
+    line, a link as `[text](url)`), in this order:
+    1. a configuration key's constant takes the documentation argument of the `define` call
+       of `ProducerConfig`'s `ConfigDef` for that key, its SSL and SASL support included
+       (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC` for `bootstrap.servers`);
+    2. else the `<NAME>_DOC` sibling in its Java class (or, for `X_CONFIG`, `X_DOC`), of any
+       visibility;
+    3. else a generated line naming it ("The `acks` configuration key.", "The documentation
+       of `ProducerConfig.X_CONFIG`.", or "Java's `C.NAME`.").
 
-14. **Runner versus tests** (P6): should `layout.test.js` and `header_conformance.test.js`
-   move into the runner?
-15. **Doc depth** (P5): the 150% size rule and the `WARNING` / `doc-contract-changes.md`
-   flow for JS (D3)?
+    No prose is invented. With the 4.4 sources no key falls to the key line.
+18. **On a method returning a Promise, `` @throws `XError` `` documents a rejection**, its
+    text saying it rejects: D2 accepts it as Java's `@throws`. `KafkaProducer`'s `send`,
+    `flush` and `close` carry Java's `@throws` so, from Java's text ("rejects with it if
+    …").
