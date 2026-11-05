@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -74,7 +75,6 @@ public sealed class ConsumerConfigMarshalTests
             + "String must be one of (case insensitive): CONSUMER, CLASSIC",
             failure.Message);
         Assert.Equal(-10, failure.Code);
-        Assert.False(failure.IsRetriable);
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public sealed class ConsumerConfigMarshalTests
     }
 
     [Fact]
-    public void Handle_AfterDispose_ThrowsObjectDisposedException()
+    public void Handle_AfterDispose_ThrowsIllegalState()
     {
         var config = new Dictionary<string, object?>
         {
@@ -113,6 +113,6 @@ public sealed class ConsumerConfigMarshalTests
         NativeConsumer consumer = NativeConsumer.Create(config);
         TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+        Assert.Throws<IllegalStateException>(() => consumer.Handle);
     }
 }

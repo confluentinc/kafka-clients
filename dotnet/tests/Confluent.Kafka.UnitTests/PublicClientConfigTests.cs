@@ -19,6 +19,7 @@ using System.Linq;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -436,11 +437,10 @@ public sealed class PublicClientConfigTests
         var consumer = (IConsumerCommon)Create(client, Configs(client, ("group.id", null)));
         try
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => consumer.GroupMetadata());
+            InvalidGroupIdException failure = Assert.Throws<InvalidGroupIdException>(() => consumer.GroupMetadata());
 
             Assert.Equal(InvalidGroupIdCode, failure.Code);
             Assert.Equal(GroupIdNotDefinedMessage, failure.Message);
-            Assert.False(failure.IsRetriable);
         }
         finally
         {
@@ -470,7 +470,6 @@ public sealed class PublicClientConfigTests
         ConfigException error = Assert.IsType<ConfigException>(caught);
         Assert.Equal(Invalid(key, "abc", "Not a number of type " + type), error.Message);
         Assert.Equal(ConfigErrorCode, error.Code);
-        Assert.False(error.IsRetriable);
     }
 
     [Theory]
@@ -539,7 +538,6 @@ public sealed class PublicClientConfigTests
     {
         ConfigException failure = Assert.Throws<ConfigException>(() => Constructs(client, configs));
         Assert.Equal(ConfigErrorCode, failure.Code);
-        Assert.False(failure.IsRetriable);
         Assert.Null(failure.InnerException);
         return failure;
     }

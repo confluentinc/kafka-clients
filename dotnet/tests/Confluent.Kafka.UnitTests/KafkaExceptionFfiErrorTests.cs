@@ -13,20 +13,21 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Tests reading a core error into the exception its code maps to (a local code to its .NET built-in, a carried managed
-/// exception to the same instance, any other code to a <see cref="KafkaException"/>), with its cause chain and its
-/// handle ownership.
+/// Tests reading a core error: a carried managed exception comes back as the same instance, and the read keeps the
+/// cause chain and the handle ownership. Which class each id reads into is in <see cref="FromFfiErrorClassTests"/>.
 /// </summary>
 public sealed class KafkaExceptionFfiErrorTests
 {
@@ -38,50 +39,8 @@ public sealed class KafkaExceptionFfiErrorTests
 
     private const string NonAsciiMessage = "café-Ω-日本語-😀";
 
-    private const string UnknownServerErrorMessage =
-        "The server experienced an unexpected error when processing the request.";
-
     /// <summary>A common error factory that builds an error from a UTF-8 message.</summary>
     private delegate IntPtr MessageFactory(IntPtr message, ref IntPtr outErr);
-
-    private static readonly Dictionary<string, (MessageFactory Factory, int Code, Type Expected)> s_localRows = new()
-    {
-        ["local_concurrent_modification"] =
-            (NativeMethods.ErrorLocalConcurrentModification, -2, typeof(InvalidOperationException)),
-        ["local_illegal_argument"] = (NativeMethods.ErrorLocalIllegalArgument, -3, typeof(ArgumentException)),
-        ["local_illegal_state"] = (NativeMethods.ErrorLocalIllegalState, -4, typeof(InvalidOperationException)),
-        ["local_timeout"] = (NativeMethods.ErrorLocalTimeout, -5, typeof(TimeoutException)),
-        ["local_unsupported_operation"] =
-            (NativeMethods.ErrorLocalUnsupportedOperation, -31, typeof(NotSupportedException)),
-        ["local_null_pointer"] = (NativeMethods.ErrorLocalNullPointer, -32, typeof(ArgumentNullException)),
-    };
-
-    [Theory]
-    [InlineData("local_concurrent_modification")]
-    [InlineData("local_illegal_argument")]
-    [InlineData("local_illegal_state")]
-    [InlineData("local_timeout")]
-    [InlineData("local_unsupported_operation")]
-    [InlineData("local_null_pointer")]
-    public void LocalCode_IsItsDotNetBuiltIn_WithTheCoreMessage(string row)
-    {
-        (MessageFactory factory, int code, Type expected) = s_localRows[row];
-        IntPtr error = Build(factory, NonAsciiMessage);
-        Assert.Equal(code, NativeMethods.Code(error));
-        string? coreMessage = Utf8Marshal.PtrToString(NativeMethods.Message(error));
-
-        Exception read = KafkaException.FromFfiError(error, owned: true)!;
-
-        Assert.IsType(expected, read);
-        Assert.Equal(NonAsciiMessage, coreMessage);
-        if (read is ArgumentException argument)
-        {
-            Assert.Null(argument.ParamName);
-        }
-
-        Assert.Equal(coreMessage, read.Message);
-        Assert.Null(read.InnerException);
-    }
 
     [Fact]
     public void LocalCallback_IsTheCarriedKafkaException_TheSameInstance()
@@ -106,7 +65,7 @@ public sealed class KafkaExceptionFfiErrorTests
     }
 
     [Fact]
-    public void LocalCallback_WithoutAnOpaque_IsAKafkaException_WithItsCode()
+    public void LocalCallback_WithoutAnOpaque_IsABareKafkaException()
     {
         using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("nothing carried");
         IntPtr outErr = IntPtr.Zero;
@@ -116,38 +75,8 @@ public sealed class KafkaExceptionFfiErrorTests
 
         KafkaException read = Assert.IsType<KafkaException>(KafkaException.FromFfiError(error, owned: true));
 
-        Assert.Equal(LocalCallbackCode, read.Code);
-        Assert.Equal("nothing carried", read.Message);
-        Assert.False(read.IsRetriable);
-        Assert.Null(read.InnerException);
-    }
-
-    [Fact]
-    public void AnyOtherCode_IsAKafkaException_WithItsCode_AndItsRetriableFlag()
-    {
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr error = NativeMethods.ErrorKafka(ref outErr);
-        Assert.Equal(IntPtr.Zero, outErr);
-        Assert.NotEqual(IntPtr.Zero, error);
-
-        KafkaException read = Assert.IsType<KafkaException>(KafkaException.FromFfiError(error, owned: true));
-
         Assert.Equal(UnknownServerErrorCode, read.Code);
-        Assert.Equal(UnknownServerErrorMessage, read.Message);
-        Assert.False(read.IsRetriable);
-        Assert.Null(read.InnerException);
-    }
-
-    [Fact]
-    public void KafkaTimeout_IsARetriableKafkaException()
-    {
-        IntPtr error = Build(NativeMethods.ErrorTimeout, NonAsciiMessage);
-
-        KafkaException read = Assert.IsType<KafkaException>(KafkaException.FromFfiError(error, owned: true));
-
-        Assert.Equal(RequestTimedOutCode, read.Code);
-        Assert.Equal(NonAsciiMessage, read.Message);
-        Assert.True(read.IsRetriable);
+        Assert.Equal("nothing carried", read.Message);
         Assert.Null(read.InnerException);
     }
 
@@ -162,29 +91,26 @@ public sealed class KafkaExceptionFfiErrorTests
 
         Assert.Equal(UnknownServerErrorCode, read.Code);
         Assert.Equal("outer", read.Message);
-        Assert.False(read.IsRetriable);
         KafkaException cause = Assert.IsType<KafkaException>(read.InnerException);
         Assert.Equal(UnknownServerErrorCode, cause.Code);
         Assert.Equal("middle: café", cause.Message);
-        Assert.False(cause.IsRetriable);
-        ArgumentException rootCause = Assert.IsType<ArgumentException>(cause.InnerException);
+        IllegalArgumentException rootCause = Assert.IsType<IllegalArgumentException>(cause.InnerException);
         Assert.Equal(NonAsciiMessage, rootCause.Message);
         Assert.Null(rootCause.InnerException);
     }
 
     [Fact]
-    public void SourceChain_ARetriableSource_KeepsItsOwnCodeAndFlag()
+    public void SourceChain_ARetriableSource_KeepsItsOwnClass()
     {
         IntPtr outer = BuildWithSource("outer", Build(NativeMethods.ErrorTimeout, "timed out"));
 
         KafkaException read = Assert.IsType<KafkaException>(KafkaException.FromFfiError(outer, owned: true));
 
         Assert.Equal(UnknownServerErrorCode, read.Code);
-        Assert.False(read.IsRetriable);
-        KafkaException cause = Assert.IsType<KafkaException>(read.InnerException);
+        KafkaTimeoutException cause = Assert.IsType<KafkaTimeoutException>(read.InnerException);
         Assert.Equal(RequestTimedOutCode, cause.Code);
         Assert.Equal("timed out", cause.Message);
-        Assert.True(cause.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(cause);
         Assert.Null(cause.InnerException);
     }
 

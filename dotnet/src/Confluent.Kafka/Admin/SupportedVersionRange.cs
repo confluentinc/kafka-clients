@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 
+using Confluent.Kafka.Java.Lang;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -29,14 +31,14 @@ public sealed class SupportedVersionRange
     /// <summary>Creates a supported range — Java's constructor.</summary>
     /// <param name="minVersion">The minimum supported version.</param>
     /// <param name="maxVersion">The maximum supported version.</param>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// Either version is negative, or the maximum is below the minimum.
     /// </exception>
     public SupportedVersionRange(short minVersion, short maxVersion)
     {
         if (minVersion < 0 || maxVersion < 0 || maxVersion < minVersion)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Expected 0 <= minVersion <= maxVersion but received minVersion:{0}, maxVersion:{1}.",

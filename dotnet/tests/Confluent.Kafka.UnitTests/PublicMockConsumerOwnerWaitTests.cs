@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -596,7 +597,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
 
     private static void AssertRefused(Exception? thrown)
     {
-        InvalidOperationException refused = Assert.IsType<InvalidOperationException>(thrown);
+        ConcurrentModificationException refused = Assert.IsType<ConcurrentModificationException>(thrown);
         Assert.Equal(ConcurrentMessage, refused.Message);
     }
 

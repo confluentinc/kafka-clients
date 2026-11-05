@@ -24,6 +24,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -80,7 +81,7 @@ public sealed class PollDeserializesAfterItsUseTests
         ConsumerRecords<string?, string?> records = Assert.IsType<ConsumerRecords<string?, string?>>(outcome);
         Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset).Select(r => r.Value));
         Assert.Equal(2, values.Calls);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -108,7 +109,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
         Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset).Select(r => r.Value));
         Assert.Equal(2, values.Calls);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -211,7 +212,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
             window.AssertTheOtherCallWaited();
             Assert.Null(window.Failure);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -283,7 +284,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
             window.AssertTheOtherCallWaited();
             Assert.Null(window.Failure);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -344,7 +345,7 @@ public sealed class PollDeserializesAfterItsUseTests
             Join(caller);
 
             Assert.True(waited, "the other thread's call returned while the close waited for the seek-backs");
-            Assert.IsType<ObjectDisposedException>(refused);
+            Assert.IsType<IllegalStateException>(refused);
             await TestTimeout.Run(() => close!, s_deadline);
             RecordDeserializationException failed = await Assert.ThrowsAsync<RecordDeserializationException>(
                 () => TestTimeout.Run(() => poll!, s_deadline));

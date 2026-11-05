@@ -20,12 +20,16 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Util;
 
 using Xunit;
+
+using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -62,7 +66,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.Null(reported);
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(callback.Calls);
         Assert.Null(offsets);
-        TimeoutException timeout = Assert.IsType<TimeoutException>(exception);
+        JavaTimeoutException timeout = Assert.IsType<JavaTimeoutException>(exception);
         Assert.Equal("commit timed out", timeout.Message);
         Assert.True(registration.IsReleased);
     }
@@ -250,7 +254,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.Null(reported);
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(calls);
         Assert.Null(offsets);
-        Assert.Equal("async commit timed out", Assert.IsType<TimeoutException>(exception).Message);
+        Assert.Equal("async commit timed out", Assert.IsType<JavaTimeoutException>(exception).Message);
         Assert.True(registration.IsReleased);
     }
 
@@ -359,7 +363,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
             Serdes.ByteArray);
         RecordingCallback callback = new RecordingCallback();
 
-        KafkaException refused = Assert.Throws<KafkaException>(() => consumer.CommitAsync(Offsets(1), callback));
+        InvalidGroupIdException refused = Assert.Throws<InvalidGroupIdException>(() => consumer.CommitAsync(Offsets(1), callback));
 
         Assert.Equal(InvalidGroupIdCode, refused.Code);
         Assert.Equal(NoGroupId, refused.Message);
@@ -400,7 +404,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         }
 
         await TestTimeout.Run(() => rebalance, s_deadline);
-        InvalidOperationException concurrent = await Assert.ThrowsAsync<InvalidOperationException>(
+        ConcurrentModificationException concurrent = await Assert.ThrowsAsync<ConcurrentModificationException>(
             () => TestTimeout.Run(() => refusedCommit, s_deadline));
         Assert.Equal(ConcurrentMessage, concurrent.Message);
         CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));

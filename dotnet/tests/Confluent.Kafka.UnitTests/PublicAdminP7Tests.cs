@@ -17,12 +17,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-
 using Confluent.Kafka.Admin;
-
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -111,7 +111,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<DelegationTokenNotFoundException>(
             () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
     }
 
@@ -123,12 +123,12 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
-        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(Assert.Throws<DelegationTokenNotFoundException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(Assert.Throws<DelegationTokenNotFoundException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<KafkaException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+            await Assert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
         AssertTokenNotFound(
-            await Assert.ThrowsAsync<KafkaException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+            await Assert.ThrowsAsync<DelegationTokenNotFoundException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
     }
 
     [Fact]
@@ -194,10 +194,10 @@ public sealed class PublicAdminP7Tests
             new[] { "group.version", "metadata.version" },
             result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        await Assert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
         foreach (AsyncKafkaFuture value in result.Values.Values)
         {
-            await Assert.ThrowsAsync<KafkaException>(() => value.Get());
+            await Assert.ThrowsAsync<InvalidRequestException>(() => value.Get());
         }
     }
 
@@ -221,7 +221,7 @@ public sealed class PublicAdminP7Tests
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)));
 
         Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
@@ -233,14 +233,13 @@ public sealed class PublicAdminP7Tests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(
                 new FeatureUpdateEntries(
                     new KeyValuePair<string, FeatureUpdate>(
                         null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE)))));
 
-        Assert.Equal("featureUpdates", thrown.ParamName);
-        Assert.StartsWith("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
+        Assert.Equal("Provided feature can not be empty.", thrown.Message);
     }
 
     [Theory]
@@ -254,7 +253,7 @@ public sealed class PublicAdminP7Tests
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
                 {
@@ -331,7 +330,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -346,7 +345,7 @@ public sealed class PublicAdminP7Tests
         AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
+        UnsupportedOperationException error = await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
         Assert.Equal("Not implemented yet", error.Message);
     }
 
@@ -356,7 +355,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException error = await Assert.ThrowsAsync<UnsupportedOperationException>(
             () => admin.AlterUserScramCredentials(
                 new[] { new UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256) }).All().Get());
 
@@ -371,9 +370,9 @@ public sealed class PublicAdminP7Tests
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.Users().Get());
-        await Assert.ThrowsAsync<NotSupportedException>(() => result.Description("alice").Get());
+        await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get());
+        await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Users().Get());
+        await Assert.ThrowsAsync<UnsupportedOperationException>(() => result.Description("alice").Get());
     }
 
     [Fact]
@@ -431,8 +430,8 @@ public sealed class PublicAdminP7Tests
     [InlineData((short)5, (short)4)]
     public void FinalizedVersionRange_RejectsAnInvalidRange(short min, short max)
     {
-        ArgumentException thrown =
-            Assert.Throws<ArgumentException>(() => new FinalizedVersionRange(min, max));
+        IllegalArgumentException thrown =
+            Assert.Throws<IllegalArgumentException>(() => new FinalizedVersionRange(min, max));
 
         Assert.Contains(
             "Expected minVersionLevel >= 0, maxVersionLevel >= 0 and maxVersionLevel >= minVersionLevel, "
@@ -446,8 +445,8 @@ public sealed class PublicAdminP7Tests
     [InlineData((short)3, (short)2)]
     public void SupportedVersionRange_RejectsAnInvalidRange(short min, short max)
     {
-        ArgumentException thrown =
-            Assert.Throws<ArgumentException>(() => new SupportedVersionRange(min, max));
+        IllegalArgumentException thrown =
+            Assert.Throws<IllegalArgumentException>(() => new SupportedVersionRange(min, max));
 
         Assert.Contains(
             $"Expected 0 <= minVersion <= maxVersion but received minVersion:{min}, maxVersion:{max}.",
@@ -465,7 +464,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void FeatureUpdate_RejectsADowngradeWithoutADowngradeType()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => new FeatureUpdate(0, FeatureUpdate.UpgradeType.UPGRADE));
 
         Assert.Contains(
@@ -478,7 +477,7 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void FeatureUpdate_RejectsANegativeLevel()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => new FeatureUpdate(-1, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE));
 
         Assert.Contains("Cannot specify a negative version level.", thrown.Message, StringComparison.Ordinal);

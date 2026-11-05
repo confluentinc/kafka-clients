@@ -19,6 +19,7 @@ using System.Globalization;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -48,25 +49,16 @@ public sealed class AsyncDescribeTransactionsResult
     /// <summary>One id's description — Java's <c>description(String)</c>.</summary>
     /// <param name="transactionalId">A transactional id from the request.</param>
     /// <returns>That id's future.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// The id was not in the request (Java's <c>IllegalArgumentException</c>), thrown at the call.
+    /// <exception cref="IllegalArgumentException">
+    /// The id was not in the request, or is null, thrown at the call with Java's message.
     /// </exception>
     public AsyncKafkaFuture<TransactionDescription> Description(string transactionalId)
     {
-        if (transactionalId is null)
-        {
-            throw new ArgumentNullException(nameof(transactionalId));
-        }
-
-        return _futures.TryGetValue(transactionalId, out AsyncKafkaFuture<TransactionDescription> future)
+        // Java's map holds no null key, so a null id was not requested either.
+        return transactionalId is not null && _futures.TryGetValue(transactionalId, out AsyncKafkaFuture<TransactionDescription> future)
             ? future
-            : throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "TransactionalId `{0}` was not included in the request",
-                    transactionalId),
-                nameof(transactionalId));
+            : throw new IllegalArgumentException(
+                "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");
     }
 
     /// <summary>

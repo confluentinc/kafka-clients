@@ -26,9 +26,12 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.UnitTests.Interop;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -142,7 +145,7 @@ public sealed class PublicAdminListTopicsTests
     [InlineData(AsyncMock)]
     [InlineData(Real)]
     [InlineData(AsyncReal)]
-    public async Task ListTopicsAfterDispose_ThrowsObjectDisposed_NamingTheClient(string kind)
+    public async Task ListTopicsAfterDispose_ThrowsIllegalState_NamingTheClient(string kind)
     {
         object admin = Create(kind);
         if (admin is IAsyncDisposable asyncAdmin)
@@ -154,12 +157,11 @@ public sealed class PublicAdminListTopicsTests
             TestTimeout.Dispose((IDisposable)admin);
         }
 
-        ObjectDisposedException thrown = Assert.Throws<ObjectDisposedException>(() =>
+        IllegalStateException thrown = Assert.Throws<IllegalStateException>(() =>
         {
             _ = admin is IAdmin sync ? (object)sync.ListTopics() : ((IAsyncAdmin)admin).ListTopics();
         });
-        string expected = kind is Mock or AsyncMock ? nameof(MockAdminClient) : nameof(KafkaAdminClient);
-        Assert.Equal(expected, thrown.ObjectName);
+        Assert.Equal("Cannot accept new calls when AdminClient is closing.", thrown.Message);
     }
 
     [Theory]
@@ -497,10 +499,10 @@ public sealed class PublicAdminListTopicsTests
 
     private static void AssertThreadExited(Exception? thrown)
     {
-        KafkaException error = Assert.IsType<KafkaException>(thrown);
+        KafkaTimeoutException error = Assert.IsType<KafkaTimeoutException>(thrown);
         Assert.Equal(7, error.Code);
         Assert.Equal(ThreadExited, error.Message);
-        Assert.True(error.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(error);
     }
 
     private static NativeAdminClient NativeOf(object admin) =>

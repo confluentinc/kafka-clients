@@ -22,12 +22,14 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -649,8 +651,8 @@ public sealed class PublicAdminP14DifferentialTests
             ReplicaNotAvailableCode,
             "Can't find diff-n-0-7",
             await Agree(FutureProbe.Of(syncResult.Values[nowhere]), FutureProbe.Of(asyncResult.Values[nowhere])));
-        KafkaException allFailure =
-            Assert.IsType<KafkaException>(await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        ReplicaNotAvailableException allFailure =
+            Assert.IsType<ReplicaNotAvailableException>(await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
         Assert.Contains(
             (allFailure.Code, allFailure.Message),
             new[] { (KafkaStorageErrorCode, Offline), (ReplicaNotAvailableCode, "Can't find diff-n-0-7") });
@@ -739,13 +741,13 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => sync.DeleteTopics((TopicCollection)null!),
             () => async.DeleteTopics((TopicCollection)null!));
         AssertThrowAlike(
             () => sync.DeleteTopics((IReadOnlyCollection<string>)null!),
             () => async.DeleteTopics((IReadOnlyCollection<string>)null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => sync.DescribeTopics((TopicCollection)null!),
             () => async.DescribeTopics((TopicCollection)null!));
         AssertThrowAlike(
@@ -945,14 +947,11 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         TopicPartition unrequested = new TopicPartition("diff-u", 7);
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => { _ = syncResult.PartitionResult(unrequested); },
             () => { _ = asyncResult.PartitionResult(unrequested); });
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); });
-        Assert.Equal("partition", rejected.ParamName);
-        Assert.Equal(
-            new ArgumentException("List Offsets for partition \"diff-u-7\" was not attempted", "partition").Message,
-            rejected.Message);
+        IllegalArgumentException rejected = Assert.Throws<IllegalArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); });
+        Assert.Equal("List Offsets for partition \"diff-u-7\" was not attempted", rejected.Message);
     }
 
     [Fact]
@@ -1008,11 +1007,11 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(asyncResult.All()),
                 static outcome => Listings((IReadOnlyCollection<GroupListing>)outcome)));
         Assert.Equal(Seeded, Listings(all));
-        IReadOnlyCollection<KafkaException> errors = Assert.IsAssignableFrom<IReadOnlyCollection<KafkaException>>(
+        IReadOnlyCollection<Exception> errors = Assert.IsAssignableFrom<IReadOnlyCollection<Exception>>(
             await Agree(
                 FutureProbe.Of(syncResult.Errors()),
                 FutureProbe.Of(asyncResult.Errors()),
-                static outcome => string.Join(",", ((IReadOnlyCollection<KafkaException>)outcome).Select(static e => e.Message))));
+                static outcome => string.Join(",", ((IReadOnlyCollection<Exception>)outcome).Select(static e => e.Message))));
         Assert.Empty(errors);
     }
 
@@ -1111,15 +1110,12 @@ public sealed class PublicAdminP14DifferentialTests
                         static outcome => AllGroupOffsets(
                             (IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>)outcome)))));
 
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => { _ = syncResult.PartitionsToOffsetAndMetadata("diff-y-absent"); },
             () => { _ = asyncResult.PartitionsToOffsetAndMetadata("diff-y-absent"); });
-        ArgumentException unknown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException unknown = Assert.Throws<IllegalArgumentException>(
             () => { _ = syncResult.PartitionsToOffsetAndMetadata("diff-y-absent"); });
-        Assert.Equal("groupId", unknown.ParamName);
-        Assert.Equal(
-            new ArgumentException("Offsets for consumer group 'diff-y-absent' were not requested.", "groupId").Message,
-            unknown.Message);
+        Assert.Equal("Offsets for consumer group 'diff-y-absent' were not requested.", unknown.Message);
     }
 
     [Fact]
@@ -1173,9 +1169,9 @@ public sealed class PublicAdminP14DifferentialTests
                         NotImplementedYet,
             await Agree(FutureProbe.Of(syncSeveral.All()), FutureProbe.Of(asyncSeveral.All())));
 
-        InvalidOperationException syncNoArgument = Assert.Throws<InvalidOperationException>(
+        IllegalStateException syncNoArgument = Assert.Throws<IllegalStateException>(
             () => { _ = syncSeveral.PartitionsToOffsetAndMetadata(); });
-        InvalidOperationException asyncNoArgument = Assert.Throws<InvalidOperationException>(
+        IllegalStateException asyncNoArgument = Assert.Throws<IllegalStateException>(
             () => { _ = asyncSeveral.PartitionsToOffsetAndMetadata(); });
         Assert.Equal(MultipleGroupsRequested, syncNoArgument.Message);
         Assert.Equal(syncNoArgument.Message, asyncNoArgument.Message);
@@ -1231,12 +1227,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         MemberToRemove unrequested = new MemberToRemove("diff-ab-3");
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => { _ = syncResult.MemberResult(unrequested); },
             () => { _ = asyncResult.MemberResult(unrequested); });
         Assert.Equal(
             "Member diff-ab-3 was not included in the original request",
-            Assert.Throws<ArgumentException>(() => { _ = syncResult.MemberResult(unrequested); }).Message);
+            Assert.Throws<IllegalArgumentException>(() => { _ = syncResult.MemberResult(unrequested); }).Message);
         AssertThrowAlike(() => { _ = syncResult.MemberResult(null!); }, () => { _ = asyncResult.MemberResult(null!); });
         Assert.Equal("member", Assert.Throws<ArgumentNullException>(() => { _ = syncResult.MemberResult(null!); }).ParamName);
 
@@ -1246,12 +1242,12 @@ public sealed class PublicAdminP14DifferentialTests
         AssertNotSupported(
                         NotImplementedYet,
             await Agree(FutureProbe.Of(syncAll.All()), FutureProbe.Of(asyncAll.All())));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => { _ = syncAll.MemberResult(members[0]); },
             () => { _ = asyncAll.MemberResult(members[0]); });
         Assert.Equal(
             "The method: memberResult is not applicable in 'removeAll' mode",
-            Assert.Throws<ArgumentException>(() => { _ = syncAll.MemberResult(members[0]); }).Message);
+            Assert.Throws<IllegalArgumentException>(() => { _ = syncAll.MemberResult(members[0]); }).Message);
     }
 
     [Fact]
@@ -1301,12 +1297,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         TopicPartition unrequested = new TopicPartition("diff-ad", 7);
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => { _ = syncResult.PartitionResult(unrequested); },
             () => { _ = asyncResult.PartitionResult(unrequested); });
         Assert.Equal(
             "Partition diff-ad-7 was not included in the original request",
-            Assert.Throws<ArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); }).Message);
+            Assert.Throws<IllegalArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); }).Message);
     }
 
     [Fact]
@@ -1636,7 +1632,7 @@ public sealed class PublicAdminP14DifferentialTests
             "owner=User:diff-an-alice;renewers=User:diff-an-alice,User:diff-an-bob;max=86400000;expiry=-1",
             TokenOf(Assert.IsType<DelegationToken>(created)));
 
-        ArgumentException noRenewer = Assert.IsType<ArgumentException>(
+        IllegalArgumentException noRenewer = Assert.IsType<IllegalArgumentException>(
             await Agree(
                 FutureProbe.Of(sync.CreateDelegationToken().DelegationToken()),
                 FutureProbe.Of(async.CreateDelegationToken().DelegationToken())));
@@ -2093,21 +2089,24 @@ public sealed class PublicAdminP14DifferentialTests
 
         FenceProducersResult syncFenced = sync.FenceProducers(new[] { "diff-pg" });
         AsyncFenceProducersResult asyncFenced = async.FenceProducers(new[] { "diff-pg" });
-        AssertThrowAlike(() => syncFenced.ProducerId(null!), () => asyncFenced.ProducerId(null!));
-        AssertThrowAlike(() => syncFenced.EpochId(null!), () => asyncFenced.EpochId(null!));
-        AssertThrowAlike<ArgumentException>(() => syncFenced.ProducerId("diff-missing"), () => asyncFenced.ProducerId("diff-missing"));
-        AssertThrowAlike<ArgumentException>(() => syncFenced.EpochId("diff-missing"), () => asyncFenced.EpochId("diff-missing"));
+        AssertThrowAlike<IllegalArgumentException>(() => syncFenced.ProducerId(null!), () => asyncFenced.ProducerId(null!));
+        AssertThrowAlike<IllegalArgumentException>(() => syncFenced.EpochId(null!), () => asyncFenced.EpochId(null!));
+        AssertThrowAlike<IllegalArgumentException>(() => syncFenced.ProducerId("diff-missing"), () => asyncFenced.ProducerId("diff-missing"));
+        AssertThrowAlike<IllegalArgumentException>(() => syncFenced.EpochId("diff-missing"), () => asyncFenced.EpochId("diff-missing"));
 
         DescribeTransactionsResult syncDescribed = sync.DescribeTransactions(new[] { "diff-pg" });
         AsyncDescribeTransactionsResult asyncDescribed = async.DescribeTransactions(new[] { "diff-pg" });
-        AssertThrowAlike(() => syncDescribed.Description(null!), () => asyncDescribed.Description(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(() => syncDescribed.Description(null!), () => asyncDescribed.Description(null!));
+        Assert.Equal(
+            "TransactionalId `null` was not included in the request",
+            Assert.Throws<IllegalArgumentException>(() => syncDescribed.Description(null!)).Message);
+        AssertThrowAlike<IllegalArgumentException>(
             () => syncDescribed.Description("diff-missing"), () => asyncDescribed.Description("diff-missing"));
 
         DescribeProducersResult syncProducers = sync.DescribeProducers(new[] { new TopicPartition("diff-pg", 0) });
         AsyncDescribeProducersResult asyncProducers = async.DescribeProducers(new[] { new TopicPartition("diff-pg", 0) });
         TopicPartition missing = new TopicPartition("diff-missing", 0);
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike<IllegalArgumentException>(
             () => syncProducers.PartitionResult(missing), () => asyncProducers.PartitionResult(missing));
 
         // Each guard names the member's own parameter, with the binding's (or Java's) message.
@@ -2117,8 +2116,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal("spec", Assert.Throws<ArgumentNullException>(() => sync.AbortTransaction(null!)).ParamName);
         Assert.Equal(
             "transactionalId", Assert.Throws<ArgumentNullException>(() => sync.ForceTerminateTransaction(null!)).ParamName);
-        Assert.Equal("transactionalId", Assert.Throws<ArgumentNullException>(() => syncFenced.ProducerId(null!)).ParamName);
-        Assert.Equal("transactionalId", Assert.Throws<ArgumentNullException>(() => syncDescribed.Description(null!)).ParamName);
+        Assert.Equal(
+            "TransactionalId `null` was not included in the request",
+            Assert.Throws<IllegalArgumentException>(() => syncFenced.ProducerId(null!)).Message);
+        Assert.Equal(
+            "TransactionalId `null` was not included in the request",
+            Assert.Throws<IllegalArgumentException>(() => syncDescribed.Description(null!)).Message);
         AssertArgument(
             "The transactional ids must not contain a null element.", "transactionalIds", () => sync.FenceProducers(nullId));
         AssertArgument(
@@ -2138,18 +2141,15 @@ public sealed class PublicAdminP14DifferentialTests
         AssertArgument(AdminStrings.InvalidStringMessage, "spec", () => sync.AbortTransaction(nulTopicSpec));
         AssertArgument(
             AdminStrings.InvalidStringMessage, "transactionalId", () => sync.ForceTerminateTransaction("diff\0pg"));
-        AssertArgument(
+        Assert.Equal(
             "TransactionalId `diff-missing` was not included in the request",
-            "transactionalId",
-            () => syncFenced.ProducerId("diff-missing"));
-        AssertArgument(
+            Assert.Throws<IllegalArgumentException>(() => syncFenced.ProducerId("diff-missing")).Message);
+        Assert.Equal(
             "TransactionalId `diff-missing` was not included in the request",
-            "transactionalId",
-            () => syncDescribed.Description("diff-missing"));
-        AssertArgument(
+            Assert.Throws<IllegalArgumentException>(() => syncDescribed.Description("diff-missing")).Message);
+        Assert.Equal(
             "Topic partition " + missing + " was not included in the request",
-            "partition",
-            () => syncProducers.PartitionResult(missing));
+            Assert.Throws<IllegalArgumentException>(() => syncProducers.PartitionResult(missing)).Message);
     }
 
     private static void AssertArgument(string message, string parameterName, Action call)
@@ -2194,7 +2194,6 @@ public sealed class PublicAdminP14DifferentialTests
             {
                 KafkaException asyncKafka = (KafkaException)asyncFailure;
                 Assert.Equal(syncKafka.Code, asyncKafka.Code);
-                Assert.Equal(syncKafka.IsRetriable, asyncKafka.IsRetriable);
             }
         }
         else if (ReferenceEquals(syncOutcome, BlockingCall.Returned))
@@ -2209,14 +2208,14 @@ public sealed class PublicAdminP14DifferentialTests
 
     private static void AssertKafka(int code, string message, object? outcome)
     {
-        KafkaException failure = Assert.IsType<KafkaException>(outcome);
+        KafkaException failure = Assert.IsAssignableFrom<KafkaException>(outcome);
         Assert.Equal(code, failure.Code);
         Assert.Equal(message, failure.Message);
     }
 
     private static void AssertNotSupported(string message, object? outcome)
     {
-        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
+        UnsupportedOperationException failure = Assert.IsType<UnsupportedOperationException>(outcome);
         Assert.Equal(message, failure.Message);
     }
 

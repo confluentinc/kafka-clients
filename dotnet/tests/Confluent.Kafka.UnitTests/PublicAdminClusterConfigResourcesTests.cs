@@ -23,6 +23,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -244,13 +245,13 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     [Fact]
-    public void AfterDispose_EveryNewRpcThrowsObjectDisposed()
+    public void AfterDispose_EveryNewRpcThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeCluster());
-        Assert.Throws<ObjectDisposedException>(() => admin.ListConfigResources());
+        Assert.Throws<IllegalStateException>(() => admin.DescribeCluster());
+        Assert.Throws<IllegalStateException>(() => admin.ListConfigResources());
     }
 
     [Fact]

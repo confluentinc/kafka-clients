@@ -18,8 +18,11 @@ using System.Diagnostics;
 using System.Threading;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -134,7 +137,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
         consumer.Commit(Empty());
 
         Assert.False(returned);
-        InvalidOperationException concurrent = Assert.IsType<InvalidOperationException>(other);
+        ConcurrentModificationException concurrent = Assert.IsType<ConcurrentModificationException>(other);
         Assert.Equal(Concurrent, concurrent.Message);
     }
 
@@ -175,8 +178,8 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
             Assert.True(started.Wait(s_wait));
 
             Stopwatch refusal = Stopwatch.StartNew();
-            InvalidOperationException concurrent =
-                Assert.Throws<InvalidOperationException>(() => consumer.CommitAsync(Empty(), Noop()));
+            ConcurrentModificationException concurrent =
+                Assert.Throws<ConcurrentModificationException>(() => consumer.CommitAsync(Empty(), Noop()));
             Assert.Equal(Concurrent, concurrent.Message);
             Assert.True(refusal.Elapsed < TimeSpan.FromSeconds(1), $"refused after {refusal.Elapsed}");
 
@@ -343,7 +346,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
             consumer.Assign(new[] { s_tp0 });
             consumer.CommitAsync(Empty(), new DelegateCallback((_, _) => consumer.Wakeup()));
 
-            KafkaException woken = Assert.Throws<KafkaException>(() => consumer.Poll(TimeSpan.Zero));
+            WakeupException woken = Assert.Throws<WakeupException>(() => consumer.Poll(TimeSpan.Zero));
 
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Empty(consumer.Poll(TimeSpan.Zero));
@@ -376,7 +379,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
             Assert.Equal(typeof(KafkaException), wrapped.GetType());
             Assert.Equal("Failed to close kafka consumer", wrapped.Message);
             Assert.Same(raised, wrapped.InnerException);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {

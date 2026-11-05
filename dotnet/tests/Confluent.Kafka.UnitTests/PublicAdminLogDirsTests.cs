@@ -21,6 +21,8 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -156,8 +158,8 @@ public sealed class PublicAdminLogDirsTests
         AsyncAlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string> { [replica] = "/mnt/absent" });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[replica].Get()), s_deadline);
+        KafkaStorageException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaStorageException>(() => result.Values[replica].Get()), s_deadline);
         Assert.Equal("Log directory /mnt/absent is offline", failure.Message);
     }
 
@@ -173,8 +175,8 @@ public sealed class PublicAdminLogDirsTests
         AsyncAlterReplicaLogDirsResult result = admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[replica].Get()), s_deadline);
+        ReplicaNotAvailableException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values[replica].Get()), s_deadline);
 
         // The core renders the replica into this message, which is why ToString is topic-partition-brokerId.
         Assert.Equal($"Can't find {replica}", failure.Message);
@@ -242,11 +244,11 @@ public sealed class PublicAdminLogDirsTests
 
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeLogDirs(new[] { 0 }));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.DescribeLogDirs(new[] { 0 }));
+        Assert.Throws<IllegalStateException>(
             () => admin.AlterReplicaLogDirs(
                 new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir }));
-        Assert.Throws<ObjectDisposedException>(() => admin.DescribeReplicaLogDirs(new[] { replica }));
+        Assert.Throws<IllegalStateException>(() => admin.DescribeReplicaLogDirs(new[] { replica }));
     }
 
     [Fact]
@@ -259,10 +261,10 @@ public sealed class PublicAdminLogDirsTests
 
         Type replicaInfos = typeof(IReadOnlyDictionary<TopicPartition, ReplicaInfo>);
         Assert.Equal(3, shapes.Length);
-        Assert.Equal(new[] { typeof(KafkaException), replicaInfos }, shapes[0]);
-        Assert.Equal(new[] { typeof(KafkaException), replicaInfos, typeof(long?), typeof(long?) }, shapes[1]);
+        Assert.Equal(new[] { typeof(ApiException), replicaInfos }, shapes[0]);
+        Assert.Equal(new[] { typeof(ApiException), replicaInfos, typeof(long?), typeof(long?) }, shapes[1]);
         Assert.Equal(
-            new[] { typeof(KafkaException), replicaInfos, typeof(long?), typeof(long?), typeof(bool) },
+            new[] { typeof(ApiException), replicaInfos, typeof(long?), typeof(long?), typeof(bool) },
             shapes[2]);
         Assert.Empty(typeof(LogDirDescription).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
     }
@@ -270,7 +272,7 @@ public sealed class PublicAdminLogDirsTests
     [Fact]
     public void G3_8_LogDirDescription_ConstructorsStoreTheirArguments_AndMapJavasMinusOneToNull()
     {
-        KafkaException error = new KafkaException("the log directory is offline");
+        Common.Errors.KafkaStorageException error = new Common.Errors.KafkaStorageException("the log directory is offline");
         Dictionary<TopicPartition, ReplicaInfo> replicas = new Dictionary<TopicPartition, ReplicaInfo>
         {
             [new TopicPartition("t", 0)] = new ReplicaInfo(1, 2, false),

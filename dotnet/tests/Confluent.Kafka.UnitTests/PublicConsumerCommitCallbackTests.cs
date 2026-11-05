@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -349,24 +350,24 @@ public sealed class PublicConsumerCommitCallbackTests
     }
 
     [Fact]
-    public void CommitAsync_AfterDispose_ThrowsObjectDisposedException()
+    public void CommitAsync_AfterDispose_ThrowsIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
-        Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync(
+        Assert.Throws<IllegalStateException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
+        Assert.Throws<IllegalStateException>(() => consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>()));
     }
 
     [Fact]
-    public async Task AsyncMock_CommitAsync_AfterDispose_ThrowsObjectDisposedException()
+    public async Task AsyncMock_CommitAsync_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.CommitAsync(
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata>(), new RecordingCommitCallback()));
     }
 

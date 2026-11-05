@@ -22,6 +22,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
@@ -353,7 +354,7 @@ public sealed class PublicAdminStringTests
 
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
-        KafkaException absent = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException absent = await Assert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 

@@ -19,7 +19,9 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -72,9 +74,9 @@ public sealed class PublicSyncProducerMockControlTests
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get());
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "sync-mock-error", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        CorruptRecordException failure = await Assert.ThrowsAsync<CorruptRecordException>(
             () => TestTimeout.Run(() => sendTask, s_deadline));
         Assert.Equal(2, failure.Code);
         Assert.Contains("sync-mock-error", failure.Message, StringComparison.Ordinal);
@@ -86,7 +88,7 @@ public sealed class PublicSyncProducerMockControlTests
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        Assert.False(producer.ErrorNext(new KafkaException(2, "nope", isRetriable: true)));
+        Assert.False(producer.ErrorNext(new Common.Errors.CorruptRecordException("nope")));
     }
 
     [Fact]
@@ -125,15 +127,15 @@ public sealed class PublicSyncProducerMockControlTests
     }
 
     [Fact]
-    public void Helpers_AfterDispose_ThrowObjectDisposed()
+    public void Helpers_AfterDispose_ThrowIllegalState()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.CompleteNext());
-        Assert.Throws<ObjectDisposedException>(() => producer.ErrorNext(new KafkaException(2, "x", isRetriable: true)));
-        Assert.Throws<ObjectDisposedException>(() => producer.HistoryCount());
-        Assert.Throws<ObjectDisposedException>(() => producer.Clear());
+        Assert.Throws<IllegalStateException>(() => producer.CompleteNext());
+        Assert.Throws<IllegalStateException>(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("x")));
+        Assert.Throws<IllegalStateException>(() => producer.HistoryCount());
+        Assert.Throws<IllegalStateException>(() => producer.Clear());
     }
 
     // Retries drive until it resolves the worker's pending send or the deadline passes: an early call returns
@@ -145,7 +147,7 @@ public sealed class PublicSyncProducerMockControlTests
         {
             if (sw.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "No pending send registered to drive within the deadline — treated as a hang.");
             }
 

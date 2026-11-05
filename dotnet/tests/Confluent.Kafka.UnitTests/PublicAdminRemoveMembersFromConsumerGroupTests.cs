@@ -17,6 +17,7 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -48,15 +49,15 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         AsyncRemoveMembersFromConsumerGroupResult result =
             admin.RemoveMembersFromConsumerGroup("p5-group", options);
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         // The core attaches no cause to the mock's refusal, so InnerException stays null.
         Assert.Null(fromAll.InnerException);
 
-        NotSupportedException fromMember = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.MemberResult(member).Get()), s_deadline);
+        UnsupportedOperationException fromMember = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.MemberResult(member).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromMember.Message);
         Assert.Null(fromMember.InnerException);
     }
@@ -72,11 +73,11 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         AsyncRemoveMembersFromConsumerGroupResult result =
             admin.RemoveMembersFromConsumerGroup("p5-group-all", options);
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => result.MemberResult(new MemberToRemove("instance-1")));
         Assert.StartsWith(
             "The method: memberResult is not applicable in 'removeAll' mode", thrown.Message, StringComparison.Ordinal);
@@ -90,7 +91,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
 
         RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.RemoveMembersFromConsumerGroup("p5-disposed", options));
     }
 
@@ -116,7 +117,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     [Fact]
     public void Options_EmptyMembers_ThrowsArgumentException()
     {
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => new RemoveMembersFromConsumerGroupOptions(Array.Empty<MemberToRemove>()));
         Assert.StartsWith("Invalid empty members has been provided", thrown.Message, StringComparison.Ordinal);
     }
@@ -153,7 +154,7 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         AsyncRemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
             "p5-group", new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove("instance-1") }));
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
             () => result.MemberResult(new MemberToRemove("instance-9")));
         Assert.StartsWith("Member instance-9 was not included in the original request", thrown.Message, StringComparison.Ordinal);
     }
@@ -169,14 +170,14 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             "p5-group",
             new RemoveMembersFromConsumerGroupOptions(new[] { first, second, new MemberToRemove("instance-1") }));
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (MemberToRemove member in new[] { first, second, new MemberToRemove("instance-2") })
         {
-            NotSupportedException fromMember = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => result.MemberResult(member).Get()), s_deadline);
+            UnsupportedOperationException fromMember = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<UnsupportedOperationException>(() => result.MemberResult(member).Get()), s_deadline);
             Assert.Equal(NotImplemented, fromMember.Message);
         }
     }
@@ -193,15 +194,15 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
 
         Assert.StartsWith(
             "The method: memberResult is not applicable in 'removeAll' mode",
-            Assert.Throws<ArgumentException>(() => removeAll.MemberResult(new MemberToRemove("instance-1"))).Message,
+            Assert.Throws<IllegalArgumentException>(() => removeAll.MemberResult(new MemberToRemove("instance-1"))).Message,
             StringComparison.Ordinal);
         Assert.StartsWith(
             "Member instance-9 was not included in the original request",
-            Assert.Throws<ArgumentException>(() => some.MemberResult(new MemberToRemove("instance-9"))).Message,
+            Assert.Throws<IllegalArgumentException>(() => some.MemberResult(new MemberToRemove("instance-9"))).Message,
             StringComparison.Ordinal);
         Assert.Equal("member", Assert.Throws<ArgumentNullException>(() => some.MemberResult(null!)).ParamName);
 
-        NotSupportedException fromMember = Assert.Throws<NotSupportedException>(() => some.MemberResult(new MemberToRemove("instance-1")).Get());
+        UnsupportedOperationException fromMember = Assert.Throws<UnsupportedOperationException>(() => some.MemberResult(new MemberToRemove("instance-1")).Get());
         Assert.Equal(NotImplemented, fromMember.Message);
     }
 

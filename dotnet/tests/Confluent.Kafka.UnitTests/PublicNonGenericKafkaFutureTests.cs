@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 
 using Confluent.Kafka.Producer;
@@ -72,7 +73,7 @@ public sealed class PublicNonGenericKafkaFutureTests
     public void Get_AfterFailure_RethrowsTheSameInstance_Unwrapped()
     {
         const string Message = "The operation failed: the broker rejected it.";
-        KafkaException cause = new KafkaException(36, Message, isRetriable: false);
+        KafkaException cause = new Common.Errors.TopicExistsException(Message);
         KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
         KafkaFuture future = new KafkaFuture(completion);
 
@@ -83,7 +84,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.Same(cause, waiting.Join());
         for (int call = 0; call < 2; call++)
         {
-            KafkaException thrown = Assert.IsType<KafkaException>(BlockingCall.RunWait(() => future.Get()));
+            TopicExistsException thrown = Assert.IsType<TopicExistsException>(BlockingCall.RunWait(() => future.Get()));
             Assert.Same(cause, thrown);
             Assert.Equal(Message, thrown.Message);
             Assert.Equal(36, thrown.Code);
@@ -104,7 +105,7 @@ public sealed class PublicNonGenericKafkaFutureTests
 
         Assert.True(outcome == "result"
             ? completion.Complete(true)
-            : completion.CompleteWithError(new KafkaException(-1, "The operation failed.", isRetriable: false)));
+            : completion.CompleteWithError(new KafkaException("The operation failed.")));
 
         Assert.True(future.IsDone);
         Assert.True(future.IsDone);
@@ -196,7 +197,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         BlockingCall waiting = BlockingCall.StartWait(() => erased.Get());
         waiting.AssertBlocked();
 
-        KafkaException cause = new KafkaException(7, "The operation failed.", isRetriable: true);
+        KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(outcome == "result"
             ? source.Complete(
                 new RecordMetadata(new TopicPartition("erasure-topic", 0), 1L, 0, 1_700_000_000_000L, -1, -1))
@@ -253,7 +254,7 @@ public sealed class PublicNonGenericKafkaFutureTests
     [InlineData("failed")]
     public void OnceDone_ThenApplyWhenCompleteAndAllOf_RunInsideTheCall(string outcome)
     {
-        KafkaException failure = new KafkaException(36, "The operation failed.", isRetriable: false);
+        KafkaException failure = new Common.Errors.TopicExistsException("The operation failed.");
         KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
         KafkaFuture future = new KafkaFuture(completion);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
@@ -335,12 +336,12 @@ public sealed class PublicNonGenericKafkaFutureTests
         });
         Exception? seenFailure = null;
         KafkaFuture after = failingFuture.WhenComplete(error => seenFailure = error);
-        KafkaException cause = new KafkaException(36, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
         Assert.False(ran);
-        Assert.Same(cause, Assert.Throws<KafkaException>(() => skipped.GetNow(-1)));
+        Assert.Same(cause, Assert.Throws<TopicExistsException>(() => skipped.GetNow(-1)));
         Assert.Same(cause, seenFailure);
-        Assert.Same(cause, Assert.Throws<KafkaException>(() => after.GetNow()));
+        Assert.Same(cause, Assert.Throws<TopicExistsException>(() => after.GetNow()));
     }
 
     [Fact]
@@ -349,7 +350,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture future = new KafkaFuture(new KafkaFutureImpl<object?>());
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
-        Assert.IsType<TimeoutException>(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
+        Assert.IsType<System.TimeoutException>(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
         future.GetNow();
         BlockingCall waiting = BlockingCall.StartWait(() => future.Get(cancellation.Token));
         waiting.AssertBlocked();
@@ -395,7 +396,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFutureImpl<int> second = new KafkaFutureImpl<int>();
         KafkaFuture<int>[] oneType = { new KafkaFuture<int>(first), new KafkaFuture<int>(second) };
         KafkaFuture all = KafkaFuture.AllOf(oneType);
-        KafkaException cause = new KafkaException(36, "The operation failed.", isRetriable: false);
+        KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(first.CompleteWithError(cause));
         Assert.False(all.IsDone);
         Assert.True(second.Complete(2));
@@ -520,7 +521,7 @@ public sealed class PublicNonGenericKafkaFutureTests
 
     private static void AssertFailedWith(KafkaException failure, object? outcome)
     {
-        KafkaException thrown = Assert.IsType<KafkaException>(outcome);
+        TopicExistsException thrown = Assert.IsType<TopicExistsException>(outcome);
         Assert.Same(failure, thrown);
         Assert.Equal("The operation failed.", thrown.Message);
     }

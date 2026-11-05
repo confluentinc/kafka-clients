@@ -22,6 +22,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Internal;
 
@@ -47,6 +48,9 @@ internal sealed partial class NativeAdminClient : IDisposable
     private const string AsyncDrainThreadName = "confluent-kafka-admin-pump";
 
     private const string CloseNegativeTimeoutMessage = "The timeout cannot be negative.";
+
+    // KafkaAdminClient's message; Java's MockAdminClient has no closed check, but the native mock is gone after Close.
+    private const string ClosedMessage = "Cannot accept new calls when AdminClient is closing.";
 
     // One comparer for every ConfigResource-keyed map the submits and the Results build, so they agree on a key.
     private static readonly IEqualityComparer<ConfigResource> s_configResourceComparer =
@@ -264,7 +268,7 @@ internal sealed partial class NativeAdminClient : IDisposable
     {
         if (timeout < TimeSpan.Zero && !_isMock)
         {
-            throw new ArgumentOutOfRangeException(nameof(timeout), CloseNegativeTimeoutMessage);
+            throw new IllegalArgumentException(CloseNegativeTimeoutMessage);
         }
 
         return (long)timeout.TotalMilliseconds;
@@ -441,7 +445,7 @@ internal sealed partial class NativeAdminClient : IDisposable
         ThrowIfClosed();
         if (controller is null)
         {
-            throw new ArgumentException("The controller node must be in the list of brokers", nameof(controller));
+            throw new IllegalArgumentException("The controller node must be in the list of brokers");
         }
 
         ValidateNode(controller, nameof(controller));
@@ -686,7 +690,7 @@ internal sealed partial class NativeAdminClient : IDisposable
     {
         if (Volatile.Read(ref _closed) != 0)
         {
-            throw new ObjectDisposedException(_isMock ? nameof(MockAdminClient) : nameof(KafkaAdminClient));
+            throw new IllegalStateException(ClosedMessage);
         }
     }
 }

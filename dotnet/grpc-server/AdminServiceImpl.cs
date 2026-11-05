@@ -681,7 +681,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // Java holds one future over the whole map, so its failure is the whole-call error; a
             // per-entry error is the Optional<Throwable> in the resolved map, absent meaning that
             // election succeeded.
-            (IReadOnlyDictionary<TopicPartition, KafkaException?> partitions, Proto.KafkaError? error) =
+            (IReadOnlyDictionary<TopicPartition, Exception?> partitions, Proto.KafkaError? error) =
                 TranslateAdmin.Resolve(result.Partitions());
             if (error is not null)
             {
@@ -689,7 +689,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             }
 
             Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
-            foreach (KeyValuePair<TopicPartition, KafkaException?> pair in partitions)
+            foreach (KeyValuePair<TopicPartition, Exception?> pair in partitions)
             {
                 Proto.VoidResultEntry entry = new Proto.VoidResultEntry
                 {
@@ -1149,7 +1149,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             // valid() and errors() are independent lists of unrelated length: never zip them.
             IReadOnlyCollection<GroupListing> valid = result.Valid().Get();
-            IReadOnlyCollection<KafkaException> errors = result.Errors().Get();
+            IReadOnlyCollection<Exception> errors = result.Errors().Get();
 
             Proto.ListGroupsResponse response = new Proto.ListGroupsResponse();
             foreach (GroupListing listing in valid)
@@ -1157,7 +1157,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Valid.Add(TranslateAdmin.GroupListingToProto(listing));
             }
 
-            foreach (KafkaException error in errors)
+            foreach (Exception error in errors)
             {
                 response.ListingErrors.Add(Translate.ToProto(error));
             }

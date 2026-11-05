@@ -18,6 +18,7 @@ using System.Globalization;
 
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -59,11 +60,11 @@ public sealed class ProducerRecord<TKey, TValue>
     /// <see langword="null"/> sequence gives no headers.
     /// </param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="topic"/> is null, or <paramref name="headers"/> contains a <see langword="null"/> header.
+    /// <paramref name="headers"/> contains a <see langword="null"/> header.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="timestamp"/> or <paramref name="partition"/> is specified and negative; the timestamp is
-    /// checked first.
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topic"/> is null, or <paramref name="timestamp"/> or <paramref name="partition"/> is
+    /// specified and negative; the timestamp is checked first.
     /// </exception>
     public ProducerRecord(
         string topic,
@@ -73,13 +74,11 @@ public sealed class ProducerRecord<TKey, TValue>
         long? timestamp = null,
         IEnumerable<Header>? headers = null)
     {
-        Topic = topic ?? throw new ArgumentNullException(nameof(topic), "Topic cannot be null.");
+        Topic = topic ?? throw new IllegalArgumentException("Topic cannot be null.");
 
         if (timestamp is { } t && t < 0)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(timestamp),
-                t,
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Invalid timestamp: {0}. Timestamp should always be non-negative or null.",
@@ -88,9 +87,7 @@ public sealed class ProducerRecord<TKey, TValue>
 
         if (partition is { } p && p < 0)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(partition),
-                p,
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Invalid partition: {0}. Partition number should always be non-negative or null.",

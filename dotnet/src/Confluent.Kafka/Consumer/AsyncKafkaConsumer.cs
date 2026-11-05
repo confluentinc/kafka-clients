@@ -21,6 +21,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -61,7 +62,7 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <c>null</c>, or the client refuses a value.
     /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// <c>group.protocol</c> is <c>classic</c>, which this client does not support; <c>classic</c> is
     /// also the default when the key is unset.
     /// </exception>

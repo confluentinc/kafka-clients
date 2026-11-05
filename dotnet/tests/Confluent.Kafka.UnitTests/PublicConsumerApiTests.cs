@@ -17,8 +17,10 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -84,12 +86,12 @@ public sealed class PublicConsumerApiTests
     }
 
     [Fact]
-    public async Task Seek_UnassignedPartition_ThrowsInvalidOperationException()
+    public async Task Seek_UnassignedPartition_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
         Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }
@@ -117,11 +119,10 @@ public sealed class PublicConsumerApiTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -1); });
 
-        Assert.Equal("offset", ex.ParamName);
-        Assert.Contains("seek offset must not be a negative number", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("seek offset must not be a negative number", ex.Message);
     }
 
     [Fact]
@@ -130,7 +131,7 @@ public sealed class PublicConsumerApiTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -3); });
+        Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -3); });
     }
 
     [Fact]
@@ -171,12 +172,12 @@ public sealed class PublicConsumerApiTests
     }
 
     [Fact]
-    public void GroupMetadata_AfterDispose_ThrowsObjectDisposed()
+    public void GroupMetadata_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
     }
 
     [Theory]
@@ -187,10 +188,9 @@ public sealed class PublicConsumerApiTests
         IConsumerCommon consumer = CreateRealConsumer(sync, ConfigWithoutGroupId());
         try
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => consumer.GroupMetadata());
+            InvalidGroupIdException failure = Assert.Throws<InvalidGroupIdException>(() => consumer.GroupMetadata());
 
             Assert.Equal(InvalidGroupIdCode, failure.Code);
-            Assert.False(failure.IsRetriable);
             Assert.Equal(GroupIdNotDefinedMessage, failure.Message);
             Assert.Null(failure.InnerException);
         }
@@ -203,12 +203,12 @@ public sealed class PublicConsumerApiTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void GroupMetadata_RealConsumer_WithoutGroupId_AfterDispose_ThrowsObjectDisposed(bool sync)
+    public void GroupMetadata_RealConsumer_WithoutGroupId_AfterDispose_ThrowsIllegalState(bool sync)
     {
         IConsumerCommon consumer = CreateRealConsumer(sync, ConfigWithoutGroupId());
         DisposeConsumer(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
     }
 
     [Fact]
@@ -258,7 +258,7 @@ public sealed class PublicConsumerApiTests
         config["group.id"] = "clientid-invalid";
         config["group.instance.id"] = "bad/id";
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => DisposeConsumer(CreateRealConsumer(sync, config)));
+        InvalidConfigurationException ex = Assert.Throws<InvalidConfigurationException>(() => DisposeConsumer(CreateRealConsumer(sync, config)));
 
         Assert.Equal(InvalidGroupInstanceIdMessage, ex.Message);
         Assert.Equal(InvalidConfigCode, ex.Code);
@@ -278,7 +278,7 @@ public sealed class PublicConsumerApiTests
         KafkaException ex = Assert.Throws<KafkaException>(() => DisposeConsumer(CreateRealConsumer(sync, config)));
 
         Assert.Equal("Failed to construct kafka consumer", ex.Message);
-        KafkaException cause = Assert.IsType<KafkaException>(ex.InnerException);
+        InvalidConfigurationException cause = Assert.IsType<InvalidConfigurationException>(ex.InnerException);
         Assert.Equal(InvalidGroupInstanceIdMessage, cause.Message);
         Assert.Equal(InvalidConfigCode, cause.Code);
     }

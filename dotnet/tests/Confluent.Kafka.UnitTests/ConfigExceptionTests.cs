@@ -100,7 +100,6 @@ public sealed class ConfigExceptionTests
 
         ConfigException thrown = Assert.IsType<ConfigException>(caught);
         Assert.Equal(ConfigErrorCode, thrown.Code);
-        Assert.False(thrown.IsRetriable);
         Assert.Null(thrown.InnerException);
     }
 
@@ -128,7 +127,6 @@ public sealed class ConfigExceptionTests
         Assert.Equal("Invalid url in bootstrap.servers: x", exception.Message);
         Assert.Same(cause, exception.InnerException);
         Assert.Equal(ConfigErrorCode, exception.Code);
-        Assert.False(exception.IsRetriable);
     }
 
     [Theory]

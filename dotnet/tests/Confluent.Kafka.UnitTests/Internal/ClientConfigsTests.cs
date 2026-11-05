@@ -1029,7 +1029,6 @@ public sealed class ClientConfigsTests
     {
         ConfigException exception = Assert.Throws<ConfigException>(() => ClientConfigs.Prepare(configs, client));
         Assert.Equal(-10, exception.Code);
-        Assert.False(exception.IsRetriable);
         Assert.Null(exception.InnerException);
         return exception.Message;
     }

@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -75,9 +76,9 @@ public sealed class PublicProducerSendTfmSmokeTests
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
-        Assert.True(producer.ErrorNext(new KafkaException(2, "tfm-error", isRetriable: true)));
+        Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
-        await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
+        await Assert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
     }
 
     [Fact]

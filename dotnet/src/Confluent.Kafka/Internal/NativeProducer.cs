@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Internal;
@@ -54,6 +55,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         "Timeout expired after {0}ms while awaiting {1} from an async send() callback, whose own report it waits for";
 
     private const string CloseNegativeTimeoutMessage = "The timeout cannot be negative.";
+
+    private const string ClosedMessage = "Cannot perform operation after producer has been closed";
+
+    private const string MockClosedMessage = "MockProducer is already closed.";
 
     private const string CloseInCallbackMessage =
         "Overriding close timeout {0} ms to 0 ms in order to prevent useless blocking due to self-join. This means " +
@@ -486,7 +491,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         if (Volatile.Read(ref _closed) != 0)
         {
-            throw new ObjectDisposedException(nameof(NativeProducer));
+            throw new IllegalStateException(IsMock ? MockClosedMessage : ClosedMessage);
         }
     }
 
@@ -679,7 +684,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     {
         if (timeout < TimeSpan.Zero && !IsMock)
         {
-            throw new ArgumentOutOfRangeException(nameof(timeout), CloseNegativeTimeoutMessage);
+            throw new IllegalArgumentException(CloseNegativeTimeoutMessage);
         }
 
         return (long)timeout.TotalMilliseconds;
@@ -1023,7 +1028,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         if (Volatile.Read(ref _closed) != 0)
         {
             ExitUse();
-            throw new ObjectDisposedException(nameof(NativeProducer));
+            throw new IllegalStateException(IsMock ? MockClosedMessage : ClosedMessage);
         }
     }
 

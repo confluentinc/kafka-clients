@@ -26,6 +26,8 @@ using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
@@ -250,6 +252,6 @@ public sealed class AdminP3ResultMarshalTests
         }
     }
 
-    private static Task<KafkaException> Failure(Func<Task> call) =>
-        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(call), s_deadline);
+    private static Task<KafkaTimeoutException> Failure(Func<Task> call) =>
+        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
 }

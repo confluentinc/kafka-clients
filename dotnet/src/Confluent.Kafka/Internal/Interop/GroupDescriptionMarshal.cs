@@ -44,17 +44,17 @@ internal static class GroupDescriptionMarshal
         return listings;
     }
 
-    internal static IReadOnlyCollection<KafkaException> CopyOutErrors(IntPtr list)
+    internal static IReadOnlyCollection<Exception> CopyOutErrors(IntPtr list)
     {
         IntPtr outErr = IntPtr.Zero;
         int count = NativeMethods.ListSize(list, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        List<KafkaException> errors = new List<KafkaException>(count);
+        List<Exception> errors = new List<Exception>(count);
         for (int i = 0; i < count; i++)
         {
             IntPtr error = NativeMethods.ListGet(list, i, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            KafkaException? exception = KafkaException.FromBorrowedHandle(error);
+            Exception? exception = KafkaException.FromFfiError(error, owned: false);
             if (exception is not null)
             {
                 errors.Add(exception);

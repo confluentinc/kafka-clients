@@ -40,9 +40,9 @@ public sealed class PublicAdminListGroupsResultTests
     {
         (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
             KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors,
+            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
             IReadOnlyCollection<GroupListing> listings,
-            IReadOnlyCollection<KafkaException> failures) = PartialFailure();
+            IReadOnlyCollection<Exception> failures) = PartialFailure();
 
         ListGroupsResult result = ListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
@@ -56,9 +56,9 @@ public sealed class PublicAdminListGroupsResultTests
     {
         (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
             KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors,
+            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
             IReadOnlyCollection<GroupListing> listings,
-            IReadOnlyCollection<KafkaException> failures) = PartialFailure();
+            IReadOnlyCollection<Exception> failures) = PartialFailure();
 
         AsyncListGroupsResult result = AsyncListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
@@ -98,8 +98,8 @@ public sealed class PublicAdminListGroupsResultTests
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<GroupListing>>), all.ReturnType);
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<GroupListing>>), valid.ReturnType);
 
-        // Java's Collection<Throwable> is a collection of KafkaException here, the binding's one error type.
-        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<KafkaException>>), errors.ReturnType);
+        // Java's Collection<Throwable>.
+        Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<Exception>>), errors.ReturnType);
 
         // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the collection, 2 = its element.
         foreach (MethodInfo accessor in new[] { all, valid, errors })
@@ -134,15 +134,15 @@ public sealed class PublicAdminListGroupsResultTests
     private static (
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> Errors,
+        KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
         IReadOnlyCollection<GroupListing> Listings,
-        IReadOnlyCollection<KafkaException> Failures) PartialFailure()
+        IReadOnlyCollection<Exception> Failures) PartialFailure()
     {
         IReadOnlyCollection<GroupListing> listings = new[] { Listing("g1") };
-        IReadOnlyCollection<KafkaException> failures = new[] { Error("first"), Error("second"), Error("third") };
+        IReadOnlyCollection<Exception> failures = new[] { Error("first"), Error("second"), Error("third") };
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
         KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
-        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors = new KafkaFutureImpl<IReadOnlyCollection<KafkaException>>();
+        KafkaFutureImpl<IReadOnlyCollection<Exception>> errors = new KafkaFutureImpl<IReadOnlyCollection<Exception>>();
         all.CompleteWithError(failures.First());
         valid.Complete(listings);
         errors.Complete(failures);

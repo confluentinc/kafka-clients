@@ -27,6 +27,8 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 
 using Xunit;
 
@@ -135,7 +137,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             return new[] { started.Join(s_deadline) ? outcome! : "never ended" };
         });
 
-        Assert.Equal(new[] { "throws InvalidOperationException: " + Concurrent }, outcomes);
+        Assert.Equal(new[] { "throws ConcurrentModificationException: " + Concurrent }, outcomes);
     }
 
     [Theory]
@@ -212,9 +214,9 @@ public sealed class PublicConsumerCallbackRoutingTests
         await TestTimeout.Run(() => rebalance, s_deadline);
         await TestTimeout.Run(() => disposing, s_deadline);
         Assert.Equal(
-            new[] { "ok", "ok [" + Topic + "-0]", "throws InvalidOperationException: " + Concurrent },
+            new[] { "ok", "ok [" + Topic + "-0]", "throws ConcurrentModificationException: " + Concurrent },
             outcomes);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -252,9 +254,9 @@ public sealed class PublicConsumerCallbackRoutingTests
         await TestTimeout.Run(() => disposing, s_deadline);
         _ = await Record.ExceptionAsync(() => TestTimeout.Run(() => rebalance, s_deadline));
         Assert.Equal(
-            new[] { "ok", "ok [" + Topic + "-0]", "throws InvalidOperationException: " + Concurrent },
+            new[] { "ok", "ok [" + Topic + "-0]", "throws ConcurrentModificationException: " + Concurrent },
             outcomes);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -352,7 +354,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.True(elapsed.Elapsed < s_wellInsideThePoll, "Dispose took " + elapsed.Elapsed);
             Assert.Equal(Enumerable.Repeat("throws KafkaException -18: ", routedCalls), outcomes);
             Assert.Equal("throws KafkaException -18: ", polled);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -408,7 +410,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.True(elapsed.Elapsed < s_wellInsideThePoll, "DisposeAsync took " + elapsed.Elapsed);
             Assert.Equal(Enumerable.Repeat("faults KafkaException -18: ", routedCalls), outcomes);
             Assert.Equal("KafkaException -18: ", polled is null ? "ok" : Describe(polled));
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -569,10 +571,10 @@ public sealed class PublicConsumerCallbackRoutingTests
         IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => ProbeTimed(consumer));
 
         Assert.True(elapsed.Elapsed < s_wait, "the timed calls took " + elapsed.Elapsed);
-        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
+        string unsupported = fails + "UnsupportedOperationException: " + MockHandleUnsupported;
         string timedOut = fails + TimedOut;
-        string timerNegative = "throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1000";
-        string coreNegative = "throws ArgumentOutOfRangeException(timeout): Timeout must not be negative";
+        string timerNegative = "throws IllegalArgumentException: Invalid negative timeout -1000";
+        string coreNegative = "throws IllegalArgumentException: Timeout must not be negative";
         AssertOutcomes(
             new[]
             {
@@ -602,7 +604,7 @@ public sealed class PublicConsumerCallbackRoutingTests
 
         IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => ProbeMetadata(consumer));
 
-        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
+        string unsupported = fails + "UnsupportedOperationException: " + MockHandleUnsupported;
         string timedOut = fails + TimedOut;
         AssertOutcomes(
             new[]
@@ -646,7 +648,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     {
         IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => new[] { Refusable(consumer, call) });
 
-        string refused = "InvalidOperationException: " + Concurrent;
+        string refused = "ConcurrentModificationException: " + Concurrent;
         Assert.Single(outcomes);
         Assert.EndsWith(refused, outcomes[0], StringComparison.Ordinal);
         Assert.True(
@@ -814,8 +816,8 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static List<string> Expected(bool mock, bool async)
     {
         string fails = async ? "faults " : "throws ";
-        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
-        string refused = "throws InvalidOperationException: " + Concurrent;
+        string unsupported = fails + "UnsupportedOperationException: " + MockHandleUnsupported;
+        string refused = "throws ConcurrentModificationException: " + Concurrent;
         List<string> expected = new List<string>
         {
             "Commit(): ok",
@@ -838,13 +840,13 @@ public sealed class PublicConsumerCallbackRoutingTests
             "SeekToBeginning: " + (mock ? unsupported : "ok"),
             "SeekToEnd: " + (mock ? unsupported : "ok"),
             "Poll: " + refused,
-            "Poll(negative): throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1",
+            "Poll(negative): throws IllegalArgumentException: Invalid negative timeout -1",
             "Subscribe: " + refused,
             "Subscribe(listener): " + refused,
             "Unsubscribe: " + refused,
             "Assign: " + refused,
             "Commit(timeout): ok",
-            "Commit(negative timeout): throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1",
+            "Commit(negative timeout): throws IllegalArgumentException: Invalid negative timeout -1",
             "Commit(offsets, timeout): ok",
             "Committed(timeout): " + (mock ? unsupported : fails + TimedOut + ShortCommittedTimeout),
             "BeginningOffsets(timeout): " + (mock ? unsupported : fails + TimedOut + ShortOffsetsTimeout),
@@ -1327,11 +1329,11 @@ public sealed class PublicConsumerCallbackRoutingTests
             {
                 consumer.Assignment();
             }
-            catch (ObjectDisposedException)
+            catch (IllegalStateException)
             {
                 return;
             }
-            catch (InvalidOperationException)
+            catch (ConcurrentModificationException)
             {
             }
 

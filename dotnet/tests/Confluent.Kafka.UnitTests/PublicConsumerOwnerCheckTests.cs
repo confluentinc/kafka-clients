@@ -18,8 +18,11 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Java.Lang;
+using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -65,7 +68,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
             Exception? delivering = Record.Exception(() => TestTimeout.Run(() => consumer.Commit(Empty()), s_deadline));
 
-            Assert.True(delivering is null || delivering is KafkaException { Code: WakeupCode }, delivering?.ToString());
+            Assert.True(delivering is null || delivering is WakeupException { Code: WakeupCode }, delivering?.ToString());
             AssertRefused(seen["Commit"]);
             AssertRefused(seen["Assignment"]);
             AssertRefused(seen["Metrics"]);
@@ -106,7 +109,7 @@ public sealed class PublicConsumerOwnerCheckTests
             Exception? delivering = await Record.ExceptionAsync(
                 () => TestTimeout.Run(() => consumer.Commit(Empty()), s_deadline));
 
-            Assert.True(delivering is null || delivering is KafkaException { Code: WakeupCode }, delivering?.ToString());
+            Assert.True(delivering is null || delivering is WakeupException { Code: WakeupCode }, delivering?.ToString());
             AssertRefused(seen["Seek"]);
             AssertRefused(seen["Assignment"]);
             AssertRefused(seen["Metrics"]);
@@ -134,11 +137,11 @@ public sealed class PublicConsumerOwnerCheckTests
             Exception? assignment = Record.Exception(() => consumer.Assignment());
             consumer.Wakeup();
 
-            KafkaException woken = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => poll, s_deadline));
+            WakeupException woken = await Assert.ThrowsAsync<WakeupException>(() => TestTimeout.Run(() => poll, s_deadline));
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Null(metrics);
             Assert.True(
-                assignment is null || assignment is InvalidOperationException { Message: ConcurrentMessage },
+                assignment is null || assignment is ConcurrentModificationException { Message: ConcurrentMessage },
                 assignment?.ToString());
             Assert.Equal(new[] { s_tp0 }, consumer.Assignment());
         }
@@ -210,7 +213,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
             AssertRefused(seen["Assignment"]);
             AssertRefused(seen["Close"]);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
             Assert.True(disposer!.Join(s_deadline), "the other thread's Dispose never returned");
             Assert.Null(disposing);
         }
@@ -251,7 +254,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
             AssertRefused(seen["Assignment"]);
             AssertRefused(await Record.ExceptionAsync(() => TestTimeout.Run(() => close!, s_deadline)));
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
             Assert.True(disposer!.Join(s_deadline), "the other thread's Dispose never returned");
             Assert.Null(disposing);
         }
@@ -300,7 +303,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
     private static void AssertRefused(Exception? thrown)
     {
-        InvalidOperationException refused = Assert.IsType<InvalidOperationException>(thrown);
+        ConcurrentModificationException refused = Assert.IsType<ConcurrentModificationException>(thrown);
         Assert.Equal(ConcurrentMessage, refused.Message);
     }
 
@@ -312,7 +315,7 @@ public sealed class PublicConsumerOwnerCheckTests
         other.Start();
         if (!other.Join(s_deadline))
         {
-            throw new TimeoutException("the other thread's calls did not return");
+            throw new System.TimeoutException("the other thread's calls did not return");
         }
 
         if (failure is not null)

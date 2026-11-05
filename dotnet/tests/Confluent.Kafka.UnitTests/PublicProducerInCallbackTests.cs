@@ -21,11 +21,14 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -80,7 +83,7 @@ public sealed class PublicProducerInCallbackTests
         KafkaException error = Assert.IsType<KafkaException>(refused);
         Assert.Equal(FlushMessage, error.Message);
         Assert.Equal(-1, error.Code);
-        Assert.False(error.IsRetriable);
+        Assert.False(error is Common.Errors.RetriableException);
         // Java's KafkaException(String): no cause.
         Assert.Null(error.InnerException);
         Assert.Equal(flavor == AsyncFlavor, faultedInCall);
@@ -119,9 +122,9 @@ public sealed class PublicProducerInCallbackTests
             },
             maxBlockMs: maxBlockMs);
 
-        KafkaException error = Assert.IsType<KafkaException>(timedOut);
+        KafkaTimeoutException error = Assert.IsType<KafkaTimeoutException>(timedOut);
         Assert.Equal(7, error.Code);
-        Assert.True(error.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(error);
         Assert.Equal(
             $"Timeout expired after {MaxBlockMs}ms while awaiting the metadata of topic {topic} from a send() " +
             "callback, which blocks the producer's completion thread",
@@ -216,7 +219,7 @@ public sealed class PublicProducerInCallbackTests
         (int _, string? destroyThread) = Assert.Single(destroys.Destroys());
         Assert.Equal(flavor == SyncFlavor ? NativeProducer.CompletionThreadName : NativeProducer.PumpThreadName, destroyThread);
         Assert.Equal(0, destroysBeforeTheCallbackReturned);
-        Assert.Throws<ObjectDisposedException>(() => SendAfterClose(producerSeen!));
+        Assert.Throws<IllegalStateException>(() => SendAfterClose(producerSeen!));
     }
 
     private static IReadOnlyList<PartitionInfo> WaitFor(Task<IReadOnlyList<PartitionInfo>> partitions) =>
