@@ -13,25 +13,44 @@ set(RUST_INCLUDE_DIR "${RUST_PROJECT_ROOT}/target/include")
 # Link type: "static" or "shared"
 set(LINK_TYPE "static" CACHE STRING "Link type: static or shared")
 
+# Directory of the Rust library: the repository root's Makefile passes
+# target/release-cdylib (the library `make -C rust build-cdylib` builds, as it
+# ships), c/Makefile's `devel-build` target/debug; a configure that does not
+# pass it keeps the cached one. When it is empty, the first of
+# target/release-cdylib, target/release and target/debug that holds the
+# library is used.
+set(RUST_LIB_DIR "" CACHE PATH "Directory of libconfluent_kafka")
+if(RUST_LIB_DIR)
+    set(RUST_LIB_PATHS "${RUST_LIB_DIR}")
+else()
+    set(RUST_LIB_PATHS
+        "${RUST_PROJECT_ROOT}/target/release-cdylib"
+        "${RUST_PROJECT_ROOT}/target/release"
+        "${RUST_PROJECT_ROOT}/target/debug")
+endif()
+# Searched again on every configure, so a changed RUST_LIB_DIR takes effect in
+# an existing build directory.
+unset(CONFLUENT_KAFKA_RUST CACHE)
+
 if(LINK_TYPE STREQUAL "shared")
     find_library(CONFLUENT_KAFKA_RUST
         NAMES confluent_kafka
-        PATHS "${RUST_PROJECT_ROOT}/target/release" "${RUST_PROJECT_ROOT}/target/debug"
+        PATHS ${RUST_LIB_PATHS}
         NO_DEFAULT_PATH
     )
 else()
     # For static linking, look for the .a file explicitly
     find_library(CONFLUENT_KAFKA_RUST
         NAMES libconfluent_kafka.a confluent_kafka
-        PATHS "${RUST_PROJECT_ROOT}/target/release" "${RUST_PROJECT_ROOT}/target/debug"
+        PATHS ${RUST_LIB_PATHS}
         NO_DEFAULT_PATH
     )
 endif()
 
 if(NOT CONFLUENT_KAFKA_RUST)
     message(FATAL_ERROR
-        "Could not find libconfluent_kafka. "
-        "Run 'cargo build --features ffi' from the Rust project root first.")
+        "Could not find libconfluent_kafka in ${RUST_LIB_PATHS}. "
+        "Run 'make -C rust build-cdylib' from the repository root first.")
 endif()
 
 message(STATUS "Using Rust library: ${CONFLUENT_KAFKA_RUST}")
@@ -40,11 +59,17 @@ message(STATUS "Using Rust headers: ${RUST_INCLUDE_DIR}")
 # Unity test framework
 add_subdirectory(tests/unity)
 
-# System libraries for static linking
+# System libraries for static linking. On macOS the platform certificate
+# verifier (the `platform-verifier` feature of the library `build-cdylib`
+# builds) calls the Security and CoreFoundation frameworks, which the shared
+# library links itself but a static archive leaves to its user.
 if(LINK_TYPE STREQUAL "shared")
     set(SYSTEM_LIBS "")
 else()
     set(SYSTEM_LIBS pthread dl m)
+    if(APPLE)
+        list(APPEND SYSTEM_LIBS "-framework Security" "-framework CoreFoundation")
+    endif()
 endif()
 
 # Enable CTest

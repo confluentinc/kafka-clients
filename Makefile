@@ -6,6 +6,9 @@
 REPO_ROOT = $(CURDIR)
 RUST_PROJECT_ROOT = $(REPO_ROOT)/rust
 ROOTS = REPO_ROOT=$(REPO_ROOT) RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT)
+# The library the C binding links outside its `devel-*` targets: the one
+# `build-rust-cdylib` builds (c/Makefile otherwise keeps the build directory's).
+C_RELEASE_LIB = RUST_LIB_DIR=$(RUST_PROJECT_ROOT)/target/release-cdylib
 # `$(MAKE)` is spelled out in every delegating recipe line rather than hidden
 # in a variable: GNU make only treats a line as a recursive make -- passing
 # down the -j jobserver, -n, -k -- when `$(MAKE)` appears in it literally.
@@ -13,7 +16,7 @@ ROOTS = REPO_ROOT=$(REPO_ROOT) RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT)
 VENV = . venv/bin/activate
 
 .PHONY: build build-all check-generated \
-	build-rust build-rust-integration-tests build-rust-all-features \
+	build-rust build-rust-integration-tests build-rust-all-features build-rust-cdylib \
 	submodules build-c init-venv init-venv-librdkafka build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
@@ -42,7 +45,10 @@ VENV = . venv/bin/activate
 
 build: init-hooks build-all
 
-build-all: build-rust-all-features build-c build-python
+# The bindings and the library they link (`build-rust-cdylib`). The release
+# build with every feature is left to `test-rust-all-features`, which builds it
+# first, so `make build` runs one release build with fat LTO, not two.
+build-all: build-c build-python
 
 build-rust:
 	$(MAKE) -C rust build
@@ -50,12 +56,18 @@ build-rust-integration-tests:
 	$(MAKE) -C rust build-integration-tests
 build-rust-all-features:
 	$(MAKE) -C rust build-all-features
+# The library the bindings link, as it ships in the C library and the Python
+# wheel, in rust/target/release-cdylib/ (see rust/Makefile's `build-cdylib`).
+# Every target that builds a binding, its gRPC image or its native gRPC server,
+# or tests one, depends on it.
+build-rust-cdylib:
+	$(MAKE) -C rust build-cdylib
 
 submodules:
 	git submodule update --init --recursive
 
-build-c: submodules build-rust-all-features
-	$(MAKE) -C c $(ROOTS) build
+build-c: submodules build-rust-cdylib
+	$(MAKE) -C c $(ROOTS) $(C_RELEASE_LIB) build
 
 # The second line is a one-time migration: master's `[dev]` extras once
 # installed the PyPI confluent-kafka (librdkafka) into venv/, and it shares the
@@ -81,8 +93,8 @@ init-venv-librdkafka:
 	[ -d $(LIBRDKAFKA_VENV) ] || python3 -m venv $(LIBRDKAFKA_VENV)
 	$(LIBRDKAFKA_PYTHON) -m pip install -q -r python/test/performance/requirements-librdkafka.txt
 
-build-python: init-venv build-rust-all-features
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
+build-python: init-venv build-rust-cdylib
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release-cdylib build)
 
 devel-build: devel-build-rust devel-build-c devel-build-python
 
@@ -103,7 +115,7 @@ devel-build-python: init-venv devel-build-rust
 # multilanguage integration test harness. See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
 # Depends on `build` so libconfluent_kafka.{a,so} are present under
-# rust/target/release/, and confluent_kafka.h (the C image) and
+# rust/target/release-cdylib/, and confluent_kafka.h (the C image) and
 # confluent_kafka_bindings.h (the Python images) under rust/target/include/.
 build-grpc-images: build
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
@@ -112,12 +124,12 @@ build-grpc-images: build
 
 # Just the two Python gRPC images (sync + asyncio). The Python image installs
 # the built binding, hence `build-python`.
-build-grpc-images-python: build-rust-all-features build-python
+build-grpc-images-python: build-rust-cdylib build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-image grpc-image-async)
 
 # Just the C gRPC image. Needs only the Rust release artifacts (see
 # c/Makefile's `grpc-image`), not the host-side `build-c`.
-build-grpc-images-c: build-rust-all-features
+build-grpc-images-c: build-rust-cdylib
 	$(MAKE) -C c $(ROOTS) grpc-image
 
 # The two .NET gRPC images (sync + async), for the .NET-only multilanguage run
@@ -175,10 +187,10 @@ test-rust-all-features-sasl-ssl:
 # binding's `test-integration` builds its gRPC image(s) and runs the matching
 # `__grpc_*` tests of the Rust harness; the prerequisites here build the
 # artifacts those images copy.
-test-integration-python: build-rust-all-features build-python
+test-integration-python: build-rust-cdylib build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) test-integration)
 
-test-integration-c: build-rust-all-features
+test-integration-c: build-rust-cdylib
 	$(MAKE) -C c $(ROOTS) test-integration
 
 # .NET's container arm, like python's and c's: dotnet/'s `test-integration` builds
@@ -230,8 +242,8 @@ test-integration-dotnet-sasl-ssl:
 build-grpc-native-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 
-build-grpc-native-c: build-rust-all-features
-	$(MAKE) -C c $(ROOTS) grpc-native
+build-grpc-native-c: build-rust-cdylib
+	$(MAKE) -C c $(ROOTS) $(C_RELEASE_LIB) grpc-native
 
 # Builds the .NET gRPC server's net10.0 leg against the host's release
 # libconfluent_kafka (dotnet/'s grpc-native target). Requires the .NET 10
@@ -260,7 +272,7 @@ test-integration-perf-rust:
 	$(MAKE) -C rust test-integration-perf
 
 test-integration-perf-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-performance)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release-cdylib test-performance)
 
 # Rust, Python and .NET performance suites, one after the other. Recipe lines
 # rather than prerequisites so the order holds under `make -j`, and so the
@@ -277,7 +289,7 @@ producer-perf-test:
 	$(MAKE) -C rust producer-perf-test
 
 producer-perf-test-c: build-c
-	$(MAKE) -C c $(ROOTS) producer-perf-test
+	$(MAKE) -C c $(ROOTS) $(C_RELEASE_LIB) producer-perf-test
 
 # The Python benchmarks also need the librdkafka venv: CLIENT_VERSION=2 runs the
 # librdkafka baseline in it, and the Rust run uses it for its librdkafka-backed
@@ -315,15 +327,15 @@ test-integration-perf-dotnet:
 
 # c/'s `test` runs ctest and then the C-backend multilanguage arm.
 test-c: build-c
-	$(MAKE) -C c $(ROOTS) test
+	$(MAKE) -C c $(ROOTS) $(C_RELEASE_LIB) test
 
 # macOS variant of test-c: C unit tests (ctest) only. On macOS the gRPC
 # multilanguage arm runs natively instead (see verify-c-macos-docker).
 test-c-macos-docker: build-c
-	$(MAKE) -C c $(ROOTS) test-unit
+	$(MAKE) -C c $(ROOTS) $(C_RELEASE_LIB) test-unit
 
 test-python: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release-cdylib test)
 
 # Delegates to dotnet/'s own `test-dotnet` (native cargo build -> dotnet
 # build matrix -> dotnet format -> the solution's unit and integration tests on
@@ -361,7 +373,7 @@ package-check-dotnet:
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
 test-python-macos-docker: build-python
-	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-unit)
+	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release-cdylib test-unit)
 
 verify: build format-check check-generated lint test check-bindings
 

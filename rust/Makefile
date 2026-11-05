@@ -19,7 +19,7 @@ endif
 # macOS perf p99 budget (ms), used by test-integration-perf-macos.
 MACOS_P99_LIMIT_MS ?= 150
 
-.PHONY: build build-integration-tests build-all-features \
+.PHONY: build build-integration-tests build-all-features build-cdylib \
 	devel-build devel-build-integration-tests devel-build-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
@@ -34,6 +34,18 @@ build-integration-tests:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests --release
 build-all-features:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features --release
+
+# The library the C binding and the Python wheel link: the C API with every
+# codec, TLS and SCRAM, the platform verifier as the default trust store and
+# no `webpki-roots`, so the Mozilla bundle is not compiled in. It has its own
+# cargo profile, `release-cdylib` (the release optimizations), so it lands in
+# target/release-cdylib/ and no release build with another feature set
+# replaces it. The root Makefile builds the bindings, their gRPC images and
+# their tests against it, .semaphore/build-ffi-library.sh the wheel's library
+# and python/soak/build.sh the soak client's.
+CDYLIB_FEATURES = ffi,gzip,snappy,lz4,zstd,aws-lc-rs,rustls,platform-verifier
+build-cdylib:
+	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --profile release-cdylib --no-default-features --features $(CDYLIB_FEATURES)
 
 devel-build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
