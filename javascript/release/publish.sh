@@ -84,8 +84,12 @@ case "$version" in
     *) die "$version is not a pre-release. Publishing a stable version moves npm's latest dist-tag away from the earlier client (1.x); README.txt says what has to be agreed first" ;;
 esac
 
+# For a scoped package npm uses an `@confluentinc:registry` setting before `registry`, so a
+# ~/.npmrc that maps the scope elsewhere would take every lookup and upload there: pin both.
+REGISTRY_FLAGS=(--registry "$REGISTRY" "--@confluentinc:registry=$REGISTRY")
+
 echo "== Checking the npm login =="
-user=$(npm whoami --registry "$REGISTRY") || die "npm is not logged in to $REGISTRY; run \`npm login\`"
+user=$(npm whoami "${REGISTRY_FLAGS[@]}") || die "npm is not logged in to $REGISTRY; run \`npm login\`"
 echo "Logged in to $REGISTRY as $user"
 
 # The sha512 integrity npm computes for a tarball.
@@ -100,7 +104,7 @@ published_integrity() {
     local out err status
     err=$(mktemp)
     status=0
-    out=$(npm view "$1@$version" dist.integrity --registry "$REGISTRY" 2>"$err") || status=$?
+    out=$(npm view "$1@$version" dist.integrity "${REGISTRY_FLAGS[@]}" 2>"$err") || status=$?
     if [ "$status" -ne 0 ]; then
         if grep -q E404 "$err"; then
             rm -f "$err"
@@ -133,7 +137,7 @@ if [ "${#pending[@]}" -eq 0 ]; then
 else
     echo "== Dry run =="
     for i in "${pending[@]}"; do
-        npm publish "${tarballs[$i]}" --dry-run --access public --tag "$DIST_TAG" --registry "$REGISTRY" \
+        npm publish "${tarballs[$i]}" --dry-run --access public --tag "$DIST_TAG" "${REGISTRY_FLAGS[@]}" \
             || die "the dry run of ${tarballs[$i]} failed"
     done
 
@@ -144,11 +148,26 @@ else
             read -r -p "One-time password for ${names[$i]}@$version: " otp < /dev/tty \
                 || die "cannot read a one-time password: run ./publish.sh in a terminal"
         done
-        npm publish "${tarballs[$i]}" --access public --tag "$DIST_TAG" --otp "$otp" --registry "$REGISTRY" \
+        npm publish "${tarballs[$i]}" --access public --tag "$DIST_TAG" --otp "$otp" "${REGISTRY_FLAGS[@]}" \
             || die "npm publish of ${tarballs[$i]} failed; rerun ./publish.sh, which skips what is already published"
         echo "Published ${names[$i]}@$version"
     done
 fi
+
+echo "== Reading the registry back =="
+# The registry can take a little while to serve a new version, so each package gets a few tries.
+for i in "${!tarballs[@]}"; do
+    local_integrity=$(integrity_of "${tarballs[$i]}")
+    remote=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        remote=$(published_integrity "${names[$i]}") || remote=""
+        [ "$remote" = "$local_integrity" ] && break
+        sleep 6
+    done
+    [ "$remote" = "$local_integrity" ] \
+        || die "$REGISTRY serves ${names[$i]}@$version with the integrity '${remote:-none}', not $local_integrity, the tarball's"
+    echo "${names[$i]}@$version: $REGISTRY serves this tarball ($local_integrity)"
+done
 
 echo "== Summary =="
 for i in "${!tarballs[@]}"; do

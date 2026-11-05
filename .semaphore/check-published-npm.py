@@ -88,13 +88,29 @@ def packument(name):
         return None
     document = json.loads(body)
     if not isinstance(document.get("versions"), dict):
-        raise ValueError(f"the registry's document of {name} has no versions")
+        # A package whose every version was unpublished has no `versions`, only
+        # `time.unpublished`.
+        if not isinstance(document.get("time", {}).get("unpublished"), dict):
+            raise ValueError(f"the registry's document of {name} has no versions")
+        document["versions"] = {}
     return document
 
 
 def versions(name):
+    """Every version of `name` the registry has ever accepted. npm never takes a
+    version again once it was published, even after it is unpublished: an
+    unpublished version leaves `versions` but stays in `time` (or, when the
+    whole package was unpublished, in `time.unpublished.versions`)."""
     document = packument(name)
-    return [] if document is None else list(document["versions"])
+    if document is None:
+        return []
+    seen = list(document["versions"])
+    times = document.get("time", {})
+    seen += [v for v in times if v not in ("created", "modified", "unpublished") and v not in seen]
+    unpublished = times.get("unpublished", {})
+    if isinstance(unpublished, dict):
+        seen += [v for v in unpublished.get("versions", []) if v not in seen]
+    return seen
 
 
 def check(version):
@@ -118,8 +134,11 @@ def check(version):
             dist = manifest.get("dist", {})
             integrity = dist.get("integrity", "")
             tarball_url = dist.get("tarball", "")
+            # The local name check-npm.py expects is npm pack's, `confluentinc-<name>-<v>.tgz`; the
+            # registry stores a scoped package's tarball as `<name>/-/<name without scope>-<v>.tgz`.
             file = f"{name[1:].replace('/', '-')}-{version}.tgz"
-            if not integrity.startswith("sha512-") or not tarball_url.endswith(f"/{file}"):
+            served = f"/{name}/-/{name.split('/', 1)[1]}-{version}.tgz"
+            if not integrity.startswith("sha512-") or not tarball_url.endswith(served):
                 problems.append(f"{name} {version} has the tarball {tarball_url!r} with the integrity {integrity!r}")
                 continue
             data = fetch(tarball_url)

@@ -57,10 +57,17 @@ no machine of it holds an npm token: publishing is these steps, by hand.
 
    What publish.sh runs, if you prefer to type the commands yourself:
 
-     npm publish confluentinc-kafka-javascript-linux-x64-gnu-<version>.tgz --access public --tag preview --otp=<code>
-     npm publish confluentinc-kafka-javascript-linux-arm64-gnu-<version>.tgz --access public --tag preview --otp=<code>
-     npm publish confluentinc-kafka-javascript-darwin-arm64-<version>.tgz --access public --tag preview --otp=<code>
-     npm publish confluentinc-kafka-javascript-<version>.tgz --access public --tag preview --otp=<code>
+     npm publish confluentinc-kafka-javascript-linux-x64-gnu-<version>.tgz --access public --tag preview \
+         --registry https://registry.npmjs.org/ --@confluentinc:registry=https://registry.npmjs.org/ --otp=<code>
+     npm publish confluentinc-kafka-javascript-linux-arm64-gnu-<version>.tgz --access public --tag preview \
+         --registry https://registry.npmjs.org/ --@confluentinc:registry=https://registry.npmjs.org/ --otp=<code>
+     npm publish confluentinc-kafka-javascript-darwin-arm64-<version>.tgz --access public --tag preview \
+         --registry https://registry.npmjs.org/ --@confluentinc:registry=https://registry.npmjs.org/ --otp=<code>
+     npm publish confluentinc-kafka-javascript-<version>.tgz --access public --tag preview \
+         --registry https://registry.npmjs.org/ --@confluentinc:registry=https://registry.npmjs.org/ --otp=<code>
+
+   The two registry options matter if your ~/.npmrc maps @confluentinc to
+   another registry: npm would otherwise publish there.
 
 4. Run the post-install task
 
@@ -71,8 +78,9 @@ no machine of it holds an npm token: publishing is these steps, by hand.
    <version> under preview, that their tarballs match the integrity the
    registry states, and that they pass the package checks. The task runs
    from master, not from the tag build, so it cannot compare the registry
-   with the recorded bundle: that comparison is the SHA-256 publish.sh
-   prints at the end against the record job's log. A quick check by hand:
+   with the recorded bundle; publish.sh does that before it finishes: it
+   reads each package back from npmjs.com and checks that the registry
+   serves exactly the tarball of this bundle. A quick check by hand:
 
      npm view @confluentinc/kafka-javascript dist-tags
      npm install @confluentinc/kafka-javascript@preview
