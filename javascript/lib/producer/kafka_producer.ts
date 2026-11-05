@@ -27,6 +27,9 @@ import type { RecordMetadata } from './record_metadata';
  * A producer's configuration: Java's ProducerConfig keys, as a plain object
  * or a `Map`. Values are stringified (`true` -> `"true"`, numbers and bigints
  * by `String`, arrays joined with `,`); `null` / `undefined` drop the key.
+ *
+ * @jsOnly The type of the configuration the constructor takes, Java's
+ *   `Map<String, Object>` or `Properties`.
  */
 export type ProducerConfigs =
   | Record<string, string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined>
@@ -34,6 +37,9 @@ export type ProducerConfigs =
 
 /**
  * Options of {@link KafkaProducer.close}.
+ *
+ * @jsOnly The options object of one Java overload set, `close()` and
+ *   `close(Duration)` (javascript/CLAUDE.md "Java shape, JS idiom").
  */
 export type CloseOptions = {
   /**
