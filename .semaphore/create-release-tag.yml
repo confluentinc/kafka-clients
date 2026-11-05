@@ -17,11 +17,16 @@ name: create-release-tag
 #     (.NET):" builds and tests the ${NUGET_PACKAGE} package and records it in
 #     the tag build's artifacts, from which it is uploaded to nuget.org by
 #     hand.
+#   - JAVASCRIPT_VERSION: the tag is javascript/v<JAVASCRIPT_VERSION>, and
+#     "Release (JavaScript):" builds and tests the ${NPM_PACKAGE} packages and
+#     records them in the tag build's artifacts as a release bundle, whose
+#     publish.sh publishes them to npmjs.com by hand.
 #   - A dev version (0.2.0-dev.1 for rust, 4.4.0a1.dev1 for python,
-#     4.4.0-dev.1 for dotnet) is tagged like any other. A rust dev version is
-#     tested and packaged, never published; a python dev version is released
-#     like any other, through the two manual promotions, and a dotnet dev
-#     version like any other dotnet version.
+#     4.4.0-dev.1 for dotnet and javascript) is tagged like any other. A rust
+#     dev version is tested and packaged, never published; a python dev
+#     version is released like any other, through the two manual promotions,
+#     and a dotnet or javascript dev version like any other version of its
+#     client.
 # A client whose version is left empty is not released; at least one version
 # must be entered. The tags are created only if all of the following hold, for
 # every client entered:
@@ -33,19 +38,22 @@ name: create-release-tag
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -rc.N
 #     or -dev.N), [project] version in python/pyproject.toml
 #     (<major>.<minor>.<patch>, optionally followed by aN, bN or rcN, then
-#     optionally by .devN), or <Version> in dotnet/Directory.Build.props
+#     optionally by .devN), <Version> in dotnet/Directory.Build.props
 #     (<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N,
-#     -dev.N or -rc.N);
+#     -dev.N or -rc.N), or "version" in javascript/package.json (the same
+#     form, 4.0.0 or higher);
 #   - on a release branch <major>.<minor>.x, only rust is entered, and its
 #     version is of that <major>.<minor>, the only one its publish block
-#     accepts from the branch; the python and dotnet release blocks accept
-#     only a commit of master;
+#     accepts from the branch; the python, dotnet and javascript release blocks
+#     accept only a commit of master;
 #   - the tag does not yet exist, and the version is new: for rust, unless it
 #     is a dev version, higher than every version on crates.io; for python, not
-#     yet on Test PyPI or PyPI; for dotnet, not yet on nuget.org;
+#     yet on Test PyPI or PyPI; for dotnet, not yet on nuget.org; for
+#     javascript, not yet on npmjs.com for the main package or any of its
+#     three platform packages;
 #   - every job in REQUIRED_CI_JOBS passed on this commit.
 # If any check fails, no tag is created, so releasing two clients is all or
-# nothing. The publish blocks repeat the tag, version and registry checks on
+# nothing (see the push below for the one exception, a failing push). The publish blocks repeat the tag, version and registry checks on
 # each tag build, and run only after every CI block of that build has passed,
 # so they also apply to a tag pushed by other means. The checks here avoid
 # creating a tag that could never be published.
@@ -61,6 +69,8 @@ global_job_config:
       value: confluent-kafka
     - name: NUGET_PACKAGE
       value: Confluent.Kafka
+    - name: NPM_PACKAGE
+      value: "@confluentinc/kafka-javascript"
     # The jobs of semaphore.yml that must pass before a commit is tagged, by
     # their exact names, separated by ';'. The list must stay in sync with
     # semaphore.yml: a job that reports a result but is not listed, or is
@@ -82,7 +92,7 @@ blocks:
             - checkout
             # refuse: fails the job with a message stating why no tag was
             # created. use_client <client>: sets the variables that the checks
-            # below read for that client (rust, python or dotnet).
+            # below read for that client (rust, python, dotnet or javascript).
             #
             # The version patterns are those of the `run` conditions of each
             # client's release blocks in semaphore.yml, without the tag prefix.
@@ -121,10 +131,19 @@ blocks:
                     manifest=dotnet/Directory.Build.props
                     manifest_key=Version
                     ;;
+                  javascript)
+                    version_param=JAVASCRIPT_VERSION
+                    version=${JAVASCRIPT_VERSION:-}
+                    version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$'
+                    version_form='<major>.<minor>.<patch>, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N'
+                    dev_pattern='-dev\.[0-9]+$'
+                    manifest=javascript/package.json
+                    manifest_key=version
+                    ;;
                 esac
                 tag="${client}/v${version}"
-                # A rust dev version is never published; a python or a dotnet
-                # one is released like any other version.
+                # A rust dev version is never published; a python, a dotnet or
+                # a javascript one is released like any other version.
                 dev=""
                 [[ "${version}" =~ ${dev_pattern} ]] && dev=yes
                 return 0
@@ -148,14 +167,17 @@ blocks:
             # version must be valid and equal the client's version at this
             # commit. /usr/bin/python3 is the image's system Python (3.12 on
             # Ubuntu 24.04), which provides tomllib. The .NET version is read
-            # by check-nupkg.py, as the release blocks read it.
+            # by check-nupkg.py and the JavaScript version by check-npm.py
+            # (which also requires 4.0.0 or higher and the same version in
+            # javascript/package-lock.json), as the release blocks read them.
             - |
               clients=()
               [ -z "${RUST_VERSION:-}" ] || clients+=(rust)
               [ -z "${PYTHON_VERSION:-}" ] || clients+=(python)
               [ -z "${DOTNET_VERSION:-}" ] || clients+=(dotnet)
+              [ -z "${JAVASCRIPT_VERSION:-}" ] || clients+=(javascript)
               if [ "${#clients[@]}" -eq 0 ]; then
-                refuse "RUST_VERSION, PYTHON_VERSION and DOTNET_VERSION are all empty; enter the version of each client to release"
+                refuse "RUST_VERSION, PYTHON_VERSION, DOTNET_VERSION and JAVASCRIPT_VERSION are all empty; enter the version of each client to release"
               fi
               head_sha=$(git rev-parse HEAD) || refuse "could not resolve HEAD"
               for client in "${clients[@]}"; do
@@ -166,6 +188,9 @@ blocks:
                 if [ "${client}" = dotnet ]; then
                   manifest_version=$(/usr/bin/python3 .semaphore/check-nupkg.py version) \
                     || refuse "could not read <Version> from ${manifest}"
+                elif [ "${client}" = javascript ]; then
+                  manifest_version=$(/usr/bin/python3 .semaphore/check-npm.py version) \
+                    || refuse "could not read \"version\" from ${manifest}"
                 else
                   manifest_version=$(/usr/bin/python3 -c 'import sys, tomllib; v = tomllib.load(open(sys.argv[1], "rb"))[sys.argv[2]].get("version"); print(v) if isinstance(v, str) else sys.exit(f"[{sys.argv[2]}] version must be a literal string")' "${manifest}" "${manifest_key}") \
                     || refuse "could not read [${manifest_key}] version from ${manifest}"
@@ -177,7 +202,7 @@ blocks:
                   && [ "$(printf '%s' "${version}" | cut -d. -f1-2).x" != "${SEMAPHORE_GIT_BRANCH}" ]; then
                   refuse "${version_param} '${version}' is not of release branch ${SEMAPHORE_GIT_BRANCH}; release it from master or from its own release branch"
                 fi
-                # publish-wheels.sh and release-nupkg.sh refuse a tag that is not on master.
+                # publish-wheels.sh, release-nupkg.sh and release-npm.sh refuse a tag that is not on master.
                 if [ "${client}" != rust ] && [ "${SEMAPHORE_GIT_BRANCH}" != master ]; then
                   refuse "${version_param} is entered on release branch ${SEMAPHORE_GIT_BRANCH}, but ${client} is released only from master"
                 fi
@@ -205,7 +230,10 @@ blocks:
             # uploaded by hand and where a version can never be reused, even
             # after it is deleted; check-published-nupkg.py lists its versions,
             # unlisted ones included, in the lowercase normalized form that a
-            # version matching the pattern above already has. A rust
+            # version matching the pattern above already has. A JavaScript
+            # version, the same, on npmjs.com, for the main package and each
+            # platform package, since npm never takes a version twice, even
+            # after it is unpublished; check-published-npm.py lists them. A rust
             # dev version is never published, so it is not compared with
             # crates.io. `fetch` writes the body of a URL to a file, or
             # empties the file if the URL does not exist; it fails on any other
@@ -275,6 +303,15 @@ blocks:
                       refuse "${NUGET_PACKAGE} ${version} is already on nuget.org; bump <Version> in dotnet/Directory.Build.props for a new release"
                     fi
                     ;;
+                  javascript)
+                    for package in "${NPM_PACKAGE}" "${NPM_PACKAGE}-linux-x64-gnu" "${NPM_PACKAGE}-linux-arm64-gnu" "${NPM_PACKAGE}-darwin-arm64"; do
+                      /usr/bin/python3 .semaphore/check-published-npm.py versions "${package}" > "${published_file}" \
+                        || refuse "could not read npmjs.com to confirm that ${package} ${version} is new"
+                      if grep -qxF -- "${version}" "${published_file}"; then
+                        refuse "${package} ${version} is already on npmjs.com; bump \"version\" in javascript/package.json for a new release"
+                      fi
+                    done
+                    ;;
                 esac
               done
             # Each job in REQUIRED_CI_JOBS must have reported `passed` for
@@ -324,11 +361,17 @@ blocks:
               fi
               echo "All ${#required[@]} required CI jobs passed on ${head_sha}"
             # Creates a lightweight tag per client, as the other Confluent
-            # clients do, and pushes them in one atomic push: either every tag
-            # reaches origin or none does. Each pushed tag starts its own tag
+            # clients do, and pushes them. Each pushed tag starts its own tag
             # build. GitHub sends no push event for a push of more than three
-            # tags, so with more clients the tags must be pushed in groups of
-            # at most three. Semaphore's pre-job setup configures
+            # tags, so the tags are pushed in groups of at most three, each
+            # group in one atomic push: either every tag of the group reaches
+            # origin or none does. Every check above has passed by then, so
+            # only a push itself can fail. When a later group fails, the tags
+            # of the groups already pushed are deleted from origin again, which
+            # keeps the release all or nothing: the builds they started refuse
+            # to publish or record a tag that no longer exists. If that
+            # deletion fails too, the job says which tags to delete by hand.
+            # Semaphore's pre-job setup configures
             # `pushInsteadOf` so that `git push` to this repository uses the
             # job's GitHub write token; a branch job receives one for its own
             # repository without any change to service.yml (see "GitHub Token
@@ -341,7 +384,24 @@ blocks:
                 git tag "${tag}" "${head_sha}" || refuse "could not create tag ${tag}"
                 refs+=("refs/tags/${tag}")
               done
-              git push --atomic origin "${refs[@]}" || refuse "could not push ${refs[*]} to origin; no tag was pushed"
+              pushed=()
+              for ((i = 0; i < ${#refs[@]}; i += 3)); do
+                group=("${refs[@]:i:3}")
+                if ! git push --atomic origin "${group[@]}"; then
+                  if [ "${#pushed[@]}" -eq 0 ]; then
+                    refuse "could not push ${group[*]} to origin; no tag was pushed"
+                  fi
+                  deletions=()
+                  for ref in "${pushed[@]}"; do
+                    deletions+=(":${ref}")
+                  done
+                  if git push --atomic origin "${deletions[@]}"; then
+                    refuse "could not push ${group[*]} to origin; ${pushed[*]}, pushed before it, were deleted from origin again, so no tag is left"
+                  fi
+                  refuse "could not push ${group[*]} to origin, nor delete ${pushed[*]}, pushed before it, from origin again: delete those tags on origin by hand before their builds release them"
+                fi
+                pushed+=("${group[@]}")
+              done
             - |
               for client in "${clients[@]}"; do
                 use_client "${client}"
@@ -353,5 +413,6 @@ blocks:
                   rust) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and, when every job passes, publishes ${CRATE} ${version} to crates.io." ;;
                   python) echo "Pushed ${tag} at ${head_sha}. Its build runs CI and builds and tests the wheels. Then run its \"Publish to Test PyPI\" promotion to publish ${PYPI_PACKAGE} ${version} to Test PyPI, then that pipeline's \"Publish to PyPI\" promotion to publish to PyPI." ;;
                   dotnet) echo "Pushed ${tag} at ${head_sha}. Its build runs CI, builds and tests the package, and records ${NUGET_PACKAGE} ${version} in its artifacts as nuget/release/${NUGET_PACKAGE}.${version}.nupkg. Then upload that file to nuget.org by hand." ;;
+                  javascript) echo "Pushed ${tag} at ${head_sha}. Its build runs CI, builds and tests the packages, and records ${NPM_PACKAGE} ${version} in its artifacts as npm/release/confluent-kafka-javascript-${version}-release.zip. Then publish it by hand with its publish.sh (javascript/release/README.txt)." ;;
                 esac
               done
