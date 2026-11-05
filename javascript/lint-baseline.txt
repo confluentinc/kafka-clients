@@ -4,3 +4,33 @@
 # subject starts with `p`. A line matching no finding any more is itself a
 # finding: delete it. See everything with
 # `node scripts/lint_rules.js --no-baseline`.
+
+# check-java-completeness: Java API the client does not translate yet.
+# KafkaFuture: the composition and completion API beyond get / isDone /
+# isCompletedExceptionally / isCancelled / cancel.
+missing common.KafkaFuture#allOf
+missing common.KafkaFuture#completedFuture
+missing common.KafkaFuture#getNow
+missing common.KafkaFuture#thenApply
+missing common.KafkaFuture#toCompletionStage
+missing common.KafkaFuture#whenComplete
+# KafkaProducer: transactions, metadata, metrics and telemetry, which the
+# preview (producer only) leaves out.
+missing clients.producer.KafkaProducer#abortTransaction
+missing clients.producer.KafkaProducer#beginTransaction
+missing clients.producer.KafkaProducer#clientInstanceId
+missing clients.producer.KafkaProducer#commitTransaction
+missing clients.producer.KafkaProducer#initTransactions
+missing clients.producer.KafkaProducer#metrics
+missing clients.producer.KafkaProducer#partitionsFor
+missing clients.producer.KafkaProducer#registerMetricForSubscription
+missing clients.producer.KafkaProducer#sendOffsetsToTransaction
+missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# KafkaProducer's public metric and thread-name constants.
+missing clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
+missing clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
+# RecordMetadata: Java's public constructor; the JavaScript one is private,
+# only the native layer builds metadata (javascript/CLAUDE.md "Files and
+# layout").
+missing clients.producer.RecordMetadata#RecordMetadata
+

@@ -89,7 +89,7 @@ PACK_DIR ?= $(CURDIR)/build/pack
 HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (process.platform === 'linux' ? '-gnu' : '')")
 
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
-	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint
+	grpc-image grpc-native test-integration-grpc pack pack-check clean java-index lint-rules test-lint
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -129,12 +129,15 @@ test-static:
 # LINT_RULES_ARGS takes a rule name (check-...) and --no-baseline.
 CARGO ?= cargo
 LINT_RULES_ARGS ?=
-lint-rules:
+java-index:
 	cd $(RUST_PROJECT_ROOT) && $(CARGO) xtask java-index --json $(CURDIR)/build/java-index.json
+
+lint-rules: java-index
 	$(NODE) scripts/lint_rules.js $(LINT_RULES_ARGS)
 
-# The rule linter's own tests: no build needed.
-test-lint:
+# The rule linter's own tests: no build of the client, only the Java index,
+# which the real-tree and mutation tests read.
+test-lint: java-index
 	$(NODE) --test $(LINT_TESTS)
 
 test-unit: build

@@ -40,7 +40,19 @@ test('every rule has a name, kinds, needs, a hint and a check', () => {
     assert.equal(typeof rule.hint, 'string');
     assert.equal(typeof rule.check, 'function');
   }
-  assert.deepEqual([...names], ['check-no-todo', 'check-exception-word', 'check-private-members', 'check-java-line']);
+  assert.deepEqual([...names], [
+    'check-no-todo',
+    'check-exception-word',
+    'check-private-members',
+    'check-java-line',
+    'check-java-name',
+    'check-java-members',
+    'check-java-completeness',
+    'check-public-audience',
+    'check-no-deprecated-translation',
+    'check-getters-readonly',
+    'check-java-tags',
+  ]);
   // No two rules share a finding kind, so a baseline line belongs to one rule.
   const kinds = RULES.flatMap((r) => r.kinds);
   assert.equal(new Set(kinds).size, kinds.length);
@@ -110,7 +122,7 @@ test('the inputs a later rule needs: a missing Java index or header is a reason,
 });
 
 test('a present Java index and header load once', () => {
-  const root = project({ 'build/java-index.json': '{"schema":1,"classes":[]}', 'h.h': 'void kafka_x(void);\n' });
+  const root = project({ 'build/java-index.json': '{"schema":1,"classes":[{"fqn":"x"}]}', 'h.h': 'void kafka_x(void);\n' });
   const ctx = new Context({ root, headerPath: path.join(root, 'h.h') });
   assert.equal(ctx.missing('java'), null);
   assert.equal(ctx.missing('header'), null);
@@ -119,6 +131,8 @@ test('a present Java index and header load once', () => {
   assert.equal(ctx.header(), 'void kafka_x(void);\n');
   const bad = project({ 'build/java-index.json': '{' });
   assert.match(new Context({ root: bad }).missing('java'), /^cannot read the Java index build\/java-index\.json: /);
+  const empty = project({ 'build/java-index.json': '{"schema":1,"classes":[]}' });
+  assert.equal(new Context({ root: empty }).missing('java'), 'the Java index build/java-index.json lists no class');
 });
 
 test('the TypeScript program is built only for a rule that needs it', () => {

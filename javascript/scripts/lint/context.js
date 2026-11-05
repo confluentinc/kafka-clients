@@ -81,12 +81,19 @@ const INPUTS = {
     if (!fs.existsSync(ctx.javaIndexPath)) {
       return `no Java index at ${ctx.rel(ctx.javaIndexPath)} (run \`cargo xtask java-index --json\` from rust/)`;
     }
+    let index;
     try {
-      ctx.javaIndex();
-      return null;
+      index = ctx.javaIndex();
     } catch (e) {
       return `cannot read the Java index ${ctx.rel(ctx.javaIndexPath)}: ${e.message}`;
     }
+    if (index === null || typeof index !== 'object' || index.schema !== 1) {
+      return `the Java index ${ctx.rel(ctx.javaIndexPath)} is not schema 1 (rerun \`cargo xtask java-index --json\`)`;
+    }
+    if (!Array.isArray(index.classes) || index.classes.length === 0) {
+      return `the Java index ${ctx.rel(ctx.javaIndexPath)} lists no class`;
+    }
+    return null;
   },
   /** The bindings header. */
   header: (ctx) =>

@@ -32,10 +32,16 @@ const ROOT = path.join(__dirname, '..', '..');
 /** The last line of every source's license header. */
 const LICENSE_END = 'limitations under the License.\n';
 
-/** A copy of the client's lib/, src/, tsconfig.json and CLAUDE.md (whose rule sentence check-no-todo exempts). */
+/**
+ * A copy of the client's lib/, src/, tsconfig.json, CLAUDE.md (whose rule
+ * sentence check-no-todo exempts), lint-baseline.txt and Java index
+ * (build/java-index.json, which `make test-lint` writes first).
+ */
 function realCopy() {
   const root = project({});
-  for (const rel of ['lib', 'src', 'tsconfig.json', 'CLAUDE.md']) copy(ROOT, root, rel);
+  for (const rel of ['lib', 'src', 'tsconfig.json', 'CLAUDE.md', 'lint-baseline.txt']) copy(ROOT, root, rel);
+  fs.mkdirSync(path.join(root, 'build'));
+  copy(ROOT, root, 'build/java-index.json');
   return root;
 }
 
@@ -71,7 +77,7 @@ const MUTATIONS = [
   {
     rule: 'check-exception-word',
     what: 'a TypeScript identifier with the word',
-    apply: (root) => edit(root, 'lib/common/kafka_future.ts', 'isCancelled()', 'isCancelledException()'),
+    apply: (root) => edit(root, 'lib/common/kafka_future.ts', LICENSE_END, `${LICENSE_END}const lastException = 0;\nvoid lastException;\n`),
   },
   {
     rule: 'check-private-members',
@@ -86,12 +92,77 @@ const MUTATIONS = [
   },
 ];
 
+/** Appends `text` as a new public module `rel` of the copy. */
+function add(root, rel, text) {
+  fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+  fs.writeFileSync(path.join(root, rel), text);
+}
+
+MUTATIONS.push(
+  {
+    // A Java getter turned into a method: J2 finds no Java `getOffset`, and J3 misses `offset`.
+    rules: ['check-java-members', 'check-java-completeness'],
+    what: 'the offset getter renamed to a getOffset method',
+    apply: (root) => edit(root, 'lib/producer/record_metadata.ts', 'get offset(): number {', 'getOffset(): number {'),
+  },
+  {
+    rule: 'check-getters-readonly',
+    what: 'a public mutable field',
+    apply: (root) => edit(root, 'lib/common/security/auth/security_protocol.ts', 'readonly id: number;', 'id: number;'),
+  },
+  {
+    rule: 'check-public-audience',
+    what: 'an export translating an internal, non-Public Java class',
+    apply: (root) => add(root, 'lib/producer/internals/txn_partition_entry.ts', 'export class TxnPartitionEntry {}\n'),
+  },
+  {
+    rule: 'check-no-deprecated-translation',
+    what: 'a translated deprecated constant',
+    apply: (root) =>
+      edit(
+        root,
+        'lib/producer/producer_config.ts',
+        'export class ProducerConfig {',
+        "export class ProducerConfig {\n  static readonly PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG: string = 'x';",
+      ),
+  },
+  {
+    rule: 'check-java-completeness',
+    what: 'a translated method dropped',
+    apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '  flush(): Promise<void> {', '  private flushAll(): Promise<void> {'),
+  },
+  {
+    rule: 'check-java-name',
+    what: 'an export naming no Java class',
+    apply: (root) => add(root, 'lib/producer/record_meta.ts', 'export class RecordMeta {}\n'),
+  },
+  {
+    // J2 reports the static-ness, and J3 no longer counts the static forId as translated.
+    rules: ['check-java-members', 'check-java-completeness'],
+    what: 'a static method made an instance method',
+    apply: (root) => edit(root, 'lib/common/security/auth/security_protocol.ts', 'static forId(', 'forId('),
+  },
+  {
+    // `is` stays: a `done` property is no translation of isDone().
+    rules: ['check-java-members', 'check-java-completeness'],
+    what: 'an isX method turned into a property without its is',
+    apply: (root) => edit(root, 'lib/common/kafka_future.ts', 'isDone(): boolean {', 'get done(): boolean {'),
+  },
+  {
+    rule: 'check-java-tags',
+    what: 'an unneeded @jsOnly',
+    apply: (root) =>
+      edit(root, 'lib/producer/callback.ts', 'export type Callback =', '/** @jsOnly Not needed. */\nexport type Callback ='),
+  },
+);
+
 for (const m of MUTATIONS) {
-  test(`${m.what} fails exactly ${m.rule}`, () => {
+  const rules = m.rules || [m.rule];
+  test(`${m.what} fails exactly ${rules.join(' and ')}`, () => {
     const root = realCopy();
     m.apply(root);
     const r = lint(root);
     assert.equal(r.status, 1, r.text);
-    assert.deepEqual(failedRules(r), [m.rule], r.text);
+    assert.deepEqual(failedRules(r), rules, r.text);
   });
 }

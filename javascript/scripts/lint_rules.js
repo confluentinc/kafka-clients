@@ -37,6 +37,13 @@ const RULES = [
   require('./lint/rules/exception_word'),
   require('./lint/rules/private_members'),
   require('./lint/rules/java_line'),
+  require('./lint/rules/java_name'),
+  require('./lint/rules/java_members'),
+  require('./lint/rules/java_completeness'),
+  require('./lint/rules/public_audience'),
+  require('./lint/rules/no_deprecated_translation'),
+  require('./lint/rules/getters_readonly'),
+  require('./lint/rules/java_tags'),
 ];
 
 /** The baseline file, relative to the client's directory. */
