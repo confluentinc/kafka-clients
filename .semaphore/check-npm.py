@@ -528,6 +528,11 @@ def dist_problems(dist, manifest, compare_sources):
     return problems
 
 
+def differing(actual, expected):
+    """The top-level fields in which two package.json differ, for a message."""
+    return ", ".join(sorted(key for key in set(actual) | set(expected) if actual.get(key) != expected.get(key)))
+
+
 def manifest_problems(label, manifest, version):
     """What no published package.json may have, whatever its content."""
     problems = []
@@ -567,7 +572,7 @@ def check_main(files, version, published):
     if manifest.get("gypfile") is not False:
         problems.append(f'{label} lacks "gypfile": false, which keeps npm from building on install')
     if not published and manifest != main_manifest(version):
-        problems.append(f"{label} is not the one pack-npm.sh writes: {json.dumps(main_manifest(version), sort_keys=True)}")
+        problems.append(f"{label} is not the one pack-npm.sh writes; it differs in {differing(manifest, main_manifest(version))}")
     names = {name[len("package/"):] for name in files}
     dist = {name[len("dist/"):] for name in names if name.startswith("dist/")}
     for extra in sorted(names - MAIN_FILES - {f"dist/{d}" for d in dist}):
@@ -599,8 +604,8 @@ def check_platform(platform, files, version, dev, published):
     if "libc" in manifest and "libc" not in PLATFORMS[platform]:
         problems.append(f"{label} has a libc, which {platform} has none of")
     if not published and manifest != platform_manifest(platform, version):
-        problems.append(f"{label} is not the one pack-npm.sh writes: "
-                        f"{json.dumps(platform_manifest(platform, version), sort_keys=True)}")
+        problems.append(f"{label} is not the one pack-npm.sh writes; it differs in "
+                        f"{differing(manifest, platform_manifest(platform, version))}")
     names = {name[len("package/"):] for name in files}
     for extra in sorted(names - PLATFORM_FILES):
         problems.append(f"{MAIN_PACKAGE}-{platform} has {extra}, which it must not carry")
