@@ -14,14 +14,15 @@
 
 using System;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The serialized key and value of a <see cref="ProducerRecord{TKey, TValue}"/> with its topic, partition and
-/// timestamp, as the native send reads them; a <see langword="null"/> key or value is an absent field.
+/// The serialized key and value of a <see cref="ProducerRecord{TKey, TValue}"/> with its topic, partition, timestamp
+/// and headers, as the native send reads them; a <see langword="null"/> key or value is an absent field.
 /// </summary>
 internal readonly struct SerializedProducerRecord
 {
@@ -30,13 +31,15 @@ internal readonly struct SerializedProducerRecord
         int? partition,
         long? timestamp,
         ReadOnlyMemory<byte>? key,
-        ReadOnlyMemory<byte>? value)
+        ReadOnlyMemory<byte>? value,
+        Headers? headers = null)
     {
         Topic = topic;
         Partition = partition;
         Timestamp = timestamp;
         Key = key;
         Value = value;
+        Headers = headers;
     }
 
     internal string Topic { get; }
@@ -48,6 +51,8 @@ internal readonly struct SerializedProducerRecord
     internal ReadOnlyMemory<byte>? Key { get; }
 
     internal ReadOnlyMemory<byte>? Value { get; }
+
+    internal Headers? Headers { get; }
 
     internal static SerializedProducerRecord Serialize<TKey, TValue>(
         ProducerRecord<TKey, TValue> record,
@@ -62,7 +67,8 @@ internal readonly struct SerializedProducerRecord
             record.Partition,
             record.Timestamp,
             keyBytes is null ? (ReadOnlyMemory<byte>?)null : keyBytes,
-            valueBytes is null ? (ReadOnlyMemory<byte>?)null : valueBytes);
+            valueBytes is null ? (ReadOnlyMemory<byte>?)null : valueBytes,
+            record.Headers);
     }
 
     private static byte[]? SerializeField<T>(ISerializer<T> serializer, string topic, T? data, bool isKey)

@@ -212,7 +212,7 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         if (recordHeaders == IntPtr.Zero)
         {
-            return Headers.Empty;
+            return new Headers();
         }
 
         IntPtr view = NativeMethods.RecordHeadersAsHeaders(recordHeaders, ref outErr);
@@ -221,7 +221,7 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         if (array == IntPtr.Zero)
         {
-            return Headers.Empty;
+            return new Headers();
         }
 
         try
@@ -229,7 +229,7 @@ internal static class ConsumerRecordsMarshal
             int count = Size(array);
             if (count <= 0)
             {
-                return Headers.Empty;
+                return new Headers();
             }
 
             List<Header> headers = new List<Header>(count);

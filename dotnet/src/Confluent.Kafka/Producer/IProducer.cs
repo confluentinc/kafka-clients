@@ -61,6 +61,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
     /// record's <see cref="RecordMetadata"/> or rethrows the delivery failure.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
+    /// surrogate, which the native client cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
@@ -84,6 +86,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="ArgumentNullException">
     /// <paramref name="record"/> or <paramref name="callback"/> is null.
     /// </exception>
+    /// <exception cref="ArgumentException">The topic or a header key contains a NUL character or an unpaired UTF-16
+    /// surrogate, which the native client cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure

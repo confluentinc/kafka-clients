@@ -93,7 +93,8 @@ realization lives in its own `bindings/<lang>/CLAUDE.md`.
    what).
 5. **Zero-copy at the boundary** — Add no *extra* copies of key/value/header
    bytes when crossing the ABI; pass by reference where the buffer's lifetime
-   allows, and copy only when lifetime forces it.
+   allows, and copy only when lifetime forces it (or when the C ABI has no borrowed form: the
+   producer's header values, which the .NET and Python bindings copy, `dotnet` ledger 301).
 6. **Shape, not logic** — Bindings add **no Kafka behavior**; all logic stays in
    the Rust core.
 7. **Review ground truth** — Review a binding against the **C ABI header** and
