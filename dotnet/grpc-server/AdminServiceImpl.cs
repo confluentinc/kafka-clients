@@ -907,7 +907,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             Proto.DescribeTransactionsResponse response = new Proto.DescribeTransactionsResponse();
             foreach (string id in ids)
             {
-                (TransactionDescription description, Proto.KafkaError? error) =
+                (TransactionDescription? description, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(result.Description(id));
                 Proto.DescribeTransactionsEntry entry = new Proto.DescribeTransactionsEntry
                 {
@@ -917,7 +917,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 {
                     entry.Error = error;
                 }
-                else
+                else if (description is not null)
                 {
                     entry.Value = TranslateAdmin.TransactionDescriptionToProto(description);
                 }
@@ -1902,10 +1902,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             DescribeFeaturesResult result = admin.DescribeFeatures(options);
 
-            FeatureMetadata metadata = result.FeatureMetadata().Get();
+            FeatureMetadata? metadata = result.FeatureMetadata().Get();
             return Task.FromResult(new Proto.DescribeFeaturesResponse
             {
-                Metadata = TranslateAdmin.FeatureMetadataToProto(metadata),
+                Metadata = metadata is null ? null : TranslateAdmin.FeatureMetadataToProto(metadata),
             });
         }
         catch (Exception ex)

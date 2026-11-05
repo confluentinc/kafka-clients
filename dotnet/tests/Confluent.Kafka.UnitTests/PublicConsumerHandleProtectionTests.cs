@@ -72,8 +72,10 @@ public sealed class PublicConsumerHandleProtectionTests
         Assert.Throws<IllegalStateException>(() => consumer.Paused());
         Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
         Assert.Throws<IllegalStateException>(() => consumer.Metrics());
-        Assert.Throws<IllegalStateException>(() => consumer.EnforceRebalance());
-        Assert.Throws<IllegalStateException>(() => consumer.EnforceRebalance("a reason"));
+
+        // Java's enforceRebalance makes no closed check.
+        consumer.EnforceRebalance();
+        consumer.EnforceRebalance("a reason");
         Assert.Throws<IllegalStateException>(() => consumer.CurrentLag(Tp()));
         Assert.Throws<IllegalStateException>(() => consumer.CommitAsync());
         Assert.Throws<IllegalStateException>(

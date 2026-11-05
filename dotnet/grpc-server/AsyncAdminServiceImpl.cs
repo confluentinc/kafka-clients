@@ -910,7 +910,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             Proto.DescribeTransactionsResponse response = new Proto.DescribeTransactionsResponse();
             foreach (string id in ids)
             {
-                (TransactionDescription description, Proto.KafkaError? error) =
+                (TransactionDescription? description, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(result.Description(id)).ConfigureAwait(false);
                 Proto.DescribeTransactionsEntry entry = new Proto.DescribeTransactionsEntry
                 {
@@ -920,7 +920,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 {
                     entry.Error = error;
                 }
-                else
+                else if (description is not null)
                 {
                     entry.Value = TranslateAdmin.TransactionDescriptionToProto(description);
                 }
@@ -1913,10 +1913,10 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             AsyncDescribeFeaturesResult result = admin.DescribeFeatures(options);
 
-            FeatureMetadata metadata = await result.FeatureMetadata().Get().ConfigureAwait(false);
+            FeatureMetadata? metadata = await result.FeatureMetadata().Get().ConfigureAwait(false);
             return new Proto.DescribeFeaturesResponse
             {
-                Metadata = TranslateAdmin.FeatureMetadataToProto(metadata),
+                Metadata = metadata is null ? null : TranslateAdmin.FeatureMetadataToProto(metadata),
             };
         }
         catch (Exception ex)

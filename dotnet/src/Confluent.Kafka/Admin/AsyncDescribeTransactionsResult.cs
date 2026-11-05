@@ -34,11 +34,11 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="DescribeTransactionsResult"/>
 public sealed class AsyncDescribeTransactionsResult
 {
-    private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<TransactionDescription>> _futures;
+    private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<TransactionDescription?>> _futures;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncDescribeTransactionsResult(
-        IReadOnlyDictionary<string, AsyncKafkaFuture<TransactionDescription>> futures, SafeAdminResultHandle native)
+        IReadOnlyDictionary<string, AsyncKafkaFuture<TransactionDescription?>> futures, SafeAdminResultHandle native)
     {
         _futures = futures;
         _native = native;
@@ -48,14 +48,17 @@ public sealed class AsyncDescribeTransactionsResult
 
     /// <summary>One id's description — Java's <c>description(String)</c>.</summary>
     /// <param name="transactionalId">A transactional id from the request.</param>
-    /// <returns>That id's future.</returns>
+    /// <returns>
+    /// That id's future. It completes with <see langword="null"/> when the native client delivers no
+    /// description, as Python's completes with <c>None</c>; Java's never completes with <c>null</c>.
+    /// </returns>
     /// <exception cref="IllegalArgumentException">
     /// The id was not in the request, or is null, thrown at the call with Java's message.
     /// </exception>
-    public AsyncKafkaFuture<TransactionDescription> Description(string transactionalId)
+    public AsyncKafkaFuture<TransactionDescription?> Description(string transactionalId)
     {
         // Java's map holds no null key, so a null id was not requested either.
-        return transactionalId is not null && _futures.TryGetValue(transactionalId, out AsyncKafkaFuture<TransactionDescription> future)
+        return transactionalId is not null && _futures.TryGetValue(transactionalId, out AsyncKafkaFuture<TransactionDescription?> future)
             ? future
             : throw new IllegalArgumentException(
                 "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");
@@ -65,24 +68,27 @@ public sealed class AsyncDescribeTransactionsResult
     /// Every id's description in one map, succeeding only if every id did — Java's
     /// <c>all()</c>.
     /// </summary>
-    /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
-    public AsyncKafkaFuture<IReadOnlyDictionary<string, TransactionDescription>> All()
+    /// <returns>
+    /// A future yielding the whole map, or faulting with the first failure. A description the native client did not
+    /// deliver is <see langword="null"/>.
+    /// </returns>
+    public AsyncKafkaFuture<IReadOnlyDictionary<string, TransactionDescription?>> All()
     {
-        IReadOnlyDictionary<string, AsyncKafkaFuture<TransactionDescription>> futures = _futures;
-        AsyncKafkaFuture<TransactionDescription>[] values = new AsyncKafkaFuture<TransactionDescription>[futures.Count];
+        IReadOnlyDictionary<string, AsyncKafkaFuture<TransactionDescription?>> futures = _futures;
+        AsyncKafkaFuture<TransactionDescription?>[] values = new AsyncKafkaFuture<TransactionDescription?>[futures.Count];
         int next = 0;
-        foreach (AsyncKafkaFuture<TransactionDescription> future in futures.Values)
+        foreach (AsyncKafkaFuture<TransactionDescription?> future in futures.Values)
         {
             values[next++] = future;
         }
 
-        return AsyncKafkaFuture.AllOf(values).ThenApply<IReadOnlyDictionary<string, TransactionDescription>>(() =>
+        return AsyncKafkaFuture.AllOf(values).ThenApply<IReadOnlyDictionary<string, TransactionDescription?>>(() =>
         {
-            Dictionary<string, TransactionDescription> descriptions =
-                new Dictionary<string, TransactionDescription>(futures.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, AsyncKafkaFuture<TransactionDescription>> entry in futures)
+            Dictionary<string, TransactionDescription?> descriptions =
+                new Dictionary<string, TransactionDescription?>(futures.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, AsyncKafkaFuture<TransactionDescription?>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null));
             }
 
             return descriptions;
@@ -90,13 +96,13 @@ public sealed class AsyncDescribeTransactionsResult
     }
 
     internal static AsyncDescribeTransactionsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription>> Descriptions, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result) native)
     {
-        Dictionary<string, AsyncKafkaFuture<TransactionDescription>> futures =
-            new Dictionary<string, AsyncKafkaFuture<TransactionDescription>>(native.Descriptions.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<TransactionDescription>> entry in native.Descriptions)
+        Dictionary<string, AsyncKafkaFuture<TransactionDescription?>> futures =
+            new Dictionary<string, AsyncKafkaFuture<TransactionDescription?>>(native.Descriptions.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<TransactionDescription?>> entry in native.Descriptions)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<TransactionDescription>(entry.Value));
+            futures.Add(entry.Key, new AsyncKafkaFuture<TransactionDescription?>(entry.Value));
         }
 
         return new AsyncDescribeTransactionsResult(futures, native.Result);

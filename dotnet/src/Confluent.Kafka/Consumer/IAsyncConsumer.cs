@@ -195,7 +195,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, an element topic is null.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
@@ -211,8 +210,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -232,8 +229,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -260,7 +255,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -287,7 +281,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -309,8 +302,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
     /// <returns>The current offset position of <paramref name="partition"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -330,8 +321,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
     /// <returns>The current offset position of <paramref name="partition"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
@@ -390,7 +379,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task Commit(
@@ -409,7 +397,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
@@ -477,7 +464,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
@@ -528,7 +514,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> or <paramref name="callback"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task CommitAsync(
@@ -549,7 +534,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="offset"/> is negative ("seek offset must not be a negative number").
     /// </exception>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
     /// The <see cref="Task"/> faults with it when called inside a callback of an
@@ -569,7 +554,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="offsetAndMetadata"/> is null.</exception>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
     /// The <see cref="Task"/> faults with it when called inside a callback of an
@@ -590,7 +575,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// operation has ended; no <c>wakeup()</c> is sent.
     /// </param>
     /// <returns>The current lag, or <see langword="null"/> when it is not known.</returns>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or <paramref name="partition"/> is not assigned to an
+    /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default);
 
@@ -608,7 +596,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The committed offsets, keyed by topic-partition, <see langword="null"/> where a partition has none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="KafkaException">
@@ -635,7 +622,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The committed offsets, keyed by topic-partition, <see langword="null"/> where a partition has none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
@@ -672,7 +658,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The resolved offset and timestamp per topic-partition, <see langword="null"/> where there is none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -696,7 +681,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The resolved offset and timestamp per topic-partition, <see langword="null"/> where there is none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
@@ -721,7 +705,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The earliest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -744,7 +727,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The earliest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
@@ -769,7 +751,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The latest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -792,7 +773,6 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The latest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>

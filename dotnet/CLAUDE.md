@@ -657,6 +657,60 @@ its C# realization, and where the enforcing rule lives.
 | `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
 | `Producer<K,V>` / `Consumer<K,V>` (generic) | **both shipped generic-only** — `Consumer<K,V>` (M6/P1b) and now `Producer<K,V>` (M11/P5): the producer trios + `ProducerRecord` are `<TKey,TValue>`, the non-generic ones removed (bytes = `<byte[],byte[]>` + `Serdes.ByteArray`); `RecordMetadata` stays non-generic. Serialize above the bytes core, invoke-on-null, synchronous `SerializationException` wrap (§4) | §4 |
 
+**Call-site checks that differ from Java (recorded).** Where the binding checks an argument or
+a state itself, it throws Java's class, at Java's point, with Java's message. These do not, and
+each goes when the reason it gives goes:
+
+- **Strings.** An unpaired surrogate is encoded as `?` (`0x3F`), as Java's
+  `String.getBytes(UTF_8)` does, by `StringSerde` and by every string the binding marshals to the
+  C ABI (topics, header keys, group ids, admin strings); a result whose key the core names shows
+  that `?`. A NUL character in a string argument throws `ArgumentException` at the call, because a
+  C string cannot carry it; Java sends it and the broker rejects the name. Goes when the C ABI
+  takes length-delimited strings.
+- **`NewTopic`** with a partition count or a replication factor below -1 throws
+  `ArgumentOutOfRangeException` at construction; Java's future fails with
+  `InvalidPartitionsException` / `InvalidReplicationFactorException`. The C ABI reads any negative
+  as unset, so passing the value on would create the topic with the broker's defaults. Goes when
+  the C ABI carries the value.
+- **Admin null names.** An admin RPC with a null topic name or group id inside an argument throws
+  at the call, as Python's does; Java fails that key's future with `InvalidTopicException` /
+  `InvalidGroupIdException`. The C ABI cannot carry the null. Two lookups on a Result answer as
+  Java: `AlterConsumerGroupOffsetsResult.PartitionResult` of a null-topic partition returns a
+  future already failed with Java's `IllegalArgumentException` *(deviation: Java fails it only
+  after the call, and with the call's error if the call failed; the Result cannot see that)*, and
+  `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
+- **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
+  `Metrics`, and `MockProducer`'s `PartitionsFor`, `Metrics`, `CompleteNext`, `ErrorNext`, `Clear`
+  and `HistoryCount` throw the closed client's `IllegalStateException`, because the native handle
+  is gone; Java answers (Java's mock checks for close only in `send`, `flush` and the transaction
+  methods). Goes when the native object outlives `Close`.
+- **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
+  (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
+  brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
+  unknown topic throw the core's `IllegalArgumentException`; Java's throw `IndexOutOfBoundsException`
+  and `RuntimeException`. Goes when the core mock throws Java's. `CreateDelegationToken` with no
+  renewer throws Java's `IndexOutOfBoundsException` "Index: 0, Size: 0" at the call, as Java's mock
+  reads `renewers().get(0)`.
+- **Consumer deserializers.** The config takes no classes, so the consumer has no
+  `key.deserializer` / `value.deserializer` route: a null deserializer throws Java's
+  `ConfigException` "Missing required configuration "key.deserializer" which has no default
+  value." (the value likewise), on all four consumers, the mocks included *(Java's `MockConsumer`
+  takes no deserializers)*.
+- **Negative partitions.** The consumer leaves a negative partition to the core, which answers as
+  Java does: `seek`, `pause`, `resume` and the real consumers' `currentLag` throw
+  `IllegalStateException` "No current assignment for partition t--1"; `position` throws "You can
+  only check the position for partitions assigned to this consumer.", an `IllegalStateException`
+  on the real consumers and an `IllegalArgumentException` on the mocks; the mocks' `currentLag`
+  returns 0; on the mocks `beginningOffsets` / `endOffsets` throw `IllegalStateException` "The
+  partition t--1 does not have a beginning offset." / "… an end offset." and `offsetsForTimes`
+  `UnsupportedOperationException` "Not implemented yet."; `assign` and `commit` accept it. Nothing
+  is recorded.
+- **A null config value** follows Java per key: a key whose Java validator rejects null throws
+  `ConfigException` with that validator's message (`Internal/ClientConfigs.cs`, from the generated
+  `Internal/ConfigTypes.g.cs`, §4 **Config**); any other null value is not set, as in
+  Python *(deviation: with several null keys .NET reports the first in the dictionary's order,
+  Java the first in `ConfigDef` order)*.
+
 **Do NOT build:** the ecosystem `confluent-kafka-dotnet` shape (`ProduceAsync`,
 delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
 **Java** client, per `dotnet/.claude/rules/bindings.md §2`.
@@ -786,12 +840,15 @@ throw, and returns a fresh owned snapshot per call, matching the shipped
 before the C call, as Java's `throwIfGroupIdNotDefined` and Python's `InvalidGroupIdError`
 do; ledger 105), `Wakeup()`, `Metrics()`
 (**shipped M9/P2** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`, Java
-`metrics()`; from another thread while one holds a use it throws `ConcurrentModificationException`,
-as Python's `metrics()` does, although Java's takes no `acquire()`; the core itself answers it
-while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; ledger 136), `Register`/`UnregisterMetricForSubscription`, and
+`metrics()`; on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner check, as Java's
+takes no `acquire()`, and holds only the use that keeps the handle alive; the core answers it
+while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; the mocks wait, as Java's
+`synchronized` mock; after close it throws, the call-site list below §3's idiom map), `Register`/`UnregisterMetricForSubscription`, and
 `EnforceRebalance(string? reason
-= null)` (a no-op that only logs under KIP-848 → returns success, never throws on
-that path; one method collapses Java's two overloads). `Seek` and `CurrentLag` are not on
+= null)` (a no-op that only logs under KIP-848; one method collapses Java's two overloads). It
+makes no owner check and, once the consumer is closed, returns without calling the core, as Java's
+only logs. *(Recorded: the core still refuses it with -2, a `ConcurrentModificationException`, while
+another op holds its flag. Goes when the core's `enforce_rebalance` takes no flag.)* `Seek` and `CurrentLag` are not on
 this list since M19/P1: both block in Java, so each is a `Task` on `IAsyncConsumer` and a
 blocking member on `IConsumer` (decision 22, ledger 103). There is no `ClientId()` since
 M19/P1: Java's `clientId()` is package-private and Python has no `client_id()` (ledger 102). **On the

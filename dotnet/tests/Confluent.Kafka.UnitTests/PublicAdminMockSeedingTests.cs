@@ -120,8 +120,9 @@ public class PublicAdminMockSeedingTests
     {
         AsyncMockAdminClient unseeded = AsyncMockAdminClient.Create().Build();
         using IDisposable unseededDisposal = TestTimeout.Disposal(unseeded);
-        FeatureMetadata before = await TestTimeout.Run(
+        FeatureMetadata? before = await TestTimeout.Run(
             () => unseeded.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
+        Assert.NotNull(before);
         Assert.Empty(before.FinalizedFeatures);
         Assert.Empty(before.SupportedFeatures);
 
@@ -132,8 +133,9 @@ public class PublicAdminMockSeedingTests
             .Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FeatureMetadata after = await TestTimeout.Run(
+        FeatureMetadata? after = await TestTimeout.Run(
             () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
+        Assert.NotNull(after);
 
         FinalizedVersionRange finalized = Assert.Contains("metadata.version", after.FinalizedFeatures);
         Assert.Equal(5, finalized.MinVersionLevel);

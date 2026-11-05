@@ -93,15 +93,16 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public void Seek_NegativeOffset_ThrowsWithExactJavaMessage()
+    public void Seek_NegativeOffset_OnTheMock_ThrowsTheUnassignedPartitionsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
+        // Java's MockConsumer.seek checks no offset; the core mock refuses the unassigned partition.
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Seek("proof-topic", 0, offset: -1));
 
-        Assert.Equal("seek offset must not be a negative number", ex.Message);
+        Assert.Equal("No current assignment for partition proof-topic-0", ex.Message);
     }
 
     [Fact]
@@ -114,14 +115,14 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public void Seek_NegativePartition_ThrowsArgumentOutOfRange()
+    public void Seek_NegativePartition_TheCoreAnswersAsJava()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(
             () => consumer.Seek("proof-topic", partition: -1, offset: 0));
-        Assert.Equal("partition", ex.ParamName);
+        Assert.Equal("No current assignment for partition proof-topic--1", ex.Message);
     }
 
     [Fact]

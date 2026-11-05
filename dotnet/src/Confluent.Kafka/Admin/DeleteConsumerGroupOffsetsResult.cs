@@ -47,10 +47,11 @@ public sealed class DeleteConsumerGroupOffsetsResult
     /// A new future that completes when that partition's offset was deleted, and fails with the partition's error, or
     /// with the call's error when the whole request failed.
     /// </returns>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="partition"/> was not part of the request, as Java throws at the call; or it has a null topic,
-    /// or a topic with a NUL character or an unpaired surrogate.
+    /// <exception cref="Java.Lang.IllegalArgumentException">
+    /// <paramref name="partition"/> (one with a null topic included) was not part of the request, as Java throws at
+    /// the call.
     /// </exception>
+    /// <exception cref="ArgumentException"><paramref name="partition"/> has a topic with a NUL character.</exception>
     public KafkaFuture PartitionResult(TopicPartition partition) =>
         new KafkaFuture(NativeAdminClient.DeleteConsumerGroupOffsetsPartitionResult(_native, partition));
 

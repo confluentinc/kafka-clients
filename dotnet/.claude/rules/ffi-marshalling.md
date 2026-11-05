@@ -1018,7 +1018,9 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
   - **In-callback rules** (Python's, plan §3.1 fact 3), on `KafkaProducer` and
     `AsyncKafkaProducer` (the mocks: below), for a wait called from inside a delivery callback: on
     the `CompletionThread`, or, from an `IAsyncDeliveryCallback`, after an `await` too, through an
-    `AsyncLocal<bool>` flag set around `OnCompletion` and reset when it returns (Python's
+    `AsyncLocal<bool>` flag set around `OnCompletion` and restored to its previous value when it
+    returns, never to a constant: a synchronous method's `AsyncLocal` write changes its caller's
+    context, so a nested call that reset it would clear the outer callback's flag (Python's
     `_in_async_callback`, `python/confluent_kafka/producer/async_producer.py:138-139`, `:597-601`
     at `851c8d95`; ledger 80, pick 4):
       - `Flush` throws at once a `KafkaException` with Java's message "KafkaProducer.flush()
@@ -1211,9 +1213,12 @@ the calling thread; a `_cb` form queues them, and its own completion, for
   - **The owner check** (ledger 136), as Java's `acquire()`
     (`AsyncKafkaConsumer.java:2219-2228`) and Python's use table
     (`python/confluent_kafka/consumer/_base.py:397-416`, `:441-458` at `3f8a5bc6`). On
-    `KafkaConsumer` and `AsyncKafkaConsumer` every call but `Wakeup()`, `Handle()` and
-    `Dispose` / `DisposeAsync` is one **use** of the thread that makes it, `Metrics()`,
-    `Close` and the state reads included. A call while another thread holds a use throws
+    `KafkaConsumer` and `AsyncKafkaConsumer` every call but `Wakeup()`, `Handle()`,
+    `Metrics()`, `EnforceRebalance()` and `Dispose` / `DisposeAsync` is one **use** of the
+    thread that makes it, `Close` and the state reads included. `Metrics()` and
+    `EnforceRebalance()` take only the use that keeps the handle alive, with no owner check, as
+    Java leaves both outside `acquire()`; once the consumer is closed `EnforceRebalance()`
+    returns, as Java's only logs. A call while another thread holds a use throws
     `ConcurrentModificationException` with the core's message before anything reaches the core,
     as Python's `_use()` raises `ConcurrentModificationError` with it (`_base.py:123`,
     `:410-412`); the same thread nests. A call made inside a callback (ledger 113's flag) is
@@ -1265,10 +1270,10 @@ the calling thread; a `_cb` form queues them, and its own completion, for
   - **Callable from any thread, at any time:** `Consumer_wakeup_err`
     (BH:30624-30625), `Consumer__set_callback_result` (BH:29189-29192) and
     `Consumer_metrics_err`, which reads through the consumer's handle, not the flag
-    (BH:30594-30596, all at `3f8a5bc6`). Of the public calls over them, only `Wakeup()`
-    skips the owner check: `Metrics()` is a use like any call, as Python's `metrics()` is
-    (`_base.py:593-596`, `:1511-1515` at `3f8a5bc6`), although Java's takes no
-    `acquire()`. `Wakeup()` is how another thread interrupts a wait, and the first step
+    (BH:30594-30596, all at `3f8a5bc6`). Of the public calls over them, `Wakeup()` and
+    `Metrics()` skip the owner check, as Java's take no `acquire()` *(Python's `metrics()` is a
+    use like any call)*; `Metrics()` still throws the closed consumer's `IllegalStateException`,
+    because the native handle is gone after close. `Wakeup()` is how another thread interrupts a wait, and the first step
     of a cross-thread `Dispose` (§B2's path list).
   - **Listeners on the async consumers** (decision 27, ledger 35): a sync listener
     runs inline on the drain thread and reports when it returns. An async
@@ -1442,8 +1447,8 @@ is the core's, so the binding adds none there.
     result is handed back (ledger 136); no corruption. The same thread nests; an
     overlapping call of the owning thread gets the core's -2, as the same class.
     Awaited async calls in sequence pass whichever thread each resumes on. `Wakeup()` and
-    `Handle()` from another thread succeed meanwhile; `Metrics()` is refused like any
-    call. A call made inside a callback on the drain thread passes the owner check, and on
+    `Handle()`, `Metrics()` and `EnforceRebalance()` from another thread pass the owner check
+    meanwhile (the core may still refuse `EnforceRebalance()` with -2 while it holds its flag). A call made inside a callback on the drain thread passes the owner check, and on
     `AsyncMockConsumer` does not wait (no deadlock). On a mock, another thread's call waits
     for the running one, and is refused for the whole of `AsyncMockConsumer.Rebalance` and
     `LosePartitions`, a sync listener included, and from the start of an async commit

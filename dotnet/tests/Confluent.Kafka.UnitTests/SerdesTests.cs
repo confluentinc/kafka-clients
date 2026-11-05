@@ -51,6 +51,14 @@ public sealed class SerdesTests
     }
 
     [Fact]
+    public void String_UnpairedSurrogate_SerializesAsQuestionMark_AsJavasGetBytes()
+    {
+        Assert.Equal(new byte[] { 0x61, 0x3F, 0x62 }, Serdes.String.Serialize(Topic, "a\uD800b"));
+        Assert.Equal(new byte[] { 0x61, 0x3F, 0x62 }, Serdes.String.Serialize(Topic, "a\uDC00b"));
+        Assert.Equal(new byte[] { 0xF0, 0x9F, 0x8E, 0x88 }, Serdes.String.Serialize(Topic, "🎈"));
+    }
+
+    [Fact]
     public void String_SerializeNull_ReturnsNull()
     {
         string? nil = null;

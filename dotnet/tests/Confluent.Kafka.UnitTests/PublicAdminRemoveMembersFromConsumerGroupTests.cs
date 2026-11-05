@@ -135,15 +135,21 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
     }
 
     [Fact]
-    public async Task MemberResult_NullMember_ThrowsArgumentNullException_Synchronously()
+    public async Task MemberResult_NullMember_ThrowsJavasIllegalArgument_Synchronously()
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         AsyncRemoveMembersFromConsumerGroupResult result = admin.RemoveMembersFromConsumerGroup(
             "p5-group", new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove("instance-1") }));
+        AsyncRemoveMembersFromConsumerGroupResult removeAll =
+            admin.RemoveMembersFromConsumerGroup("p5-group", new RemoveMembersFromConsumerGroupOptions());
 
-        ArgumentNullException thrown = Assert.Throws<ArgumentNullException>(() => result.MemberResult(null!));
-        Assert.Equal("member", thrown.ParamName);
+        Assert.Equal(
+            "Member null was not included in the original request",
+            Assert.Throws<IllegalArgumentException>(() => result.MemberResult(null!)).Message);
+        Assert.Equal(
+            "The method: memberResult is not applicable in 'removeAll' mode",
+            Assert.Throws<IllegalArgumentException>(() => removeAll.MemberResult(null!)).Message);
     }
 
     [Fact]
@@ -200,7 +206,12 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
             "Member instance-9 was not included in the original request",
             Assert.Throws<IllegalArgumentException>(() => some.MemberResult(new MemberToRemove("instance-9"))).Message,
             StringComparison.Ordinal);
-        Assert.Equal("member", Assert.Throws<ArgumentNullException>(() => some.MemberResult(null!)).ParamName);
+        Assert.Equal(
+            "Member null was not included in the original request",
+            Assert.Throws<IllegalArgumentException>(() => some.MemberResult(null!)).Message);
+        Assert.Equal(
+            "The method: memberResult is not applicable in 'removeAll' mode",
+            Assert.Throws<IllegalArgumentException>(() => removeAll.MemberResult(null!)).Message);
 
         UnsupportedOperationException fromMember = FutureAssert.Throws<UnsupportedOperationException>(() => some.MemberResult(new MemberToRemove("instance-1")).Get());
         Assert.Equal(NotImplemented, fromMember.Message);

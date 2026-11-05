@@ -163,6 +163,48 @@ public sealed class PublicProducerSerializerFailureTests
 
     [Theory]
     [InlineData(AsyncReal)]
+    public async Task ApiException_ASlowAsyncCallback_HoldsFlushUntilItEnds(string flavor)
+    {
+        ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
+        using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
+            flavor, Serdes.String, value);
+        TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        GatedAsyncCallback callback = new GatedAsyncCallback(release.Task);
+
+        AsyncKafkaFuture<RecordMetadata> future = await producer.Send(
+            new ProducerRecord<string, string>(Topic, "v", key: "k", partition: 1), callback);
+
+        // Java's flush() returns only after the callbacks of the records it covers.
+        Task flush = producer.Flush();
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        Assert.False(flush.IsCompleted);
+
+        release.SetResult(true);
+
+        await TestTimeout.Run(() => flush, s_deadline);
+        Assert.True(future.IsDone);
+    }
+
+    // A nested serializer-failure callback must not clear the outer callback's in-callback flag, or the outer
+    // callback's Flush would wait for itself.
+    [Theory]
+    [InlineData(AsyncReal)]
+    public async Task ApiException_ANestedFailingSendInsideAnAsyncCallback_LetsItsFlushComplete(string flavor)
+    {
+        ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
+        using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
+            flavor, Serdes.String, value);
+        NestingAsyncCallback callback = new NestingAsyncCallback(producer);
+
+        _ = await producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback);
+
+        await TestTimeout.Run(() => callback.Ended, s_deadline);
+        await TestTimeout.Run(() => producer.Flush(), s_deadline);
+    }
+
+    [Theory]
+    [InlineData(AsyncReal)]
     public async Task ApiException_AFaultedAsyncCallback_StillFailsTheFutureWithTheSerializersException(string flavor)
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
@@ -426,6 +468,37 @@ public sealed class PublicProducerSerializerFailureTests
         }
 
         public void OnCompletion(RecordMetadata metadata, Exception? exception) => throw _thrown;
+    }
+
+    private sealed class NestingAsyncCallback : IAsyncDeliveryCallback
+    {
+        private readonly IAsyncProducer<string, string> _producer;
+        private readonly TaskCompletionSource<bool> _ended = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal NestingAsyncCallback(IAsyncProducer<string, string> producer)
+        {
+            _producer = producer;
+        }
+
+        internal Task Ended => _ended.Task;
+
+        public async Task OnCompletion(RecordMetadata metadata, Exception? exception)
+        {
+            try
+            {
+                await Task.Yield();
+                _ = await _producer.Send(
+                    new ProducerRecord<string, string>(Topic, "v2", key: "k2"),
+                    new GatedAsyncCallback(Task.CompletedTask));
+                await _producer.Flush();
+                _ended.TrySetResult(true);
+            }
+            catch (Exception e)
+            {
+                _ended.TrySetException(e);
+            }
+        }
     }
 
     private sealed class GatedAsyncCallback : IAsyncDeliveryCallback

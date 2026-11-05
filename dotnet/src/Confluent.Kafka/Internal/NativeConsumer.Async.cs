@@ -223,7 +223,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            CheckInAUse(() => SnapshotPartitions(partitions)),
+            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
             NativeMethods.ConsumerPauseCb,
             AsyncOperation.Pause,
             cancellationToken,
@@ -233,7 +233,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            CheckInAUse(() => SnapshotPartitions(partitions)),
+            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
             NativeMethods.ConsumerResumeCb,
             AsyncOperation.Resume,
             cancellationToken,
@@ -243,7 +243,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
+            SnapshotSeekPartitions(partitions),
             NativeMethods.ConsumerSeekToBeginningCb,
             AsyncOperation.SeekToBeginning,
             cancellationToken,
@@ -253,7 +253,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            CheckWhenOpen(() => SnapshotSeekPartitions(partitions)),
+            SnapshotSeekPartitions(partitions),
             NativeMethods.ConsumerSeekToEndCb,
             AsyncOperation.SeekToEnd,
             cancellationToken,
@@ -307,7 +307,11 @@ internal sealed partial class NativeConsumer
 
     internal Task<long?> CurrentLagWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
     {
-        CheckInAUse(() => RequireTopicPartition(partition.Topic, partition.Partition), UseKind.UnownedOnMock);
+        if (CheckInAUse(() => LagOfANullTopic(partition.Topic, partition.Partition), UseKind.UnownedOnMock))
+        {
+            return Task.FromResult<long?>(0);
+        }
+
         if (RoutesToTheHandle)
         {
             return RouteAsync(cancellationToken, handle => handle.CurrentLag(partition.Topic, partition.Partition));

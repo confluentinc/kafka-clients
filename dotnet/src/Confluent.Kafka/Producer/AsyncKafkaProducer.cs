@@ -135,7 +135,9 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         }
         catch (ApiException error)
         {
-            return FutureFailure.SendAsync(record.Topic, record.Partition, error, callback, asyncCallback, cancellationToken);
+            return FutureFailure.SendAsync(
+                record.Topic, record.Partition, error, callback, asyncCallback, cancellationToken,
+                _native.FailureCallbacks);
         }
 
         // As Java's doSend, the headers turn read-only once the serializers ran; the mocks leave them writable.

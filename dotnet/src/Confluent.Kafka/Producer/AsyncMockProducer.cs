@@ -164,11 +164,13 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// delivery callback receives the same instance, and its future's <see cref="AsyncKafkaFuture{T}.Get()"/> faults
     /// with an <see cref="Java.Util.Concurrent.ExecutionException"/> around it.
     /// </summary>
-    /// <param name="exception">The exception to fail the send with.</param>
-    /// <returns><see langword="true"/> if a pending send was failed; otherwise <see langword="false"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="exception"/> is null.</exception>
+    /// <param name="exception">
+    /// The exception to fail the send with; <see langword="null"/> completes it successfully, as
+    /// <see cref="CompleteNext"/> does.
+    /// </param>
+    /// <returns><see langword="true"/> if a pending send was completed; otherwise <see langword="false"/>.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool ErrorNext(Exception exception) => _native.MockErrorNext(exception);
+    public bool ErrorNext(Exception? exception) => _native.MockErrorNext(exception);
 
     /// <summary>
     /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>); the native mock

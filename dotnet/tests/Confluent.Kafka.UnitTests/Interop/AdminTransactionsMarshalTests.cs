@@ -281,7 +281,9 @@ public sealed class AdminTransactionsMarshalTests
                 list,
                 ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            return TransactionDescriptionMarshal.CopyOut(description);
+            TransactionDescription? copied = TransactionDescriptionMarshal.CopyOut(description);
+            Assert.NotNull(copied);
+            return copied;
         }
         finally
         {

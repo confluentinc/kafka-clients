@@ -1539,7 +1539,8 @@ public sealed class AdminP14SyncCompositionTests
                 }
 
             case "description-null-user":
-                AssertNullArgument(Thrown(() => harness.Description(null!)), "userName");
+                // Java's description(null) fails its future with the call's error, as for a user not in the response.
+                AssertNotImplemented(await harness.Description(null!).Outcome());
                 break;
 
             case "description-invalid-user":
@@ -1684,7 +1685,7 @@ public sealed class AdminP14SyncCompositionTests
             {
                 ["metadata.version"] = new SupportedVersionRange(1, 21),
             });
-        return RunSingleRow(row, SingleHarness<FeatureMetadata>.DescribeFeatures(flavour), metadata);
+        return RunSingleRow(row, SingleHarness<FeatureMetadata?>.DescribeFeatures(flavour), metadata);
     }
 
     [Theory]
@@ -1872,8 +1873,8 @@ public sealed class AdminP14SyncCompositionTests
     [MemberData(nameof(DescribeTransactionsRows))]
     public async Task DescribeTransactions_SyncAndAsyncResults_ComposeAlike(string row, string flavour)
     {
-        LookupHarness<string, TransactionDescription> harness =
-            LookupHarness<string, TransactionDescription>.DescribeTransactions(flavour, s_transactionalIds);
+        LookupHarness<string, TransactionDescription?> harness =
+            LookupHarness<string, TransactionDescription?>.DescribeTransactions(flavour, s_transactionalIds);
         switch (row)
         {
             case "unknown-key":
@@ -3707,7 +3708,7 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class LookupHarness<TKey, TValue> : KeyedHarness<TKey>
         where TKey : notnull
-        where TValue : class
+        where TValue : class?
     {
         private readonly Action<TKey, TValue> _succeed;
         private readonly Action<TKey, Exception> _fail;
@@ -3734,27 +3735,27 @@ public sealed class AdminP14SyncCompositionTests
             _all = all;
         }
 
-        internal static LookupHarness<string, TransactionDescription> DescribeTransactions(
+        internal static LookupHarness<string, TransactionDescription?> DescribeTransactions(
             string flavour, IReadOnlyList<string> ids)
         {
-            Dictionary<string, KafkaFutureImpl<TransactionDescription>> futures =
-                new Dictionary<string, KafkaFutureImpl<TransactionDescription>>(ids.Count, StringComparer.Ordinal);
+            Dictionary<string, KafkaFutureImpl<TransactionDescription?>> futures =
+                new Dictionary<string, KafkaFutureImpl<TransactionDescription?>>(ids.Count, StringComparer.Ordinal);
             foreach (string id in ids)
             {
-                futures.Add(id, new KafkaFutureImpl<TransactionDescription>());
+                futures.Add(id, new KafkaFutureImpl<TransactionDescription?>());
             }
 
-            Action<string, TransactionDescription> succeed = (id, value) => futures[id].Complete(value);
+            Action<string, TransactionDescription?> succeed = (id, value) => futures[id].Complete(value);
             Action<string, Exception> fail = (id, failure) => futures[id].CompleteWithError(failure);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DescribeTransactionsResult result = DescribeTransactionsResult.OfClient((futures, NoResultHandle()));
-                return new LookupHarness<string, TransactionDescription>(
+                return new LookupHarness<string, TransactionDescription?>(
                     succeed, fail, ids, Transaction, result.Description, null, () => FutureProbe.Of(result.All()));
             }
 
             AsyncDescribeTransactionsResult asyncResult = AsyncDescribeTransactionsResult.OfClient((futures, NoResultHandle()));
-            return new LookupHarness<string, TransactionDescription>(
+            return new LookupHarness<string, TransactionDescription?>(
                 succeed, fail, ids, Transaction, null, asyncResult.Description, () => FutureProbe.Of(asyncResult.All()));
         }
 
@@ -4658,18 +4659,18 @@ public sealed class AdminP14SyncCompositionTests
                 () => asyncResult.DelegationTokens() == asyncResult.DelegationTokens());
         }
 
-        internal static SingleHarness<FeatureMetadata> DescribeFeatures(string flavour)
+        internal static SingleHarness<FeatureMetadata?> DescribeFeatures(string flavour)
         {
-            KafkaFutureImpl<FeatureMetadata> impl = new KafkaFutureImpl<FeatureMetadata>();
+            KafkaFutureImpl<FeatureMetadata?> impl = new KafkaFutureImpl<FeatureMetadata?>();
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DescribeFeaturesResult result = DescribeFeaturesResult.OfClient((impl, NoResultHandle()));
-                return new SingleHarness<FeatureMetadata>(
+                return new SingleHarness<FeatureMetadata?>(
                     impl, () => FutureProbe.Of(result.FeatureMetadata()), () => result.FeatureMetadata() == result.FeatureMetadata());
             }
 
             AsyncDescribeFeaturesResult asyncResult = AsyncDescribeFeaturesResult.OfClient((impl, NoResultHandle()));
-            return new SingleHarness<FeatureMetadata>(
+            return new SingleHarness<FeatureMetadata?>(
                 impl,
                 () => FutureProbe.Of(asyncResult.FeatureMetadata()),
                 () => asyncResult.FeatureMetadata() == asyncResult.FeatureMetadata());

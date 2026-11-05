@@ -328,25 +328,22 @@ public sealed class PublicConsumerCommitCallbackTests
         Assert.Equal("offsets", error.ParamName);
     }
 
+    // Java's MockConsumer commits any partition; the binding makes no partition check of its own.
     [Fact]
-    public void CommitAsync_NegativePartition_ThrowsArgumentOutOfRangeBeforeAnyNativeCall()
+    public void CommitAsync_NegativePartition_IsCommittedByTheCore()
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         RecordingCommitCallback callback = new RecordingCommitCallback();
+        TopicPartition negative = new TopicPartition(Topic, -1);
 
-        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(
-            () => consumer.CommitAsync(
-                new Dictionary<TopicPartition, OffsetAndMetadata>
-                {
-                    [new TopicPartition(Topic, -1)] = new OffsetAndMetadata(1),
-                },
-                callback));
+        consumer.CommitAsync(
+            new Dictionary<TopicPartition, OffsetAndMetadata> { [negative] = new OffsetAndMetadata(1) },
+            callback);
 
-        Assert.Equal("offsets", error.ParamName);
-        Assert.Equal(-1, error.ActualValue);
-        Assert.StartsWith("Partition must not be negative.", error.Message, StringComparison.Ordinal);
-        Assert.Empty(callback.Completions);
+        Completion completion = Assert.Single(callback.Completions);
+        Assert.Null(completion.Exception);
+        Assert.Equal(1, Assert.Contains(negative, completion.Offsets!).Offset);
     }
 
     [Fact]

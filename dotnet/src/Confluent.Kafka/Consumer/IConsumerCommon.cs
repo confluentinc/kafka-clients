@@ -89,11 +89,15 @@ public interface IConsumerCommon
     /// with an optional <paramref name="reason"/>).
     /// </summary>
     /// <remarks>
-    /// Under the KIP-848 group protocol it only logs and returns, as Java's <c>AsyncKafkaConsumer</c> does; the
+    /// Under the KIP-848 group protocol it only logs and returns, as Java's <c>AsyncKafkaConsumer</c> does. As in
+    /// Java, it makes no closed check, so on a closed consumer it returns, and no owner check, so another thread's
+    /// call does not refuse it; the core still refuses it while another operation is in flight. The
     /// <see cref="KafkaException"/> below cannot occur under that protocol.
     /// </remarks>
     /// <param name="reason">An optional human-readable reason, or <see langword="null"/>.</param>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// The core refused it while another operation was in flight (the core's own check).
+    /// </exception>
     /// <exception cref="KafkaException">
     /// The core reported a rebalance failure (not reachable under the current KIP-848
     /// no-op).
@@ -107,12 +111,13 @@ public interface IConsumerCommon
     /// <remarks>
     /// Each <see cref="IMetric.Value"/> was measured once, by this call; the entries do not measure again. Keys
     /// compare by name, group and tags, not description, so per-partition metrics that share a name are distinct
-    /// keys.
+    /// keys. As Java's <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, another thread's call does not
+    /// refuse it on <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/>; the
+    /// mocks wait for it, as Java's synchronized <c>MockConsumer.metrics()</c> does.
     /// </remarks>
     /// <returns>An owned, immutable snapshot (empty when no metrics are registered — e.g. a mock).</returns>
-    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    /// <exception cref="ConcurrentModificationException">
-    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed: the native handle is gone, where Java's consumer still answers.
     /// </exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 

@@ -421,15 +421,16 @@ public sealed class PublicConsumerReentrancyHandleTests
     }
 
     [Fact]
-    public void Position_WithNegativeTimeoutAndNullTopic_ThrowsForTheTimeout()
+    public void Position_WithNegativeTimeoutAndNullTopic_ThrowsForTheAssignmentFirst()
     {
+        // Java's KafkaConsumer.position checks isAssigned before it builds the timer.
         MockConsumer<byte[], byte[]> consumer = NewMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using ConsumerHandle handle = consumer.Handle();
 
-        IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(
+        IllegalStateException failure = Assert.Throws<IllegalStateException>(
             () => handle.Position(new TopicPartition(null!, 0), TimeSpan.FromSeconds(-1)));
-        Assert.Equal("Invalid negative timeout -1000", failure.Message);
+        Assert.Equal("You can only check the position for partitions assigned to this consumer.", failure.Message);
     }
 
     [Fact]

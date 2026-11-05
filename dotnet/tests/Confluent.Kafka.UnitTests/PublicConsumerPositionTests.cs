@@ -124,13 +124,14 @@ public sealed class PublicConsumerPositionTests
     }
 
     [Fact]
-    public async Task Position_NullTopic_ThrowsArgumentNull()
+    public async Task Position_NullTopic_ThrowsIllegalArgumentAtTheCall()
     {
+        // Java's MockConsumer.position throws IllegalArgumentException for a partition that is not assigned.
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        await Assert.ThrowsAsync<ArgumentNullException>(
-            () => consumer.Position(default));
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Position(default); });
+        Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
     }
 
     [Fact]

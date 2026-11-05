@@ -53,9 +53,10 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// </param>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="configs"/>, <paramref name="keyDeserializer"/>, or
-    /// <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null: Java then reads the
+    /// <c>key.deserializer</c> / <c>value.deserializer</c> config, which .NET config cannot set.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
@@ -71,8 +72,14 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
+        // Java copies the config map first, so a null one fails before a missing deserializer.
+        if (configs is null)
+        {
+            throw new ArgumentNullException(nameof(configs));
+        }
+
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
         _native = NativeConsumer.Create(configs);
     }
 

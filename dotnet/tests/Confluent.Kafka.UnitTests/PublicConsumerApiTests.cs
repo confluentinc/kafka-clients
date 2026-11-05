@@ -113,16 +113,17 @@ public sealed class PublicConsumerApiTests
         Assert.Equal("sync-group", meta.GroupId);
     }
 
+    // Java's MockConsumer.seek checks no offset: an unassigned partition is refused as unassigned.
     [Fact]
-    public void Seek_NegativeOffset_ThrowsExactJavaMessage()
+    public async Task Seek_NegativeOffset_OnTheMock_UnassignedPartition_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
-            () => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -1); });
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
+            () => consumer.Seek(new TopicPartition("t", 0), offset: -1));
 
-        Assert.Equal("seek offset must not be a negative number", ex.Message);
+        Assert.Equal("No current assignment for partition t-0", ex.Message);
     }
 
     [Fact]

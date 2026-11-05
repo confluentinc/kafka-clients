@@ -25,12 +25,12 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class TransactionDescriptionMarshal
 {
-    internal static TransactionDescription CopyOut(IntPtr description)
+    internal static TransactionDescription? CopyOut(IntPtr description)
     {
         if (description == IntPtr.Zero)
         {
             // Python's binding reads a missing description as None, so the future completes with null.
-            return null!;
+            return null;
         }
 
         IntPtr outErr = IntPtr.Zero;

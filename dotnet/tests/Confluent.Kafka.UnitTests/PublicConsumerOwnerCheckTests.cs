@@ -47,7 +47,7 @@ public sealed class PublicConsumerOwnerCheckTests
     private static readonly TopicPartition s_tp0 = new TopicPartition(Topic, 0);
 
     [Fact]
-    public void KafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupAndHandlePass()
+    public void KafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupHandleMetricsAndEnforceRebalancePass()
     {
         KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer();
         try
@@ -61,6 +61,7 @@ public sealed class PublicConsumerOwnerCheckTests
                     seen["Commit"] = Record.Exception(() => consumer.Commit(Empty()));
                     seen["Assignment"] = Record.Exception(() => consumer.Assignment());
                     seen["Metrics"] = Record.Exception(() => consumer.Metrics());
+                    seen["EnforceRebalance"] = Record.Exception(() => consumer.EnforceRebalance());
                     seen["Close"] = Record.Exception(() => consumer.Close());
                     seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
                     seen["Wakeup"] = Record.Exception(consumer.Wakeup);
@@ -71,7 +72,12 @@ public sealed class PublicConsumerOwnerCheckTests
             Assert.True(delivering is null || delivering is WakeupException { Code: WakeupCode }, delivering?.ToString());
             AssertRefused(seen["Commit"]);
             AssertRefused(seen["Assignment"]);
-            AssertRefused(seen["Metrics"]);
+            // Java's metrics() and enforceRebalance() take no acquire(), so the binding makes no owner check; the core
+            // answers enforceRebalance itself while the delivering call holds its flag.
+            Assert.Null(seen["Metrics"]);
+            Assert.True(
+                seen["EnforceRebalance"] is null or ConcurrentModificationException,
+                seen["EnforceRebalance"]?.ToString());
             AssertRefused(seen["Close"]);
             Assert.Null(seen["Handle"]);
             Assert.Null(seen["Wakeup"]);
@@ -84,7 +90,7 @@ public sealed class PublicConsumerOwnerCheckTests
     }
 
     [Fact]
-    public async Task AsyncKafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupAndHandlePass()
+    public async Task AsyncKafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupHandleMetricsAndEnforceRebalancePass()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
         try
@@ -100,6 +106,7 @@ public sealed class PublicConsumerOwnerCheckTests
                         seen["Seek"] = Record.Exception(() => { _ = consumer.Seek(s_tp0, 1); });
                         seen["Assignment"] = Record.Exception(() => consumer.Assignment());
                         seen["Metrics"] = Record.Exception(() => consumer.Metrics());
+                        seen["EnforceRebalance"] = Record.Exception(() => consumer.EnforceRebalance());
                         close = CloseCatching(consumer);
                         seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
                         seen["Wakeup"] = Record.Exception(consumer.Wakeup);
@@ -112,7 +119,12 @@ public sealed class PublicConsumerOwnerCheckTests
             Assert.True(delivering is null || delivering is WakeupException { Code: WakeupCode }, delivering?.ToString());
             AssertRefused(seen["Seek"]);
             AssertRefused(seen["Assignment"]);
-            AssertRefused(seen["Metrics"]);
+            // Java's metrics() and enforceRebalance() take no acquire(), so the binding makes no owner check; the core
+            // answers enforceRebalance itself while the delivering call holds its flag.
+            Assert.Null(seen["Metrics"]);
+            Assert.True(
+                seen["EnforceRebalance"] is null or ConcurrentModificationException,
+                seen["EnforceRebalance"]?.ToString());
             AssertRefused(await Record.ExceptionAsync(() => TestTimeout.Run(() => close!, s_deadline)));
             Assert.Null(seen["Handle"]);
             Assert.Null(seen["Wakeup"]);
