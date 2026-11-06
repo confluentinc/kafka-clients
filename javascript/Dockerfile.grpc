@@ -53,6 +53,20 @@ COPY javascript/binding.gyp javascript/package.json javascript/package-lock.json
 # alone, for the runtime stage below).
 RUN cd /workspace/javascript && npm ci --no-audit --no-fund --ignore-scripts
 
+# The gRPC packages, at the versions pinned in package.json's devDependencies
+# (the single source of truth: the native arm loads the ones `npm ci`
+# installs). Installed by name into a prefix of their own rather than by a
+# bare `npm install` of the package, which would add its other devDependencies.
+# It reads only package.json, so it sits before the sources: a source change
+# does not download the packages again.
+RUN mkdir -p /workspace/grpc-deps && \
+    cd /workspace/grpc-deps && \
+    echo '{"private": true}' > package.json && \
+    npm install --prefix /workspace/grpc-deps --no-save --no-package-lock --ignore-scripts --no-audit --no-fund \
+        $(node -p "Object.entries(require('/workspace/javascript/package.json').devDependencies || {}) \
+            .filter(([name]) => name.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')") && \
+    test -d node_modules/@grpc/grpc-js && test -d node_modules/@grpc/proto-loader
+
 COPY javascript/src /workspace/javascript/src
 COPY javascript/scripts /workspace/javascript/scripts
 COPY javascript/lib /workspace/javascript/lib
@@ -66,18 +80,6 @@ ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/rust/target/release \
 RUN make -C /workspace/javascript build && \
     test -f /workspace/javascript/build/Release/confluent-kafka-javascript.node && \
     test -f /workspace/javascript/dist/producer/index.js
-
-# The gRPC packages, at the versions pinned in package.json's devDependencies
-# (the single source of truth, shared with the native `make -C javascript
-# grpc-native`). Installed by name into a prefix of their own rather than by a
-# bare `npm install` of the package, which would add its other devDependencies.
-RUN mkdir -p /workspace/grpc-deps && \
-    cd /workspace/grpc-deps && \
-    echo '{"private": true}' > package.json && \
-    npm install --prefix /workspace/grpc-deps --no-save --no-package-lock --ignore-scripts --no-audit --no-fund \
-        $(node -p "Object.entries(require('/workspace/javascript/package.json').devDependencies || {}) \
-            .filter(([name]) => name.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')") && \
-    test -d node_modules/@grpc/grpc-js && test -d node_modules/@grpc/proto-loader
 
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — Node + the addon + the compiled library + the gRPC packages.

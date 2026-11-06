@@ -258,8 +258,8 @@ test-integration-javascript-sasl-ssl:
 #   c/       the kafka_grpc_server binary
 #   dotnet/  the .NET gRPC server's net10.0 build (Confluent.Kafka.GrpcServer.dll
 #            plus the native library), run with the `dotnet` host
-#   javascript/node_modules  @grpc/grpc-js + @grpc/proto-loader, put on
-#            NODE_PATH by the harness (MULTILANG_JS_NODE_PATH overrides it)
+# (The JavaScript server needs nothing there: it runs from javascript/, with the
+# gRPC packages `npm ci` installs in javascript/node_modules.)
 build-grpc-native-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 

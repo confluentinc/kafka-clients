@@ -78,6 +78,12 @@ test("a Map is accepted, and its non-string keys rejected with Java's ConfigErro
     name: 'ConfigError',
     message: 'Invalid value x for configuration 1: Key must be a string.',
   });
+  // Every key is checked before any value, as Java and Python do: the bad
+  // key is reported, not the earlier key's bad value.
+  assert.throws(() => configEntries(new Map([['linger.ms', true], [1, 'x']])), {
+    name: 'ConfigError',
+    message: 'Invalid value x for configuration 1: Key must be a string.',
+  });
 });
 
 test('values of an unknown key of other types are rejected', () => {

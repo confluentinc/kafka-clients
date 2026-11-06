@@ -25,9 +25,10 @@ import { ApiError } from './api_error';
  *
  * A catch-only base: constructing it throws `TypeError`.
  */
-export class RetriableError extends ApiError {
+export abstract class RetriableError extends ApiError {
   /**
-   * A catch-only base: constructing it directly throws `TypeError`.
+   * A catch-only base: constructing it directly throws `TypeError` (and
+   * TypeScript rejects `new` on it, as Java's abstract class).
    *
    * @param message - the message a subclass passes on, Java's message
    * @param options - `cause`: the cause a subclass passes on, Java's cause

@@ -197,11 +197,11 @@ impl BackendKind {
     /// JavaScript runs the checked-in `javascript/grpc_server.js` with `node`
     /// (`MULTILANG_NODE` overrides it) against the addon built in
     /// `javascript/build/Release` and the library compiled into
-    /// `javascript/dist` (both `make -C javascript build`); the gRPC packages (`@grpc/grpc-js`,
-    /// `@grpc/proto-loader`) are resolved through `NODE_PATH`, from
-    /// `target/grpc-native/javascript/node_modules` unless
-    /// `MULTILANG_JS_NODE_PATH` names another `node_modules` directory. The
-    /// server loads the `.proto` files at runtime from `GRPC_PROTO_DIR`.
+    /// `javascript/dist` (both `make -C javascript build`); the gRPC packages
+    /// (`@grpc/grpc-js`, `@grpc/proto-loader`) are the devDependencies `npm ci`
+    /// installs in `javascript/node_modules`, which Node resolves from the
+    /// server's own directory. The server loads the `.proto` files at runtime
+    /// from `GRPC_PROTO_DIR`.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         match self {
@@ -255,9 +255,6 @@ impl BackendKind {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("node"));
                 let javascript = root.join("../javascript");
-                let node_modules = std::env::var_os("MULTILANG_JS_NODE_PATH")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| root.join("target/grpc-native/javascript/node_modules"));
                 require_native_artifact(self, &node, TARGET);
                 require_native_artifact(
                     self,
@@ -265,18 +262,22 @@ impl BackendKind {
                     TARGET,
                 );
                 require_native_artifact(self, &javascript.join("dist/producer/index.js"), TARGET);
-                require_native_artifact(self, &node_modules.join("@grpc/grpc-js"), TARGET);
-                require_native_artifact(self, &node_modules.join("@grpc/proto-loader"), TARGET);
-
-                let mut node_path = std::ffi::OsString::from(node_modules);
-                if let Some(existing) = std::env::var_os("NODE_PATH") {
-                    node_path.push(":");
-                    node_path.push(existing);
+                // What grpc_server.js loads: Node resolves `require` from the
+                // server's directory, javascript/node_modules, before any
+                // NODE_PATH.
+                for package in ["@grpc/grpc-js", "@grpc/proto-loader"] {
+                    let path = javascript.join("node_modules").join(package);
+                    assert!(
+                        path.exists(),
+                        "{} native gRPC backend: {} does not exist. Run `npm ci` in javascript/.",
+                        self.label(),
+                        path.display(),
+                    );
                 }
+
                 let mut command = Command::new(node);
                 command
                     .arg(javascript.join("grpc_server.js"))
-                    .env("NODE_PATH", node_path)
                     .env("GRPC_PROTO_DIR", root.join("multilanguage-test-server/proto"));
                 (command, TARGET)
             },
