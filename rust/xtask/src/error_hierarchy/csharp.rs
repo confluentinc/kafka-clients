@@ -1202,9 +1202,10 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
             doc.push_str(" .NET records a stack trace on every throw, where Java's <c>ApiException</c> records none.");
         }
         lines.extend(summary(&doc, "    "));
-        let name: String = s.name.split('_').map(|w| pascal(&w.to_lowercase())).collect();
+        // Java's own name and spelling, as for every `public static final` field (`INSTANCE`).
         lines.push(format!(
-            "    public static readonly {simple} {name} = new {simple}({});",
+            "    public static readonly {simple} {} = new {simple}({});",
+            s.name,
             args.join(", ")
         ));
         lines.push(String::new());
@@ -1634,10 +1635,10 @@ mod tests {
     }
 
     #[test]
-    fn a_singleton_is_instance_and_keeps_a_private_constructor() {
+    fn a_singleton_keeps_javas_name_and_a_private_constructor() {
         let c = graph();
         let cs = render(&c, &errors("CoordinatorNotAvailableException"));
-        assert!(cs.contains("    public static readonly CoordinatorNotAvailableException Instance = new CoordinatorNotAvailableException();"));
+        assert!(cs.contains("    public static readonly CoordinatorNotAvailableException INSTANCE = new CoordinatorNotAvailableException();"));
         assert!(cs.contains("    private CoordinatorNotAvailableException()\n"));
         assert!(cs.contains("compare by"));
     }

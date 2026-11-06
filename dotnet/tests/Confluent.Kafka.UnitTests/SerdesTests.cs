@@ -99,7 +99,7 @@ public sealed class SerdesTests
     [InlineData(256)]
     [InlineData(int.MaxValue)]
     [InlineData(int.MinValue)]
-    public void Int32_RoundTrips(int value)
+    public void Integer_RoundTrips(int value)
     {
         byte[]? bytes = Serdes.Integer().Serialize(Topic, value);
         Assert.NotNull(bytes);
@@ -107,7 +107,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Int32_WireFormat_IsBigEndian()
+    public void Integer_WireFormat_IsBigEndian()
     {
         Assert.Equal(new byte[] { 0x00, 0x00, 0x00, 0x01 }, Serdes.Integer().Serialize(Topic, 1));
         Assert.Equal(new byte[] { 0x00, 0x00, 0x01, 0x00 }, Serdes.Integer().Serialize(Topic, 256));
@@ -121,7 +121,7 @@ public sealed class SerdesTests
     [InlineData(-1L)]
     [InlineData(long.MaxValue)]
     [InlineData(long.MinValue)]
-    public void Int64_RoundTrips(long value)
+    public void Long_RoundTrips(long value)
     {
         byte[]? bytes = Serdes.Long().Serialize(Topic, value);
         Assert.NotNull(bytes);
@@ -129,7 +129,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Int64_WireFormat_IsBigEndian()
+    public void Long_WireFormat_IsBigEndian()
     {
         Assert.Equal(
             new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
@@ -175,7 +175,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Guid_RoundTrips()
+    public void UUID_RoundTrips()
     {
         Guid value = Guid.NewGuid();
         byte[]? bytes = Serdes.UUID().Serialize(Topic, value);
@@ -184,7 +184,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Guid_WireFormat_IsCanonicalLowercaseStringUtf8_NotRawBytes()
+    public void UUID_WireFormat_IsCanonicalLowercaseStringUtf8_NotRawBytes()
     {
         var value = new Guid("A1B2C3D4-E5F6-7788-99AA-BBCCDDEEFF00");
         const string canonical = "a1b2c3d4-e5f6-7788-99aa-bbccddeeff00";
@@ -197,7 +197,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Guid_DeserializeParsesCanonicalString()
+    public void UUID_DeserializeParsesCanonicalString()
     {
         byte[] wire = Encoding.UTF8.GetBytes("12345678-9abc-def0-1234-56789abcdef0");
         Guid decoded = Serdes.UUID().Deserialize(Topic, wire);
@@ -205,7 +205,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Null_SerializeReturnsNull_DeserializeReturnsDefault()
+    public void Void_SerializeReturnsNull_DeserializeReturnsDefault()
     {
         Assert.Null(Serdes.Void().Serialize(Topic, null));
         Assert.Null(Serdes.Void().Serialize(Topic, new object()));
@@ -214,7 +214,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Int32_WrongLength_ThrowsSerializationException()
+    public void Integer_WrongLength_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
             () => Serdes.Integer().Deserialize(Topic, new byte[] { 0x00, 0x00, 0x01 }));
@@ -222,7 +222,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Int64_WrongLength_ThrowsSerializationException()
+    public void Long_WrongLength_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
             () => Serdes.Long().Deserialize(Topic, new byte[] { 0x00, 0x00, 0x00, 0x01 }));
@@ -238,7 +238,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void Guid_MalformedText_ThrowsSerializationException()
+    public void UUID_MalformedText_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
             () => Serdes.UUID().Deserialize(Topic, Encoding.UTF8.GetBytes("not-a-uuid")));
