@@ -27,6 +27,9 @@ import type { RecordMetadata } from './record_metadata';
  * A producer's configuration: Java's ProducerConfig keys, as a plain object
  * or a `Map`. Values are stringified (`true` -> `"true"`, numbers and bigints
  * by `String`, arrays joined with `,`); `null` / `undefined` drop the key.
+ *
+ * @jsOnly The type of the configuration the constructor takes, Java's
+ *   `Map<String, Object>` or `Properties`.
  */
 export type ProducerConfigs =
   | Record<string, string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined>
@@ -34,6 +37,9 @@ export type ProducerConfigs =
 
 /**
  * Options of {@link KafkaProducer.close}.
+ *
+ * @jsOnly The options object of one Java overload set, `close()` and
+ *   `close(Duration)` (javascript/CLAUDE.md "Java shape, JS idiom").
  */
 export type CloseOptions = {
   /**
@@ -173,6 +179,14 @@ export class KafkaProducer {
    * @throws `IllegalStateError` when the producer is closed
    * @throws `TypeError` when `record` is not a ProducerRecord or `callback` not
    *   a function
+   * @throws `InterruptError` rejects with it if the thread is interrupted while
+   *   blocked
+   * @throws `SerializationError` rejects with it if the key or value are not
+   *   valid objects given the configured serializers
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of the
+   *   bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   * @throws `KafkaError` rejects with it if a Kafka related error occurs that
+   *   does not belong to the public API errors
    */
   send(record: ProducerRecord, callback?: Callback | null): Promise<KafkaFuture<RecordMetadata>> {
     if (!(record instanceof ProducerRecord)) throw new TypeError('record must be a ProducerRecord');
@@ -275,6 +289,11 @@ export class KafkaProducer {
    * it resolves.
    *
    * Calling it from inside a callback rejects, as Java's flush() throws there.
+   *
+   * @throws `InterruptError` rejects with it if the thread is interrupted while
+   *   blocked
+   * @throws `KafkaError` rejects with it if the method is invoked inside a
+   *   `send` callback
    */
   flush(): Promise<void> {
     if (this.#destroyed) {
@@ -307,6 +326,13 @@ export class KafkaProducer {
    * @returns rejecting with an `IllegalArgumentError` for a negative
    *   `timeoutMs`
    * @throws `TypeError` when `timeoutMs` is not an integer
+   * @throws `InterruptError` rejects with it if the thread is interrupted while
+   *   blocked
+   * @throws `KafkaError` rejects with it if an unexpected error occurs while
+   *   trying to close the client; this error should be treated as fatal and
+   *   indicate the client is no longer usable
+   * @throws `IllegalArgumentError` rejects with it if the `timeoutMs` is
+   *   negative
    */
   close(options?: CloseOptions): Promise<void> {
     let timeoutMs: number | null = null;

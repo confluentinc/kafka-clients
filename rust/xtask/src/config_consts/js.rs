@@ -16,6 +16,7 @@
 //! ([`super::SPECS`]) that a producer reaches, each a class of static
 //! properties in the lib/ folder of its Java package.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -24,11 +25,14 @@ use crate::javascript_gen::{header, js_str, tsdoc, JsModule};
 
 type Res<T> = anyhow::Result<T>;
 
+/// The producer's Java config class, whose `ConfigDef` documents its keys.
+const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
+
 /// The config classes of the Node.js client: Java class and lib/ folder. The
 /// others the Python client generates (`ConsumerConfig`, `AdminClientConfig`,
 /// `TopicConfig`, `LogLevelConfig`) wait for a consumer and an admin client.
 const JS_SPECS: &[(&str, &str)] = &[
-    ("org.apache.kafka.clients.producer.ProducerConfig", "producer"),
+    (PRODUCER_CONFIG, "producer"),
     ("org.apache.kafka.common.config.SaslConfigs", "common/config"),
     ("org.apache.kafka.common.config.SslConfigs", "common/config"),
     ("org.apache.kafka.common.config.SecurityConfig", "common/config"),
@@ -50,6 +54,69 @@ const NOTES: &[(&str, &str, &str)] = &[
          the only trust store format it reads (no JKS or PKCS12).",
     ),
 ];
+
+/// The TSDoc text of constant `name` (value `value`) of Java class `owner`
+/// (PLAN.md §8 decision 17), Java's own documentation of it, translated as a
+/// Javadoc is:
+/// 1. for a configuration key, the documentation argument of the `define`
+///    call of `ProducerConfig`'s `ConfigDef` for that key (`docs`), which may
+///    be another class's `_DOC` (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC`);
+/// 2. else the sibling `<NAME>_DOC` or, for an `X_CONFIG`, `X_DOC` (any
+///    visibility) of `owner`;
+/// 3. else a line naming it: the key of an `X_CONFIG`, the constant an
+///    `X_DOC` documents, or Java's constant itself.
+fn constant_doc(
+    reader: &mut Reader,
+    docs: &BTreeMap<String, (String, String)>,
+    owner: &str,
+    name: &str,
+    value: &Value,
+) -> Res<String> {
+    let translator = crate::javadoc::Translator { index: None, panics: false };
+    if let Value::Str(key) = value {
+        let is_key_constant = !name.ends_with("_DOC") && !name.starts_with("DEFAULT_");
+        if let Some((class, src)) = docs.get(key).filter(|_| is_key_constant) {
+            match reader
+                .eval_src(class, src)
+                .map_err(|e| anyhow::anyhow!("the doc of `{key}` in `{class}`: {e}"))?
+            {
+                Value::Str(text) => return Ok(translator.to_rustdoc(&text)),
+                other => anyhow::bail!("config constants: the doc of `{key}` in `{class}` is not a string: {other:?}"),
+            }
+        }
+    }
+    let class = reader.class(owner)?;
+    let stem = name.strip_suffix("_CONFIG");
+    let siblings = [Some(format!("{name}_DOC")), stem.map(|s| format!("{s}_DOC"))];
+    for sibling in siblings.iter().flatten() {
+        let Some(field) = class.fields.iter().find(|f| f.name == *sibling && f.static_final) else {
+            continue;
+        };
+        let Some(init) = field.init.clone() else {
+            continue;
+        };
+        let doc = reader
+            .eval_src(owner, &init)
+            .map_err(|e| anyhow::anyhow!("`{owner}.{sibling}`: {e}"))?;
+        if let Value::Str(text) = doc {
+            return Ok(translator.to_rustdoc(&text));
+        }
+    }
+    let java = simple(owner);
+    if let (Some(_), Value::Str(key)) = (stem, value) {
+        return Ok(format!("The `{key}` configuration key."));
+    }
+    if let Some(stem) = name.strip_suffix("_DOC") {
+        let config = format!("{stem}_CONFIG");
+        let target = if class.fields.iter().any(|f| f.name == config) {
+            config
+        } else {
+            stem.to_string()
+        };
+        return Ok(format!("The documentation of `{java}.{target}`."));
+    }
+    Ok(format!("Java's `{java}.{name}`."))
+}
 
 /// A constant's TypeScript value and its type.
 fn js_value(v: &Value) -> Res<(String, String)> {
@@ -92,6 +159,8 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         .map(|l| l.trim().to_string())
         .collect();
     let mut reader = Reader::new(repo_root);
+    // The documentation of every key a producer's configuration takes.
+    let docs = crate::config_types::define_docs(repo_root, PRODUCER_CONFIG)?;
     let mut out = Vec::new();
     for (java, dir) in JS_SPECS {
         let spec = SPECS
@@ -100,11 +169,15 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
             .ok_or_else(|| anyhow::anyhow!("config constants: {java} is not a Python config class"))?;
         let name = simple(spec.java);
         let class = reader.class(spec.java)?;
-        let mut consts = constants_of(&mut reader, spec.java, &deprecated)?;
+        // Each constant with the Java class declaring it, where its `_DOC` sibling is.
+        let mut consts: Vec<(String, Value, &str)> = constants_of(&mut reader, spec.java, &deprecated)?
+            .into_iter()
+            .map(|(n, v)| (n, v, spec.java))
+            .collect();
         for parent in spec.flatten {
             for (n, v) in constants_of(&mut reader, parent, &deprecated)? {
-                if !consts.iter().any(|(m, _)| *m == n) {
-                    consts.push((n, v));
+                if !consts.iter().any(|(m, _, _)| *m == n) {
+                    consts.push((n, v, parent));
                 }
             }
         }
@@ -146,26 +219,28 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         text.push('\n');
         text.push_str(&tsdoc(&about, ""));
         text.push_str(&format!("\nexport class {name} {{\n"));
-        for (n, v) in &consts {
+        for (n, v, owner) in &consts {
             let (val, ty) = js_value(v)?;
-            let note = NOTES.iter().find(|(c, k, _)| c == java && k == n).map(|(_, _, t)| *t);
-            if let Some(t) = note {
-                text.push_str(&tsdoc(t, "  "));
-                text.push('\n');
+            let mut doc = constant_doc(&mut reader, &docs, owner, n, v)?;
+            if let Some((_, _, t)) = NOTES.iter().find(|(c, k, _)| c == java && k == n) {
+                doc.push_str("\n\n");
+                doc.push_str(t);
             }
+            text.push_str(&tsdoc(&doc, "  "));
+            text.push('\n');
             // The type is written out: a `static readonly` with a literal
             // initializer would otherwise be typed as that literal.
             text.push_str(&format!("  static readonly {n}: {ty} = {val};\n"));
         }
         if spec.kind == Kind::ConstantsOnly {
             text.push_str(&format!(
-                "\n  /**\n   * Not instantiable: throws `TypeError`.\n   */\n  \
+                "\n  /**\n   * Not instantiable: throws `TypeError`.\n   *\n   * @param args - ignored\n   * @throws `TypeError` always\n   */\n  \
                  constructor(...args: unknown[]) {{\n    void args;\n    throw new TypeError('{name} is not instantiable: its ConfigDef machinery is not ' +\n      \
                  'translated; a configuration is a plain object of its keys');\n  }}\n"
             ));
         }
         for (c, k, _) in NOTES {
-            if c == java && !consts.iter().any(|(n, _)| n == k) {
+            if c == java && !consts.iter().any(|(n, _, _)| n == k) {
                 anyhow::bail!("config constants: the note on `{c}.{k}` names no constant");
             }
         }
@@ -224,5 +299,48 @@ mod tests {
         assert!(sasl
             .content
             .contains("  static readonly DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR: number = 0.8;\n"));
+    }
+
+    #[test]
+    fn test_constant_docs_come_from_java_doc_strings() {
+        let modules = modules(&repo_root()).unwrap();
+        let producer = &modules.iter().find(|m| m.name == "ProducerConfig").unwrap().content;
+        // From the private `METADATA_MAX_AGE_DOC` sibling of `METADATA_MAX_AGE_CONFIG`.
+        assert!(producer.contains("  /**\n   * The period of time in milliseconds after which we force a refresh of\n"));
+        // `<code>x</code>` read as Javadoc: a code span.
+        assert!(producer.contains("`linger.ms`"));
+        assert!(!producer.contains("   * <code>"));
+        // The ConfigDef's doc of the key, another class's `_DOC` (CommonClientConfigs').
+        assert!(producer
+            .contains("  /**\n   * A list of host/port pairs used to establish the initial connection to the\n"));
+        // Without the ConfigDef's doc and with no sibling in the class: the key.
+        let mut reader = Reader::new(&repo_root());
+        let key = Value::Str("bootstrap.servers".into());
+        let line =
+            constant_doc(&mut reader, &BTreeMap::new(), PRODUCER_CONFIG, "BOOTSTRAP_SERVERS_CONFIG", &key).unwrap();
+        assert_eq!(line, "The `bootstrap.servers` configuration key.");
+        // A list keeps one item per line, a link its target.
+        assert!(producer.contains("   * - `acks=0` If set to zero"));
+        assert!(producer.contains("   *   1. If no partition is specified"));
+        let sasl = &modules.iter().find(|m| m.name == "SaslConfigs").unwrap().content;
+        assert!(sasl.contains("[here](https://docs.oracle.com/javase/8/docs/technotes/guides/security/jgss/tutorials/LoginConfigFile.html)"));
+        assert!(producer.contains(
+            "  /**\n   * The documentation of `ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG`.\n   */\n  static readonly ENABLE_IDEMPOTENCE_DOC"
+        ));
+        assert!(producer.contains(
+            "  /**\n   * Java's `ProducerConfig.DEFAULT_CLIENT_RACK`.\n   */\n  static readonly DEFAULT_CLIENT_RACK"
+        ));
+        // Every constant has a TSDoc comment.
+        for m in &modules {
+            let lines: Vec<&str> = m.content.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if l.starts_with("  static readonly ") {
+                    assert_eq!(lines[i - 1], "   */", "{}: {l}", m.name);
+                }
+            }
+        }
+        // A translation note follows Java's text.
+        let ssl = &modules.iter().find(|m| m.name == "SslConfigs").unwrap().content;
+        assert!(ssl.contains("   * Translation note: Java's value."));
     }
 }
