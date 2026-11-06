@@ -174,7 +174,7 @@ internal sealed partial class NativeAdminClient
                 break;
             case nameof(CreatePartitionsOptions.RetryOnQuotaViolation):
                 NativeMethods.CreatePartitionsOptionsSetRetryOnQuotaViolation(
-                    native, options.RetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ShouldRetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("CreatePartitionsOptions has no C setter for " + setter + ".");

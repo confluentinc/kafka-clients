@@ -188,7 +188,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListTopicsOptions.ListInternal()"/> <see langword="false"/>, so internal
+    /// <see cref="ListTopicsOptions.ShouldListInternal()"/> <see langword="false"/>, so internal
     /// topics such as <c>__consumer_offsets</c> are excluded.
     /// </param>
     /// <returns>

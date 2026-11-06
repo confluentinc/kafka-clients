@@ -48,4 +48,12 @@ internal static class SetterMethods
         Assert.Equal(expected, Getters.NamesOf(type));
         Assert.Equal(expected, NamesOf(type));
     }
+
+    // For a class where Java names a getter differently from its setter (shouldValidateOnly() and validateOnly(x)).
+    internal static void AssertGettersAndSetters(Type type, string[] getters, string[] setters)
+    {
+        Assert.Empty(type.GetProperties());
+        Assert.Equal(getters.OrderBy(name => name, StringComparer.Ordinal), Getters.NamesOf(type));
+        Assert.Equal(setters.OrderBy(name => name, StringComparer.Ordinal), NamesOf(type));
+    }
 }

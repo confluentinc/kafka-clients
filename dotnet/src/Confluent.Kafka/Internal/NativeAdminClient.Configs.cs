@@ -288,7 +288,7 @@ internal sealed partial class NativeAdminClient
                 NativeMethods.AlterConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterConfigsOptions.ValidateOnly):
-                NativeMethods.AlterConfigsOptionsSetValidateOnly(native, options.ValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.AlterConfigsOptionsSetValidateOnly(native, options.ShouldValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterConfigsOptions has no C setter for " + setter + ".");

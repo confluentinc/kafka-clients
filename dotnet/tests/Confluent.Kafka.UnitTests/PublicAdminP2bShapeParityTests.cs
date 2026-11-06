@@ -281,20 +281,32 @@ public sealed class PublicAdminP2bShapeParityTests
     {
         ListTopicsOptions list = new ListTopicsOptions();
         Assert.Null(list.TimeoutMs());
-        Assert.False(list.ListInternal());
-        AssertOptionNames(typeof(ListTopicsOptions), nameof(ListTopicsOptions.ListInternal), nameof(list.TimeoutMs));
+        Assert.False(list.ShouldListInternal());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(ListTopicsOptions),
+            getters: new[] { nameof(ListTopicsOptions.ShouldListInternal), nameof(list.TimeoutMs) },
+            setters: new[] { nameof(ListTopicsOptions.ListInternal), nameof(list.TimeoutMs) });
 
         CreatePartitionsOptions create = new CreatePartitionsOptions();
         Assert.Null(create.TimeoutMs());
         Assert.False(create.ValidateOnly());
 
         // The one option whose Java default is not the C# default for its type.
-        Assert.True(create.RetryOnQuotaViolation());
-        AssertOptionNames(
+        Assert.True(create.ShouldRetryOnQuotaViolation());
+        SetterMethods.AssertGettersAndSetters(
             typeof(CreatePartitionsOptions),
-            nameof(CreatePartitionsOptions.RetryOnQuotaViolation),
-            nameof(create.TimeoutMs),
-            nameof(CreatePartitionsOptions.ValidateOnly));
+            getters: new[]
+            {
+                nameof(CreatePartitionsOptions.ShouldRetryOnQuotaViolation),
+                nameof(create.TimeoutMs),
+                nameof(CreatePartitionsOptions.ValidateOnly),
+            },
+            setters: new[]
+            {
+                nameof(CreatePartitionsOptions.RetryOnQuotaViolation),
+                nameof(create.TimeoutMs),
+                nameof(CreatePartitionsOptions.ValidateOnly),
+            });
 
         // Java's DeleteRecordsOptions declares no members of its own, so the inherited timeout is the whole surface.
         DeleteRecordsOptions delete = new DeleteRecordsOptions();

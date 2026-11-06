@@ -597,8 +597,11 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         AlterConfigsOptions alter = new AlterConfigsOptions();
         Assert.Null(alter.TimeoutMs());
-        Assert.False(alter.ValidateOnly());
-        SetterMethods.AssertGettersAndSetters(typeof(AlterConfigsOptions), "TimeoutMs", "ValidateOnly");
+        Assert.False(alter.ShouldValidateOnly());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(AlterConfigsOptions),
+            getters: new[] { "ShouldValidateOnly", "TimeoutMs" },
+            setters: new[] { "TimeoutMs", "ValidateOnly" });
 
         foreach (Type type in new[] { typeof(DescribeConfigsOptions), typeof(AlterConfigsOptions) })
         {

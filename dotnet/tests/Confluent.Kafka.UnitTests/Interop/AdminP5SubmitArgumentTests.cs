@@ -78,7 +78,7 @@ public sealed class AdminP5SubmitArgumentTests
         options.TimeoutMs(7);
         options.InGroupStates(new[] { GroupState.DEAD, GroupState.EMPTY });
         options.WithProtocolTypes(Array.Empty<string>());
-        options.WithTypes(null!);
+        options.WithTypes(null);
 
         Assert.Equal(
             new[]
