@@ -17,7 +17,12 @@ RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 PROFILE ?= release
 CONFLUENT_KAFKA_LIB_DIR ?= $(RUST_PROJECT_ROOT)/target/$(PROFILE)
 CONFLUENT_KAFKA_INCLUDE_DIR ?= $(RUST_PROJECT_ROOT)/target/include
-export CONFLUENT_KAFKA_LIB_DIR CONFLUENT_KAFKA_INCLUDE_DIR
+# How the addon links libconfluent_kafka (binding.gyp): dynamic, the default,
+# for development, the tests and the gRPC image; static for a release, whose
+# addon carries the library (.semaphore/build-javascript-native.sh), e.g.
+# `make -C javascript build CONFLUENT_KAFKA_LINK=static`.
+CONFLUENT_KAFKA_LINK ?= dynamic
+export CONFLUENT_KAFKA_LIB_DIR CONFLUENT_KAFKA_INCLUDE_DIR CONFLUENT_KAFKA_LINK
 
 NODE ?= node
 NPM ?= npm
@@ -72,8 +77,18 @@ GRPC_NATIVE_DIR ?= $(RUST_PROJECT_ROOT)/target/grpc-native/javascript
 GRPC_NPM_PACKAGES = $(shell $(NODE) -p "Object.entries(require('./package.json').devDependencies) \
 	.filter(([n]) => n.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')")
 
+# The npm packages of this machine's platform (`pack`), and their install test
+# (`pack-check`): the addon linked statically, the main package and this
+# platform's package packed into $(PACK_DIR), checked by check-npm.py, then
+# installed into a fresh project, where the smoke program runs
+# (.semaphore/pack-npm.sh --dev, .semaphore/test-npm.sh). Packages to test the
+# packaging, never ones to release: the release packages are built by
+# semaphore.yml's "Release (JavaScript):" blocks.
+PACK_DIR ?= $(CURDIR)/build/pack
+HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (process.platform === 'linux' ? '-gnu' : '')")
+
 .PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
-	grpc-image grpc-native test-integration-grpc clean
+	grpc-image grpc-native test-integration-grpc pack pack-check clean
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -184,6 +199,15 @@ test-integration-grpc:
 		$(MAKE) grpc-image && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-js; \
 	fi
+
+# build-addon first: node-gyp's rebuild empties build/, which holds $(PACK_DIR).
+pack:
+	$(MAKE) build-addon CONFLUENT_KAFKA_LINK=static
+	rm -rf $(PACK_DIR)
+	cd $(REPO_ROOT) && sh .semaphore/pack-npm.sh --dev $(PACK_DIR)
+
+pack-check: pack
+	cd $(REPO_ROOT) && sh .semaphore/test-npm.sh $(PACK_DIR) $(HOST_PLATFORM)
 
 clean:
 	rm -rf build dist

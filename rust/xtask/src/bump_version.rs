@@ -43,6 +43,13 @@
 //! on another line, so it is never the default. A .NET version lower, in
 //! semver order, than the current one is refused.
 //!
+//! `--javascript-version <semver>` sets the version of the Node.js client's
+//! npm package, `"version"` in [`JAVASCRIPT_PACKAGE`] and both of its copies
+//! in [`JAVASCRIPT_LOCK`], in the semver form only and 4.0.0 or higher (the
+//! npm name is shared with an earlier client whose versions are 1.x). It is a
+//! fourth line, like .NET's: it moves only when given, and a version lower
+//! than the current one is refused.
+//!
 //! What is released together:
 //!
 //!   - every member of the Rust workspace at the version of `confluent-kafka`
@@ -50,7 +57,8 @@
 //!     `Cargo.lock` with them;
 //!   - the Python packages in [`PYPROJECTS`] and the `__version__` of
 //!     [`PYTHON_VERSION_MODULES`];
-//!   - with `--dotnet-version`, the .NET package.
+//!   - with `--dotnet-version`, the .NET package;
+//!   - with `--javascript-version`, the Node.js client's npm package.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -72,14 +80,29 @@ const PYTHON_VERSION_MODULES: [&str; 1] = ["tools/translation_agent/translation_
 /// The MSBuild file whose one `<Version>` is the .NET package's version.
 const DOTNET_PROPS: &str = "dotnet/Directory.Build.props";
 
+/// The Node.js client's package manifest, whose top-level `"version"` is its
+/// version.
+const JAVASCRIPT_PACKAGE: &str = "javascript/package.json";
+
+/// The Node.js client's lockfile, which repeats the version at its top level
+/// and in `packages[""]`.
+const JAVASCRIPT_LOCK: &str = "javascript/package-lock.json";
+
+/// The lowest major version of the Node.js client: below it, the npm name's
+/// versions are the earlier librdkafka-based client's.
+const JAVASCRIPT_MIN_MAJOR: u64 = 4;
+
 const USAGE: &str =
     "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440_VERSION] \
-     [--dotnet-version SEMVER]\n\
+     [--dotnet-version SEMVER] [--javascript-version SEMVER]\n\
      The crates get the semver version; the Python packages the PEP 440 version, by default the\n\
      crate's in PEP 440 form. Python versions are their own line and only move up: a version below\n\
      a package's current one is refused, so pass --python-version while the crate's is lower.\n\
      --dotnet-version sets the .NET package's version (dotnet/Directory.Build.props), in the semver\n\
-     form; without it that version is left as it is. It only moves up too.";
+     form; without it that version is left as it is. It only moves up too.\n\
+     --javascript-version sets the Node.js package's version (javascript/package.json and its\n\
+     lockfile), in the semver form and 4.0.0 or higher; without it that version is left as it is.\n\
+     It only moves up too.";
 
 /// A pre-release stage, in semver precedence order (its labels compare as
 /// ASCII text).
@@ -221,13 +244,15 @@ fn number(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
-/// The arguments: the crate version, then `--python-version` and
-/// `--dotnet-version`, each at most once, in either order.
+/// The arguments: the crate version, then `--python-version`,
+/// `--dotnet-version` and `--javascript-version`, each at most once, in any
+/// order.
 #[derive(Debug, PartialEq, Eq)]
 struct Args<'a> {
     version: &'a str,
     python: Option<&'a str>,
     dotnet: Option<&'a str>,
+    javascript: Option<&'a str>,
 }
 
 fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
@@ -237,11 +262,12 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
     if version.starts_with("--") {
         anyhow::bail!("{USAGE}");
     }
-    let mut parsed = Args { version, python: None, dotnet: None };
+    let mut parsed = Args { version, python: None, dotnet: None, javascript: None };
     while let [flag, value, rest @ ..] = flags {
         let slot = match flag.as_str() {
             "--python-version" => &mut parsed.python,
             "--dotnet-version" => &mut parsed.dotnet,
+            "--javascript-version" => &mut parsed.javascript,
             _ => anyhow::bail!("{USAGE}"),
         };
         if slot.replace(value).is_some() {
@@ -256,9 +282,10 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
 }
 
 pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
-    let Args { version: text, python: python_override, dotnet } = parse_args(args)?;
+    let Args { version: text, python: python_override, dotnet, javascript } = parse_args(args)?;
     let new = PackageVersion::parse(text).with_context(|| format!("`{text}` is not a version; {USAGE}"))?;
     let dotnet = dotnet.map(parse_dotnet_version).transpose()?;
+    let javascript = javascript.map(parse_javascript_version).transpose()?;
     let python = match python_override {
         Some(python) if is_pep440(python) => python.to_string(),
         Some(python) => anyhow::bail!("`{python}` is not a PEP 440 version in normal form, such as 0.3.0.post1"),
@@ -276,10 +303,11 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     if new < current {
         anyhow::bail!("{new} is below the current version {current}");
     }
-    match dotnet {
-        Some(dotnet) => println!("🔖 Bumping {current} → {new} (Python: {python}, .NET: {dotnet})"),
-        None => println!("🔖 Bumping {current} → {new} (Python: {python})"),
-    }
+    let dotnet_note = dotnet.map(|dotnet| format!(", .NET: {dotnet}")).unwrap_or_default();
+    let javascript_note = javascript
+        .map(|javascript| format!(", JavaScript: {javascript}"))
+        .unwrap_or_default();
+    println!("🔖 Bumping {current} → {new} (Python: {python}{dotnet_note}{javascript_note})");
 
     // Every edit is computed before any file is written, so a manifest this
     // command cannot read leaves the tree untouched.
@@ -327,6 +355,28 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
             edits.push((path, set_props_version(&props, &dotnet.to_string())?));
         },
         None => println!("   {DOTNET_PROPS} is not changed: pass --dotnet-version to set the .NET version"),
+    }
+    match javascript {
+        Some(javascript) => {
+            let package_path = root.join(JAVASCRIPT_PACKAGE);
+            let lock_path = root.join(JAVASCRIPT_LOCK);
+            let package = read(&package_path)?;
+            let lock = read(&lock_path)?;
+            let current = javascript_version(&package, &lock)?;
+            ensure_javascript_not_lowered(current, javascript)?;
+            let value = javascript.to_string();
+            edits.push((
+                package_path,
+                set_json_strings(JAVASCRIPT_PACKAGE, &package, &[&["version"]], &value)?,
+            ));
+            edits.push((
+                lock_path,
+                set_json_strings(JAVASCRIPT_LOCK, &lock, &[&["version"], &["packages", "", "version"]], &value)?,
+            ));
+        },
+        None => {
+            println!("   {JAVASCRIPT_PACKAGE} is not changed: pass --javascript-version to set the JavaScript version")
+        },
     }
 
     for (path, text) in &edits {
@@ -386,6 +436,249 @@ fn ensure_dotnet_not_lowered(current: &str, new: PackageVersion) -> anyhow::Resu
         );
     }
     Ok(())
+}
+
+/// The JavaScript version given with `--javascript-version`: the semver form
+/// only, as npm writes it, and 4.0.0 or higher.
+fn parse_javascript_version(text: &str) -> anyhow::Result<PackageVersion> {
+    match PackageVersion::parse(text) {
+        Some(version) if version.to_string() == text && version.major >= JAVASCRIPT_MIN_MAJOR => Ok(version),
+        Some(version) if version.to_string() == text => anyhow::bail!(
+            "`{text}` is below {JAVASCRIPT_MIN_MAJOR}.0.0: the versions of @confluentinc/kafka-javascript below \
+             {JAVASCRIPT_MIN_MAJOR} are the earlier librdkafka-based client's"
+        ),
+        _ => anyhow::bail!(
+            "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, such \
+             as 4.4.0-beta.1"
+        ),
+    }
+}
+
+/// The current JavaScript version: the one `"version"` of `package`, which
+/// `lock` must repeat at its top level and in `packages[""]`.
+fn javascript_version<'a>(package: &'a str, lock: &str) -> anyhow::Result<&'a str> {
+    let (start, end) = json_string_range(JAVASCRIPT_PACKAGE, package, &["version"])?;
+    let current = &package[start..end];
+    for path in [&["version"][..], &["packages", "", "version"][..]] {
+        let (start, end) = json_string_range(JAVASCRIPT_LOCK, lock, path)?;
+        let locked = &lock[start..end];
+        if locked != current {
+            anyhow::bail!(
+                "{JAVASCRIPT_LOCK} has `{locked}` at {}, not `{current}`, the version of {JAVASCRIPT_PACKAGE}; \
+                 run `npm install --package-lock-only` in javascript/ first",
+                json_path(path)
+            );
+        }
+    }
+    Ok(current)
+}
+
+/// Refuses to write `new` over the JavaScript version `current`, when it is
+/// lower in semver order: the npm package only moves up.
+fn ensure_javascript_not_lowered(current: &str, new: PackageVersion) -> anyhow::Result<()> {
+    let current_version = parse_javascript_version(current)
+        .with_context(|| format!("{JAVASCRIPT_PACKAGE} has `{current}`, not a version this command writes"))?;
+    if new < current_version {
+        anyhow::bail!(
+            "{JAVASCRIPT_PACKAGE} is at {current}: the JavaScript version {new} would lower it. JavaScript versions \
+             only move up; pass --javascript-version with a version not below {current}"
+        );
+    }
+    Ok(())
+}
+
+/// A JSON path as a message shows it: `"version"`, `packages[""].version`.
+fn json_path(path: &[&str]) -> String {
+    match path {
+        [key] => format!("\"{key}\""),
+        _ => path.iter().enumerate().fold(String::new(), |mut out, (i, key)| {
+            if i == 0 {
+                out.push_str(key);
+            } else if i + 1 == path.len() {
+                out.push('.');
+                out.push_str(key);
+            } else {
+                out.push_str(&format!("[\"{key}\"]"));
+            }
+            out
+        }),
+    }
+}
+
+/// `text` with the string at each of `paths` set to `value`, every other byte
+/// kept.
+fn set_json_strings(file: &str, text: &str, paths: &[&[&str]], value: &str) -> anyhow::Result<String> {
+    let mut ranges = paths
+        .iter()
+        .map(|path| json_string_range(file, text, path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    ranges.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in ranges {
+        out.push_str(&text[at..start]);
+        out.push_str(value);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    Ok(out)
+}
+
+/// The byte range of the contents of the one string at `path` (object keys
+/// from the root) in the JSON document `text`, between its quotes. It must be
+/// a plain string, with no escape, as a version is.
+fn json_string_range(file: &str, text: &str, path: &[&str]) -> anyhow::Result<(usize, usize)> {
+    let mut scanner = JsonScanner { text: text.as_bytes(), pos: 0, path: Vec::new(), want: path, found: Vec::new() };
+    scanner
+        .document()
+        .with_context(|| format!("{file} is not JSON this command can read"))?;
+    match scanner.found[..] {
+        [Some(range)] => Ok(range),
+        [None] => anyhow::bail!("{file} has {} that is not a plain string", json_path(path)),
+        [] => anyhow::bail!("{file} has no {}", json_path(path)),
+        _ => anyhow::bail!("{file} has more than one {}", json_path(path)),
+    }
+}
+
+/// A JSON reader that only finds the values at one path: for each, the range
+/// of a plain string's contents, or None for any other value.
+struct JsonScanner<'a, 'p> {
+    text: &'a [u8],
+    pos: usize,
+    path: Vec<String>,
+    want: &'p [&'p str],
+    found: Vec<Option<(usize, usize)>>,
+}
+
+impl JsonScanner<'_, '_> {
+    fn document(&mut self) -> anyhow::Result<()> {
+        self.value()?;
+        self.skip_whitespace();
+        if self.pos != self.text.len() {
+            anyhow::bail!("it has text after its value, at byte {}", self.pos);
+        }
+        Ok(())
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.text.get(self.pos).is_some_and(|b| b" \t\r\n".contains(b)) {
+            self.pos += 1;
+        }
+    }
+
+    fn expect(&mut self, byte: u8) -> anyhow::Result<()> {
+        self.skip_whitespace();
+        if self.text.get(self.pos) != Some(&byte) {
+            anyhow::bail!("expected `{}` at byte {}", byte as char, self.pos);
+        }
+        self.pos += 1;
+        Ok(())
+    }
+
+    /// Reads a string; returns its contents' range and whether it has an escape.
+    fn string(&mut self) -> anyhow::Result<(usize, usize, bool)> {
+        self.expect(b'"')?;
+        let start = self.pos;
+        let mut escaped = false;
+        loop {
+            match self.text.get(self.pos) {
+                None => anyhow::bail!("a string does not end"),
+                Some(b'"') => break,
+                Some(b'\\') => {
+                    escaped = true;
+                    self.pos += 2;
+                },
+                Some(_) => self.pos += 1,
+            }
+        }
+        let end = self.pos;
+        self.pos += 1;
+        Ok((start, end, escaped))
+    }
+
+    fn value(&mut self) -> anyhow::Result<()> {
+        self.skip_whitespace();
+        let wanted = self.path.iter().map(String::as_str).eq(self.want.iter().copied());
+        match self.text.get(self.pos) {
+            Some(b'{') => {
+                if wanted {
+                    self.found.push(None);
+                }
+                self.pos += 1;
+                self.skip_whitespace();
+                if self.text.get(self.pos) == Some(&b'}') {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                loop {
+                    let (start, end, _) = self.string()?;
+                    let key = String::from_utf8_lossy(&self.text[start..end]).into_owned();
+                    self.expect(b':')?;
+                    self.path.push(key);
+                    self.value()?;
+                    self.path.pop();
+                    self.skip_whitespace();
+                    match self.text.get(self.pos) {
+                        Some(b',') => self.pos += 1,
+                        Some(b'}') => {
+                            self.pos += 1;
+                            return Ok(());
+                        },
+                        _ => anyhow::bail!("expected `,` or `}}` at byte {}", self.pos),
+                    }
+                }
+            },
+            Some(b'[') => {
+                if wanted {
+                    self.found.push(None);
+                }
+                self.pos += 1;
+                self.skip_whitespace();
+                if self.text.get(self.pos) == Some(&b']') {
+                    self.pos += 1;
+                    return Ok(());
+                }
+                // An array's elements are on no key path.
+                self.path.push("[]".to_string());
+                loop {
+                    self.value()?;
+                    self.skip_whitespace();
+                    match self.text.get(self.pos) {
+                        Some(b',') => self.pos += 1,
+                        Some(b']') => {
+                            self.pos += 1;
+                            self.path.pop();
+                            return Ok(());
+                        },
+                        _ => anyhow::bail!("expected `,` or `]` at byte {}", self.pos),
+                    }
+                }
+            },
+            Some(b'"') => {
+                let (start, end, escaped) = self.string()?;
+                if wanted {
+                    self.found.push((!escaped).then_some((start, end)));
+                }
+                Ok(())
+            },
+            Some(_) => {
+                if wanted {
+                    self.found.push(None);
+                }
+                let start = self.pos;
+                while self.text.get(self.pos).is_some_and(|b| !b" \t\r\n,]}".contains(b)) {
+                    self.pos += 1;
+                }
+                let literal = &self.text[start..self.pos];
+                let number = literal.iter().all(|b| b"+-.0123456789eE".contains(b)) && !literal.is_empty();
+                if !(number || [&b"true"[..], b"false", b"null"].contains(&literal)) {
+                    anyhow::bail!("unexpected `{}` at byte {start}", String::from_utf8_lossy(literal));
+                }
+                Ok(())
+            },
+            None => anyhow::bail!("it ends where a value is expected"),
+        }
+    }
 }
 
 /// Whether `text` starts with `prefix`, ignoring ASCII case.
@@ -915,6 +1208,24 @@ version = \"9.9.9\"
             edited,
             props.replacen(&format!("<Version>{current}</Version>"), "<Version>99.0.0</Version>", 1)
         );
+        let package = read(&root.join(JAVASCRIPT_PACKAGE)).expect("package.json");
+        let lock = read(&root.join(JAVASCRIPT_LOCK)).expect("package-lock.json");
+        let current = javascript_version(&package, &lock).expect("one version, the lockfile's too");
+        parse_javascript_version(current).expect("a semver JavaScript version");
+        let edited = set_json_strings(JAVASCRIPT_PACKAGE, &package, &[&["version"]], "99.0.0").expect("settable");
+        assert_eq!(
+            edited,
+            package.replacen(&format!("\"version\": \"{current}\""), "\"version\": \"99.0.0\"", 1)
+        );
+        let edited_lock =
+            set_json_strings(JAVASCRIPT_LOCK, &lock, &[&["version"], &["packages", "", "version"]], "99.0.0")
+                .expect("settable");
+        assert_eq!(javascript_version(&edited, &edited_lock).unwrap(), "99.0.0");
+        assert_eq!(edited_lock.matches("\"version\": \"99.0.0\"").count(), 2);
+        assert_eq!(
+            edited_lock.replace("\"version\": \"99.0.0\"", &format!("\"version\": \"{current}\"")),
+            lock
+        );
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -932,17 +1243,38 @@ version = \"9.9.9\"
         ]);
         assert_eq!(
             parse_args(&args).unwrap(),
-            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: Some("4.4.0-beta.1") }
+            Args {
+                version: "0.3.0",
+                python: Some("4.4.0b1"),
+                dotnet: Some("4.4.0-beta.1"),
+                javascript: None
+            }
         );
         let args = strings(&["0.3.0", "--python-version", "4.4.0b1"]);
         assert_eq!(
             parse_args(&args).unwrap(),
-            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: None }
+            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: None, javascript: None }
         );
         let args = strings(&["0.3.0"]);
         assert_eq!(
             parse_args(&args).unwrap(),
-            Args { version: "0.3.0", python: None, dotnet: None }
+            Args { version: "0.3.0", python: None, dotnet: None, javascript: None }
+        );
+        let args = strings(&[
+            "0.3.0",
+            "--javascript-version",
+            "4.4.0-beta.2",
+            "--dotnet-version",
+            "4.4.0",
+        ]);
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Args {
+                version: "0.3.0",
+                python: None,
+                dotnet: Some("4.4.0"),
+                javascript: Some("4.4.0-beta.2")
+            }
         );
         for bad in [
             &[][..],
@@ -951,6 +1283,14 @@ version = \"9.9.9\"
             &["0.3.0", "--net-version", "4.4.0"][..],
             &["0.3.0", "4.4.0"][..],
             &["0.3.0", "--dotnet-version", "4.4.0", "--dotnet-version", "4.4.1"][..],
+            &["0.3.0", "--javascript-version"][..],
+            &[
+                "0.3.0",
+                "--javascript-version",
+                "4.4.0",
+                "--javascript-version",
+                "4.4.1",
+            ][..],
         ] {
             assert!(parse_args(&strings(bad)).is_err(), "{bad:?}");
         }
@@ -1078,6 +1418,115 @@ version = \"9.9.9\"
         assert_eq!(
             error("<Project><Version>4.4.0</Version><!-- no end"),
             "dotnet/Directory.Build.props has a comment that does not end"
+        );
+    }
+
+    #[test]
+    fn javascript_version_is_the_semver_form_only_from_4() {
+        for text in [
+            "4.4.0",
+            "4.4.0-alpha.1",
+            "4.4.0-beta.2",
+            "4.4.0-dev.3",
+            "4.4.0-rc.0",
+            "10.0.100",
+        ] {
+            assert_eq!(parse_javascript_version(text).unwrap().to_string(), text);
+        }
+        for text in [
+            "4.4.0b1",
+            "4.4.0.dev1",
+            "4.4",
+            "v4.4.0",
+            "4.4.0-beta",
+            "4.4.0+abc",
+            "4.4.0-pre.1",
+            "",
+        ] {
+            assert_eq!(
+                parse_javascript_version(text).unwrap_err().to_string(),
+                format!(
+                    "`{text}` is not a JavaScript package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, \
+                     such as 4.4.0-beta.1"
+                )
+            );
+        }
+        for text in ["1.11.0", "3.9.9", "0.1.0-rc.1"] {
+            assert_eq!(
+                parse_javascript_version(text).unwrap_err().to_string(),
+                format!(
+                    "`{text}` is below 4.0.0: the versions of @confluentinc/kafka-javascript below 4 are the earlier \
+                     librdkafka-based client's"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_lower_javascript_version_is_refused() {
+        let check = |current: &str, new: &str| ensure_javascript_not_lowered(current, v(new));
+        assert_eq!(
+            check("4.4.0-beta.2", "4.4.0-beta.1").unwrap_err().to_string(),
+            "javascript/package.json is at 4.4.0-beta.2: the JavaScript version 4.4.0-beta.1 would lower it. \
+             JavaScript versions only move up; pass --javascript-version with a version not below 4.4.0-beta.2"
+        );
+        assert!(check("4.4.0", "4.4.0-rc.9").is_err());
+        // Semver order, as npm compares: dev is above beta.
+        check("4.4.0-beta.1", "4.4.0-dev.1").unwrap();
+        check("4.4.0-beta.1", "4.4.0-beta.1").unwrap();
+        check("4.4.0-rc.1", "4.4.0").unwrap();
+        assert_eq!(
+            check("1.11.0", "4.4.0").unwrap_err().to_string(),
+            "javascript/package.json has `1.11.0`, not a version this command writes"
+        );
+    }
+
+    #[test]
+    fn json_strings_are_set_in_place() {
+        let package = "{\n  \"name\": \"@confluentinc/kafka-javascript\",\n  \"version\": \"4.4.0-beta.1\",\n  \"private\": true,\n  \
+                       \"scripts\": { \"version\": \"echo x\" },\n  \"files\": [\"version\", {\"version\": 1}]\n}\n";
+        assert_eq!(
+            set_json_strings(JAVASCRIPT_PACKAGE, package, &[&["version"]], "4.4.0-beta.2").unwrap(),
+            package.replace("\"version\": \"4.4.0-beta.1\"", "\"version\": \"4.4.0-beta.2\"")
+        );
+        let lock = "{\r\n\t\"name\": \"x\", \"version\": \"4.4.0-beta.1\", \"lockfileVersion\": 3,\r\n\t\"packages\": {\r\n\t\t\"\": \
+                    {\"version\": \"4.4.0-beta.1\", \"license\": \"Apache-2.0\"},\r\n\t\t\"node_modules/a\": {\"version\": \"1.0.0\"}\r\n\t}\r\n}";
+        assert_eq!(javascript_version(package, lock).unwrap(), "4.4.0-beta.1");
+        let edited =
+            set_json_strings(JAVASCRIPT_LOCK, lock, &[&["version"], &["packages", "", "version"]], "4.5.0").unwrap();
+        assert_eq!(edited, lock.replace("\"version\": \"4.4.0-beta.1\"", "\"version\": \"4.5.0\""));
+        assert!(edited.contains("\"node_modules/a\": {\"version\": \"1.0.0\"}"));
+
+        let error = |text: &str, path: &[&str]| json_string_range(JAVASCRIPT_LOCK, text, path).unwrap_err().to_string();
+        assert_eq!(
+            error("{\"name\": \"x\"}", &["version"]),
+            "javascript/package-lock.json has no \"version\""
+        );
+        assert_eq!(
+            error("{\"version\": \"1\", \"version\": \"2\"}", &["version"]),
+            "javascript/package-lock.json has more than one \"version\""
+        );
+        assert_eq!(
+            error("{\"version\": 4}", &["version"]),
+            "javascript/package-lock.json has \"version\" that is not a plain string"
+        );
+        assert_eq!(
+            error("{\"version\": \"4.4\\u002e0\"}", &["version"]),
+            "javascript/package-lock.json has \"version\" that is not a plain string"
+        );
+        assert_eq!(
+            error("{\"packages\": {}}", &["packages", "", "version"]),
+            "javascript/package-lock.json has no packages[\"\"].version"
+        );
+        assert_eq!(
+            error("{\"version\": \"1\"", &["version"]),
+            "javascript/package-lock.json is not JSON this command can read"
+        );
+        let stale = lock.replacen("{\"version\": \"4.4.0-beta.1\"", "{\"version\": \"4.4.0-alpha.1\"", 1);
+        assert_eq!(
+            javascript_version(package, &stale).unwrap_err().to_string(),
+            "javascript/package-lock.json has `4.4.0-alpha.1` at packages[\"\"].version, not `4.4.0-beta.1`, the \
+             version of javascript/package.json; run `npm install --package-lock-only` in javascript/ first"
         );
     }
 }

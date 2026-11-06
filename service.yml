@@ -78,7 +78,7 @@ semaphore:
     - name: bump-version
       branch: master
       pipeline_file: .semaphore/bump-version.yml
-      description: Set a new version with `make bump-version` on a branch off BASE_BRANCH and open a PR with it. The Cargo manifests and Cargo.lock get VERSION as given, the Python packages its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1) unless PYTHON_VERSION is set. Python versions only move up, so PYTHON_VERSION is required whenever that PEP 440 form is below the current Python version (python/pyproject.toml). DOTNET_VERSION, when set, gives the .NET package (dotnet/Directory.Build.props) its version; to change only that one, give VERSION and PYTHON_VERSION their current values. Nothing is merged, tagged or published; the PR's build runs the checks. Fails if the branch bump-version/<VERSION> already exists on origin.
+      description: Set a new version with `make bump-version` on a branch off BASE_BRANCH and open a PR with it. The Cargo manifests and Cargo.lock get VERSION as given, the Python packages its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1) unless PYTHON_VERSION is set. Python versions only move up, so PYTHON_VERSION is required whenever that PEP 440 form is below the current Python version (python/pyproject.toml). DOTNET_VERSION, when set, gives the .NET package (dotnet/Directory.Build.props) its version, and JAVASCRIPT_VERSION the Node.js package (javascript/package.json and package-lock.json) its version; to change only one of those, give VERSION and PYTHON_VERSION their current values. Nothing is merged, tagged or published; the PR's build runs the checks. Fails if the branch bump-version/<VERSION> already exists on origin.
       parameters:
         - name: VERSION
           required: true
@@ -89,7 +89,18 @@ semaphore:
         - name: DOTNET_VERSION
           required: false
           description: A version for the Confluent.Kafka NuGet package in semver form, X.Y.Z or X.Y.Z-alpha.N, -beta.N, -dev.N, -rc.N (e.g. "4.4.0-beta.1"), written to dotnet/Directory.Build.props. It must not be below the current one. Without it the .NET version is left as it is.
+        - name: JAVASCRIPT_VERSION
+          required: false
+          description: A version for the @confluentinc/kafka-javascript npm package in semver form, X.Y.Z or X.Y.Z-alpha.N, -beta.N, -dev.N, -rc.N, 4.0.0 or higher (e.g. "4.4.0-beta.2"), written to javascript/package.json and package-lock.json. It must not be below the current one. Without it the JavaScript version is left as it is.
         - name: BASE_BRANCH
           required: true
           default_value: master
           description: The branch to bump and the PR's base.
+    - name: javascript-post-install
+      branch: master
+      pipeline_file: .semaphore/javascript-post-install.yml
+      description: Check a version of the Node.js client after it was published to npmjs.com by hand (javascript/release/README.txt). It checks that the registry has @confluentinc/kafka-javascript and its three platform packages at JAVASCRIPT_VERSION under the preview dist-tag, with tarballs matching the registry's integrity and passing the package checks, then installs the package from npmjs.com into an empty project and runs the smoke program on Linux amd64 and arm64 (almalinux 8 and 9, rockylinux 9, debian bookworm and trixie, ubuntu 20.04, 22.04 and 24.04) and macOS arm64, with Node.js 18, 20, 22 and 24. It reads the registry anonymously and publishes nothing.
+      parameters:
+        - name: JAVASCRIPT_VERSION
+          required: true
+          description: The published version to check, X.Y.Z or X.Y.Z-alpha.N, X.Y.Z-beta.N, X.Y.Z-dev.N, X.Y.Z-rc.N (e.g. "4.4.0-beta.2").
