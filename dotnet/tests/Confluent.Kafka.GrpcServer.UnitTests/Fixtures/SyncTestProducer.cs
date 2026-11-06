@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
@@ -72,6 +73,18 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _inner.PartitionsFor(topic);
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
+
+    public void InitTransactions() => _inner.InitTransactions();
+
+    public void BeginTransaction() => _inner.BeginTransaction();
+
+    public void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, ConsumerGroupMetadata groupMetadata) =>
+        _inner.SendOffsetsToTransaction(offsets, groupMetadata);
+
+    public void CommitTransaction() => _inner.CommitTransaction();
+
+    public void AbortTransaction() => _inner.AbortTransaction();
 
     public void Close()
     {
