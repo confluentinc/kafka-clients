@@ -26,7 +26,9 @@ import type { RecordMetadata } from './record_metadata';
 /**
  * A producer's configuration: Java's ProducerConfig keys, as a plain object
  * or a `Map`. Values are stringified (`true` -> `"true"`, numbers and bigints
- * by `String`, arrays joined with `,`); `null` / `undefined` drop the key.
+ * by `String`, arrays joined with `,`); `undefined` drops the key, and so does
+ * `null` unless the key's validator rejects `null`, which throws
+ * `ConfigError`.
  *
  * @jsOnly The type of the configuration the constructor takes, Java's
  *   `Map<String, Object>` or `Properties`.
