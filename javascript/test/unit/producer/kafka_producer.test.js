@@ -248,6 +248,61 @@ test('a negative close timeout on an open producer is rejected first and changes
   assert.throws(() => other.send(new ProducerRecord({ topic: 'unit-n', value: 'v' })), { message: CLOSED_MESSAGE });
 });
 
+test('close() while a send waits for metadata rejects that send with a bare KafkaError', async () => {
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'max.block.ms': 60000 });
+  const calls = [];
+  const sent = producer.send(new ProducerRecord({ topic: 'unit-close-waiting', value: 'v' }), () => calls.push('callback'));
+  let settled = false;
+  sent.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  // Let the record reach the core, where it waits for the topic's metadata.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  const started = Date.now();
+  await producer.close();
+  await assert.rejects(sent, (e) => {
+    assert.equal(e.constructor, KafkaError);
+    assert.equal(e.message, 'Producer closed while send in progress');
+    return true;
+  });
+  // Well below max.block.ms (60 s), however loaded the machine.
+  assert.ok(Date.now() - started < 30000, `close took ${Date.now() - started} ms`);
+  assert.deepEqual(calls, []);
+});
+
+test('flush() does not wait for a send still waiting for metadata', async () => {
+  const blockMs = 1500;
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'max.block.ms': blockMs });
+  try {
+    const calls = [];
+    const sent = producer.send(new ProducerRecord({ topic: 'unit-flush-waiting', value: 'v' }), (m, error) =>
+      calls.push(error),
+    );
+    let handedOver = false;
+    sent.then(
+      () => (handedOver = true),
+      () => (handedOver = true),
+    );
+    await producer.flush();
+    // flush() covers only the sends that had resolved: this one still waits.
+    assert.equal(handedOver, false);
+    assert.deepEqual(calls, []);
+    // It then fails on its own max.block.ms: a resolved send() and a failed
+    // future, its callback run once.
+    const future = await sent;
+    const message = `Topic unit-flush-waiting not present in metadata after ${blockMs} ms.`;
+    assert.equal(future.isCompletedExceptionally(), true);
+    await assert.rejects(future.get(), { name: 'TimeoutError', message });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].name, 'TimeoutError');
+    assert.equal(calls[0].message, message);
+  } finally {
+    await producer.close();
+  }
+});
+
 test('argument errors throw synchronously', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   try {
