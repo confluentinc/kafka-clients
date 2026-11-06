@@ -30,15 +30,18 @@ interface ClientErrorFields {
   apiError: boolean;
 }
 
-const ids = new WeakMap<Function, number>();
+/** An error class: what `setFfiId`, `ffiIdOf` and `init` take. */
+type ErrorClassLike = abstract new (...args: never[]) => unknown;
+
+const ids = new WeakMap<ErrorClassLike, number>();
 
 /** Registers the `kafka_common_Error_e` value of a generated class. */
-export function setFfiId(cls: Function, id: number): void {
+export function setFfiId(cls: ErrorClassLike, id: number): void {
   ids.set(cls, id);
 }
 
 /** The FFI id `cls` itself registered, or `undefined`. */
-export function ownFfiId(cls: Function): number | undefined {
+export function ownFfiId(cls: ErrorClassLike): number | undefined {
   return ids.get(cls);
 }
 
@@ -46,9 +49,9 @@ export function ownFfiId(cls: Function): number | undefined {
  * The FFI id of `cls`: its own or its nearest ancestor's, `undefined` when
  * none has one.
  */
-export function ffiIdOf(cls: Function): number | undefined {
+export function ffiIdOf(cls: ErrorClassLike): number | undefined {
   for (let c: unknown = cls; typeof c === 'function' && c !== Error; c = Object.getPrototypeOf(c)) {
-    if (ids.has(c)) return ids.get(c);
+    if (ids.has(c as ErrorClassLike)) return ids.get(c as ErrorClassLike);
   }
   return undefined;
 }
@@ -65,6 +68,7 @@ export function messageOf(message: unknown, options: unknown): string {
     return message;
   }
   const cause = causeOf(options);
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's (Throwable cause) constructor takes cause.toString(), whatever the cause is
   return cause === undefined || cause === null ? '' : String(cause);
 }
 
@@ -86,7 +90,7 @@ export function optionsOf(options: unknown): { cause: unknown } | undefined {
  * `name` (the class name, JavaScript's convention), `code` and `errorName`
  * (its class's FFI id), `retriable` and `apiError` (Java's `instanceof`).
  */
-export function init(self: Error & ClientErrorFields, cls: Function): void {
+export function init(self: Error & ClientErrorFields, cls: ErrorClassLike): void {
   Object.defineProperty(self, 'name', { value: cls.name, enumerable: false, configurable: true, writable: true });
   const id = ffiIdOf(cls);
   self.code = id === undefined ? -1 : id;
@@ -96,18 +100,20 @@ export function init(self: Error & ClientErrorFields, cls: Function): void {
   self.apiError = self instanceof ApiError;
 }
 
-let cachedBases: [Function, Function] | null = null;
+let cachedBases: [ErrorClassLike, ErrorClassLike] | null = null;
 
 /**
  * `[RetriableError, ApiError]`: required on first use, not at load (they
  * extend the classes this module serves), and kept once both are loaded, so a
  * conversion costs no `require()`.
  */
-function bases(): [Function, Function] {
+function bases(): [ErrorClassLike, ErrorClassLike] {
   if (cachedBases !== null) return cachedBases;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- loaded on first use: RetriableError extends the classes this module serves, so a static import would be a cycle
   const { RetriableError } = require('./common/errors/retriable_error') as typeof import('./common/errors/retriable_error');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- loaded on first use: ApiError extends the classes this module serves, so a static import would be a cycle
   const { ApiError } = require('./common/errors/api_error') as typeof import('./common/errors/api_error');
-  const found: [Function, Function] = [RetriableError, ApiError];
+  const found: [ErrorClassLike, ErrorClassLike] = [RetriableError, ApiError];
   if (typeof RetriableError === 'function' && typeof ApiError === 'function') cachedBases = found;
   return found;
 }
