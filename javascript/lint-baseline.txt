@@ -1,0 +1,7 @@
+# Findings of the Node.js client's rule linter runner not burnt down yet
+# (node scripts/lint_rules.js: the addon's C rules and the non-TypeScript
+# files; design/current/javascript-rule-linter/PLAN.md §3). The ESLint rules'
+# baseline is eslint-baseline.txt. One `<kind> <subject>` per line, or
+# `prefix:<p>` to waive every finding whose subject starts with `p`. A line
+# matching no finding any more is itself a finding: delete it. See everything
+# with `node scripts/lint_rules.js --no-baseline`.
