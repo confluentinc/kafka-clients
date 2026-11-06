@@ -155,6 +155,9 @@ export class ProducerRecord {
    * @throws `IllegalArgumentError` when the topic is null, or the timestamp or
    *   the partition is negative, as Java's IllegalArgumentException
    * @throws `TypeError` when an argument has the wrong type
+   * @throws `RangeError` when the partition is above 2^31 - 1 or the timestamp
+   *   above 2^53 - 1, beyond Java's `Integer` and the integers a JS number
+   *   holds exactly
    */
   constructor(options: ProducerRecordOptions) {
     if (options === null || typeof options !== 'object') {
@@ -212,7 +215,11 @@ export class ProducerRecord {
   }
 
   toString(): string {
-    const headers = this.#headers.map((h) => `RecordHeader(key = ${h.key}, value = ${show(h.value)})`).join(', ');
+    // A header value is bytes in Java (RecordHeader.toString prints
+    // Arrays.toString(value())): a string one prints as its UTF-8 bytes.
+    const headers = this.#headers
+      .map((h) => `RecordHeader(key = ${h.key}, value = ${show(typeof h.value === 'string' ? toBytes(h.value) : h.value)})`)
+      .join(', ');
     return (
       `ProducerRecord(topic=${this.#topic}, partition=${this.#partition}, ` +
       `headers=RecordHeaders(headers = [${headers}], isReadOnly = false), key=${show(this.#key)}, ` +

@@ -56,6 +56,9 @@ team that owns it.
 - A config value is checked against its key's Java `ConfigDef` type, and a
   `null` against its key's validator, before the core sees the configuration
   (`ConfigError` with Java's message; a password's value is never shown).
+- A topic, a header key, or a config key or value holding a NUL byte throws a
+  `TypeError`: C would read the NUL as the end of the string. Keys, values and
+  header values are bytes and may hold any.
 
 ### Known limitations
 

@@ -234,8 +234,8 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         }
         if spec.kind == Kind::ConstantsOnly {
             text.push_str(&format!(
-                "\n  /**\n   * Not instantiable: throws `TypeError`.\n   *\n   * @param args - ignored\n   * @throws `TypeError` always\n   */\n  \
-                 constructor(...args: unknown[]) {{\n    void args;\n    throw new TypeError('{name} is not instantiable: its ConfigDef machinery is not ' +\n      \
+                "\n  /**\n   * Not instantiable: throws `TypeError`. Private, so TypeScript rejects `new` too.\n   *\n   * @param args - ignored\n   * @throws `TypeError` always\n   */\n  \
+                 private constructor(...args: unknown[]) {{\n    void args;\n    throw new TypeError('{name} is not instantiable: its ConfigDef machinery is not ' +\n      \
                  'translated; a configuration is a plain object of its keys');\n  }}\n"
             ));
         }
@@ -294,7 +294,7 @@ mod tests {
         assert!(producer
             .content
             .contains("throw new TypeError('ProducerConfig is not instantiable"));
-        assert!(producer.content.contains("  constructor(...args: unknown[]) {\n"));
+        assert!(producer.content.contains("  private constructor(...args: unknown[]) {\n"));
         let sasl = modules.iter().find(|m| m.name == "SaslConfigs").unwrap();
         assert!(sasl
             .content

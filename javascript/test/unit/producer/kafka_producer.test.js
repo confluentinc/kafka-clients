@@ -248,6 +248,61 @@ test('a negative close timeout on an open producer is rejected first and changes
   assert.throws(() => other.send(new ProducerRecord({ topic: 'unit-n', value: 'v' })), { message: CLOSED_MESSAGE });
 });
 
+test('close() while a send waits for metadata rejects that send with a bare KafkaError', async () => {
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'max.block.ms': 60000 });
+  const calls = [];
+  const sent = producer.send(new ProducerRecord({ topic: 'unit-close-waiting', value: 'v' }), () => calls.push('callback'));
+  let settled = false;
+  sent.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  // Let the record reach the core, where it waits for the topic's metadata.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  const started = Date.now();
+  await producer.close();
+  await assert.rejects(sent, (e) => {
+    assert.equal(e.constructor, KafkaError);
+    assert.equal(e.message, 'Producer closed while send in progress');
+    return true;
+  });
+  // Well below max.block.ms (60 s), however loaded the machine.
+  assert.ok(Date.now() - started < 30000, `close took ${Date.now() - started} ms`);
+  assert.deepEqual(calls, []);
+});
+
+test('flush() does not wait for a send still waiting for metadata', async () => {
+  const blockMs = 1500;
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'max.block.ms': blockMs });
+  try {
+    const calls = [];
+    const sent = producer.send(new ProducerRecord({ topic: 'unit-flush-waiting', value: 'v' }), (m, error) =>
+      calls.push(error),
+    );
+    let handedOver = false;
+    sent.then(
+      () => (handedOver = true),
+      () => (handedOver = true),
+    );
+    await producer.flush();
+    // flush() covers only the sends that had resolved: this one still waits.
+    assert.equal(handedOver, false);
+    assert.deepEqual(calls, []);
+    // It then fails on its own max.block.ms: a resolved send() and a failed
+    // future, its callback run once.
+    const future = await sent;
+    const message = `Topic unit-flush-waiting not present in metadata after ${blockMs} ms.`;
+    assert.equal(future.isCompletedExceptionally(), true);
+    await assert.rejects(future.get(), { name: 'TimeoutError', message });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].name, 'TimeoutError');
+    assert.equal(calls[0].message, message);
+  } finally {
+    await producer.close();
+  }
+});
+
 test('argument errors throw synchronously', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   try {
@@ -261,6 +316,56 @@ test('argument errors throw synchronously', async () => {
   } finally {
     await producer.close();
   }
+});
+
+test('a string holding a NUL is refused where the C ABI would truncate it', async () => {
+  // A C reader stops at the first NUL: 'acks\0x' would read as 'acks', and
+  // 'good\0bad' as the topic 'good'.
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'acks\0ignored': 'all' }), {
+    name: 'TypeError',
+    message: 'config keys must be strings without null bytes',
+  });
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, acks: '0\0bogus' }), {
+    name: 'TypeError',
+    message: 'config values must be strings without null bytes',
+  });
+  const producer = new KafkaProducer(UNREACHABLE);
+  const calls = [];
+  const callback = () => calls.push('callback');
+  assert.throws(() => producer.send(new ProducerRecord({ topic: 'good\0bad', value: 'v' }), callback), {
+    name: 'TypeError',
+    message: 'topic must be a string without null bytes',
+  });
+  assert.throws(
+    () => producer.send(new ProducerRecord({ topic: 'unit-nul', value: 'v', headers: [{ key: 'k\0x', value: 'h' }] }), callback),
+    { name: 'TypeError', message: 'a header key must be a string without null bytes' },
+  );
+  // Neither send left anything pending: the close has nothing to wait for and
+  // no callback ran.
+  const started = Date.now();
+  await producer.close();
+  assert.ok(Date.now() - started < MAX_BLOCK_MS * 10, `close took ${Date.now() - started} ms`);
+  assert.deepEqual(calls, []);
+});
+
+test('a refused NUL-holding send leaves an unclosed producer idle', () => {
+  const r = runNode(`
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 });
+    for (const record of [
+      new ProducerRecord({ topic: 'a\\0b', value: 'v' }),
+      new ProducerRecord({ topic: 'idle', value: 'v', headers: [{ key: 'a\\0b', value: 'v' }] }),
+    ]) {
+      try { p.send(record, () => console.log('callback ran')); } catch (e) { console.log(e.name, e.message); }
+    }
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    'TypeError topic must be a string without null bytes\n' +
+      'TypeError a header key must be a string without null bytes\n',
+  );
+  assert.ok(r.ms < 30000, `took ${r.ms} ms`);
 });
 
 // Runs `script` in a fresh Node process (killed after `timeout` ms), returning
@@ -299,7 +404,8 @@ test('a pending send keeps the process alive until it completes', () => {
 
 test('terminating a worker with records in flight tears its producer down cleanly', () => {
   // Environment teardown finalizes the threadsafe function while the producer
-  // still runs and its tasks still fire the notify hook (COMMENTS.100 item 5).
+  // still runs and its tasks still fire the notify hook: a hook call racing
+  // the finalizer must not reach the released threadsafe function.
   const r = runNode(`
     const { Worker } = require('node:worker_threads');
     const body = \`

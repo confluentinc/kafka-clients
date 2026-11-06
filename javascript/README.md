@@ -130,10 +130,9 @@ make test-integration-javascript-native  # from the repository root: the server 
 make test-integration-javascript         # Linux only: the server in a container (Dockerfile.grpc)
 ```
 
-The native arm needs `@grpc/grpc-js` and `@grpc/proto-loader` (devDependencies);
-`make -C javascript grpc-native` installs them under
-`rust/target/grpc-native/javascript`, or `MULTILANG_JS_NODE_PATH` names a
-`node_modules` that already holds them. The transaction, `partitionsFor` and
+The native arm loads `@grpc/grpc-js` and `@grpc/proto-loader`, two of the
+devDependencies, from `javascript/node_modules` (`npm ci`);
+`make -C javascript grpc-native` checks they are there. The transaction, `partitionsFor` and
 metrics cases are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`),
 as the producer has none of them yet.
 
@@ -165,6 +164,11 @@ A default import compiled to CommonJS by an interop helper (TypeScript's
 package sets `__esModule`, so the helper reads a `default` export it does not
 have. TypeScript rejects such an import (TS1192, "has no default export");
 import by name or as a namespace instead.
+
+A TypeScript project needs `@types/node` (`npm install --save-dev
+@types/node`): the declarations type keys and values with Node's `Buffer`, and
+the package does not depend on `@types/node` itself, so without it (and without
+`skipLibCheck`) tsc reports TS2688 / TS2580 in `producer_record.d.ts`.
 
 ```
 lib/index.ts           the namespaces { producer, common, consumer } and the Java built-in
@@ -312,6 +316,11 @@ and `cause`. Java's built-in exceptions (`IllegalStateError`,
 `KafkaError`s: `send()` on a closed producer throws an `IllegalStateError`. A
 config value of the wrong JavaScript type for its key throws a `ConfigError`
 with Java's message; any other value of the wrong JavaScript type throws a
-`TypeError`.
+`TypeError`, and so does a topic, header key or config key or value holding a
+null byte (`"topic must be a string without null bytes"`), which C would read
+as the end of the string; keys, values and header values are bytes and may
+hold any. The core's error for a null mandatory argument (`LOCAL_NULL_POINTER`,
+Java's `NullPointerException`) is a `TypeError` as well, as in the Python
+client; the client checks its arguments first, so it is not expected.
 
 See `CLAUDE.md` for the binding's rules.

@@ -100,6 +100,74 @@ test('produces one record with a key, a value and headers', { skip: SKIP, timeou
   }
 });
 
+test('NUL bytes in a key, a value and a header value cross byte-exact', { skip: SKIP, timeout: 120000 }, async () => {
+  // Only the strings the C ABI reads as NUL-terminated (topic, header key,
+  // config) refuse a NUL; bytes cross with their length.
+  const topic = freshTopic('nul');
+  const producer = new KafkaProducer({ 'bootstrap.servers': BOOTSTRAP, acks: 'all' });
+  try {
+    const sent = [
+      { key: 'k\0ey', value: 'v\0al\0', header: 'h\0v' },
+      { key: Buffer.from([0, 1, 0]), value: new Uint8Array([0, 0, 7, 0]), header: Buffer.from([0]) },
+    ];
+    let partition;
+    for (const { key, value, header } of sent) {
+      const metadata = await (
+        await producer.send(
+          new ProducerRecord({ topic, partition: 0, key, value, headers: [{ key: 'h', value: header }] }),
+        )
+      ).get();
+      partition = metadata.partition;
+    }
+    const { records } = await fetchRecords(BOOTSTRAP, topic, partition);
+    const bytes = (d) => (typeof d === 'string' ? Buffer.from(d, 'utf8') : Buffer.from(d));
+    assert.deepEqual(
+      records.map((r) => [r.key, r.value, r.headers]),
+      sent.map(({ key, value, header }) => [bytes(key), bytes(value), [{ key: 'h', value: bytes(header) }]]),
+    );
+  } finally {
+    await producer.close();
+  }
+});
+
+test('CreateTime: the timestamp given, or the send time, reaches the broker', { skip: SKIP, timeout: 120000 }, async () => {
+  const topic = freshTopic('create-time');
+  const producer = new KafkaProducer({ 'bootstrap.servers': BOOTSTRAP, acks: 'all' });
+  try {
+    // The two C record paths: without headers, and through the options
+    // builder with them.
+    const explicit = 1700000000123;
+    const withoutHeaders = await (
+      await producer.send(new ProducerRecord({ topic, partition: 0, timestamp: explicit, value: 'a' }))
+    ).get();
+    const withHeaders = await (
+      await producer.send(
+        new ProducerRecord({ topic, partition: 0, timestamp: explicit + 1, value: 'b', headers: [{ key: 'h', value: 'v' }] }),
+      )
+    ).get();
+    assert.equal(withoutHeaders.timestamp, explicit);
+    assert.equal(withHeaders.timestamp, explicit + 1);
+    // No timestamp: the producer stamps its current time.
+    const before = Date.now();
+    const future = await producer.send(new ProducerRecord({ topic, partition: 0, timestamp: null, value: 'c' }));
+    const after = Date.now();
+    const stamped = await future.get();
+    assert.ok(stamped.timestamp >= before && stamped.timestamp <= after, `${before} <= ${stamped.timestamp} <= ${after}`);
+
+    const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
+    assert.deepEqual(
+      records.map((r) => [r.value.toString(), r.timestamp]),
+      [
+        ['a', explicit],
+        ['b', explicit + 1],
+        ['c', stamped.timestamp],
+      ],
+    );
+  } finally {
+    await producer.close();
+  }
+});
+
 // Sends N records to partition 0 of `topic`, awaiting each send() (the
 // hand-over) before the next, and returns their futures in send order.
 async function sendSequentially(producer, topic, n, value) {

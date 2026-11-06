@@ -28,9 +28,17 @@ const { spawnSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 
+/** The default compiler, the devDependency's. */
+const DEFAULT_TSC = path.join(ROOT, 'node_modules', '.bin', 'tsc');
+
 /** The command that runs tsc. */
 function tscCommand() {
-  return process.env.TSC || path.join(ROOT, 'node_modules', '.bin', 'tsc');
+  return process.env.TSC || DEFAULT_TSC;
+}
+
+/** `arg` quoted for POSIX sh: single quotes, a `'` written as `'\''`. */
+function shellQuote(arg) {
+  return `'${String(arg).replace(/'/g, "'\\''")}'`;
 }
 
 /** The typeRoots holding @types/node. */
@@ -38,10 +46,16 @@ function typeRoots() {
   return path.resolve(ROOT, process.env.TS_TYPE_ROOTS || path.join('node_modules', '@types'));
 }
 
-/** Runs tsc with `args`; returns {status, output}. */
+/**
+ * Runs tsc with `args`; returns {status, output}. The default compiler is run
+ * directly, with no shell. A `TSC` override is a command line, as the
+ * Makefile's `$(TSC) ...` reads it (`npx tsc` works), so it goes through the
+ * shell, every argument quoted: it reaches the compiler literally.
+ */
 function runTsc(args) {
-  const command = [tscCommand(), ...args.map((a) => JSON.stringify(a))].join(' ');
-  const r = spawnSync(command, { cwd: ROOT, encoding: 'utf8', shell: true });
+  const r = process.env.TSC
+    ? spawnSync([process.env.TSC, ...args.map(shellQuote)].join(' '), { cwd: ROOT, encoding: 'utf8', shell: true })
+    : spawnSync(DEFAULT_TSC, args, { cwd: ROOT, encoding: 'utf8' });
   return { status: r.status, output: `${r.stdout || ''}${r.stderr || ''}` };
 }
 
@@ -58,4 +72,4 @@ function writeConfig(dir, config) {
   return file;
 }
 
-module.exports = { ROOT, tscCommand, typeRoots, runTsc, tscAvailable, writeConfig };
+module.exports = { ROOT, tscCommand, shellQuote, typeRoots, runTsc, tscAvailable, writeConfig };

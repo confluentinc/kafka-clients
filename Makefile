@@ -180,9 +180,9 @@ test-integration-javascript-sasl-ssl:
 # The `__grpc_js` arm with the gRPC server as a host process instead of a
 # container (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs):
 # only the broker runs in Docker. Used on macOS, where a container runs Linux
-# and could only test the Linux build of the binding. It needs
-# javascript/node_modules' @grpc/grpc-js + @grpc/proto-loader, put on NODE_PATH
-# by the harness (MULTILANG_JS_NODE_PATH overrides it).
+# and could only test the Linux build of the binding. The server needs nothing
+# built for it: it runs from javascript/, with the gRPC packages `npm ci`
+# installs in javascript/node_modules.
 build-grpc-native-javascript: build-javascript
 	$(MAKE) -C javascript grpc-native
 

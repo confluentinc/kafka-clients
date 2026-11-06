@@ -67,7 +67,12 @@ no machine of it holds an npm token: publishing is these steps, by hand.
          --registry https://registry.npmjs.org/ --@confluentinc:registry=https://registry.npmjs.org/ --otp=<code>
 
    The two registry options matter if your ~/.npmrc maps @confluentinc to
-   another registry: npm would otherwise publish there.
+   another registry: npm would otherwise publish there. Without --tag preview,
+   npm moves the main package's latest dist-tag to this version, and every
+   plain `npm install` of the earlier client's users gets it. Typed by hand or
+   not, run ./publish.sh afterwards: it skips what is published and checks
+   the dist-tags, preview at <version> on each package and the main package's
+   latest (rc and alpha too, when set) still on the earlier client.
 
 4. Run the post-install task
 

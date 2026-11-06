@@ -419,14 +419,16 @@ export class SaslConfigs {
    *
    * The formula to generate the `exp` claim is very simple:
    *
-   * ``java Let:
+   * ```java
+   * Let:
    *
-   * x = the current timestamp in seconds, on client y = the value of this
-   * configuration
+   *   x = the current timestamp in seconds, on client
+   *   y = the value of this configuration
    *
    * Then:
    *
-   * exp = x + y ``
+   *   exp = x + y
+   * ```
    *
    * *Note*: If a value for `sasl.oauthbearer.assertion.file` is provided, this
    * configuration will be ignored.
@@ -477,14 +479,16 @@ export class SaslConfigs {
    *
    * The formula to generate the `nbf` claim is very simple:
    *
-   * ``java Let:
+   * ```java
+   * Let:
    *
-   * x = the current timestamp in seconds, on client y = the value of this
-   * configuration
+   *   x = the current timestamp in seconds, on client
+   *   y = the value of this configuration
    *
    * Then:
    *
-   * nbf = x - y ``
+   *   nbf = x - y
+   * ```
    *
    * *Note*: If a value for `sasl.oauthbearer.assertion.file` is provided, this
    * configuration will be ignored.

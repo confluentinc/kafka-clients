@@ -26,9 +26,10 @@ import { KafkaError } from '../common/kafka_error';
  *
  * A catch-only base: constructing it throws `TypeError`.
  */
-export class InvalidOffsetError extends KafkaError {
+export abstract class InvalidOffsetError extends KafkaError {
   /**
-   * A catch-only base: constructing it directly throws `TypeError`.
+   * A catch-only base: constructing it directly throws `TypeError` (and
+   * TypeScript rejects `new` on it, as Java's abstract class).
    *
    * @param message - the message a subclass passes on, Java's message
    * @param options - `cause`: the cause a subclass passes on, Java's cause

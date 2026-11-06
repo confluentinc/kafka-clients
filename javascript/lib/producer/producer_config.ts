@@ -579,12 +579,12 @@ export class ProducerConfig {
   static readonly CONFIG_PROVIDERS_DOC: string = 'Comma-separated alias names for classes implementing the <code>ConfigProvider</code> interface. This enables loading configuration data (such as passwords, API keys, and other credentials) from external sources. For example, see <a href="https://kafka.apache.org/documentation/#config_providers">Configuration Providers</a>.';
 
   /**
-   * Not instantiable: throws `TypeError`.
+   * Not instantiable: throws `TypeError`. Private, so TypeScript rejects `new` too.
    *
    * @param args - ignored
    * @throws `TypeError` always
    */
-  constructor(...args: unknown[]) {
+  private constructor(...args: unknown[]) {
     void args;
     throw new TypeError('ProducerConfig is not instantiable: its ConfigDef machinery is not ' +
       'translated; a configuration is a plain object of its keys');
