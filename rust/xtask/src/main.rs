@@ -2725,6 +2725,9 @@ fn print_help() {
                     --dotnet-version SEMVER sets the .NET package's version
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too
+                    --javascript-version SEMVER sets the Node.js package's version
+                    (javascript/package.json and its lockfile), 4.0.0 or higher, a fourth
+                    line, left as it is without it; it only moves up too
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2778,7 +2781,7 @@ Usage:
   cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER] [--javascript-version SEMVER]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]

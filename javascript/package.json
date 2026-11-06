@@ -4,6 +4,11 @@
   "private": true,
   "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/confluentinc/kafka-clients.git",
+    "directory": "javascript"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
