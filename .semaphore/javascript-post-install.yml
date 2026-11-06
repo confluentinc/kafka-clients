@@ -12,7 +12,9 @@ name: javascript-post-install
 #
 # "Registry" checks the registry (.semaphore/check-published-npm.py check): the main package and
 # the three platform packages are there at JAVASCRIPT_VERSION, the `preview` dist-tag of each
-# points at it, the main package's optionalDependencies name the three at that version, and each
+# points at it or at a later version (so a rerun after the next pre-release still passes), the main
+# package's `latest` (and `rc` / `alpha`, when present) stays on the earlier client, a version
+# below 4, the main package's optionalDependencies name the three at that version, and each
 # tarball matches the sha512 integrity the registry states and passes check-npm.py's package
 # checks. The task runs from master rather than from the tag build, so it cannot compare the
 # registry with the recorded bundle; publish.sh does that instead, reading each package back from
@@ -49,6 +51,7 @@ blocks:
                 echo "Refusing to check: '${JAVASCRIPT_VERSION}' is not a release version" >&2
                 exit 1
               fi
+            - /usr/bin/python3 .semaphore/check-published-npm.py self-test
             - /usr/bin/python3 .semaphore/check-published-npm.py check "${JAVASCRIPT_VERSION}"
 
   - name: "Install (Linux amd64)"

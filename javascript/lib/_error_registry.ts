@@ -202,6 +202,7 @@ export const ERRORS: ReadonlyArray<ErrorRow> = Object.freeze<ErrorRow[]>([
 ]);
 
 export const FFI_NAMES: ReadonlyMap<number, string> = new Map<number, string>([
+  [-32, 'LOCAL_NULL_POINTER'],
   [-31, 'LOCAL_UNSUPPORTED_OPERATION'],
   [-30, 'LOCAL_CALLBACK'],
   [-29, 'BOOTSTRAP_RESOLUTION'],

@@ -196,7 +196,8 @@ typedef struct {
 int js_bytes(napi_env env, napi_value value, const char* what, JsBytes* out);
 
 // Reads a JS string into a malloc'ed NUL-terminated UTF-8 copy, or throws a
-// TypeError naming `what` and returns NULL.
+// TypeError and returns NULL: `what` for a value that is not a string, `what`
+// followed by " without null bytes" for a string holding a NUL.
 char* js_string_dup(napi_env env, napi_value value, const char* what);
 
 // Builds the C record. `headers` is `null` or an array of `[key, value]`
