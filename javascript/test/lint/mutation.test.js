@@ -185,6 +185,19 @@ MUTATIONS.push(
     apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '  timeoutMs?: number | undefined;', '  timeout?: number | undefined;'),
   },
   {
+    // The untranslated get(long, TimeUnit) is baselined by its own form: a
+    // positional timeout on get() is a wrong shape the baseline does not cover.
+    rule: 'check-overload-shape',
+    what: 'KafkaFuture.get taking a positional timeout',
+    apply: (root) =>
+      edit(
+        root,
+        'lib/common/kafka_future.ts',
+        '   * @returns resolving to the result value, rejecting with the error the\n   *   future failed with\n   */\n  get(): Promise<T> {',
+        '   * @param timeoutMs - The maximum time to wait\n   * @returns resolving to the result value, rejecting with the error the\n   *   future failed with\n   */\n  get(timeoutMs?: number): Promise<T> {\n    void timeoutMs;',
+      ),
+  },
+  {
     // The registry misses a use, flush's native path no longer resolves, and
     // so its Promise is no waiting call's.
     rules: ['check-type-mapping', 'check-waiting-call-promise', 'check-native-registry'],
