@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+
 namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
@@ -24,6 +26,16 @@ public interface ISerializer<T>
     /// <summary>Encodes <paramref name="data"/>, which may be <see langword="null"/>.</summary>
     /// <param name="topic">The topic the record is sent to.</param>
     /// <param name="data">The value to encode.</param>
-    /// <returns>The bytes, or <see langword="null"/>, which is sent as a null key or value.</returns>
-    byte[]? Serialize(string topic, T data);
+    /// <returns>
+    /// The bytes, or <see langword="null"/>, which is sent as a null key or value. An empty memory is sent as empty bytes.
+    /// A <see langword="null"/> <c>byte[]</c> converts to an empty memory, not to <see langword="null"/>: return
+    /// <see langword="null"/> itself.
+    /// </returns>
+    /// <remarks>
+    /// The producer reads the bytes where they are and copies them only into its record batch. It reads them until
+    /// <c>Send</c> returns or throws, or, on an async producer, until <c>Send</c> throws or the <c>ValueTask</c> it returns
+    /// has completed. Keep them unchanged until then. The key and the value are read after both serializers ran, so they
+    /// must not share a buffer that the second call overwrites.
+    /// </remarks>
+    ReadOnlyMemory<byte>? Serialize(string topic, T data);
 }

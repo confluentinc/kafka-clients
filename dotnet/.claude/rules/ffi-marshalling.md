@@ -679,6 +679,11 @@ hazard, fixed by pinning.)
     record: until the sync `Send` returns, so a stack `kafka_Bytes_t` is fine there; until the
     handover `cb` on the async `Send`, so there it must not live on the stack (BH:38183-38191;
     ledger 79 5c).
+    The key and value reach `SerializedProducerRecord` exactly as the serializers return them
+    (`ReadOnlyMemory<byte>?`): absent is `HasValue == false`. No code converts a `byte[]?` to
+    `ReadOnlyMemory<byte>?` by the implicit conversion, which turns a null array into an empty
+    value (ledger 401), and no code copies the memory (`ToArray()`, a new array) on the way to
+    the pin.
     **Note:** `fixed` also yields a null pointer for an **empty** (non-null)
     array — not just for `null` — and the core rejects `(null, len ≥ 0)`. So an
     **empty** key/value (`Length == 0`) must pass a **non-null** pointer — use a

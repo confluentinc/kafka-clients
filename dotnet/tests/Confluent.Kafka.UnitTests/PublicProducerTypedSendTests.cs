@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -236,6 +237,11 @@ public sealed class PublicProducerTypedSendTests
     {
         // Serdes.ByteArray returns the caller's array, so the bytes send path adds no value-sized copy.
         byte[] value = Encoding.UTF8.GetBytes("value");
-        Assert.Same(value, Serdes.ByteArray.Serialize(Topic, value));
+        ReadOnlyMemory<byte>? serialized = Serdes.ByteArray.Serialize(Topic, value);
+        Assert.True(serialized.HasValue);
+        Assert.True(MemoryMarshal.TryGetArray(serialized.Value, out ArraySegment<byte> segment));
+        Assert.Same(value, segment.Array);
+        Assert.Equal(0, segment.Offset);
+        Assert.Equal(value.Length, segment.Count);
     }
 }

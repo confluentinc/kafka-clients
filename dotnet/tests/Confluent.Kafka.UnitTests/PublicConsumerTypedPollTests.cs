@@ -52,8 +52,8 @@ public sealed class PublicConsumerTypedPollTests
     {
         MockConsumer<string, long> consumer = ReadyToPoll(Serdes.String, Serdes.Int64);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        byte[] key = Serdes.String.Serialize(Topic, "hello")!;
-        byte[] value = Serdes.Int64.Serialize(Topic, 1_234_567_890_123L)!;
+        byte[] key = Serdes.String.Serialize(Topic, "hello")?.ToArray()!;
+        byte[] value = Serdes.Int64.Serialize(Topic, 1_234_567_890_123L)?.ToArray()!;
         consumer.AddRecord(Topic, Partition, offset: 11, key, value);
 
         ConsumerRecord<string, long> record = Assert.Single(Poll(consumer));
@@ -74,7 +74,7 @@ public sealed class PublicConsumerTypedPollTests
                 () => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
             await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
             consumer.AddRecord(
-                Topic, Partition, offset: 12, Serdes.String.Serialize(Topic, "wörld-Ω")!, Serdes.Int64.Serialize(Topic, -7L)!);
+                Topic, Partition, offset: 12, Serdes.String.Serialize(Topic, "wörld-Ω")?.ToArray(), Serdes.Int64.Serialize(Topic, -7L)?.ToArray());
 
             ConsumerRecords<string, long> records = default!;
             await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
@@ -182,7 +182,7 @@ public sealed class PublicConsumerTypedPollTests
             MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray, zero);
             using (TestTimeout.Disposal(consumer))
             {
-                consumer.AddRecord(Topic, Partition, offset: 6, key: new byte[] { 7 }, value: Serdes.Int64.Serialize(Topic, 0L)!);
+                consumer.AddRecord(Topic, Partition, offset: 6, key: new byte[] { 7 }, value: Serdes.Int64.Serialize(Topic, 0L)?.ToArray());
                 ConsumerRecord<byte[], long?> record = Assert.Single(Poll(consumer));
                 Assert.Equal(0L, record.Value);
                 Assert.Equal(1, zero.InvocationCount);

@@ -530,7 +530,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         internal Exception? LastThrown { get; private set; }
 
-        public byte[]? Serialize(string topic, string data)
+        public ReadOnlyMemory<byte>? Serialize(string topic, string data)
         {
             InvalidCastException thrown = new InvalidCastException("not a string");
             LastThrown = thrown;
