@@ -152,3 +152,28 @@
   add a public row (`ForName("saſl_ssl")` → `SASL_SSL`). The row catches the gap only when the suite runs in
   invariant mode, so also add one child-process test with the variable set, or record that mode as unverified.
   - **Resolved** in the fixup of e739b2e8b (ruled 2026-11-06, ledger 395 amended to 10 letters): `JavaText.ToUpperRoot` maps `ſ` (U+017F) to `S` itself, beside the nine, in the `IndexOfAny` array and the switch, so none of the ten letters whose Java upper case is ASCII depends on the globalization mode; the decision comment says ten and that `ToUpperInvariant` maps `ſ` only under ICU. `JavaTextTests` moves the `ſ` row to the mapping theory with Java's `"S"`; `PublicConfigEnumsTests` adds `ForName("saſl_ssl")` → `SASL_SSL`, `Of("claſſic")` → `CLASSIC` and `ForConfig("requeſted")` → `REQUESTED`. No invariant-mode child-process test: with all ten mapped by the helper nothing depends on the mode. Checked once by hand: under `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` those rows pass (102/102, culture theories excluded), and with the `ſ` entry removed 4 fail.
+
+- **109-R316-1** (Low; Java parity of a message; the text comes from #316, and our rebased test now asserts it;
+  needs a ruling) — a0b4d3c8a / fb1e415be. Locations: `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs:174-177`
+  (`RequireDeserializer`), `dotnet/CLAUDE.md:718-722` (the "Consumer deserializers" bullet), and
+  `dotnet/tests/Confluent.Kafka.UnitTests/PublicDeserializerDisposalTests.cs:668` (`MissingDeserializer`). Master's
+  `PublicSyncConsumerPreconditionTests.cs:56-58` asserts the same text.
+  - The four consumers refuse a null deserializer with `ConfigException` "Missing required configuration
+    "key.deserializer" which has no default value.". The bullet, #316's F18 row and the test name
+    `..._ThrowsJavasMissingConfiguration` call that Java's message. It is not Kafka 4.4's.
+    `KafkaConsumer(Map, Deserializer, Deserializer)` builds `new ConsumerConfig(ConsumerConfig.appendDeserializerToConfig(...))`,
+    and for a null deserializer with no config key `appendDeserializerToConfig` throws
+    `new ConfigException(KEY_DESERIALIZER_CLASS_CONFIG, null, "must be non-null.")`, which is
+    `ConfigException(String, Object, String)`, so the text is "Invalid value null for configuration key.deserializer:
+    must be non-null." (the value likewise). The required-key text is what an older `appendDeserializerToConfig`
+    gave, when it only `put` a non-null deserializer.
+  - fb1e415be gives the producers that 4.4 form ("Invalid value null for configuration key.serializer: must be
+    non-null.", the same construction in `ProducerConfig.appendSerializerToConfig`). Its body puts the producer
+    "beside the consumer's RequireDeserializer", yet the two helpers now give different texts for the same Java
+    pattern, and only the producer's is Java's.
+  - Fix, if Pranav agrees: `RequireDeserializer` throws `new ConfigException(key, null, "must be non-null.")`, as
+    `RequireSerializer` does. Update the bullet, the two tests and `MissingDeserializer`, and correct F18's "Java's
+    message", for all four consumers, mocks included (the mocks are a recorded choice; only the text changes).
+    Otherwise record the text as a deviation. Order and type are already Java's: a null `configs` is
+    `ArgumentNullException` first, then key, then value, each a `ConfigException`.
+  - **Resolved** (ledger 398, Pranav 2026-11-06: "lets go with (a)"): `NativeConsumer.RequireDeserializer` throws `new ConfigException(key, null, "must be non-null.")`, as `RequireSerializer` does, so the four consumers, the mocks included, read "Invalid value null for configuration key.deserializer: must be non-null." (the value likewise), Kafka 4.4's `appendDeserializerToConfig`; order unchanged (a null `configs` first, then key, then value), nothing disposed. Both helpers' summaries quote Java's text and drop the "always missing" claim. `dotnet/CLAUDE.md`'s Consumer deserializers bullet quotes the 4.4 text. Tests: `PublicSyncConsumerPreconditionTests` (its two asserts; the test renamed `Constructor_NullDeserializer_ThrowsJavasConfigException`) and `PublicDeserializerDisposalTests` (`MissingDeserializer` → `NullDeserializer`, plus the order asserts). Not changed: #316's closed plan's F18 row (`design/history/M22/P2-exception-call-site-parity/PLAN.md:93`), a history record.

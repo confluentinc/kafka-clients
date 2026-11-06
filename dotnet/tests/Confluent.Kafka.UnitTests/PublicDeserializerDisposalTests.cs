@@ -533,17 +533,21 @@ public sealed class PublicDeserializerDisposalTests
         DisposableDeserializer value = new DisposableDeserializer("value");
 
         Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Consumer(flavor, null!, key, value)).ParamName);
+        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Consumer(flavor, null!, null!, null!)).ParamName);
         Assert.Equal(
-            MissingDeserializer("key.deserializer"),
+            NullDeserializer("key.deserializer"),
+            Assert.Throws<ConfigException>(() => Consumer(flavor, Unreachable(), null!, null!)).Message);
+        Assert.Equal(
+            NullDeserializer("key.deserializer"),
             Assert.Throws<ConfigException>(() => Consumer(flavor, Unreachable(), null!, value)).Message);
         Assert.Equal(
-            MissingDeserializer("value.deserializer"),
+            NullDeserializer("value.deserializer"),
             Assert.Throws<ConfigException>(() => Consumer(flavor, Unreachable(), key, null!)).Message);
         Assert.Equal(
-            MissingDeserializer("key.deserializer"),
+            NullDeserializer("key.deserializer"),
             Assert.Throws<ConfigException>(() => Mock(flavor, null!, value)).Message);
         Assert.Equal(
-            MissingDeserializer("value.deserializer"),
+            NullDeserializer("value.deserializer"),
             Assert.Throws<ConfigException>(() => Mock(flavor, key, null!)).Message);
 
         Assert.Equal(0, key.Disposals);
@@ -664,8 +668,8 @@ public sealed class PublicDeserializerDisposalTests
             ? new MockConsumer<byte[], byte[]>(key, value)
             : new AsyncMockConsumer<byte[], byte[]>(key, value);
 
-    private static string MissingDeserializer(string key) =>
-        "Missing required configuration \"" + key + "\" which has no default value.";
+    private static string NullDeserializer(string key) =>
+        "Invalid value null for configuration " + key + ": must be non-null.";
 
     private static DestroyLog WatchDestroy(IConsumerCommon consumer)
     {

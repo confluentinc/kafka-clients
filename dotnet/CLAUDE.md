@@ -717,8 +717,8 @@ each goes when the reason it gives goes:
   reads `renewers().get(0)`.
 - **Consumer deserializers.** The config takes no classes, so the consumer has no
   `key.deserializer` / `value.deserializer` route: a null deserializer throws Java's
-  `ConfigException` "Missing required configuration "key.deserializer" which has no default
-  value." (the value likewise), on all four consumers, the mocks included *(Java's `MockConsumer`
+  `ConfigException` "Invalid value null for configuration key.deserializer: must be
+  non-null." (the value likewise), on all four consumers, the mocks included *(Java's `MockConsumer`
   takes no deserializers)*.
 - **Negative partitions.** The consumer leaves a negative partition to the core, which answers as
   Java does: `seek`, `pause`, `resume` and the real consumers' `currentLag` throw

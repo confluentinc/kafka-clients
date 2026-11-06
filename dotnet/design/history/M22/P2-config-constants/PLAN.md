@@ -534,3 +534,6 @@ Pranav, 2026-11-06, verbatim:
    `ToUpperInvariant` (D8 amended), folded into the single commit.
 5. Rebased onto master `96b786709` (#316, errors follow Java's exception hierarchy), with the lookups' and tests'
    exception types moved to #316's classes.
+6. After the rebase: the producers refuse a null serializer with #316's `ConfigException` and Java's text (ledger 397,
+   Pranav's request), and the consumers' null-deserializer message becomes Kafka 4.4's (ledger 398, "lets go with (a)"),
+   as two follow-up commits on the branch.

@@ -168,13 +168,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
     /// <summary>
-    /// A consumer constructor's deserializer, or Java's <c>ConfigException</c> for a null one: Java falls back to the
-    /// <paramref name="key"/> config, a class name, which .NET config cannot hold, so the key is always missing.
+    /// A consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
+    /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
+    /// <paramref name="key"/> config names no class; .NET config cannot name one.
     /// </summary>
     internal static T RequireDeserializer<T>(T? deserializer, string key)
         where T : class =>
-        deserializer ?? throw new ConfigException(
-            "Missing required configuration \"" + key + "\" which has no default value.");
+        deserializer ?? throw new ConfigException(key, null, "must be non-null.");
 
     internal static NativeConsumer Create(
         IReadOnlyDictionary<string, object?> configs,

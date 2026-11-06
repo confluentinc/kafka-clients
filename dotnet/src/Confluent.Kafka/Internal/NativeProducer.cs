@@ -103,8 +103,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// A producer constructor's serializer, or Java's <c>ConfigException</c> for a null one: Java falls back to the
-    /// <paramref name="key"/> config, a class name, which .NET config cannot hold, so the key is always missing.
+    /// A producer constructor's serializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null for
+    /// configuration <paramref name="key"/>: must be non-null.", which Java throws when the <paramref name="key"/>
+    /// config names no class; .NET config cannot name one.
     /// </summary>
     internal static T RequireSerializer<T>(T? serializer, string key)
         where T : class =>
