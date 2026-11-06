@@ -309,7 +309,9 @@ mod tests {
         assert!(state.content.contains("\nsetFfiId(IllegalStateError, -4);"));
         let retriable = find("RetriableError");
         // Java's abstract base is abstract: TypeScript rejects `new`, the runtime guard stays for JavaScript.
-        assert!(retriable.content.contains("export abstract class RetriableError extends ApiError {"));
+        assert!(retriable
+            .content
+            .contains("export abstract class RetriableError extends ApiError {"));
         assert!(retriable.content.contains("if (new.target === RetriableError) {"));
         assert!(!retriable.content.contains("setFfiId"));
         let api = find("ApiError");
