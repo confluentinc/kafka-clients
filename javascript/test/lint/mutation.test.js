@@ -266,6 +266,19 @@ MUTATIONS.push(
       ),
   },
   {
+    rule: 'check-cb-twin-only',
+    what: 'a blocking flush in a macro of util.h',
+    apply: (root) => {
+      edit(root, 'src/util.h', '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n', '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n#define FLUSH_VIEW(view) FFI_DISCARD(kafka_producer_Producer_flush((view), &ffi_err))\n');
+      edit(
+        root,
+        'src/producer.c',
+        '    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FLUSH_VIEW(p->view);\n    }\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+      );
+    },
+  },
+  {
     rule: 'check-out-err',
     what: 'an FFI_ERR dropped',
     apply: (root) =>

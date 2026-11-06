@@ -59,6 +59,15 @@ test('reading the future is a finding in every form, its _cb twins included', ()
   ]);
 });
 
+test("a macro's body is checked at its definition", () => {
+  const { UTIL_H } = require('./_c_fixture');
+  const r = runN(RULE, {
+    'src/util.h': `${UTIL_H}#define FLUSH_VIEW(view) \\\n    FFI_DISCARD(kafka_x_P_flush((view), &ffi_err))\n`,
+    'src/producer.c': PRODUCER_C.replace('    kafka_x_P_flush_cb(p, on_handover, ctx);', '    FLUSH_VIEW(p);'),
+  });
+  assert.deepEqual(findings(r), ['src/util.h:14: the macro FLUSH_VIEW calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
+});
+
 test('an allowlist entry allows exactly its call; one that allows nothing is a finding', () => {
   let r = runN(RULE, { 'src/producer.c': BLOCKING }, { ALLOWED: [{ key: 'src/producer.c:js_send:kafka_x_P_flush(p, &ffi_err)', reason: 'the test' }] });
   assert.equal(r.status, 0, r.text);

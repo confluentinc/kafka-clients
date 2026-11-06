@@ -226,16 +226,24 @@ function functionBodies(text) {
   return out;
 }
 
-/** Whether offset `at` of `code` is on a preprocessor line, or a `\`-continued line of one. */
-function inDirective(code, at) {
+/**
+ * The start of the preprocessor line offset `at` of `code` is on (a
+ * `\`-continued line counting as its directive's), or -1 off one.
+ */
+function directiveStart(code, at) {
   let lineStart = code.lastIndexOf('\n', at - 1) + 1;
   for (;;) {
-    if (/^\s*#/.test(code.slice(lineStart, lineStart + 64))) return true;
-    if (lineStart === 0) return false;
+    if (/^\s*#/.test(code.slice(lineStart, lineStart + 64))) return lineStart;
+    if (lineStart === 0) return -1;
     const prevEnd = lineStart - 1;
-    if (!/\\\s*$/.test(code.slice(code.lastIndexOf('\n', prevEnd - 1) + 1, prevEnd))) return false;
+    if (!/\\\s*$/.test(code.slice(code.lastIndexOf('\n', prevEnd - 1) + 1, prevEnd))) return -1;
     lineStart = code.lastIndexOf('\n', prevEnd - 1) + 1;
   }
+}
+
+/** Whether offset `at` of `code` is on a preprocessor line, or a `\`-continued line of one. */
+function inDirective(code, at) {
+  return directiveStart(code, at) >= 0;
 }
 
 /**
@@ -243,7 +251,8 @@ function inDirective(code, at) {
  * function}`, `args` the argument texts (comments dropped, whitespace
  * collapsed), `function` the name of the definition enclosing it (or
  * `null`), `directive` whether it sits on a preprocessor line (a macro body;
- * the macro's own name in its `#define` is not a call).
+ * the macro's own name in its `#define` is not a call), `macro` the name of
+ * the `#define` whose body holds it (or `null`).
  * A call is an identifier followed by `(` that is neither a keyword nor a
  * definition. With `name`, only the calls of that function.
  */
@@ -258,6 +267,7 @@ function callSites(text, name) {
     const callee = m[1];
     if (NOT_CALLS.has(callee) || (name !== undefined && callee !== name)) continue;
     const directive = inDirective(code, m.index);
+    const define = directive ? /^\s*#\s*define\s+(\w+)/.exec(code.slice(directiveStart(code, m.index))) : null;
     // A macro's own name in its `#define NAME(...)`.
     if (directive && /#\s*define\s+$/.test(code.slice(code.lastIndexOf('\n', m.index) + 1, m.index))) continue;
     const enclosing = bodies.find((b) => m.index >= b.bodyStart && m.index < b.bodyEnd);
@@ -274,6 +284,7 @@ function callSites(text, name) {
       end: close,
       function: enclosing ? enclosing.name : null,
       directive,
+      macro: define ? define[1] : null,
     });
   }
   return out;

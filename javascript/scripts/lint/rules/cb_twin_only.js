@@ -19,8 +19,10 @@
 // src/ calls `f_cb`, never `f` or its `_err` twin, which would block the
 // event loop and run callbacks on the caller's thread. This generalises
 // test/static/header_conformance.test.js's fixed producer list to every
-// client. The one exception is listed with its reason and the exact call it
-// allows; an entry that allows nothing is a finding.
+// client, in function bodies and in the bodies of `#define`s (src/*.c and
+// src/*.h), a macro's call checked once, at its definition. The one
+// exception is listed with its reason and the exact call it allows; an entry
+// that allows nothing is a finding.
 //
 // It also owns javascript/CLAUDE.md boundary rule 5 (never read the future):
 // no function named by `FORBIDDEN` is called in src/, its `_cb` twins
@@ -67,11 +69,13 @@ module.exports = {
     const raw = [];
     let checked = 0;
     for (const c of calls) {
-      if (!header.has(c.name) || c.directive) continue;
+      // A macro's body is checked at its definition: every use of the macro makes the call.
+      if (!header.has(c.name) || (c.directive && !c.macro)) continue;
       checked += 1;
+      const caller = c.macro ? `the macro ${c.macro}` : c.function;
       const forbidden = this.FORBIDDEN.find((f) => c.name.startsWith(f.prefix));
       if (forbidden) {
-        raw.push({ kind: 'forbidden-call', subject: `${c.file}:${c.line}`, message: `${c.function} calls ${c.name}: ${forbidden.reason}` });
+        raw.push({ kind: 'forbidden-call', subject: `${c.file}:${c.line}`, message: `${caller} calls ${c.name}: ${forbidden.reason}` });
         continue;
       }
       const twin = blocking.get(c.name);
@@ -79,8 +83,8 @@ module.exports = {
       raw.push({
         kind: 'blocking-call',
         subject: `${c.file}:${c.line}`,
-        message: `${c.function} calls ${c.name}, the blocking form of ${twin}: call the _cb twin`,
-        allow: `${c.file}:${c.function}:${c.name}(${c.args.join(', ')})`,
+        message: `${caller} calls ${c.name}, the blocking form of ${twin}: call the _cb twin`,
+        allow: `${c.file}:${c.macro ? `#define ${c.macro}` : c.function}:${c.name}(${c.args.join(', ')})`,
       });
     }
     const { kept, unused } = applyAllowlist(raw, this.ALLOWED, 'cb-unused-allowance');

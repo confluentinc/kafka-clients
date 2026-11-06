@@ -183,3 +183,13 @@ test('bareArg: an argument without its casts and parentheses', () => {
   assert.equal(c.bareArg('f(e)'), 'f(e)');
   assert.equal(c.bareArg('(int)f(e)'), 'f(e)');
 });
+
+test('callSites: a call in a #define body names its macro', () => {
+  const text = '#define FLUSH(v) \\\n    f((v), &e)\nvoid g(void) {\n    FLUSH(1);\n    h();\n}\n';
+  const calls = c.callSites(text).map((x) => [x.name, x.macro, x.function]);
+  assert.deepEqual(calls, [
+    ['f', 'FLUSH', null],
+    ['FLUSH', null, 'g'],
+    ['h', null, 'g'],
+  ]);
+});
