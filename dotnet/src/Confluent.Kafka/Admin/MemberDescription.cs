@@ -105,16 +105,15 @@ public sealed class MemberDescription
     /// The consumer id of the group member — Java's <c>consumerId()</c>, over the field Java
     /// calls <c>memberId</c>. Never <see langword="null"/>.
     /// </summary>
-    /// <returns>The consumer id of the group member — Java's <c>consumerId()</c>, over the field Java calls
-    /// <c>memberId</c>.</returns>
+    /// <returns>The consumer id of the group member.</returns>
     public string ConsumerId() => _consumerId;
 
     /// <summary>
     /// The static group instance id of the member, or <see langword="null"/> if it is not a
     /// static member — Java's <c>groupInstanceId()</c>.
     /// </summary>
-    /// <returns>The static group instance id of the member, or <see langword="null"/> if it is not a static member
-    ///.</returns>
+    /// <returns>The static group instance id of the member, or <see langword="null"/> if it is not a static
+    /// member.</returns>
     public string? GroupInstanceId() => _groupInstanceId;
 
     /// <summary>

@@ -110,7 +110,7 @@ public sealed class ClientQuotaAlteration
         /// <summary>
         /// The new value, or null to clear the quota — Java's boxed <c>Double value()</c>.
         /// </summary>
-        /// <returns>The new value, or null to clear the quota — Java's boxed <c>Double value()</c>.</returns>
+        /// <returns>The new value, or null to clear the quota.</returns>
         public double? Value() => _value;
 
         /// <summary>

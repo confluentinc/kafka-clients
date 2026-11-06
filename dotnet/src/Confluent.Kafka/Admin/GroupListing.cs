@@ -94,8 +94,7 @@ public sealed class GroupListing
     /// Whether this is a simple consumer group — Java's <c>isSimpleConsumerGroup()</c>: a classic
     /// group with an empty protocol.
     /// </summary>
-    /// <returns>Whether this is a simple consumer group — Java's <c>isSimpleConsumerGroup()</c>: a classic group
-    /// with an empty protocol.</returns>
+    /// <returns>Whether this is a simple consumer group.</returns>
     /// <remarks>
     /// Derived from <see cref="Type()"/> and <see cref="Protocol()"/>, as Java derives it, so a listing
     /// the caller builds answers as one the client returns; the core's

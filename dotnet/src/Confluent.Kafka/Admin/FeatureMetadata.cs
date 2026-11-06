@@ -54,8 +54,8 @@ public sealed class FeatureMetadata
     /// unavailable — Java's <c>finalizedFeaturesEpoch()</c>, an
     /// <c>Optional&lt;Long&gt;</c>.
     /// </summary>
-    /// <returns>The finalized-features epoch, or <see langword="null"/> when the finalized features are unavailable
-    /// — Java's <c>finalizedFeaturesEpoch()</c>, an <c>Optional&lt;Long&gt;</c>.</returns>
+    /// <returns>The finalized-features epoch, or <see langword="null"/> when the finalized features are
+    /// unavailable.</returns>
     /// <remarks>
     /// A negative epoch is absent, as Java reads it; <c>0</c> is a legal epoch.
     /// </remarks>

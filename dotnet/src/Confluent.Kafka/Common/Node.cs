@@ -69,7 +69,7 @@ public sealed class Node
     public string? Rack() => _rack;
 
     /// <summary>Whether the node is fenced, Java's <c>isFenced()</c>.</summary>
-    /// <returns>Whether the node is fenced, Java's <c>isFenced()</c>.</returns>
+    /// <returns>Whether the node is fenced.</returns>
     public bool IsFenced() => _isFenced;
 
     /// <inheritdoc/>

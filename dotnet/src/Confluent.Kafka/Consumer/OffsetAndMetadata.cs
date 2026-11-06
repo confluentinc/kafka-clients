@@ -72,8 +72,8 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
     /// The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when absent (Java's
     /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>). A negative epoch is absent.
     /// </summary>
-    /// <returns>The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when absent
-    /// (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).</returns>
+    /// <returns>The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when
+    /// absent.</returns>
     public int? LeaderEpoch() => _leaderEpoch;
 
     /// <summary>

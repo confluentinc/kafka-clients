@@ -31,7 +31,7 @@ public sealed class KafkaPrincipal
 
     private readonly string _principalType;
     private readonly string _name;
-    private bool _tokenAuthenticated;
+    private volatile bool _tokenAuthenticated;
 
     /// <summary>Creates a principal that was not token-authenticated — Java's two-argument constructor.</summary>
     /// <param name="principalType">The principal type, e.g. <see cref="USER_TYPE"/>.</param>

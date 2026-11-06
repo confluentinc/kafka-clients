@@ -535,6 +535,26 @@ public sealed class PublicAdminP7Tests
     }
 
     [Fact]
+    public void KafkaPrincipal_TokenAuthenticated_DefaultsToFalse_AndItsSetterLeavesEqualityAlone()
+    {
+        KafkaPrincipal principal = new KafkaPrincipal("User", "alice");
+        KafkaPrincipal unflagged = new KafkaPrincipal("User", "alice", false);
+        int hashBefore = principal.GetHashCode();
+
+        Assert.False(principal.TokenAuthenticated());
+
+        principal.TokenAuthenticated(true);
+
+        Assert.True(principal.TokenAuthenticated());
+        Assert.Equal(unflagged, principal);
+        Assert.Equal(hashBefore, principal.GetHashCode());
+        Assert.Equal(unflagged.GetHashCode(), principal.GetHashCode());
+        Assert.Equal(
+            typeof(void),
+            typeof(KafkaPrincipal).GetMethod(nameof(KafkaPrincipal.TokenAuthenticated), new[] { typeof(bool) })!.ReturnType);
+    }
+
+    [Fact]
     public void ScramMechanism_RoundTripsItsName()
     {
         Assert.Equal("SCRAM-SHA-256", ScramMechanism.SCRAM_SHA_256.MechanismName());

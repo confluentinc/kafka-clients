@@ -47,8 +47,8 @@ public sealed class OffsetAndTimestamp
     /// The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/>
     /// when absent (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
     /// </summary>
-    /// <returns>The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when absent
-    /// (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).</returns>
+    /// <returns>The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when
+    /// absent.</returns>
     public int? LeaderEpoch() => _leaderEpoch;
 
     /// <summary>
