@@ -135,7 +135,7 @@ new RecordMetadata(fields);
 // @ts-expect-error KafkaFuture's constructor is private
 new KafkaFuture(Symbol('token'));
 // @ts-expect-error SecurityProtocol's constructor is private
-new SecurityProtocol();
+new SecurityProtocol(Symbol('token'), 0, 'PLAINTEXT');
 // @ts-expect-error the client's own members are private
 record._toNative();
 
