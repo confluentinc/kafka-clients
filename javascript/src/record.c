@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// JS values -> the C ProducerRecord. lib/producer/producer_record.js has
+// JS values -> the C ProducerRecord. lib/producer/producer_record.ts has
 // already turned strings into Buffers and checked the types Java's
 // constructor checks, so this reads Uint8Arrays (a Buffer is one) as
 // kafka_Bytes_t over their own memory: no copy of a key or value is made here

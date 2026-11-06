@@ -104,9 +104,15 @@ test('the one blocking close is the finalizer force-close (rule 4 exception)', (
 });
 
 test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both ways", () => {
-  // lib/_error_registry.js is generated from rust/src/ffi/common.rs; the addon
-  // is built against the header cbindgen generates from it.
-  const { FFI_NAMES } = require('../../lib/_error_registry');
+  // lib/_error_registry.ts is generated from rust/src/ffi/common.rs; the addon
+  // is built against the header cbindgen generates from it. Read from the
+  // source (no build): the `[value, 'NAME'],` rows of its FFI_NAMES literal.
+  const registry = fs.readFileSync(path.join(__dirname, '..', '..', 'lib', '_error_registry.ts'), 'utf8');
+  const start = registry.indexOf('export const FFI_NAMES');
+  assert.ok(start >= 0, 'lib/_error_registry.ts has no FFI_NAMES');
+  const body = registry.slice(start, registry.indexOf(']);', start));
+  const FFI_NAMES = [...body.matchAll(/^ {2}\[(-?\d+), '([A-Z0-9_]+)'\],$/gm)].map((m) => [Number(m[1]), m[2]]);
+  assert.ok(FFI_NAMES.length > 0, 'FFI_NAMES has no rows');
   const values = new Map(errorEnumerators(header));
   assert.deepEqual([...FFI_NAMES].sort((a, b) => a[0] - b[0]), [...values].map(([n, v]) => [v, n]).sort((a, b) => a[0] - b[0]));
   assert.equal(values.get('LOCAL_ILLEGAL_ARGUMENT'), -3);

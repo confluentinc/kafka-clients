@@ -17,7 +17,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const native = require('../../lib/_native');
+const native = require('../../dist/_native');
 
 test('the addon loads and links libconfluent_kafka', () => {
   assert.equal(native.probe(), true);

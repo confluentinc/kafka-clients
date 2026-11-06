@@ -15,7 +15,7 @@
 'use strict';
 
 // The generated error hierarchy and the core -> JavaScript conversion
-// (lib/_errors.js), as python/test/unit/test_errors.py checks the Python one:
+// (lib/_errors.ts), as python/test/unit/test_errors.py checks the Python one:
 // every class has the Java parent's class as its parent (both directions),
 // lives in the folder of its Java package, carries its FFI id, and the
 // conversion constructs the class of the core's id with the fallback rules of
@@ -28,9 +28,9 @@ const path = require('node:path');
 
 const root = require('@confluentinc/kafka-javascript');
 const { common, producer, consumer } = root;
-const { ERRORS, FFI_NAMES } = require('../../lib/_error_registry');
-const { UNKNOWN_SERVER_ERROR, classForFfiId, errorClasses, fromNative } = require('../../lib/_errors');
-const { ownFfiId } = require('../../lib/_throwable');
+const { ERRORS, FFI_NAMES } = require('../../dist/_error_registry');
+const { UNKNOWN_SERVER_ERROR, classForFfiId, errorClasses, fromNative } = require('../../dist/_errors');
+const { ownFfiId } = require('../../dist/_throwable');
 
 const REPO = path.join(__dirname, '..', '..', '..');
 const JAVA = path.join(REPO, 'kafka', 'clients', 'src', 'main', 'java');
@@ -49,7 +49,7 @@ const {
 const { ConfigError } = common.config;
 const { IllegalArgumentError, IllegalStateError, NoSuchElementError, ExecutionError, IndexOutOfBoundsError } = root;
 
-const BY_JAVA = new Map(ERRORS.map(([module, name, java]) => [java, require(path.join('../../lib', module))[name]]));
+const BY_JAVA = new Map(ERRORS.map(([module, name, java]) => [java, require(path.join('../../dist', module))[name]]));
 
 /** The FQN of Java's `extends` parent of `fqn`, read from its source. */
 function javaParent(fqn) {
@@ -280,7 +280,7 @@ test("the gRPC server maps the client's errors by code, the Java built-ins inclu
   // errors from its own by errorClasses(): a binding-thrown IllegalArgumentError
   // crosses with its code -3 and the client's message unprefixed, as
   // python/grpc_translate.py does. Here, not in test/static: it loads the
-  // addon through lib/producer.
+  // addon through dist/producer.
   const { kafkaErrorToProto } = require('../../grpc_translate');
   const message = 'Invalid timestamp: -5. Timestamp should always be non-negative or null.';
   assert.deepEqual(kafkaErrorToProto(new IllegalArgumentError(message)), { code: -3, message });
