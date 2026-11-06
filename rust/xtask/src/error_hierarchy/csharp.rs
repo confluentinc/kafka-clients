@@ -61,9 +61,13 @@ const CSHARP_JDK_BASES: &[(&str, &str)] = &[
     ("java.lang.IndexOutOfBoundsException", "System.ArgumentOutOfRangeException"),
 ];
 
-/// The names a getter method, which takes no arguments, cannot take: the properties of
-/// `System.Exception` and `KafkaException`, which clash by name, and the parameterless methods of
-/// `object`, `System.Exception` and `KafkaException`, which it would hide.
+/// The names a getter method, which takes no arguments, cannot take. A getter would clash by name
+/// with a property or an event, and would hide a parameterless method, of any class it can inherit
+/// from: `object`, `System.Exception`, `KafkaException` (whose members are internal, but visible to
+/// the generated classes in its assembly), and the .NET built-ins of `CSHARP_JDK_BASES`. Of those,
+/// `System.ArgumentException` adds `ParamName`, and `System.ArgumentOutOfRangeException` adds
+/// `ParamName` and `ActualValue`; those are reserved under every root, as no Java 4.4 getter has
+/// either name.
 const RESERVED_MEMBERS: &[&str] = &[
     "Message",
     "Data",
@@ -73,6 +77,9 @@ const RESERVED_MEMBERS: &[&str] = &[
     "StackTrace",
     "TargetSite",
     "InnerException",
+    "SerializeObjectState",
+    "ParamName",
+    "ActualValue",
     "Code",
     "FfiId",
     "GetBaseException",
@@ -80,6 +87,7 @@ const RESERVED_MEMBERS: &[&str] = &[
     "GetHashCode",
     "ToString",
     "MemberwiseClone",
+    "Finalize",
     "TypeAndMessage",
 ];
 
@@ -1712,7 +1720,11 @@ mod tests {
 
     #[test]
     fn a_getter_named_like_an_inherited_method_stops_generation() {
-        for (java, cs) in [("getType", "GetType"), ("typeAndMessage", "TypeAndMessage")] {
+        for (java, cs) in [
+            ("getType", "GetType"),
+            ("typeAndMessage", "TypeAndMessage"),
+            ("paramName", "ParamName"),
+        ] {
             let mut c = graph();
             let fqn = errors("GroupAuthorizationException");
             c.get_mut(&fqn).unwrap().java.getters[0].name = java.into();
