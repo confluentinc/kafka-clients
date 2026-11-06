@@ -57,6 +57,7 @@ export class KafkaFuture<T> {
    */
   get(): Promise<T> {
     if (this.#state === SUCCEEDED) return Promise.resolve(this.#value as T);
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the future failed with, as Java's get() throws it (the client's errors are Errors; the native boundary types them unknown)
     if (this.#state === FAILED) return Promise.reject(this.#error);
     return new Promise<T>((resolve, reject) => {
       if (this.#waiters === null) this.#waiters = [];
