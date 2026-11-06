@@ -111,7 +111,8 @@ class Reader {
   }
 }
 
-// The records of an uncompressed record set: [{offset, key, value}].
+// The records of an uncompressed record set: [{offset, key, value, headers}],
+// `headers` an array of {key, value}.
 function parseRecords(buf) {
   const out = [];
   const r = new Reader(buf);
@@ -141,12 +142,13 @@ function parseRecords(buf) {
       const offsetDelta = r.varlong();
       const key = r.nullableVarBytes();
       const value = r.nullableVarBytes();
-      const headers = r.varlong();
-      for (let h = 0; h < headers; h++) {
-        r.bytes(r.varlong());
-        r.nullableVarBytes();
+      const headerCount = r.varlong();
+      const headers = [];
+      for (let h = 0; h < headerCount; h++) {
+        const headerKey = r.bytes(r.varlong()).toString('utf8');
+        headers.push({ key: headerKey, value: r.nullableVarBytes() });
       }
-      if (!control) out.push({ offset: baseOffset + offsetDelta, key, value });
+      if (!control) out.push({ offset: baseOffset + offsetDelta, key, value, headers });
     }
     r.pos = end;
   }
@@ -171,7 +173,7 @@ function roundTrip(socket, request) {
 
 /**
  * Reads partition `partition` of `topic` from offset 0 up to its high
- * watermark: `{highWatermark, records: [{offset, key, value}]}`.
+ * watermark: `{highWatermark, records: [{offset, key, value, headers}]}`.
  */
 async function fetchRecords(bootstrap, topic, partition) {
   const [host, port] = bootstrap.split(',')[0].split(':');

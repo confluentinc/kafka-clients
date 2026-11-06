@@ -126,6 +126,8 @@ export class KafkaProducer {
    * @throws `KafkaError` when the configuration is invalid (`ConfigError`,
    *   also for a value of the wrong type for its key) or the producer cannot
    *   be built
+   * @throws `TypeError` when a config key or value holds a null byte, which
+   *   the C ABI would read as the end of the string
    */
   constructor(configs: ProducerConfigs) {
     this.#handle = native.producerCreate(configEntries(configs));
@@ -177,8 +179,9 @@ export class KafkaProducer {
    * @returns resolving at hand-over to the future of the record's metadata,
    *   rejecting with the error Java's send() would throw
    * @throws `IllegalStateError` when the producer is closed
-   * @throws `TypeError` when `record` is not a ProducerRecord or `callback` not
-   *   a function
+   * @throws `TypeError` when `record` is not a ProducerRecord, `callback` not
+   *   a function, or the topic or a header key holds a null byte, which the C
+   *   ABI would read as the end of the string
    * @throws `InterruptError` rejects with it if the thread is interrupted while
    *   blocked
    * @throws `SerializationError` rejects with it if the key or value are not

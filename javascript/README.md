@@ -312,6 +312,9 @@ and `cause`. Java's built-in exceptions (`IllegalStateError`,
 `KafkaError`s: `send()` on a closed producer throws an `IllegalStateError`. A
 config value of the wrong JavaScript type for its key throws a `ConfigError`
 with Java's message; any other value of the wrong JavaScript type throws a
-`TypeError`.
+`TypeError`, and so does a topic, header key or config key or value holding a
+null byte (`"topic must be a string without null bytes"`), which C would read
+as the end of the string; keys, values and header values are bytes and may
+hold any.
 
 See `CLAUDE.md` for the binding's rules.

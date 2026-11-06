@@ -263,6 +263,56 @@ test('argument errors throw synchronously', async () => {
   }
 });
 
+test('a string holding a NUL is refused where the C ABI would truncate it', async () => {
+  // A C reader stops at the first NUL: 'acks\0x' would read as 'acks', and
+  // 'good\0bad' as the topic 'good'.
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'acks\0ignored': 'all' }), {
+    name: 'TypeError',
+    message: 'config keys must be strings without null bytes',
+  });
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, acks: '0\0bogus' }), {
+    name: 'TypeError',
+    message: 'config values must be strings without null bytes',
+  });
+  const producer = new KafkaProducer(UNREACHABLE);
+  const calls = [];
+  const callback = () => calls.push('callback');
+  assert.throws(() => producer.send(new ProducerRecord({ topic: 'good\0bad', value: 'v' }), callback), {
+    name: 'TypeError',
+    message: 'topic must be a string without null bytes',
+  });
+  assert.throws(
+    () => producer.send(new ProducerRecord({ topic: 'unit-nul', value: 'v', headers: [{ key: 'k\0x', value: 'h' }] }), callback),
+    { name: 'TypeError', message: 'a header key must be a string without null bytes' },
+  );
+  // Neither send left anything pending: the close has nothing to wait for and
+  // no callback ran.
+  const started = Date.now();
+  await producer.close();
+  assert.ok(Date.now() - started < MAX_BLOCK_MS * 10, `close took ${Date.now() - started} ms`);
+  assert.deepEqual(calls, []);
+});
+
+test('a refused NUL-holding send leaves an unclosed producer idle', () => {
+  const r = runNode(`
+    const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+    const p = new KafkaProducer({ 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 });
+    for (const record of [
+      new ProducerRecord({ topic: 'a\\0b', value: 'v' }),
+      new ProducerRecord({ topic: 'idle', value: 'v', headers: [{ key: 'a\\0b', value: 'v' }] }),
+    ]) {
+      try { p.send(record, () => console.log('callback ran')); } catch (e) { console.log(e.name, e.message); }
+    }
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    r.stdout,
+    'TypeError topic must be a string without null bytes\n' +
+      'TypeError a header key must be a string without null bytes\n',
+  );
+  assert.ok(r.ms < 30000, `took ${r.ms} ms`);
+});
+
 // Runs `script` in a fresh Node process (killed after `timeout` ms), returning
 // its exit status, output and wall time.
 function runNode(script, timeout = 30000) {
