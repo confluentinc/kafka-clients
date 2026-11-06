@@ -61,7 +61,9 @@ const CSHARP_JDK_BASES: &[(&str, &str)] = &[
     ("java.lang.IndexOutOfBoundsException", "System.ArgumentOutOfRangeException"),
 ];
 
-/// Members of `System.Exception`, `object` and `KafkaException` a getter method must not hide.
+/// The names a getter method, which takes no arguments, cannot take: the properties of
+/// `System.Exception` and `KafkaException`, which clash by name, and the parameterless methods of
+/// `object`, `System.Exception` and `KafkaException`, which it would hide.
 const RESERVED_MEMBERS: &[&str] = &[
     "Message",
     "Data",
@@ -72,13 +74,13 @@ const RESERVED_MEMBERS: &[&str] = &[
     "TargetSite",
     "InnerException",
     "Code",
-    "IsRetriable",
     "FfiId",
     "GetBaseException",
-    "GetObjectData",
     "GetType",
     "GetHashCode",
     "ToString",
+    "MemberwiseClone",
+    "TypeAndMessage",
 ];
 
 /// C# keywords that are not Java keywords, so a Java parameter may carry one.
@@ -1710,11 +1712,13 @@ mod tests {
 
     #[test]
     fn a_getter_named_like_an_inherited_method_stops_generation() {
-        let mut c = graph();
-        let fqn = errors("GroupAuthorizationException");
-        c.get_mut(&fqn).unwrap().java.getters[0].name = "getType".into();
-        let g = Graph { classes: &c };
-        let err = render_class(&g, &c[&fqn], &repo_root()).unwrap_err().to_string();
-        assert!(err.contains("would hide `GetType`"), "{err}");
+        for (java, cs) in [("getType", "GetType"), ("typeAndMessage", "TypeAndMessage")] {
+            let mut c = graph();
+            let fqn = errors("GroupAuthorizationException");
+            c.get_mut(&fqn).unwrap().java.getters[0].name = java.into();
+            let g = Graph { classes: &c };
+            let err = render_class(&g, &c[&fqn], &repo_root()).unwrap_err().to_string();
+            assert!(err.contains(&format!("would hide `{cs}`")), "{err}");
+        }
     }
 }
