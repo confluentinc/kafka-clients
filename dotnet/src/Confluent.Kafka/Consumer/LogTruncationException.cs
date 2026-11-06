@@ -31,6 +31,8 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 public class LogTruncationException : global::Confluent.Kafka.Consumer.OffsetOutOfRangeException
 {
+    private readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> _divergentOffsets;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>LogTruncationException(Map&lt;TopicPartition, Long&gt; fetchOffsets,
     /// Map&lt;TopicPartition, OffsetAndMetadata&gt; divergentOffsets)</c>.
@@ -47,17 +49,17 @@ public class LogTruncationException : global::Confluent.Kafka.Consumer.OffsetOut
     public LogTruncationException(string? message, IReadOnlyDictionary<TopicPartition, long> fetchOffsets, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> divergentOffsets)
         : base(message, fetchOffsets)
     {
-        DivergentOffsets = divergentOffsets ?? throw new ArgumentNullException(nameof(divergentOffsets));
+        _divergentOffsets = divergentOffsets ?? throw new ArgumentNullException(nameof(divergentOffsets));
     }
 
     internal LogTruncationException(CoreError _, string? message, Exception? innerException, IReadOnlyDictionary<TopicPartition, long> offsetOutOfRangePartitions, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> divergentOffsets)
         : base(_, message, innerException, offsetOutOfRangePartitions)
     {
-        DivergentOffsets = divergentOffsets;
+        _divergentOffsets = divergentOffsets;
     }
 
     /// <summary>Java's <c>divergentOffsets()</c>.</summary>
-    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> DivergentOffsets { get; }
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> DivergentOffsets() => _divergentOffsets;
 
     internal override int FfiId => -20;
 }

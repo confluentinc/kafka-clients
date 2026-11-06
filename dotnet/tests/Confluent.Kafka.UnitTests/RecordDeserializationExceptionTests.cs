@@ -47,14 +47,14 @@ public sealed class RecordDeserializationExceptionTests
             "m",
             cause);
 
-        Assert.Equal(Origin.VALUE, e.Origin);
-        Assert.Equal(s_tp, e.TopicPartition);
-        Assert.Equal(7L, e.Offset);
-        Assert.Equal(10L, e.Timestamp);
-        Assert.Equal(TimestampType.CREATE_TIME, e.TimestampType);
-        Assert.Equal(new byte[] { (byte)'k' }, e.KeyBuffer);
-        Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer);
-        Header header = Assert.Single(e.Headers!);
+        Assert.Equal(Origin.VALUE, e.Origin());
+        Assert.Equal(s_tp, e.TopicPartition());
+        Assert.Equal(7L, e.Offset());
+        Assert.Equal(10L, e.Timestamp());
+        Assert.Equal(TimestampType.CREATE_TIME, e.TimestampType());
+        Assert.Equal(new byte[] { (byte)'k' }, e.KeyBuffer());
+        Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer());
+        Header header = Assert.Single(e.Headers()!);
         Assert.Equal("h", header.Key());
         Assert.Equal(new byte[] { (byte)'1' }, header.Value());
         Assert.Equal("m", e.Message);
@@ -77,10 +77,10 @@ public sealed class RecordDeserializationExceptionTests
             "m",
             cause: null);
 
-        Assert.Null(e.Origin);
-        Assert.Null(e.KeyBuffer);
-        Assert.Null(e.ValueBuffer);
-        Assert.Null(e.Headers);
+        Assert.Null(e.Origin());
+        Assert.Null(e.KeyBuffer());
+        Assert.Null(e.ValueBuffer());
+        Assert.Null(e.Headers());
         Assert.Null(e.InnerException);
     }
 
@@ -90,8 +90,8 @@ public sealed class RecordDeserializationExceptionTests
         RecordDeserializationException e = new RecordDeserializationException(
             Origin.KEY, s_tp, 3, 1, TimestampType.CREATE_TIME, null, new byte[] { (byte)'v' }, new Headers(), "m", null);
 
-        Assert.Null(e.KeyBuffer);
-        Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer);
+        Assert.Null(e.KeyBuffer());
+        Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer());
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class RecordDeserializationExceptionTests
         RecordDeserializationException e = new RecordDeserializationException(
             Origin.KEY, s_tp, 0, 0, TimestampType.CREATE_TIME, null, null, headers, "m", null);
 
-        Assert.Same(headers, e.Headers);
+        Assert.Same(headers, e.Headers());
     }
 
     [Fact]

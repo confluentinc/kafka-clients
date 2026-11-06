@@ -27,6 +27,8 @@ namespace Confluent.Kafka.Common.Errors;
 /// </summary>
 public class ThrottlingQuotaExceededException : global::Confluent.Kafka.Common.Errors.RetriableException
 {
+    private readonly int _throttleTimeMs;
+
     /// <summary>Initializes the exception, as Java's <c>ThrottlingQuotaExceededException(String message)</c>.</summary>
     public ThrottlingQuotaExceededException(string? message)
         : base(message)
@@ -40,17 +42,17 @@ public class ThrottlingQuotaExceededException : global::Confluent.Kafka.Common.E
     public ThrottlingQuotaExceededException(int throttleTimeMs, string? message)
         : base(message)
     {
-        ThrottleTimeMs = throttleTimeMs;
+        _throttleTimeMs = throttleTimeMs;
     }
 
     internal ThrottlingQuotaExceededException(CoreError _, string? message, Exception? innerException, int throttleTimeMs)
         : base(_, message, innerException)
     {
-        ThrottleTimeMs = throttleTimeMs;
+        _throttleTimeMs = throttleTimeMs;
     }
 
     /// <summary>Java's <c>throttleTimeMs()</c>.</summary>
-    public int ThrottleTimeMs { get; }
+    public int ThrottleTimeMs() => _throttleTimeMs;
 
     internal override int FfiId => 89;
 }

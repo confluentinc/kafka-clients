@@ -30,6 +30,8 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 public class OffsetOutOfRangeException : global::Confluent.Kafka.Consumer.InvalidOffsetException
 {
+    private readonly IReadOnlyDictionary<TopicPartition, long> _offsetOutOfRangePartitions;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>OffsetOutOfRangeException(Map&lt;TopicPartition, Long&gt;
     /// offsetOutOfRangePartitions)</c>.
@@ -46,20 +48,20 @@ public class OffsetOutOfRangeException : global::Confluent.Kafka.Consumer.Invali
     public OffsetOutOfRangeException(string? message, IReadOnlyDictionary<TopicPartition, long> offsetOutOfRangePartitions)
         : base(message)
     {
-        OffsetOutOfRangePartitions = offsetOutOfRangePartitions;
+        _offsetOutOfRangePartitions = offsetOutOfRangePartitions;
     }
 
     internal OffsetOutOfRangeException(CoreError _, string? message, Exception? innerException, IReadOnlyDictionary<TopicPartition, long> offsetOutOfRangePartitions)
         : base(_, message, innerException)
     {
-        OffsetOutOfRangePartitions = offsetOutOfRangePartitions;
+        _offsetOutOfRangePartitions = offsetOutOfRangePartitions;
     }
 
     /// <summary>Java's <c>offsetOutOfRangePartitions()</c>.</summary>
-    public IReadOnlyDictionary<TopicPartition, long> OffsetOutOfRangePartitions { get; }
+    public IReadOnlyDictionary<TopicPartition, long> OffsetOutOfRangePartitions() => _offsetOutOfRangePartitions;
 
     /// <inheritdoc/>
-    public override IReadOnlyCollection<TopicPartition> Partitions => new KeySetView<TopicPartition, long>(OffsetOutOfRangePartitions);
+    public override IReadOnlyCollection<TopicPartition> Partitions() => new KeySetView<TopicPartition, long>(_offsetOutOfRangePartitions);
 
     internal override int FfiId => -22;
 }

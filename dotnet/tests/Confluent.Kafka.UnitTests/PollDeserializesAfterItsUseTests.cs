@@ -124,7 +124,7 @@ public sealed class PollDeserializesAfterItsUseTests
 
         RecordDeserializationException e = Assert.Throws<RecordDeserializationException>(() => consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(3L, e.Offset);
+        Assert.Equal(3L, e.Offset());
         Assert.Equal(3L, consumer.Position(s_tp0));
     }
 
@@ -143,7 +143,7 @@ public sealed class PollDeserializesAfterItsUseTests
             RecordDeserializationException e = await Assert.ThrowsAsync<RecordDeserializationException>(
                 () => TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline));
 
-            Assert.Equal(3L, e.Offset);
+            Assert.Equal(3L, e.Offset());
             Assert.Equal(3L, await TestTimeout.Run(() => consumer.Position(s_tp0), s_deadline));
         }
         finally
@@ -348,8 +348,8 @@ public sealed class PollDeserializesAfterItsUseTests
             await TestTimeout.Run(() => close!, s_deadline);
             RecordDeserializationException failed = await Assert.ThrowsAsync<RecordDeserializationException>(
                 () => TestTimeout.Run(() => poll!, s_deadline));
-            Assert.Equal(new TopicPartition(topic, values.Failed), failed.TopicPartition);
-            Assert.Equal(0L, failed.Offset);
+            Assert.Equal(new TopicPartition(topic, values.Failed), failed.TopicPartition());
+            Assert.Equal(0L, failed.Offset());
         }
         finally
         {
@@ -511,8 +511,8 @@ public sealed class PollDeserializesAfterItsUseTests
         {
             Assert.True(_waited, "the other thread's call returned while the seek-backs ran");
             RecordDeserializationException failed = Assert.IsType<RecordDeserializationException>(_polled);
-            Assert.Equal(new TopicPartition(_topic, _failed), failed.TopicPartition);
-            Assert.Equal(0L, failed.Offset);
+            Assert.Equal(new TopicPartition(_topic, _failed), failed.TopicPartition());
+            Assert.Equal(0L, failed.Offset());
             string line = Assert.Single(_lines);
             Assert.Contains($"Could not seek {_topic}-{_failed} back to offset 0", line, StringComparison.Ordinal);
         }

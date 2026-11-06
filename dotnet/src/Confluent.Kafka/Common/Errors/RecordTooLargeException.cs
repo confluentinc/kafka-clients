@@ -28,6 +28,8 @@ namespace Confluent.Kafka.Common.Errors;
 /// </summary>
 public class RecordTooLargeException : global::Confluent.Kafka.Common.Errors.ApiException
 {
+    private readonly IReadOnlyDictionary<TopicPartition, long>? _recordTooLargePartitions;
+
     /// <summary>Initializes the exception, as Java's <c>RecordTooLargeException()</c>.</summary>
     public RecordTooLargeException()
     {
@@ -60,17 +62,17 @@ public class RecordTooLargeException : global::Confluent.Kafka.Common.Errors.Api
     public RecordTooLargeException(string? message, IReadOnlyDictionary<TopicPartition, long> recordTooLargePartitions)
         : base(message)
     {
-        RecordTooLargePartitions = recordTooLargePartitions;
+        _recordTooLargePartitions = recordTooLargePartitions;
     }
 
     internal RecordTooLargeException(CoreError _, string? message, Exception? innerException, IReadOnlyDictionary<TopicPartition, long>? recordTooLargePartitions)
         : base(_, message, innerException)
     {
-        RecordTooLargePartitions = recordTooLargePartitions;
+        _recordTooLargePartitions = recordTooLargePartitions;
     }
 
     /// <summary>Java's <c>recordTooLargePartitions()</c>.</summary>
-    public IReadOnlyDictionary<TopicPartition, long>? RecordTooLargePartitions { get; }
+    public IReadOnlyDictionary<TopicPartition, long>? RecordTooLargePartitions() => _recordTooLargePartitions;
 
     internal override int FfiId => 10;
 }

@@ -24,13 +24,15 @@ namespace Confluent.Kafka.Common.Errors;
 /// <summary>Java's <c>org.apache.kafka.common.errors.GroupAuthorizationException</c>.</summary>
 public class GroupAuthorizationException : global::Confluent.Kafka.Common.Errors.AuthorizationException
 {
+    private readonly string? _groupId;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>GroupAuthorizationException(String message, String groupId)</c>.
     /// </summary>
     public GroupAuthorizationException(string? message, string? groupId)
         : base(message)
     {
-        GroupId = groupId;
+        _groupId = groupId;
     }
 
     /// <summary>Initializes the exception, as Java's <c>GroupAuthorizationException(String message)</c>.</summary>
@@ -42,11 +44,11 @@ public class GroupAuthorizationException : global::Confluent.Kafka.Common.Errors
     internal GroupAuthorizationException(CoreError _, string? message, Exception? innerException, string? groupId)
         : base(_, message, innerException)
     {
-        GroupId = groupId;
+        _groupId = groupId;
     }
 
     /// <summary>Java's <c>groupId()</c>.</summary>
-    public string? GroupId { get; }
+    public string? GroupId() => _groupId;
 
     /// <summary>Creates the exception, as Java's <c>forGroupId(String groupId)</c>.</summary>
     public static GroupAuthorizationException ForGroupId(string? groupId)

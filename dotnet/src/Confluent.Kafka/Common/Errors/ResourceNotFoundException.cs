@@ -27,6 +27,8 @@ namespace Confluent.Kafka.Common.Errors;
 /// </summary>
 public class ResourceNotFoundException : global::Confluent.Kafka.Common.Errors.ApiException
 {
+    private readonly string? _resource;
+
     /// <summary>Initializes the exception, as Java's <c>ResourceNotFoundException(String message)</c>.</summary>
     public ResourceNotFoundException(string? message)
         : this(null, message)
@@ -47,7 +49,7 @@ public class ResourceNotFoundException : global::Confluent.Kafka.Common.Errors.A
     public ResourceNotFoundException(string? resource, string? message)
         : base(message)
     {
-        Resource = resource;
+        _resource = resource;
     }
 
     /// <summary>
@@ -57,17 +59,17 @@ public class ResourceNotFoundException : global::Confluent.Kafka.Common.Errors.A
     public ResourceNotFoundException(string? resource, string? message, Exception? innerException)
         : base(message, innerException)
     {
-        Resource = resource;
+        _resource = resource;
     }
 
     internal ResourceNotFoundException(CoreError _, string? message, Exception? innerException, string? resource)
         : base(_, message, innerException)
     {
-        Resource = resource;
+        _resource = resource;
     }
 
     /// <summary>Java's <c>resource()</c>.</summary>
-    public string? Resource { get; }
+    public string? Resource() => _resource;
 
     internal override int FfiId => 91;
 }

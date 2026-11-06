@@ -25,6 +25,8 @@ namespace Confluent.Kafka.Common.Errors;
 /// <summary>Java's <c>org.apache.kafka.common.errors.TopicAuthorizationException</c>.</summary>
 public class TopicAuthorizationException : global::Confluent.Kafka.Common.Errors.AuthorizationException
 {
+    private readonly IReadOnlyCollection<string> _unauthorizedTopics;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>TopicAuthorizationException(String message, Set&lt;String&gt;
     /// unauthorizedTopics)</c>.
@@ -32,7 +34,7 @@ public class TopicAuthorizationException : global::Confluent.Kafka.Common.Errors
     public TopicAuthorizationException(string? message, IReadOnlyCollection<string> unauthorizedTopics)
         : base(message)
     {
-        UnauthorizedTopics = unauthorizedTopics;
+        _unauthorizedTopics = unauthorizedTopics;
     }
 
     /// <summary>
@@ -52,11 +54,11 @@ public class TopicAuthorizationException : global::Confluent.Kafka.Common.Errors
     internal TopicAuthorizationException(CoreError _, string? message, Exception? innerException, IReadOnlyCollection<string> unauthorizedTopics)
         : base(_, message, innerException)
     {
-        UnauthorizedTopics = unauthorizedTopics;
+        _unauthorizedTopics = unauthorizedTopics;
     }
 
     /// <summary>Java's <c>unauthorizedTopics()</c>.</summary>
-    public IReadOnlyCollection<string> UnauthorizedTopics { get; }
+    public IReadOnlyCollection<string> UnauthorizedTopics() => _unauthorizedTopics;
 
     internal override int FfiId => 29;
 }
