@@ -253,6 +253,27 @@ MUTATIONS.push(
       ),
   },
   {
+    rule: 'check-out-err',
+    what: "the drain's read of the executor's error deleted",
+    apply: (root) => edit(root, 'src/callback_queue.c', '        error_discard(ffi_take(&ffi_err));\n', ''),
+  },
+  {
+    rule: 'check-out-err',
+    what: 'the executor called with a NULL slot',
+    apply: (root) => edit(root, 'src/callback_queue.c', 'q->execute(q->client, &ffi_err)', 'q->execute(q->client, NULL)'),
+  },
+  {
+    rule: 'check-out-err',
+    what: 'FFI_DISCARD around a call given another slot',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (props != NULL) FFI_DISCARD(kafka_Map_destroy_err(props, &ffi_err));',
+        '    kafka_common_Error_t* map_err = NULL;\n    if (props != NULL) FFI_DISCARD(kafka_Map_destroy_err(props, &map_err));',
+      ),
+  },
+  {
     rule: 'check-notify-hook',
     what: 'a call added in cbq_notify',
     apply: (root) =>
