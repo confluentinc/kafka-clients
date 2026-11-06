@@ -21,6 +21,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
 using Confluent.Kafka.Producer;
 
@@ -100,6 +101,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return _handle;
         }
     }
+
+    /// <summary>
+    /// A producer constructor's serializer, or Java's <c>ConfigException</c> for a null one: Java falls back to the
+    /// <paramref name="key"/> config, a class name, which .NET config cannot hold, so the key is always missing.
+    /// </summary>
+    internal static T RequireSerializer<T>(T? serializer, string key)
+        where T : class =>
+        serializer ?? throw new ConfigException(key, null, "must be non-null.");
 
     internal static NativeProducer Create(
         IReadOnlyDictionary<string, object?> configs,

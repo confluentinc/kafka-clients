@@ -323,6 +323,24 @@ public sealed class PublicSerializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
+    public void ANullConfigs_IsRefusedBeforeANullSerializer_AndANullKeySerializerBeforeANullValueSerializer(
+        string flavor)
+    {
+        DisposableSerializer value = new DisposableSerializer("value");
+
+        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Producer(flavor, null!, null!, null!)).ParamName);
+        Assert.Equal(
+            NullSerializer("key.serializer"),
+            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), null!, null!)).Message);
+        Assert.Equal(
+            NullSerializer("key.serializer"),
+            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), null!, value)).Message);
+        Assert.Equal(0, value.Disposals);
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor)]
+    [InlineData(AsyncFlavor)]
     public void ANullArgument_DisposesNothing(string flavor)
     {
         DisposableSerializer key = new DisposableSerializer("key");
@@ -330,11 +348,11 @@ public sealed class PublicSerializerDisposalTests
 
         Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Producer(flavor, null!, key, value)).ParamName);
         Assert.Equal(
-            "keySerializer",
-            Assert.Throws<ArgumentNullException>(() => Producer(flavor, Unreachable(), null!, value)).ParamName);
+            NullSerializer("key.serializer"),
+            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), null!, value)).Message);
         Assert.Equal(
-            "valueSerializer",
-            Assert.Throws<ArgumentNullException>(() => Producer(flavor, Unreachable(), key, null!)).ParamName);
+            NullSerializer("value.serializer"),
+            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), key, null!)).Message);
 
         Assert.Equal(0, key.Disposals);
         Assert.Equal(0, value.Disposals);
@@ -494,6 +512,9 @@ public sealed class PublicSerializerDisposalTests
         flavor == SyncFlavor
             ? new KafkaProducer<byte[], byte[]>(configs, key, value)
             : new AsyncKafkaProducer<byte[], byte[]>(configs, key, value);
+
+    private static string NullSerializer(string key) =>
+        "Invalid value null for configuration " + key + ": must be non-null.";
 
     private static async Task<int> CloseBy(object producer, string how)
     {
