@@ -48,10 +48,10 @@ public sealed class PublicConsumerTfmSmokeTests
             ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
             ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-            Assert.Equal(Topic, record.Topic);
-            Assert.Equal(5, record.Offset);
-            Assert.Equal(Encoding.UTF8.GetBytes("k"), record.Key);
-            Assert.Equal(Encoding.UTF8.GetBytes("v"), record.Value);
+            Assert.Equal(Topic, record.Topic());
+            Assert.Equal(5, record.Offset());
+            Assert.Equal(Encoding.UTF8.GetBytes("k"), record.Key());
+            Assert.Equal(Encoding.UTF8.GetBytes("v"), record.Value());
         }
         finally
         {
@@ -119,9 +119,9 @@ public sealed class PublicConsumerTfmSmokeTests
             System.Collections.Generic.IReadOnlyList<PartitionInfo> partitions = default!;
             await TestTimeout.Run(async () => partitions = await consumer.PartitionsFor(Topic), s_deadline);
             PartitionInfo info = Assert.Single(partitions);
-            Assert.Equal(Topic, info.Topic);
-            Assert.Equal(7, info.Leader!.Id);
-            Assert.Equal("broker-1", info.Leader.Host);
+            Assert.Equal(Topic, info.Topic());
+            Assert.Equal(7, info.Leader()!.Id());
+            Assert.Equal("broker-1", info.Leader()!.Host());
 
             System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.IReadOnlyList<PartitionInfo>> map = default!;
             await TestTimeout.Run(async () => map = await consumer.ListTopics(), s_deadline);
@@ -148,10 +148,10 @@ public sealed class PublicConsumerTfmSmokeTests
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
 
             ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-            Assert.Equal(Topic, record.Topic);
-            Assert.Equal(5, record.Offset);
-            Assert.Equal(Encoding.UTF8.GetBytes("k"), record.Key);
-            Assert.Equal(Encoding.UTF8.GetBytes("v"), record.Value);
+            Assert.Equal(Topic, record.Topic());
+            Assert.Equal(5, record.Offset());
+            Assert.Equal(Encoding.UTF8.GetBytes("k"), record.Key());
+            Assert.Equal(Encoding.UTF8.GetBytes("v"), record.Value());
 
             Assert.Equal(6L, consumer.Position(new TopicPartition(Topic, Partition)));
         }
@@ -176,9 +176,9 @@ public sealed class PublicConsumerTfmSmokeTests
 
             System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 consumer.Committed(new[] { tp });
-            Assert.Equal(42, committed[tp]!.Offset);
-            Assert.Equal("meta-x", committed[tp]!.Metadata);
-            Assert.Equal(7, committed[tp]!.LeaderEpoch);
+            Assert.Equal(42, committed[tp]!.Offset());
+            Assert.Equal("meta-x", committed[tp]!.Metadata());
+            Assert.Equal(7, committed[tp]!.LeaderEpoch());
 
             consumer.UpdateBeginningOffset(Topic, Partition, 5);
             consumer.UpdateEndOffset(Topic, Partition, 99);
@@ -187,7 +187,7 @@ public sealed class PublicConsumerTfmSmokeTests
 
             consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
             PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
-            Assert.Equal(Topic, info.Topic);
+            Assert.Equal(Topic, info.Topic());
             Assert.True(consumer.ListTopics().ContainsKey(Topic));
 
             Assert.Throws<UnsupportedOperationException>(() => consumer.OffsetsForTimes(
@@ -213,7 +213,7 @@ public sealed class PublicConsumerTfmSmokeTests
 
             ConsumerRecords<byte[], byte[]> records = default!;
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
-            Assert.Equal(8, Assert.Single(records).Offset);
+            Assert.Equal(8, Assert.Single(records).Offset());
 
             consumer.Commit(new System.Collections.Generic.Dictionary<TopicPartition, OffsetAndMetadata>
             {
@@ -221,12 +221,12 @@ public sealed class PublicConsumerTfmSmokeTests
             });
             System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 consumer.Committed(new[] { tp });
-            Assert.Equal(5, committed[tp]!.Offset);
-            Assert.Equal("m", committed[tp]!.Metadata);
+            Assert.Equal(5, committed[tp]!.Offset());
+            Assert.Equal("m", committed[tp]!.Metadata());
 
             mock.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
             PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
-            Assert.Equal(Topic, info.Topic);
+            Assert.Equal(Topic, info.Topic());
             Assert.True(consumer.ListTopics().ContainsKey(Topic));
         }
         finally
@@ -250,9 +250,9 @@ public sealed class PublicConsumerTfmSmokeTests
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
 
             ConsumerRecord<string, long> record = Assert.Single(records);
-            Assert.Equal("tfm-key", record.Key);
-            Assert.Equal(4242L, record.Value);
-            Assert.Equal(9, record.Offset);
+            Assert.Equal("tfm-key", record.Key());
+            Assert.Equal(4242L, record.Value());
+            Assert.Equal(9, record.Offset());
         }
         finally
         {

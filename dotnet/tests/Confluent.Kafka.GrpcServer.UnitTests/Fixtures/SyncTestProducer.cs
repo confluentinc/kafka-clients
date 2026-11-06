@@ -43,7 +43,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback)
     {
-        ulong index = ProducerProbe.IndexOf(record.Key);
+        ulong index = ProducerProbe.IndexOf(record.Key());
         _sends++;
         if (_behaviour.DisposeAfterSends is int disposeAfter && _sends == disposeAfter + 1)
         {

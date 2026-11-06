@@ -102,7 +102,7 @@ internal sealed class NativeConsumerHandle : IDisposable
             _handle,
             arguments.TopicPartition(topic, partition),
             arguments.OffsetAndMetadata(
-                offsetAndMetadata.Offset, offsetAndMetadata.LeaderEpoch ?? -1, offsetAndMetadata.Metadata),
+                offsetAndMetadata.Offset(), offsetAndMetadata.LeaderEpoch() ?? -1, offsetAndMetadata.Metadata()),
             ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
     }

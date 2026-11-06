@@ -71,10 +71,10 @@ public sealed class PublicAclTypesTests
     {
         ResourcePattern pattern = new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL);
 
-        Assert.Equal(ResourceType.TOPIC, pattern.ResourceType);
-        Assert.Equal("orders", pattern.Name);
-        Assert.Equal(PatternType.LITERAL, pattern.PatternType);
-        Assert.False(pattern.IsUnknown);
+        Assert.Equal(ResourceType.TOPIC, pattern.ResourceType());
+        Assert.Equal("orders", pattern.Name());
+        Assert.Equal(PatternType.LITERAL, pattern.PatternType());
+        Assert.False(pattern.IsUnknown());
     }
 
     [Fact]
@@ -114,14 +114,14 @@ public sealed class PublicAclTypesTests
 
     [Fact]
     public void ResourcePattern_EmptyName_IsAccepted() =>
-        Assert.Equal(string.Empty, new ResourcePattern(ResourceType.TOPIC, string.Empty, PatternType.LITERAL).Name);
+        Assert.Equal(string.Empty, new ResourcePattern(ResourceType.TOPIC, string.Empty, PatternType.LITERAL).Name());
 
     [Fact]
     public void ResourcePattern_IsUnknown_TracksEitherComponent()
     {
-        Assert.True(new ResourcePattern(ResourceType.UNKNOWN, "orders", PatternType.LITERAL).IsUnknown);
-        Assert.True(new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.UNKNOWN).IsUnknown);
-        Assert.False(new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.PREFIXED).IsUnknown);
+        Assert.True(new ResourcePattern(ResourceType.UNKNOWN, "orders", PatternType.LITERAL).IsUnknown());
+        Assert.True(new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.UNKNOWN).IsUnknown());
+        Assert.False(new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.PREFIXED).IsUnknown());
     }
 
     [Fact]
@@ -144,17 +144,17 @@ public sealed class PublicAclTypesTests
     {
         ResourcePatternFilter filter = new ResourcePatternFilter(ResourceType.ANY, null, PatternType.MATCH);
 
-        Assert.Equal(ResourceType.ANY, filter.ResourceType);
-        Assert.Null(filter.Name);
-        Assert.Equal(PatternType.MATCH, filter.PatternType);
+        Assert.Equal(ResourceType.ANY, filter.ResourceType());
+        Assert.Null(filter.Name());
+        Assert.Equal(PatternType.MATCH, filter.PatternType());
     }
 
     [Fact]
     public void ResourcePatternFilter_Any_IsTheMatchEverythingFilter()
     {
-        Assert.Equal(ResourceType.ANY, ResourcePatternFilter.ANY.ResourceType);
-        Assert.Null(ResourcePatternFilter.ANY.Name);
-        Assert.Equal(PatternType.ANY, ResourcePatternFilter.ANY.PatternType);
+        Assert.Equal(ResourceType.ANY, ResourcePatternFilter.ANY.ResourceType());
+        Assert.Null(ResourcePatternFilter.ANY.Name());
+        Assert.Equal(PatternType.ANY, ResourcePatternFilter.ANY.PatternType());
     }
 
     [Fact]
@@ -165,8 +165,8 @@ public sealed class PublicAclTypesTests
             new ResourcePatternFilter(ResourceType.TOPIC, string.Empty, PatternType.LITERAL);
 
         Assert.NotEqual(wildcard, empty);
-        Assert.Null(wildcard.Name);
-        Assert.Equal(string.Empty, empty.Name);
+        Assert.Null(wildcard.Name());
+        Assert.Equal(string.Empty, empty.Name());
 
         // The distinction has to survive a dictionary, which is where these types are used.
         Dictionary<ResourcePatternFilter, string> byFilter = new Dictionary<ResourcePatternFilter, string>
@@ -213,11 +213,11 @@ public sealed class PublicAclTypesTests
         AccessControlEntry entry =
             new AccessControlEntry("User:alice", "*", AclOperation.READ, AclPermissionType.ALLOW);
 
-        Assert.Equal("User:alice", entry.Principal);
-        Assert.Equal("*", entry.Host);
-        Assert.Equal(AclOperation.READ, entry.Operation);
-        Assert.Equal(AclPermissionType.ALLOW, entry.PermissionType);
-        Assert.False(entry.IsUnknown);
+        Assert.Equal("User:alice", entry.Principal());
+        Assert.Equal("*", entry.Host());
+        Assert.Equal(AclOperation.READ, entry.Operation());
+        Assert.Equal(AclPermissionType.ALLOW, entry.PermissionType());
+        Assert.False(entry.IsUnknown());
     }
 
     [Fact]
@@ -259,15 +259,15 @@ public sealed class PublicAclTypesTests
         AccessControlEntry entry = new AccessControlEntry(
             string.Empty, string.Empty, AclOperation.DESCRIBE, AclPermissionType.DENY);
 
-        Assert.Equal(string.Empty, entry.Principal);
-        Assert.Equal(string.Empty, entry.Host);
+        Assert.Equal(string.Empty, entry.Principal());
+        Assert.Equal(string.Empty, entry.Host());
     }
 
     [Fact]
     public void AccessControlEntry_IsUnknown_TracksEitherEnum()
     {
-        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.UNKNOWN, AclPermissionType.ALLOW).IsUnknown);
-        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.UNKNOWN).IsUnknown);
+        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.UNKNOWN, AclPermissionType.ALLOW).IsUnknown());
+        Assert.True(new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.UNKNOWN).IsUnknown());
     }
 
     [Fact]
@@ -293,10 +293,10 @@ public sealed class PublicAclTypesTests
         AccessControlEntryFilter filter =
             new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
 
-        Assert.Null(filter.Principal);
-        Assert.Null(filter.Host);
-        Assert.Equal(AclOperation.ANY, filter.Operation);
-        Assert.Equal(AclPermissionType.ANY, filter.PermissionType);
+        Assert.Null(filter.Principal());
+        Assert.Null(filter.Host());
+        Assert.Equal(AclOperation.ANY, filter.Operation());
+        Assert.Equal(AclPermissionType.ANY, filter.PermissionType());
     }
 
     [Fact]
@@ -365,14 +365,14 @@ public sealed class PublicAclTypesTests
     {
         AclBinding binding = NewBinding();
 
-        Assert.Equal("orders", binding.Pattern.Name);
-        Assert.Equal(ResourceType.TOPIC, binding.Pattern.ResourceType);
-        Assert.Equal(PatternType.LITERAL, binding.Pattern.PatternType);
-        Assert.Equal("User:alice", binding.Entry.Principal);
-        Assert.Equal("*", binding.Entry.Host);
-        Assert.Equal(AclOperation.READ, binding.Entry.Operation);
-        Assert.Equal(AclPermissionType.ALLOW, binding.Entry.PermissionType);
-        Assert.False(binding.IsUnknown);
+        Assert.Equal("orders", binding.Pattern().Name());
+        Assert.Equal(ResourceType.TOPIC, binding.Pattern().ResourceType());
+        Assert.Equal(PatternType.LITERAL, binding.Pattern().PatternType());
+        Assert.Equal("User:alice", binding.Entry().Principal());
+        Assert.Equal("*", binding.Entry().Host());
+        Assert.Equal(AclOperation.READ, binding.Entry().Operation());
+        Assert.Equal(AclPermissionType.ALLOW, binding.Entry().PermissionType());
+        Assert.False(binding.IsUnknown());
     }
 
     [Fact]
@@ -391,11 +391,11 @@ public sealed class PublicAclTypesTests
     {
         Assert.True(new AclBinding(
             new ResourcePattern(ResourceType.UNKNOWN, "orders", PatternType.LITERAL),
-            new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.ALLOW)).IsUnknown);
+            new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.ALLOW)).IsUnknown());
 
         Assert.True(new AclBinding(
             new ResourcePattern(ResourceType.TOPIC, "orders", PatternType.LITERAL),
-            new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.UNKNOWN)).IsUnknown);
+            new AccessControlEntry("User:a", "*", AclOperation.READ, AclPermissionType.UNKNOWN)).IsUnknown());
     }
 
     [Fact]
@@ -441,8 +441,8 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void AclBindingFilter_Any_IsBothHalvesAny()
     {
-        Assert.Equal(ResourcePatternFilter.ANY, AclBindingFilter.ANY.PatternFilter);
-        Assert.Equal(AccessControlEntryFilter.ANY, AclBindingFilter.ANY.EntryFilter);
+        Assert.Equal(ResourcePatternFilter.ANY, AclBindingFilter.ANY.PatternFilter());
+        Assert.Equal(AccessControlEntryFilter.ANY, AclBindingFilter.ANY.EntryFilter());
         Assert.Equal(
             new AclBindingFilter(ResourcePatternFilter.ANY, AccessControlEntryFilter.ANY),
             AclBindingFilter.ANY);
@@ -465,15 +465,15 @@ public sealed class PublicAclTypesTests
     [Fact]
     public void AclBindingFilter_IsUnknown_PropagatesFromEitherHalf()
     {
-        Assert.False(AclBindingFilter.ANY.IsUnknown);
+        Assert.False(AclBindingFilter.ANY.IsUnknown());
 
         Assert.True(new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.UNKNOWN, null, PatternType.ANY),
-            AccessControlEntryFilter.ANY).IsUnknown);
+            AccessControlEntryFilter.ANY).IsUnknown());
 
         Assert.True(new AclBindingFilter(
             ResourcePatternFilter.ANY,
-            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.UNKNOWN)).IsUnknown);
+            new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.UNKNOWN)).IsUnknown());
     }
 
     [Fact]
@@ -521,13 +521,13 @@ public sealed class PublicAclTypesTests
         AclBinding binding = NewBinding();
         AclBindingFilter filter = binding.ToFilter();
 
-        Assert.Equal(binding.Pattern.ResourceType, filter.PatternFilter.ResourceType);
-        Assert.Equal(binding.Pattern.Name, filter.PatternFilter.Name);
-        Assert.Equal(binding.Pattern.PatternType, filter.PatternFilter.PatternType);
-        Assert.Equal(binding.Entry.Principal, filter.EntryFilter.Principal);
-        Assert.Equal(binding.Entry.Host, filter.EntryFilter.Host);
-        Assert.Equal(binding.Entry.Operation, filter.EntryFilter.Operation);
-        Assert.Equal(binding.Entry.PermissionType, filter.EntryFilter.PermissionType);
+        Assert.Equal(binding.Pattern().ResourceType(), filter.PatternFilter().ResourceType());
+        Assert.Equal(binding.Pattern().Name(), filter.PatternFilter().Name());
+        Assert.Equal(binding.Pattern().PatternType(), filter.PatternFilter().PatternType());
+        Assert.Equal(binding.Entry().Principal(), filter.EntryFilter().Principal());
+        Assert.Equal(binding.Entry().Host(), filter.EntryFilter().Host());
+        Assert.Equal(binding.Entry().Operation(), filter.EntryFilter().Operation());
+        Assert.Equal(binding.Entry().PermissionType(), filter.EntryFilter().PermissionType());
     }
 
     private static AclBinding NewBinding() =>

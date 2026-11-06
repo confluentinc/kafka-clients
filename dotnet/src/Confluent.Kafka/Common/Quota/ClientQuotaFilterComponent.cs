@@ -22,27 +22,42 @@ namespace Confluent.Kafka.Common.Quota;
 /// </summary>
 public sealed class ClientQuotaFilterComponent
 {
-    // A recorded deviation: Java's match() is a nullable Optional with three states, which a
-    // string? cannot hold, so the match type is a property of its own. The constructor is
-    // private, as Java's, so an Exact match always has a name.
+    private readonly string _entityType;
+    private readonly ClientQuotaMatchType _matchType;
+    private readonly string? _match;
+
+    // Java's match() is a nullable Optional with three states, which a string? cannot hold, so
+    // the match type has a method of its own. The constructor is private, as Java's, so an
+    // Exact match always has a name.
     private ClientQuotaFilterComponent(string entityType, ClientQuotaMatchType matchType, string? matchName)
     {
-        EntityType = entityType ?? throw new ArgumentNullException(nameof(entityType));
-        MatchType = matchType;
-        MatchName = matchName;
+        _entityType = entityType ?? throw new ArgumentNullException(nameof(entityType));
+        _matchType = matchType;
+        _match = matchName;
     }
 
     /// <summary>The entity type the component applies to — Java's <c>entityType()</c>.</summary>
-    public string EntityType { get; }
-
-    /// <summary>Which of the three matches this component performs.</summary>
-    public ClientQuotaMatchType MatchType { get; }
+    /// <returns>The component's entity type.</returns>
+    public string EntityType() => _entityType;
 
     /// <summary>
-    /// The exactly-matched entity name; non-null if and only if
-    /// <see cref="MatchType"/> is <see cref="ClientQuotaMatchType.Exact"/>.
+    /// Which of the three matches this component performs. Java has no counterpart: its
+    /// <c>match()</c> tells the three apart as a present, an empty or a null <c>Optional</c>,
+    /// which <see cref="Match()"/> alone cannot.
     /// </summary>
-    public string? MatchName { get; }
+    /// <returns>
+    /// <see cref="ClientQuotaMatchType.Exact"/> for a name matched exactly,
+    /// <see cref="ClientQuotaMatchType.Default"/> for the default name, and
+    /// <see cref="ClientQuotaMatchType.Specified"/> for any specified name.
+    /// </returns>
+    public ClientQuotaMatchType MatchType() => _matchType;
+
+    /// <summary>The matched entity name — Java's <c>match()</c>.</summary>
+    /// <returns>
+    /// The name that is matched exactly; non-null if and only if <see cref="MatchType()"/> is
+    /// <see cref="ClientQuotaMatchType.Exact"/>.
+    /// </returns>
+    public string? Match() => _match;
 
     /// <summary>
     /// A component matching <paramref name="entityName"/> exactly — Java's <c>ofEntity</c>.
@@ -85,18 +100,18 @@ public sealed class ClientQuotaFilterComponent
 
     /// <summary>
     /// Value equality over the type and the match — Java's <c>equals</c>, where
-    /// <see cref="MatchType"/> stands in for Java's nullable <c>Optional</c>.
+    /// <see cref="MatchType()"/> stands in for Java's nullable <c>Optional</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same component.</returns>
     public override bool Equals(object? obj) =>
         obj is ClientQuotaFilterComponent other
-        && string.Equals(EntityType, other.EntityType, StringComparison.Ordinal)
-        && MatchType == other.MatchType
-        && string.Equals(MatchName, other.MatchName, StringComparison.Ordinal);
+        && string.Equals(EntityType(), other.EntityType(), StringComparison.Ordinal)
+        && MatchType() == other.MatchType()
+        && string.Equals(Match(), other.Match(), StringComparison.Ordinal);
 
     /// <summary>
-    /// The hash of the type and the match — Java's <c>hashCode</c>. <see cref="MatchType"/> is
+    /// The hash of the type and the match — Java's <c>hashCode</c>. <see cref="MatchType()"/> is
     /// folded in, so <see cref="ClientQuotaMatchType.Default"/> and
     /// <see cref="ClientQuotaMatchType.Specified"/> do not collide although both carry a null name.
     /// </summary>
@@ -106,9 +121,9 @@ public sealed class ClientQuotaFilterComponent
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(EntityType);
-            hash = (hash * 31) + ((int)MatchType).GetHashCode();
-            hash = (hash * 31) + (MatchName is null ? 0 : StringComparer.Ordinal.GetHashCode(MatchName));
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_entityType);
+            hash = (hash * 31) + ((int)_matchType).GetHashCode();
+            hash = (hash * 31) + (_match is null ? 0 : StringComparer.Ordinal.GetHashCode(_match));
             return hash;
         }
     }
@@ -122,10 +137,10 @@ public sealed class ClientQuotaFilterComponent
     public override string ToString() =>
         string.Concat(
             "ClientQuotaFilterComponent(entityType=",
-            EntityType,
+            EntityType(),
             ", matchType=",
-            MatchType.ToString(),
+            MatchType().ToString(),
             ", matchName=",
-            MatchName ?? "null",
+            Match() ?? "null",
             ")");
 }

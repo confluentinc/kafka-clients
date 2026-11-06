@@ -31,9 +31,9 @@ internal static class LogDirMarshal
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(replica.Topic))
+        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(replica.Topic()))
         {
-            native = NativeMethods.TopicPartitionReplicaNew(topic.Pointer, replica.Partition, replica.BrokerId, ref outErr);
+            native = NativeMethods.TopicPartitionReplicaNew(topic.Pointer, replica.Partition(), replica.BrokerId(), ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);

@@ -77,8 +77,8 @@ public sealed class PublicAdminDeleteAclsTests
 
         foreach (AclBindingFilter key in result.Values.Keys)
         {
-            Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Principal);
-            Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Host);
+            Assert.Equal(key.PatternFilter().Name(), key.EntryFilter().Principal());
+            Assert.Equal(key.PatternFilter().Name(), key.EntryFilter().Host());
         }
 
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
@@ -162,7 +162,7 @@ public sealed class PublicAdminDeleteAclsTests
         AclBindingFilter filter = Filter("tópico-café-日本");
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { filter });
 
-        Assert.Equal("tópico-café-日本", Assert.Single(result.Values).Key.PatternFilter.Name);
+        Assert.Equal("tópico-café-日本", Assert.Single(result.Values).Key.PatternFilter().Name());
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 

@@ -3339,7 +3339,7 @@ public sealed class AdminP14SyncCompositionTests
                 return new ValuedHarness<TopicPartition, DeletedRecords>(
                     futures,
                     partitions,
-                    partition => new DeletedRecords(100L + partition.Partition),
+                    partition => new DeletedRecords(100L + partition.Partition()),
                     true,
                     () => result.LowWatermarks,
                     null,
@@ -3351,7 +3351,7 @@ public sealed class AdminP14SyncCompositionTests
             return new ValuedHarness<TopicPartition, DeletedRecords>(
                 futures,
                 partitions,
-                partition => new DeletedRecords(100L + partition.Partition),
+                partition => new DeletedRecords(100L + partition.Partition()),
                 true,
                 null,
                 () => asyncResult.LowWatermarks,
@@ -3582,7 +3582,7 @@ public sealed class AdminP14SyncCompositionTests
             };
 
         private static DescribeReplicaLogDirsResult.ReplicaLogDirInfo ReplicaLogDir(TopicPartitionReplica replica) =>
-            new DescribeReplicaLogDirsResult.ReplicaLogDirInfo("/data/broker-" + replica.BrokerId, 0L, null, -1L);
+            new DescribeReplicaLogDirsResult.ReplicaLogDirInfo("/data/broker-" + replica.BrokerId(), 0L, null, -1L);
 
         private static ConsumerGroupDescription ConsumerGroup(string groupId) =>
             new ConsumerGroupDescription(
@@ -3826,7 +3826,7 @@ public sealed class AdminP14SyncCompositionTests
 
         private static DescribeProducersResult.PartitionProducerState Producers(TopicPartition partition) =>
             new DescribeProducersResult.PartitionProducerState(
-                new[] { new ProducerState(2_000L + partition.Partition, 2, 7, 1_700_000_000_000L, null, null) });
+                new[] { new ProducerState(2_000L + partition.Partition(), 2, 7, 1_700_000_000_000L, null, null) });
 
         private bool Answers(TKey key) => CallIndexer(key) is null;
     }
@@ -4202,7 +4202,7 @@ public sealed class AdminP14SyncCompositionTests
             _futures = futures;
             _values = partitions.ToDictionary(
                 partition => partition,
-                partition => new ListOffsetsResult.ListOffsetsResultInfo(100L + partition.Partition, -1L, null));
+                partition => new ListOffsetsResult.ListOffsetsResultInfo(100L + partition.Partition(), -1L, null));
             _sync = sync;
             _async = async;
         }

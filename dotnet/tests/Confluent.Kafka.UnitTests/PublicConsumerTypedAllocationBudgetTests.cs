@@ -94,7 +94,7 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
         Assert.Equal(recordCount, records.Count);
         foreach (ConsumerRecord<byte[], int> record in records)
         {
-            Assert.Equal(valueSize, record.Value);
+            Assert.Equal(valueSize, record.Value());
         }
 
         return after - before;

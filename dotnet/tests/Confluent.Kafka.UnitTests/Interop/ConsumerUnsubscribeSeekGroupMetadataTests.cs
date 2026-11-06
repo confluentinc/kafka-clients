@@ -132,10 +132,10 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("proof-group", meta.GroupId);
-        Assert.Equal(-1, meta.GenerationId);
-        Assert.Equal(string.Empty, meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("proof-group", meta.GroupId());
+        Assert.Equal(-1, meta.GenerationId());
+        Assert.Equal(string.Empty, meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Fact]
@@ -146,7 +146,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("grüße-café-Ω-日本語-😀", meta.GroupId);
+        Assert.Equal("grüße-café-Ω-日本語-😀", meta.GroupId());
     }
 
     [Fact]
@@ -158,8 +158,8 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("static-group", meta.GroupId);
-        Assert.Equal("instance-7", meta.GroupInstanceId);
+        Assert.Equal("static-group", meta.GroupId());
+        Assert.Equal("instance-7", meta.GroupInstanceId());
     }
 
     [Fact]
@@ -170,10 +170,10 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("dummy.group.id", meta.GroupId);
-        Assert.Equal(1, meta.GenerationId);
-        Assert.Equal("1", meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("dummy.group.id", meta.GroupId());
+        Assert.Equal(1, meta.GenerationId());
+        Assert.Equal("1", meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Fact]

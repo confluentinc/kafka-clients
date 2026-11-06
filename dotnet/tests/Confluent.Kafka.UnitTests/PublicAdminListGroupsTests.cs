@@ -53,15 +53,15 @@ public sealed class PublicAdminListGroupsTests
 
         Assert.Equal(
             new[] { "public-lg-a", "public-lg-b", "public-lg-c" },
-            valid.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal));
+            valid.Select(listing => listing.GroupId()).OrderBy(id => id, StringComparer.Ordinal));
         Assert.Empty(errors);
 
         foreach (GroupListing listing in valid)
         {
-            Assert.Equal(GroupType.CONSUMER, listing.Type);
-            Assert.Equal(GroupState.STABLE, listing.GroupState);
-            Assert.Equal(ConsumerProtocol, listing.Protocol);
-            Assert.False(listing.IsSimpleConsumerGroup);
+            Assert.Equal(GroupType.CONSUMER, listing.Type());
+            Assert.Equal(GroupState.STABLE, listing.GroupState());
+            Assert.Equal(ConsumerProtocol, listing.Protocol());
+            Assert.False(listing.IsSimpleConsumerGroup());
         }
     }
 
@@ -79,8 +79,8 @@ public sealed class PublicAdminListGroupsTests
         IReadOnlyCollection<GroupListing> valid = await TestTimeout.Run(() => result.Valid().Get(), s_deadline);
 
         Assert.Equal(
-            valid.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal),
-            all.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal));
+            valid.Select(listing => listing.GroupId()).OrderBy(id => id, StringComparer.Ordinal),
+            all.Select(listing => listing.GroupId()).OrderBy(id => id, StringComparer.Ordinal));
         Assert.Equal(2, all.Count);
     }
 
@@ -109,7 +109,7 @@ public sealed class PublicAdminListGroupsTests
         IReadOnlyCollection<GroupListing> valid =
             await TestTimeout.Run(() => admin.ListGroups().Valid().Get(), s_deadline);
 
-        Assert.Equal("public-lg-iface", Assert.Single(valid).GroupId);
+        Assert.Equal("public-lg-iface", Assert.Single(valid).GroupId());
     }
 
     [Fact]
@@ -127,7 +127,7 @@ public sealed class PublicAdminListGroupsTests
             admin.ListGroups(new ListGroupsOptions()),
         })
         {
-            Assert.Equal("public-lg-nofilter", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
+            Assert.Equal("public-lg-nofilter", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId());
         }
     }
 
@@ -147,7 +147,7 @@ public sealed class PublicAdminListGroupsTests
             TimeoutMs = 30_000,
         });
 
-        Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
+        Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId());
     }
 
     [Fact]

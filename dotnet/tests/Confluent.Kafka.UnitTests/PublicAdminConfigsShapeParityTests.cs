@@ -103,37 +103,37 @@ public sealed class PublicAdminConfigsShapeParityTests
     [Fact]
     public void ConfigEntry_KeepsP1sFiveMembers_AndGainsJavasFour()
     {
-        Assert.Equal(typeof(string), Property(typeof(ConfigEntry), nameof(ConfigEntry.Name)).PropertyType);
-        Assert.Equal(typeof(string), Property(typeof(ConfigEntry), nameof(ConfigEntry.Value)).PropertyType);
-        Assert.Equal(typeof(bool), Property(typeof(ConfigEntry), nameof(ConfigEntry.IsDefault)).PropertyType);
-        Assert.Equal(typeof(bool), Property(typeof(ConfigEntry), nameof(ConfigEntry.IsSensitive)).PropertyType);
-        Assert.Equal(typeof(bool), Property(typeof(ConfigEntry), nameof(ConfigEntry.IsReadOnly)).PropertyType);
+        Assert.Equal(typeof(string), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Name)).ReturnType);
+        Assert.Equal(typeof(string), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Value)).ReturnType);
+        Assert.Equal(typeof(bool), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.IsDefault)).ReturnType);
+        Assert.Equal(typeof(bool), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.IsSensitive)).ReturnType);
+        Assert.Equal(typeof(bool), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.IsReadOnly)).ReturnType);
 
         Assert.Equal(
             NullableAnnotation.NotAnnotated,
-            NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Name))));
+            NullableAnnotation.Flag(Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Name))));
 
         Assert.Equal(
             NullableAnnotation.Annotated,
-            NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Value))));
+            NullableAnnotation.Flag(Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Value))));
 
         Assert.Equal(
-            typeof(ConfigEntry.ConfigSource), Property(typeof(ConfigEntry), nameof(ConfigEntry.Source)).PropertyType);
+            typeof(ConfigEntry.ConfigSource), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Source)).ReturnType);
         Assert.Equal(
-            typeof(ConfigEntry.ConfigType?), Property(typeof(ConfigEntry), nameof(ConfigEntry.Type)).PropertyType);
+            typeof(ConfigEntry.ConfigType?), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Type)).ReturnType);
         Assert.Equal(
-            typeof(string), Property(typeof(ConfigEntry), nameof(ConfigEntry.Documentation)).PropertyType);
+            typeof(string), Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Documentation)).ReturnType);
         Assert.Equal(
             typeof(IReadOnlyList<ConfigEntry.ConfigSynonym>),
-            Property(typeof(ConfigEntry), nameof(ConfigEntry.Synonyms)).PropertyType);
+            Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Synonyms)).ReturnType);
 
         Assert.Equal(
             NullableAnnotation.Annotated,
-            NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Documentation))));
+            NullableAnnotation.Flag(Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Documentation))));
 
         Assert.Equal(
             NullableAnnotation.NotAnnotated,
-            NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Synonyms))));
+            NullableAnnotation.Flag(Getters.Get(typeof(ConfigEntry), nameof(ConfigEntry.Synonyms))));
 
         Assert.Equal(
             new[]
@@ -141,8 +141,8 @@ public sealed class PublicAdminConfigsShapeParityTests
                 "Documentation", "IsDefault", "IsReadOnly", "IsSensitive", "Name", "Source", "Synonyms", "Type",
                 "Value",
             },
-            typeof(ConfigEntry).GetProperties().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
-        Assert.All(typeof(ConfigEntry).GetProperties(), property => Assert.Null(property.SetMethod));
+            Getters.NamesOf(typeof(ConfigEntry)));
+        Assert.Empty(typeof(ConfigEntry).GetProperties());
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.True(
             new ConfigEntry(
                 "k", "v", ConfigEntry.ConfigSource.DEFAULT_CONFIG, false, false,
-                Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.STRING, null).IsDefault);
+                Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.STRING, null).IsDefault());
 
         foreach (ConfigEntry.ConfigSource source in Enum.GetValues(typeof(ConfigEntry.ConfigSource))
                      .Cast<ConfigEntry.ConfigSource>()
@@ -160,16 +160,16 @@ public sealed class PublicAdminConfigsShapeParityTests
             Assert.False(
                 new ConfigEntry(
                     "k", "v", source, false, false, Array.Empty<ConfigEntry.ConfigSynonym>(),
-                    ConfigEntry.ConfigType.STRING, null).IsDefault,
+                    ConfigEntry.ConfigType.STRING, null).IsDefault(),
                 $"{source} is not DEFAULT_CONFIG, so IsDefault must be false");
         }
 
         ConfigEntry plain = new ConfigEntry("k", "v");
-        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, plain.Source);
-        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, plain.Type);
-        Assert.Empty(plain.Synonyms);
-        Assert.Null(plain.Documentation);
-        Assert.False(plain.IsDefault);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, plain.Source());
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, plain.Type());
+        Assert.Empty(plain.Synonyms());
+        Assert.Null(plain.Documentation());
+        Assert.False(plain.IsDefault());
     }
 
     [Fact]
@@ -200,21 +200,20 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         Assert.Equal(
             new[] { "Name", "Source", "Value" },
-            typeof(ConfigEntry.ConfigSynonym).GetProperties()
-                .Select(p => p.Name)
-                .OrderBy(n => n, StringComparer.Ordinal));
+            Getters.NamesOf(typeof(ConfigEntry.ConfigSynonym)));
+        Assert.Empty(typeof(ConfigEntry.ConfigSynonym).GetProperties());
 
         Assert.Equal(
             typeof(string),
-            Property(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Name)).PropertyType);
+            Getters.Get(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Name)).ReturnType);
         Assert.Equal(
             typeof(ConfigEntry.ConfigSource),
-            Property(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Source)).PropertyType);
+            Getters.Get(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Source)).ReturnType);
 
         Assert.Equal(
             NullableAnnotation.Annotated,
             NullableAnnotation.Flag(
-                Property(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Value))));
+                Getters.Get(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Value))));
     }
 
     [Fact]
@@ -226,9 +225,9 @@ public sealed class PublicAdminConfigsShapeParityTests
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
         Assert.Equal(
-            typeof(ConfigEntry), Property(typeof(AlterConfigOp), nameof(AlterConfigOp.ConfigEntry)).PropertyType);
+            typeof(ConfigEntry), Getters.Get(typeof(AlterConfigOp), nameof(AlterConfigOp.ConfigEntry)).ReturnType);
         Assert.Equal(
-            typeof(AlterConfigOpType), Property(typeof(AlterConfigOp), nameof(AlterConfigOp.OpType)).PropertyType);
+            typeof(AlterConfigOpType), Getters.Get(typeof(AlterConfigOp), nameof(AlterConfigOp.OpType)).ReturnType);
 
         ConfigEntry entry = new ConfigEntry("k", "v");
         AlterConfigOp op = new AlterConfigOp(entry, AlterConfigOpType.SET);
@@ -277,7 +276,7 @@ public sealed class PublicAdminConfigsShapeParityTests
             Enum.GetNames(typeof(AlterConfigOpType)).OrderBy(name => name, StringComparer.Ordinal));
 
         // AlterConfigOp has a member named OpType, so a nested type of that name would be CS0102: the enum is flattened.
-        Assert.NotNull(typeof(AlterConfigOp).GetProperty("OpType"));
+        Assert.NotNull(typeof(AlterConfigOp).GetMethod("OpType", Type.EmptyTypes));
         Assert.Null(typeof(AlterConfigOp).GetNestedType("OpType"));
     }
 
@@ -304,7 +303,7 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         foreach (AlterConfigOpType member in members)
         {
-            Assert.Equal(member, new AlterConfigOp(new ConfigEntry("k", "v"), member).OpType);
+            Assert.Equal(member, new AlterConfigOp(new ConfigEntry("k", "v"), member).OpType());
         }
     }
 
@@ -317,12 +316,12 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         Config config = new Config(new[] { firstA, b, lastA });
 
-        Assert.Equal(2, config.Entries.Count);
-        Assert.Equal(new[] { "a", "b" }, config.Entries.Select(entry => entry.Name));
-        Assert.Same(lastA, config.Entries.First());
-        Assert.Same(b, config.Entries.Last());
+        Assert.Equal(2, config.Entries().Count);
+        Assert.Equal(new[] { "a", "b" }, config.Entries().Select(entry => entry.Name()));
+        Assert.Same(lastA, config.Entries().First());
+        Assert.Same(b, config.Entries().Last());
         Assert.Same(lastA, config.Get("a"));
-        Assert.Equal("3", config.Get("a")!.Value);
+        Assert.Equal("3", config.Get("a")!.Value());
     }
 
     [Fact]
@@ -339,11 +338,11 @@ public sealed class PublicAdminConfigsShapeParityTests
     {
         Config config = new Config(new[] { new ConfigEntry("a", "1") });
 
-        Assert.False(config.Entries is List<ConfigEntry>);
-        ICollection<ConfigEntry> collection = Assert.IsAssignableFrom<ICollection<ConfigEntry>>(config.Entries);
+        Assert.False(config.Entries() is List<ConfigEntry>);
+        ICollection<ConfigEntry> collection = Assert.IsAssignableFrom<ICollection<ConfigEntry>>(config.Entries());
         Assert.True(collection.IsReadOnly);
         Assert.Throws<NotSupportedException>(() => collection.Add(new ConfigEntry("b", "2")));
-        Assert.Equal(new[] { "a" }, config.Entries.Select(entry => entry.Name));
+        Assert.Equal(new[] { "a" }, config.Entries().Select(entry => entry.Name()));
     }
 
     [Fact]
@@ -623,6 +622,4 @@ public sealed class PublicAdminConfigsShapeParityTests
             typeof(IAdmin).Assembly.GetExportedTypes(),
             type => type.Name.IndexOf("IncrementalAlterConfigsResult", StringComparison.Ordinal) >= 0);
     }
-
-    private static PropertyInfo Property(Type type, string name) => type.GetProperty(name)!;
 }

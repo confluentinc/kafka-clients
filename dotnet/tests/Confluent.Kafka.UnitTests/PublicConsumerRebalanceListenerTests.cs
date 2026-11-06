@@ -74,7 +74,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         consumer.Rebalance(new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 1) });
 
         Assert.Empty(listener.Revoked);
-        TopicPartition[] assigned = Assert.Single(listener.Assigned).OrderBy(tp => tp.Partition).ToArray();
+        TopicPartition[] assigned = Assert.Single(listener.Assigned).OrderBy(tp => tp.Partition()).ToArray();
         Assert.Equal(
             new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 1) },
             assigned);
@@ -281,7 +281,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         ConsumerRecords<byte[], byte[]> records = null!;
         TestTimeout.Run(() => records = consumer.Poll(TimeSpan.FromMilliseconds(1)), s_deadline);
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(tp1, new TopicPartition(record.Topic, record.Partition));
+        Assert.Equal(tp1, new TopicPartition(record.Topic(), record.Partition()));
     }
 
     [Fact]
@@ -303,7 +303,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         consumer.Rebalance(new[] { tp1, tp2 });
 
         Assert.Equal(new[] { tp2 }, Assert.Single(listener.Assigned));
-        Assert.Equal(new[] { tp1, tp2 }, consumer.Assignment().OrderBy(tp => tp.Partition).ToArray());
+        Assert.Equal(new[] { tp1, tp2 }, consumer.Assignment().OrderBy(tp => tp.Partition()).ToArray());
     }
 
     [Fact]
@@ -518,7 +518,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
         await TestTimeout.Run(() => consumer.LosePartitions(new[] { tp0 }), s_deadline);
 
-        Assert.Equal(new[] { tp0, tp1 }, listener.Assigned[0].OrderBy(tp => tp.Partition).ToArray());
+        Assert.Equal(new[] { tp0, tp1 }, listener.Assigned[0].OrderBy(tp => tp.Partition()).ToArray());
         Assert.Empty(listener.Assigned[1]);
         Assert.Equal(new[] { tp1 }, Assert.Single(listener.Revoked));
         Assert.Equal(new[] { tp0 }, Assert.Single(listener.Lost));
@@ -690,7 +690,7 @@ public sealed class PublicConsumerRebalanceListenerTests
             await TestTimeout.Run(() => consumer.LosePartitions(new[] { tp0 }), s_deadline);
 
             Assert.Equal(new[] { tp0 }, Assert.Single(lost));
-            Assert.Equal(new[] { tp0, tp1 }, inside!.OrderBy(tp => tp.Partition).ToArray());
+            Assert.Equal(new[] { tp0, tp1 }, inside!.OrderBy(tp => tp.Partition()).ToArray());
             Assert.Equal(new[] { tp1 }, consumer.Assignment().ToArray());
         }
         finally
@@ -938,7 +938,7 @@ public sealed class PublicConsumerRebalanceListenerTests
     }
 
     private static string Format(IReadOnlyCollection<TopicPartition> partitions) =>
-        "[" + string.Join(", ", partitions.Select(tp => tp.Topic + "-" + tp.Partition)) + "]";
+        "[" + string.Join(", ", partitions.Select(tp => tp.Topic() + "-" + tp.Partition())) + "]";
 
     /// <summary>A listener that runs the actions it is given for revoked and assigned partitions.</summary>
     private sealed class DelegateListener : IConsumerRebalanceListener

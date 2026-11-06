@@ -67,13 +67,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
             map.Keys.OrderBy(name => name, StringComparer.Ordinal),
             names.OrderBy(name => name, StringComparer.Ordinal));
         Assert.Equal(
-            map.Values.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal),
-            listings.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal));
+            map.Values.Select(listing => listing.Name()).OrderBy(name => name, StringComparer.Ordinal),
+            listings.Select(listing => listing.Name()).OrderBy(name => name, StringComparer.Ordinal));
 
         TopicListing a = map["p2b-list-a"];
-        Assert.Equal("p2b-list-a", a.Name);
-        Assert.False(a.IsInternal);
-        Assert.NotEqual(Uuid.ZERO_UUID, a.TopicId);
+        Assert.Equal("p2b-list-a", a.Name());
+        Assert.False(a.IsInternal());
+        Assert.NotEqual(Uuid.ZERO_UUID, a.TopicId());
     }
 
     [Fact]
@@ -328,7 +328,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             await TestTimeout.Run(() => admin.ListTopics().NamesToListings().Get(), s_deadline);
 
         Assert.True(map.ContainsKey(Topic));
-        Assert.Equal(Topic, map[Topic].Name);
+        Assert.Equal(Topic, map[Topic].Name());
     }
 
     [Fact]
@@ -461,9 +461,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
         public static readonly TopicIdentityComparer Instance = new TopicIdentityComparer();
 
         public bool Equals(TopicPartition x, TopicPartition y) =>
-            ReferenceEquals(x.Topic, y.Topic) && x.Partition == y.Partition;
+            ReferenceEquals(x.Topic(), y.Topic()) && x.Partition() == y.Partition();
 
-        public int GetHashCode(TopicPartition obj) => RuntimeHelpers.GetHashCode(obj.Topic) ^ obj.Partition;
+        public int GetHashCode(TopicPartition obj) => RuntimeHelpers.GetHashCode(obj.Topic()) ^ obj.Partition();
     }
 
     /// <summary>The getters the binding never reads, declared for the read-back tests.</summary>

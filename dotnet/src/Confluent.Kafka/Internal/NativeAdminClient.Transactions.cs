@@ -328,14 +328,14 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(spec));
             }
 
-            if (spec.TopicPartition.Topic is null)
+            if (spec.TopicPartition().Topic() is null)
             {
                 throw new ArgumentException(
                     "The abort transaction spec must not carry a topic partition with a null topic.",
                     nameof(spec));
             }
 
-            AdminStrings.Validate(spec.TopicPartition.Topic, nameof(spec));
+            AdminStrings.Validate(spec.TopicPartition().Topic(), nameof(spec));
             IntPtr nativeSpec = NewAbortTransactionSpec(spec);
             try
             {
@@ -360,12 +360,12 @@ internal sealed partial class NativeAdminClient
 
     internal static IntPtr NewAbortTransactionSpec(AbortTransactionSpec spec)
     {
-        IntPtr partition = NewNativeTopicPartition(spec.TopicPartition);
+        IntPtr partition = NewNativeTopicPartition(spec.TopicPartition());
         try
         {
             IntPtr outErr = IntPtr.Zero;
             IntPtr native = NativeMethods.AbortTransactionSpecNew(
-                partition, spec.ProducerId, spec.ProducerEpoch, spec.CoordinatorEpoch, ref outErr);
+                partition, spec.ProducerId(), spec.ProducerEpoch(), spec.CoordinatorEpoch(), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return native;
         }

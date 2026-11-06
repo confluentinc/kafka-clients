@@ -368,13 +368,13 @@ public sealed class PublicProducerSerializerFailureTests
 
     private static void AssertPlaceholder(RecordMetadata metadata, int partition)
     {
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(partition, metadata.Partition);
-        Assert.False(metadata.HasOffset);
-        Assert.Equal(-1L, metadata.Offset);
-        Assert.False(metadata.HasTimestamp);
-        Assert.Equal(-1, metadata.SerializedKeySize);
-        Assert.Equal(-1, metadata.SerializedValueSize);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(partition, metadata.Partition());
+        Assert.False(metadata.HasOffset());
+        Assert.Equal(-1L, metadata.Offset());
+        Assert.False(metadata.HasTimestamp());
+        Assert.Equal(-1, metadata.SerializedKeySize());
+        Assert.Equal(-1, metadata.SerializedValueSize());
     }
 
     private static Dictionary<string, object?> Unreachable() =>

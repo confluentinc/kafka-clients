@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// A broker whose query failed fails only its own future. A log directory that is offline fails
-/// nothing: the broker's future succeeds and that directory's <see cref="LogDirDescription.Error"/>
+/// nothing: the broker's future succeeds and that directory's <see cref="LogDirDescription.Error()"/>
 /// is non-null.
 /// </remarks>
 /// <seealso cref="AsyncDescribeLogDirsResult"/>

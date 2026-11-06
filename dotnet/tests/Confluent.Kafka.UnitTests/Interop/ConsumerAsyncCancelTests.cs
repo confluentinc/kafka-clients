@@ -280,7 +280,7 @@ public sealed class ConsumerAsyncCancelTests
             Assert.Equal(
                 new[] { (0, 3L), (0, 4L), (1, 7L) },
                 (await WithDeadline(consumer.Poll(TimeSpan.FromSeconds(30))))
-                    .Select(record => (record.Partition, record.Offset))
+                    .Select(record => (Partition: record.Partition(), Offset: record.Offset()))
                     .OrderBy(fetched => fetched)
                     .ToArray());
         }

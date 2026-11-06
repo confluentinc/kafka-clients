@@ -47,9 +47,9 @@ public sealed class PublicProducerSendTfmSmokeTests
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)).Delivery(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public sealed class PublicProducerSendTfmSmokeTests
 
         RecordMetadata metadata = default!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
-        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(Topic, metadata.Topic());
         Assert.Equal(1, producer.HistoryCount());
     }
 

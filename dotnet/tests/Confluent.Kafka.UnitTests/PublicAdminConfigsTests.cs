@@ -57,10 +57,10 @@ public sealed class PublicAdminConfigsTests
 
         Config config = await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
         ConfigEntry entry = Assert.IsType<ConfigEntry>(config.Get("cleanup.policy"));
-        Assert.Equal("compact", entry.Value);
+        Assert.Equal("compact", entry.Value());
 
         IReadOnlyDictionary<ConfigResource, Config> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
-        Assert.Equal("compact", all[resource].Get("cleanup.policy")!.Value);
+        Assert.Equal("compact", all[resource].Get("cleanup.policy")!.Value());
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public sealed class PublicAdminConfigsTests
 
         AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
         Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
-        Assert.Equal("1000", config.Get("retention.ms")!.Value);
+        Assert.Equal("1000", config.Get("retention.ms")!.Value());
     }
 
     [Fact]
@@ -177,7 +177,7 @@ public sealed class PublicAdminConfigsTests
 
         Config config = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { subscription }).Values[subscription].Get(), s_deadline);
-        Assert.Equal("60000", config.Get("interval.ms")!.Value);
+        Assert.Equal("60000", config.Get("interval.ms")!.Value());
     }
 
     [Fact]
@@ -207,11 +207,11 @@ public sealed class PublicAdminConfigsTests
         // The sibling's operation was applied, so the success above is not a blanket one.
         Config config = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { sibling }).Values[sibling].Get(), s_deadline);
-        Assert.Equal("v", config.Get("k")!.Value);
+        Assert.Equal("v", config.Get("k")!.Value());
 
         Config untouched = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { noOps }).Values[noOps].Get(), s_deadline);
-        Assert.Empty(untouched.Entries);
+        Assert.Empty(untouched.Entries());
     }
 
     [Fact]
@@ -273,7 +273,7 @@ public sealed class PublicAdminConfigsTests
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
 
         ConfigResource key = Assert.Single(result.Values.Keys);
-        Assert.Equal(ConfigResourceType.UNKNOWN, key.Type);
+        Assert.Equal(ConfigResourceType.UNKNOWN, key.Type());
         Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
 
         UnsupportedOperationException failure = await TestTimeout.Run(
@@ -361,7 +361,7 @@ public sealed class PublicAdminConfigsTests
 
         Config config = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { resource }).Values[resource].Get(), s_deadline);
-        Assert.Equal("v", config.Get("k")!.Value);
+        Assert.Equal("v", config.Get("k")!.Value());
     }
 
     [Fact]
@@ -384,6 +384,6 @@ public sealed class PublicAdminConfigsTests
 
         IReadOnlyDictionary<ConfigResource, Config> all =
             await TestTimeout.Run(() => admin.DescribeConfigs(new[] { resource }).All().Get(), s_deadline);
-        Assert.Equal("y", all[resource].Get("x")!.Value);
+        Assert.Equal("y", all[resource].Get("x")!.Value());
     }
 }

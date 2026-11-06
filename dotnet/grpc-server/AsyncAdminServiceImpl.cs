@@ -333,7 +333,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 }
                 else
                 {
-                    entry.Value = new Proto.DeletedRecords { LowWatermark = deleted.LowWatermark };
+                    entry.Value = new Proto.DeletedRecords { LowWatermark = deleted.LowWatermark() };
                 }
 
                 response.Entries.Add(entry);
@@ -1481,7 +1481,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             }
 
             return await TranslateAdmin
-                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId))
+                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId()))
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -2040,7 +2040,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 ReplicationFactor = await result.ReplicationFactor(topic).Get().ConfigureAwait(false),
             };
             Config config = await result.Config(topic).Get().ConfigureAwait(false);
-            foreach (ConfigEntry entry in config.Entries)
+            foreach (ConfigEntry entry in config.Entries())
             {
                 metadata.Configs.Add(TranslateAdmin.ConfigEntryToProto(entry));
             }

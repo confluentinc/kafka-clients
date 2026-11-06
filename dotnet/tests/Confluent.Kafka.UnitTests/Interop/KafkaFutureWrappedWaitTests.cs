@@ -267,7 +267,7 @@ public sealed class KafkaFutureWrappedWaitTests
         }
 
         Assert.Same(failure, callback.Exception);
-        Assert.Equal(3, callback.Metadata!.Partition);
+        Assert.Equal(3, callback.Metadata!.Partition());
     }
 
     private static ProducerRecord<byte[], byte[]> Record() =>

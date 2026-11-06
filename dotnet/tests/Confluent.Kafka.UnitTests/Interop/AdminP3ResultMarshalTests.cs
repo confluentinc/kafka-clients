@@ -56,16 +56,16 @@ public sealed class AdminP3ResultMarshalTests
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => clusterIdFuture.GetAsync(), s_deadline));
 
         List<Node> nodes = (await TestTimeout.Run(() => nodesFuture.GetAsync(), s_deadline))
-            .OrderBy(node => node.Id)
+            .OrderBy(node => node.Id())
             .ToList();
-        Assert.Equal(new[] { 0, 1 }, nodes.Select(node => node.Id));
-        Assert.Equal(new[] { "localhost", "localhost" }, nodes.Select(node => node.Host));
-        Assert.Equal(new[] { 1000, 1001 }, nodes.Select(node => node.Port));
+        Assert.Equal(new[] { 0, 1 }, nodes.Select(node => node.Id()));
+        Assert.Equal(new[] { "localhost", "localhost" }, nodes.Select(node => node.Host()));
+        Assert.Equal(new[] { 1000, 1001 }, nodes.Select(node => node.Port()));
 
         Node? controller = await TestTimeout.Run(() => controllerFuture.GetAsync(), s_deadline);
         Assert.NotNull(controller);
-        Assert.Equal(0, controller!.Id);
-        Assert.Equal("localhost", controller.Host);
+        Assert.Equal(0, controller!.Id());
+        Assert.Equal("localhost", controller.Host());
 
         // The core mock reports an empty set whatever the options say, as Java's mock does.
         IReadOnlyCollection<AclOperation>? operations =
@@ -107,12 +107,12 @@ public sealed class AdminP3ResultMarshalTests
         Assert.Equal(asyncResult.ClusterId(), asyncResult.ClusterId());
         Assert.Equal(asyncResult.AuthorizedOperations(), asyncResult.AuthorizedOperations());
 
-        Assert.Equal(7, Assert.Single(await TestTimeout.Run(() => asyncResult.Nodes().Get(), s_deadline)).Id);
+        Assert.Equal(7, Assert.Single(await TestTimeout.Run(() => asyncResult.Nodes().Get(), s_deadline)).Id());
         Assert.Null(await TestTimeout.Run(() => asyncResult.Controller().Get(), s_deadline));
         Assert.Equal("cid", await TestTimeout.Run(() => asyncResult.ClusterId().Get(), s_deadline));
         Assert.Null(await TestTimeout.Run(() => asyncResult.AuthorizedOperations().Get(), s_deadline));
 
-        Assert.Equal(7, Assert.Single(syncResult.Nodes().Get()).Id);
+        Assert.Equal(7, Assert.Single(syncResult.Nodes().Get()).Id());
         Assert.Null(syncResult.Controller().Get());
         Assert.Equal("cid", syncResult.ClusterId().Get());
         Assert.Null(syncResult.AuthorizedOperations().Get());
@@ -152,10 +152,10 @@ public sealed class AdminP3ResultMarshalTests
         GC.Collect();
         GC.WaitForPendingFinalizers();
 
-        Assert.Contains(resources, resource => resource.Type == ConfigResourceType.BROKER && resource.Name == "0");
+        Assert.Contains(resources, resource => resource.Type() == ConfigResourceType.BROKER && resource.Name() == "0");
         Assert.Contains(
-            resources, resource => resource.Type == ConfigResourceType.BROKER_LOGGER && resource.Name == "0");
-        Assert.Equal(2, resources.Count(resource => resource.Name == "0"));
+            resources, resource => resource.Type() == ConfigResourceType.BROKER_LOGGER && resource.Name() == "0");
+        Assert.Equal(2, resources.Count(resource => resource.Name() == "0"));
         Assert.Equal(resources, await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
@@ -182,9 +182,9 @@ public sealed class AdminP3ResultMarshalTests
         IReadOnlyCollection<ConfigResource> brokersOnly = await List(admin, new[] { ConfigResourceType.BROKER });
         IReadOnlyCollection<ConfigResource> groups = await List(admin, new[] { ConfigResourceType.GROUP });
 
-        Assert.Contains(unfiltered, resource => resource.Type == ConfigResourceType.BROKER_LOGGER);
-        Assert.DoesNotContain(brokersOnly, resource => resource.Type == ConfigResourceType.BROKER_LOGGER);
-        Assert.Contains(brokersOnly, resource => resource.Type == ConfigResourceType.BROKER);
+        Assert.Contains(unfiltered, resource => resource.Type() == ConfigResourceType.BROKER_LOGGER);
+        Assert.DoesNotContain(brokersOnly, resource => resource.Type() == ConfigResourceType.BROKER_LOGGER);
+        Assert.Contains(brokersOnly, resource => resource.Type() == ConfigResourceType.BROKER);
         Assert.Empty(groups);
     }
 

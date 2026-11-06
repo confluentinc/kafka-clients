@@ -333,7 +333,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 }
                 else
                 {
-                    entry.Value = new Proto.DeletedRecords { LowWatermark = deleted.LowWatermark };
+                    entry.Value = new Proto.DeletedRecords { LowWatermark = deleted.LowWatermark() };
                 }
 
                 response.Entries.Add(entry);
@@ -1474,7 +1474,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             }
 
             return Task.FromResult(TranslateAdmin
-                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId)));
+                .VoidResponse(futures, member => TranslateAdmin.NameKey(member.GroupInstanceId())));
         }
         catch (Exception ex)
         {
@@ -2027,7 +2027,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 ReplicationFactor = result.ReplicationFactor(topic).Get(),
             };
             Config config = result.Config(topic).Get();
-            foreach (ConfigEntry entry in config.Entries)
+            foreach (ConfigEntry entry in config.Entries())
             {
                 metadata.Configs.Add(TranslateAdmin.ConfigEntryToProto(entry));
             }

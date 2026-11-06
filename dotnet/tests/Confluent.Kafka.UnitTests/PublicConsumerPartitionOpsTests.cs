@@ -122,7 +122,7 @@ public sealed class PublicConsumerPartitionOpsTests
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
-        long[] offsets = records.Select(r => r.Offset).OrderBy(o => o).ToArray();
+        long[] offsets = records.Select(r => r.Offset()).OrderBy(o => o).ToArray();
         Assert.Equal(new long[] { 5, 6, 7, 8, 9 }, offsets);
     }
 
@@ -144,7 +144,7 @@ public sealed class PublicConsumerPartitionOpsTests
 
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
-        long[] offsets = records.Select(r => r.Offset).OrderBy(o => o).ToArray();
+        long[] offsets = records.Select(r => r.Offset()).OrderBy(o => o).ToArray();
         Assert.Equal(new long[] { 8, 9 }, offsets);
     }
 

@@ -49,9 +49,9 @@ public sealed class PublicSyncProducerSendTests
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2)).Get(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(2, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(2, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
         // RecordMetadata.ToString mirrors Java's "topic-partition@offset".
         Assert.Equal("sync-send-topic-2@0", metadata.ToString());
     }
@@ -71,8 +71,8 @@ public sealed class PublicSyncProducerSendTests
                     new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{captured}"), partition: 0)).Get(),
                 s_deadline);
 
-            Assert.Equal(0, metadata.Partition);
-            Assert.Equal((long)captured, metadata.Offset);
+            Assert.Equal(0, metadata.Partition());
+            Assert.Equal((long)captured, metadata.Offset());
         }
     }
 
@@ -91,9 +91,9 @@ public sealed class PublicSyncProducerSendTests
         RecordMetadata metadata = null!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public sealed class PublicSyncProducerSendTests
                 new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
 
-        Assert.Equal(topic, metadata.Topic);
+        Assert.Equal(topic, metadata.Topic());
     }
 
     [Fact]

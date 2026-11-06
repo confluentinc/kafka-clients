@@ -190,14 +190,14 @@ public sealed class AdminConfigsSubmitArgumentTests
             new AlterConfigOp(new ConfigEntry("retention.ms", "1000"), AlterConfigOpType.SET),
             new AlterConfigOp(new ConfigEntry("cleanup.policy", string.Empty), AlterConfigOpType.SET)));
         Config set = await Describe(admin, s_topicResource);
-        Assert.Equal("1000", set.Get("retention.ms")!.Value);
-        Assert.Equal(string.Empty, set.Get("cleanup.policy")!.Value);
+        Assert.Equal("1000", set.Get("retention.ms")!.Value());
+        Assert.Equal(string.Empty, set.Get("cleanup.policy")!.Value());
 
         await Alter(admin, Ops(
             s_topicResource, new AlterConfigOp(new ConfigEntry("retention.ms", null), AlterConfigOpType.DELETE)));
         Config deleted = await Describe(admin, s_topicResource);
         Assert.Null(deleted.Get("retention.ms"));
-        Assert.Equal(string.Empty, deleted.Get("cleanup.policy")!.Value);
+        Assert.Equal(string.Empty, deleted.Get("cleanup.policy")!.Value());
     }
 
     [Fact]
@@ -223,8 +223,8 @@ public sealed class AdminConfigsSubmitArgumentTests
         Assert.Equal(new[] { s_topicResource }, result.Values.Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Config config = await Describe(admin, s_topicResource);
-        Assert.Equal("2", config.Get("retention.ms")!.Value);
-        Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
+        Assert.Equal("2", config.Get("retention.ms")!.Value());
+        Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
     }
 
     [Theory]
@@ -244,7 +244,7 @@ public sealed class AdminConfigsSubmitArgumentTests
             new AlterConfigsOptions { ValidateOnly = validateOnly }));
 
         await TestTimeout.Run(() => result.Values[s_topicResource].Get(), s_deadline);
-        Assert.Empty((await Describe(admin, s_topicResource)).Entries);
+        Assert.Empty((await Describe(admin, s_topicResource)).Entries());
     }
 
     [Fact]

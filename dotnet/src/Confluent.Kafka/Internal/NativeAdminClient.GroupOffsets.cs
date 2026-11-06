@@ -259,14 +259,14 @@ internal sealed partial class NativeAdminClient
             {
                 foreach (TopicPartition partition in selected)
                 {
-                    if (partition.Topic is null)
+                    if (partition.Topic() is null)
                     {
                         throw new ArgumentException(
                             $"The spec for group id '{entry.Key}' must not select a topic partition with a null topic.",
                             nameof(groupSpecs));
                     }
 
-                    AdminStrings.Validate(partition.Topic, nameof(groupSpecs));
+                    AdminStrings.Validate(partition.Topic(), nameof(groupSpecs));
                 }
             }
 
@@ -385,7 +385,7 @@ internal sealed partial class NativeAdminClient
                 new List<KeyValuePair<TopicPartition, OffsetAndMetadata>>(offsets.Count);
             foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The offsets map must not contain a topic partition with a null topic.", nameof(offsets));
@@ -396,8 +396,8 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentException("Offset value must not be null.", nameof(offsets));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(offsets));
-                AdminStrings.Validate(entry.Value.Metadata, nameof(offsets));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(offsets));
+                AdminStrings.Validate(entry.Value.Metadata(), nameof(offsets));
                 entries.Add(entry);
             }
 
@@ -448,13 +448,13 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> AlterConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
-        if (partition.Topic is null)
+        if (partition.Topic() is null)
         {
             // No request partition has a null topic, so Java's future fails as for one not attempted. A recorded
             // deviation: Java fails it only once the call has answered, with the call's own error if it failed.
             KafkaFutureImpl<object?> notAttempted = new KafkaFutureImpl<object?>();
             notAttempted.CompleteWithError(new IllegalArgumentException(
-                "Alter offset for partition \"null-" + partition.Partition.ToString(CultureInfo.InvariantCulture) +
+                "Alter offset for partition \"null-" + partition.Partition().ToString(CultureInfo.InvariantCulture) +
                 "\" was not attempted"));
             return notAttempted;
         }
@@ -505,10 +505,10 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String metadata = Utf8Marshal.Pin(value.Metadata ?? string.Empty))
+        using (Utf8Marshal.PinnedUtf8String metadata = Utf8Marshal.Pin(value.Metadata() ?? string.Empty))
         {
             native = NativeMethods.OffsetAndMetadataWithLeaderEpochMetadata(
-                value.Offset, value.LeaderEpoch ?? -1, metadata.Pointer, ref outErr);
+                value.Offset(), value.LeaderEpoch() ?? -1, metadata.Pointer, ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -530,12 +530,12 @@ internal sealed partial class NativeAdminClient
     // A null topic cannot cross the C ABI, so a result lookup rejects it at the call.
     private static IntPtr NewResultTopicPartition(TopicPartition partition)
     {
-        if (partition.Topic is null)
+        if (partition.Topic() is null)
         {
             throw new ArgumentException("The partition must not have a null topic.", nameof(partition));
         }
 
-        AdminStrings.Validate(partition.Topic, nameof(partition));
+        AdminStrings.Validate(partition.Topic(), nameof(partition));
         return NewNativeTopicPartition(partition);
     }
 
@@ -560,14 +560,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (TopicPartition partition in partitions)
             {
-                if (partition.Topic is null)
+                if (partition.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The partitions collection must not contain a topic partition with a null topic.",
                         nameof(partitions));
                 }
 
-                AdminStrings.Validate(partition.Topic, nameof(partitions));
+                AdminStrings.Validate(partition.Topic(), nameof(partitions));
                 if (seen.Add(partition))
                 {
                     requested.Add(partition);
@@ -611,11 +611,11 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> DeleteConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
-        if (partition.Topic is null)
+        if (partition.Topic() is null)
         {
             // No request partition has a null topic: Java's membership check throws at the call.
             throw new IllegalArgumentException(
-                "Partition null-" + partition.Partition.ToString(CultureInfo.InvariantCulture) +
+                "Partition null-" + partition.Partition().ToString(CultureInfo.InvariantCulture) +
                 " was not included in the original request");
         }
 
@@ -738,7 +738,7 @@ internal sealed partial class NativeAdminClient
             AdminStrings.Validate(options.Reason, nameof(options));
             foreach (MemberToRemove member in options.Members)
             {
-                AdminStrings.Validate(member.GroupInstanceId, nameof(options));
+                AdminStrings.Validate(member.GroupInstanceId(), nameof(options));
             }
 
             using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(groupId);
@@ -775,7 +775,7 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> RemoveMembersFromConsumerGroupMemberResult(
         SafeAdminResultHandle result, MemberToRemove member)
     {
-        AdminStrings.Validate(member.GroupInstanceId, nameof(member));
+        AdminStrings.Validate(member.GroupInstanceId(), nameof(member));
         IntPtr native = NewNativeMemberToRemove(member);
         try
         {
@@ -864,7 +864,7 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String groupInstanceId = Utf8Marshal.Pin(member.GroupInstanceId))
+        using (Utf8Marshal.PinnedUtf8String groupInstanceId = Utf8Marshal.Pin(member.GroupInstanceId()))
         {
             native = NativeMethods.MemberToRemoveNew(groupInstanceId.Pointer, ref outErr);
         }

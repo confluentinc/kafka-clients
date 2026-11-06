@@ -78,7 +78,7 @@ public sealed class PollDeserializesAfterItsUseTests
         object? outcome = BlockingCall.RunGet(() => consumer.Poll(s_pollTimeout));
 
         ConsumerRecords<string?, string?> records = Assert.IsType<ConsumerRecords<string?, string?>>(outcome);
-        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset).Select(r => r.Value));
+        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset()).Select(r => r.Value()));
         Assert.Equal(2, values.Calls);
         Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
@@ -106,7 +106,7 @@ public sealed class PollDeserializesAfterItsUseTests
         ConsumerRecords<string?, string?> records =
             await TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline);
 
-        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset).Select(r => r.Value));
+        Assert.Equal(new[] { "a", "b" }, records.OrderBy(r => r.Offset()).Select(r => r.Value()));
         Assert.Equal(2, values.Calls);
         Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
@@ -180,7 +180,7 @@ public sealed class PollDeserializesAfterItsUseTests
             Assert.All(Kept(topic, values.Failed), kept => Assert.Equal(0L, consumer.Position(kept)));
             AddRecords(consumer.AddRecord, Kept(topic, values.Failed));
             AssertRedelivered(consumer.Poll(s_pollTimeout), topic, values.Failed);
-            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition));
+            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition()));
         }
         finally
         {
@@ -252,7 +252,7 @@ public sealed class PollDeserializesAfterItsUseTests
             AddRecords(consumer.AddRecord, Kept(topic, values.Failed));
             AssertRedelivered(
                 await TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline), topic, values.Failed);
-            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition));
+            Assert.Equal(Kept(topic, values.Failed), consumer.Assignment().OrderBy(tp => tp.Partition()));
         }
         finally
         {
@@ -383,8 +383,8 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         foreach (TopicPartition partition in partitions)
         {
-            addRecord(partition.Topic, partition.Partition, 0, null, new[] { (byte)partition.Partition });
-            addRecord(partition.Topic, partition.Partition, 1, null, new[] { (byte)partition.Partition });
+            addRecord(partition.Topic(), partition.Partition(), 0, null, new[] { (byte)partition.Partition() });
+            addRecord(partition.Topic(), partition.Partition(), 1, null, new[] { (byte)partition.Partition() });
         }
     }
 
@@ -394,11 +394,11 @@ public sealed class PollDeserializesAfterItsUseTests
     private static void AssertRedelivered(ConsumerRecords<byte[], int> records, string topic, int failed)
     {
         IEnumerable<(int Partition, long Offset, int Value)> expected = Kept(topic, failed)
-            .SelectMany(tp => new[] { (tp.Partition, 0L, tp.Partition), (tp.Partition, 1L, tp.Partition) });
+            .SelectMany(tp => new[] { (tp.Partition(), 0L, tp.Partition()), (tp.Partition(), 1L, tp.Partition()) });
         Assert.Equal(
             expected,
-            records.Select(r => (r.Partition, r.Offset, r.Value)).OrderBy(r => r.Partition).ThenBy(r => r.Offset));
-        Assert.All(records, r => Assert.Equal(topic, r.Topic));
+            records.Select(r => (Partition: r.Partition(), Offset: r.Offset(), Value: r.Value())).OrderBy(r => r.Partition).ThenBy(r => r.Offset));
+        Assert.All(records, r => Assert.Equal(topic, r.Topic()));
     }
 
     private static SeekBackWindow RunTheSeekBackWindow(

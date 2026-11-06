@@ -111,20 +111,20 @@ public sealed class PublicAdminShapeParityTests
     public void ConfigEntry_TheEightArgumentConstructor_DerivesIsDefault_AndHasValueEquality()
     {
         ConfigEntry defaulted = Full(ConfigEntry.ConfigSource.DEFAULT_CONFIG);
-        Assert.True(defaulted.IsDefault);
-        Assert.Equal(ConfigEntry.ConfigSource.DEFAULT_CONFIG, defaulted.Source);
-        Assert.Equal("k", defaulted.Name);
-        Assert.Equal("v", defaulted.Value);
-        Assert.True(defaulted.IsSensitive);
-        Assert.False(defaulted.IsReadOnly);
-        Assert.Empty(defaulted.Synonyms);
-        Assert.Equal(ConfigEntry.ConfigType.STRING, defaulted.Type);
-        Assert.Equal("doc", defaulted.Documentation);
+        Assert.True(defaulted.IsDefault());
+        Assert.Equal(ConfigEntry.ConfigSource.DEFAULT_CONFIG, defaulted.Source());
+        Assert.Equal("k", defaulted.Name());
+        Assert.Equal("v", defaulted.Value());
+        Assert.True(defaulted.IsSensitive());
+        Assert.False(defaulted.IsReadOnly());
+        Assert.Empty(defaulted.Synonyms());
+        Assert.Equal(ConfigEntry.ConfigType.STRING, defaulted.Type());
+        Assert.Equal("doc", defaulted.Documentation());
 
         foreach (ConfigEntry.ConfigSource source in
             (ConfigEntry.ConfigSource[])Enum.GetValues(typeof(ConfigEntry.ConfigSource)))
         {
-            Assert.Equal(source == ConfigEntry.ConfigSource.DEFAULT_CONFIG, Full(source).IsDefault);
+            Assert.Equal(source == ConfigEntry.ConfigSource.DEFAULT_CONFIG, Full(source).IsDefault());
         }
 
         ConfigEntry same = Full(ConfigEntry.ConfigSource.DEFAULT_CONFIG);
@@ -180,8 +180,8 @@ public sealed class PublicAdminShapeParityTests
         callers[0] = new ConfigEntry.ConfigSynonym("b", "2", ConfigEntry.ConfigSource.DEFAULT_CONFIG);
         callers.Add(null!);
 
-        Assert.Equal(new[] { synonym }, entry.Synonyms);
-        Assert.False(entry.Synonyms is ConfigEntry.ConfigSynonym[], "Synonyms must not expose the backing array");
+        Assert.Equal(new[] { synonym }, entry.Synonyms());
+        Assert.False(entry.Synonyms() is ConfigEntry.ConfigSynonym[], "Synonyms must not expose the backing array");
         Assert.Equal(twin, entry);
         Assert.Equal(hash, entry.GetHashCode());
         Assert.Equal(

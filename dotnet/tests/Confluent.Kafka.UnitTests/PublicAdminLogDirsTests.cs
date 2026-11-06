@@ -52,14 +52,14 @@ public sealed class PublicAdminLogDirsTests
             await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
-        Assert.Null(description.Error);
-        Assert.Equal(2, description.ReplicaInfos.Count);
-        Assert.Contains(new TopicPartition(Topic, 0), description.ReplicaInfos);
-        Assert.Contains(new TopicPartition(Topic, 1), description.ReplicaInfos);
+        Assert.Null(description.Error());
+        Assert.Equal(2, description.ReplicaInfos().Count);
+        Assert.Contains(new TopicPartition(Topic, 0), description.ReplicaInfos());
+        Assert.Contains(new TopicPartition(Topic, 1), description.ReplicaInfos());
 
         IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>> all =
             await TestTimeout.Run(() => result.AllDescriptions().Get(), s_deadline);
-        Assert.Equal(2, all[0][DefaultLogDir].ReplicaInfos.Count);
+        Assert.Equal(2, all[0][DefaultLogDir].ReplicaInfos().Count);
     }
 
     [Fact]
@@ -76,7 +76,7 @@ public sealed class PublicAdminLogDirsTests
             await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
-        Assert.False(description.IsCordoned);
+        Assert.False(description.IsCordoned());
         Assert.Contains("isCordoned=false", description.ToString(), StringComparison.Ordinal);
     }
 
@@ -278,32 +278,32 @@ public sealed class PublicAdminLogDirsTests
         };
 
         LogDirDescription two = new LogDirDescription(error, replicas);
-        Assert.Same(error, two.Error);
+        Assert.Same(error, two.Error());
 
         // A read-only view over the caller's map, not the map itself.
-        Assert.Equal(replicas, two.ReplicaInfos);
-        Assert.Null(two.TotalBytes);
-        Assert.Null(two.UsableBytes);
-        Assert.False(two.IsCordoned);
+        Assert.Equal(replicas, two.ReplicaInfos());
+        Assert.Null(two.TotalBytes());
+        Assert.Null(two.UsableBytes());
+        Assert.False(two.IsCordoned());
 
         LogDirDescription four = new LogDirDescription(null, replicas, 100, 0);
-        Assert.Null(four.Error);
-        Assert.Equal(100, four.TotalBytes);
-        Assert.Equal(0, four.UsableBytes);
-        Assert.False(four.IsCordoned);
+        Assert.Null(four.Error());
+        Assert.Equal(100, four.TotalBytes());
+        Assert.Equal(0, four.UsableBytes());
+        Assert.False(four.IsCordoned());
 
         LogDirDescription javaUnknown = new LogDirDescription(null, replicas, -1, -1, true);
-        Assert.Null(javaUnknown.TotalBytes);
-        Assert.Null(javaUnknown.UsableBytes);
-        Assert.True(javaUnknown.IsCordoned);
+        Assert.Null(javaUnknown.TotalBytes());
+        Assert.Null(javaUnknown.UsableBytes());
+        Assert.True(javaUnknown.IsCordoned());
 
         LogDirDescription fourUnknown = new LogDirDescription(null, replicas, -1, 5);
-        Assert.Null(fourUnknown.TotalBytes);
-        Assert.Equal(5, fourUnknown.UsableBytes);
+        Assert.Null(fourUnknown.TotalBytes());
+        Assert.Equal(5, fourUnknown.UsableBytes());
 
         LogDirDescription otherNegative = new LogDirDescription(null, replicas, -2, 7, false);
-        Assert.Equal(-2, otherNegative.TotalBytes);
-        Assert.Equal(7, otherNegative.UsableBytes);
+        Assert.Equal(-2, otherNegative.TotalBytes());
+        Assert.Equal(7, otherNegative.UsableBytes());
     }
 
     [Theory]

@@ -108,20 +108,20 @@ public sealed class PublicAdminP2bShapeParityTests
             new[] { typeof(string), typeof(Uuid), typeof(bool) },
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
-        Assert.Equal(typeof(string), typeof(TopicListing).GetProperty(nameof(TopicListing.Name))!.PropertyType);
-        Assert.Equal(typeof(Uuid), typeof(TopicListing).GetProperty(nameof(TopicListing.TopicId))!.PropertyType);
-        Assert.Equal(typeof(bool), typeof(TopicListing).GetProperty(nameof(TopicListing.IsInternal))!.PropertyType);
+        Assert.Equal(typeof(string), typeof(TopicListing).GetMethod(nameof(TopicListing.Name), Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(Uuid), typeof(TopicListing).GetMethod(nameof(TopicListing.TopicId), Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(bool), typeof(TopicListing).GetMethod(nameof(TopicListing.IsInternal), Type.EmptyTypes)!.ReturnType);
 
         // Java's topicId() is a Uuid, not the base64 string the ABI transports.
-        Assert.Equal(1, NullableFlag(typeof(TopicListing).GetProperty(nameof(TopicListing.Name))!));
+        Assert.Equal(1, NullableFlag(typeof(TopicListing).GetMethod(nameof(TopicListing.Name), Type.EmptyTypes)!));
 
         TopicListing listing = new TopicListing("t", new Uuid(1L, 2L), isInternal: true);
-        Assert.Equal("t", listing.Name);
-        Assert.True(listing.IsInternal);
+        Assert.Equal("t", listing.Name());
+        Assert.True(listing.IsInternal());
         // Java renders the boolean in lowercase, where bool.ToString() gives "True".
-        Assert.Equal("(name=t, topicId=" + listing.TopicId + ", internal=true)", listing.ToString());
+        Assert.Equal("(name=t, topicId=" + listing.TopicId() + ", internal=true)", listing.ToString());
         Assert.Equal(
-            "(name=t, topicId=" + listing.TopicId + ", internal=false)",
+            "(name=t, topicId=" + listing.TopicId() + ", internal=false)",
             new TopicListing("t", new Uuid(1L, 2L), isInternal: false).ToString());
 
         Assert.Throws<ArgumentNullException>(() => new TopicListing(null!, Uuid.ZERO_UUID, false));
@@ -268,12 +268,12 @@ public sealed class PublicAdminP2bShapeParityTests
         ConstructorInfo only = Assert.Single(typeof(DeletedRecords).GetConstructors());
         Assert.Equal(new[] { typeof(long) }, only.GetParameters().Select(p => p.ParameterType));
 
-        PropertyInfo watermark = typeof(DeletedRecords).GetProperty(nameof(DeletedRecords.LowWatermark))!;
-        Assert.Equal(typeof(long), watermark.PropertyType);
-        Assert.Null(watermark.SetMethod);
+        MethodInfo watermark = typeof(DeletedRecords).GetMethod(nameof(DeletedRecords.LowWatermark), Type.EmptyTypes)!;
+        Assert.Equal(typeof(long), watermark.ReturnType);
+        Assert.Null(typeof(DeletedRecords).GetProperty(nameof(DeletedRecords.LowWatermark)));
 
-        Assert.Equal(7, new DeletedRecords(7).LowWatermark);
-        Assert.Equal(-1, new DeletedRecords(-1).LowWatermark);
+        Assert.Equal(7, new DeletedRecords(7).LowWatermark());
+        Assert.Equal(-1, new DeletedRecords(-1).LowWatermark());
     }
 
     [Fact]

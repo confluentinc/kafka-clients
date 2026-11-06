@@ -318,8 +318,8 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults — notably
     /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/> and
     /// <see cref="DescribeConfigsOptions.IncludeDocumentation"/> both
-    /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms"/> comes back empty and
-    /// <see cref="ConfigEntry.Documentation"/> <see langword="null"/>.
+    /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms()"/> comes back empty and
+    /// <see cref="ConfigEntry.Documentation()"/> <see langword="null"/>.
     /// </param>
     /// <returns>
     /// One future per resource, each carrying that resource's own <see cref="Config"/>
@@ -344,7 +344,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <param name="configs">
     /// Resource → the operations to apply to it, in order. ⚠ An
     /// <see cref="AlterConfigOpType.DELETE"/> whose
-    /// <see cref="ConfigEntry.Value"/> is <see langword="null"/> is a <b>real request</b>
+    /// <see cref="ConfigEntry.Value()"/> is <see langword="null"/> is a <b>real request</b>
     /// and the null reaches the broker as a null; it is not the same as an empty string.
     /// </param>
     /// <param name="options">
@@ -384,7 +384,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <returns>
     /// One future per broker, each yielding that broker's log directories keyed by path.
     /// ⚠ A <b>log directory</b> that is offline does not fault anything — the future
-    /// succeeds and that directory's <see cref="LogDirDescription.Error"/> is non-null.
+    /// succeeds and that directory's <see cref="LogDirDescription.Error()"/> is non-null.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -724,7 +724,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults. Note
     /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations"/> defaults to
     /// <see langword="false"/>, which leaves
-    /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
+    /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
     /// </param>
     /// <returns>
     /// One future per group id, each carrying that group's own
@@ -756,7 +756,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults. Note
     /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations"/> defaults to
     /// <see langword="false"/>, which leaves
-    /// <see cref="ClassicGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
+    /// <see cref="ClassicGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
     /// </param>
     /// <returns>
     /// One future per group id, each carrying that group's own
@@ -1014,7 +1014,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="entries">
     /// The alterations to apply. An <see cref="ClientQuotaAlteration.Op"/> with a null
-    /// <see cref="ClientQuotaAlteration.Op.Value"/> <em>removes</em> that quota, while
+    /// <see cref="ClientQuotaAlteration.Op.Value()"/> <em>removes</em> that quota, while
     /// <c>0.0</c> sets it to zero. A <b>repeated entity</b> is accepted, as Java accepts it:
     /// every alteration is sent, in order, and the
     /// entity has one future in the result, as Java's per-entity future map collapses it.
@@ -1110,7 +1110,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="hmac">
     /// The token's MAC, passed back <b>verbatim</b> from
-    /// <see cref="Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac"/>. ⚠ It may contain interior zero
+    /// <see cref="Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac()"/>. ⚠ It may contain interior zero
     /// bytes, so it must never be treated as a NUL-terminated string.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>

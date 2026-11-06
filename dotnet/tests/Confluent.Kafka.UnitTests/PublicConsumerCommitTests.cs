@@ -50,9 +50,9 @@ public sealed class PublicConsumerCommitTests
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = await CommittedOf(consumer, new[] { tp });
 
         Assert.True(result.ContainsKey(tp));
-        Assert.Equal(42, result[tp]!.Offset);
-        Assert.Equal("meta-x", result[tp]!.Metadata);
-        Assert.Equal(7, result[tp]!.LeaderEpoch);
+        Assert.Equal(42, result[tp]!.Offset());
+        Assert.Equal("meta-x", result[tp]!.Metadata());
+        Assert.Equal(7, result[tp]!.LeaderEpoch());
     }
 
     [Fact]
@@ -70,9 +70,9 @@ public sealed class PublicConsumerCommitTests
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = await CommittedOf(consumer, new[] { tp });
 
         Assert.True(result.ContainsKey(tp));
-        Assert.Equal(100, result[tp]!.Offset);
-        Assert.Equal(string.Empty, result[tp]!.Metadata);
-        Assert.Null(result[tp]!.LeaderEpoch);
+        Assert.Equal(100, result[tp]!.Offset());
+        Assert.Equal(string.Empty, result[tp]!.Metadata());
+        Assert.Null(result[tp]!.LeaderEpoch());
     }
 
     [Fact]
@@ -162,9 +162,9 @@ public sealed class PublicConsumerCommitTests
     {
         OffsetAndMetadata value = new OffsetAndMetadata(5);
 
-        Assert.Equal(5, value.Offset);
-        Assert.Equal(string.Empty, value.Metadata);
-        Assert.Null(value.LeaderEpoch);
+        Assert.Equal(5, value.Offset());
+        Assert.Equal(string.Empty, value.Metadata());
+        Assert.Null(value.LeaderEpoch());
     }
 
     [Fact]
@@ -172,9 +172,9 @@ public sealed class PublicConsumerCommitTests
     {
         OffsetAndMetadata value = new OffsetAndMetadata(5, "m", 3);
 
-        Assert.Equal(5, value.Offset);
-        Assert.Equal("m", value.Metadata);
-        Assert.Equal(3, value.LeaderEpoch);
+        Assert.Equal(5, value.Offset());
+        Assert.Equal("m", value.Metadata());
+        Assert.Equal(3, value.LeaderEpoch());
     }
 
     [Fact]
@@ -182,8 +182,8 @@ public sealed class PublicConsumerCommitTests
     {
         OffsetAndMetadata value = new OffsetAndMetadata(0, "boundary");
 
-        Assert.Equal(0, value.Offset);
-        Assert.Equal("boundary", value.Metadata);
+        Assert.Equal(0, value.Offset());
+        Assert.Equal("boundary", value.Metadata());
     }
 
     [Fact]

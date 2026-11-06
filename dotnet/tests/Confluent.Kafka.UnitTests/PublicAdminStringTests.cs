@@ -156,7 +156,7 @@ public sealed class PublicAdminStringTests
             ["updateFeatures:featureName"] = ("featureUpdates", (admin, bad) =>
                 admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>
                 {
-                    [bad] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    [bad] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 })),
             ["fenceProducers:transactionalId"] = ("transactionalIds", (admin, bad) =>
                 admin.FenceProducers(new[] { bad })),

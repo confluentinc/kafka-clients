@@ -121,7 +121,7 @@ internal sealed class NativeCallArguments : IDisposable
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.NodeWithRackIsFenced(
-            node.Id, Utf8(node.Host), node.Port, NullableUtf8(node.Rack), node.IsFenced ? (sbyte)1 : (sbyte)0, ref outErr);
+            node.Id(), Utf8(node.Host()), node.Port(), NullableUtf8(node.Rack()), node.IsFenced() ? (sbyte)1 : (sbyte)0, ref outErr);
         return Track(handle, Kind.Node, ref outErr);
     }
 
@@ -182,22 +182,22 @@ internal sealed class NativeCallArguments : IDisposable
 
     internal IntPtr TopicPartitionInfo(Confluent.Kafka.Common.TopicPartitionInfo info)
     {
-        IntPtr leader = info.Leader is null ? IntPtr.Zero : Node(info.Leader);
-        IntPtr replicas = NodeList(info.Replicas);
-        IntPtr isr = NodeList(info.InSyncReplicas);
+        IntPtr leader = info.Leader() is { } infoLeader ? Node(infoLeader) : IntPtr.Zero;
+        IntPtr replicas = NodeList(info.Replicas());
+        IntPtr isr = NodeList(info.Isr());
         IntPtr outErr = IntPtr.Zero;
         // Java's four-argument TopicPartitionInfo constructor leaves both lists null, and
         // the .NET class has both lists or neither; null lists are that constructor.
-        IntPtr handle = info.Elr is { } elr && info.LastKnownElr is { } lastKnownElr
+        IntPtr handle = info.Elr() is { } elr && info.LastKnownElr() is { } lastKnownElr
             ? NativeMethods.TopicPartitionInfoWithElrLastKnownElr(
-                info.Partition,
+                info.Partition(),
                 leader,
                 replicas,
                 isr,
                 NodeList(elr),
                 NodeList(lastKnownElr),
                 ref outErr)
-            : NativeMethods.TopicPartitionInfoNew(info.Partition, leader, replicas, isr, ref outErr);
+            : NativeMethods.TopicPartitionInfoNew(info.Partition(), leader, replicas, isr, ref outErr);
         return Track(handle, Kind.TopicPartitionInfo, ref outErr);
     }
 

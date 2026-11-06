@@ -31,6 +31,7 @@ public sealed class FeatureMetadata
 {
     private readonly IReadOnlyDictionary<string, FinalizedVersionRange> _finalizedFeatures;
     private readonly IReadOnlyDictionary<string, SupportedVersionRange> _supportedFeatures;
+    private readonly long? _finalizedFeaturesEpoch;
 
     internal FeatureMetadata(
         IReadOnlyDictionary<string, FinalizedVersionRange> finalizedFeatures,
@@ -38,36 +39,40 @@ public sealed class FeatureMetadata
         IReadOnlyDictionary<string, SupportedVersionRange> supportedFeatures)
     {
         _finalizedFeatures = finalizedFeatures;
-        FinalizedFeaturesEpoch = finalizedFeaturesEpoch;
+        _finalizedFeaturesEpoch = finalizedFeaturesEpoch;
         _supportedFeatures = supportedFeatures;
     }
 
     /// <summary>
     /// The finalized version level of each feature — Java's <c>finalizedFeatures()</c>.
     /// </summary>
-    public IReadOnlyDictionary<string, FinalizedVersionRange> FinalizedFeatures => _finalizedFeatures;
+    /// <returns>The finalized version level of each feature.</returns>
+    public IReadOnlyDictionary<string, FinalizedVersionRange> FinalizedFeatures() => _finalizedFeatures;
 
     /// <summary>
     /// The finalized-features epoch, or <see langword="null"/> when the finalized features are
     /// unavailable — Java's <c>finalizedFeaturesEpoch()</c>, an
     /// <c>Optional&lt;Long&gt;</c>.
     /// </summary>
+    /// <returns>The finalized-features epoch, or <see langword="null"/> when the finalized features are unavailable
+    /// — Java's <c>finalizedFeaturesEpoch()</c>, an <c>Optional&lt;Long&gt;</c>.</returns>
     /// <remarks>
     /// A negative epoch is absent, as Java reads it; <c>0</c> is a legal epoch.
     /// </remarks>
-    public long? FinalizedFeaturesEpoch { get; }
+    public long? FinalizedFeaturesEpoch() => _finalizedFeaturesEpoch;
 
     /// <summary>
     /// The versions of each feature the brokers support — Java's <c>supportedFeatures()</c>.
     /// </summary>
-    public IReadOnlyDictionary<string, SupportedVersionRange> SupportedFeatures => _supportedFeatures;
+    /// <returns>The versions of each feature the brokers support.</returns>
+    public IReadOnlyDictionary<string, SupportedVersionRange> SupportedFeatures() => _supportedFeatures;
 
     /// <summary>Value equality over all three members — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same feature metadata.</returns>
     public override bool Equals(object? obj) =>
         obj is FeatureMetadata other
-        && FinalizedFeaturesEpoch == other.FinalizedFeaturesEpoch
+        && FinalizedFeaturesEpoch() == other.FinalizedFeaturesEpoch()
         && MapEquals(_finalizedFeatures, other._finalizedFeatures)
         && MapEquals(_supportedFeatures, other._supportedFeatures);
 
@@ -77,7 +82,7 @@ public sealed class FeatureMetadata
     {
         unchecked
         {
-            int hash = FinalizedFeaturesEpoch.GetHashCode();
+            int hash = FinalizedFeaturesEpoch().GetHashCode();
             foreach (KeyValuePair<string, FinalizedVersionRange> entry in _finalizedFeatures)
             {
                 hash ^= StringComparer.Ordinal.GetHashCode(entry.Key) * 31 + entry.Value.GetHashCode();
@@ -99,7 +104,7 @@ public sealed class FeatureMetadata
             CultureInfo.InvariantCulture,
             "FeatureMetadata{{finalizedFeatures:{0}, finalizedFeaturesEpoch:{1}, supportedFeatures:{2}}}",
             MapToString(_finalizedFeatures),
-            FinalizedFeaturesEpoch?.ToString(CultureInfo.InvariantCulture) ?? "<none>",
+            FinalizedFeaturesEpoch()?.ToString(CultureInfo.InvariantCulture) ?? "<none>",
             MapToString(_supportedFeatures));
 
     private static bool MapEquals<TValue>(

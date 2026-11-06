@@ -56,8 +56,8 @@ public sealed class AdminP9PerKeyStage2Tests
 
         TopicDescription present = await TestTimeout.Run(
             () => result.TopicNameValues!["cp3-present"].Get(), s_deadline);
-        Assert.Equal("cp3-present", present.Name);
-        Assert.Equal(3, present.Partitions.Count);
+        Assert.Equal("cp3-present", present.Name());
+        Assert.Equal(3, present.Partitions().Count);
 
         UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => result.TopicNameValues!["cp3-absent"].Get(), s_deadline));
@@ -79,8 +79,8 @@ public sealed class AdminP9PerKeyStage2Tests
             AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null));
 
         TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues![id].Get(), s_deadline);
-        Assert.Equal(id, description.TopicId);
-        Assert.Equal("cp3-by-id", description.Name);
+        Assert.Equal(id, description.TopicId());
+        Assert.Equal("cp3-by-id", description.Name());
     }
 
     [Fact]
@@ -137,7 +137,7 @@ public sealed class AdminP9PerKeyStage2Tests
             foreach (KeyValuePair<string, LogDirDescription> entry in directories)
             {
                 Assert.Equal("/tmp/kafka-logs", entry.Key);
-                replicas += entry.Value.ReplicaInfos.Count;
+                replicas += entry.Value.ReplicaInfos().Count;
             }
         }
 

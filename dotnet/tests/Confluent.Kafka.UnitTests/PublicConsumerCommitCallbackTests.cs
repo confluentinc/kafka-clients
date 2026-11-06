@@ -60,12 +60,12 @@ public sealed class PublicConsumerCommitCallbackTests
         Assert.Null(completion.Exception);
         Assert.NotNull(completion.Offsets);
         Assert.Equal(2, completion.Offsets!.Count);
-        Assert.Equal(42, completion.Offsets[first].Offset);
-        Assert.Equal("meta-x", completion.Offsets[first].Metadata);
-        Assert.Equal(7, completion.Offsets[first].LeaderEpoch);
-        Assert.Equal(9, completion.Offsets[second].Offset);
-        Assert.Equal(string.Empty, completion.Offsets[second].Metadata);
-        Assert.Null(completion.Offsets[second].LeaderEpoch);
+        Assert.Equal(42, completion.Offsets[first].Offset());
+        Assert.Equal("meta-x", completion.Offsets[first].Metadata());
+        Assert.Equal(7, completion.Offsets[first].LeaderEpoch());
+        Assert.Equal(9, completion.Offsets[second].Offset());
+        Assert.Equal(string.Empty, completion.Offsets[second].Metadata());
+        Assert.Null(completion.Offsets[second].LeaderEpoch());
     }
 
     [Fact]
@@ -117,8 +117,8 @@ public sealed class PublicConsumerCommitCallbackTests
 
         Assert.Equal(PumpThreadName, completion.Thread.Name);
         Assert.Null(completion.Exception);
-        Assert.Equal(5, completion.Offsets![partition].Offset);
-        Assert.Equal("m", completion.Offsets[partition].Metadata);
+        Assert.Equal(5, completion.Offsets![partition].Offset());
+        Assert.Equal("m", completion.Offsets[partition].Metadata());
     }
 
     [Fact]
@@ -187,7 +187,7 @@ public sealed class PublicConsumerCommitCallbackTests
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
             await TestTimeout.Run(() => consumer.Committed(new[] { partition }), s_deadline);
-        Assert.Equal(17, committed[partition]!.Offset);
+        Assert.Equal(17, committed[partition]!.Offset());
     }
 
     [Fact]
@@ -205,9 +205,9 @@ public sealed class PublicConsumerCommitCallbackTests
             });
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed = consumer.Committed(new[] { partition });
-        Assert.Equal(31, committed[partition]!.Offset);
-        Assert.Equal("no-callback-meta", committed[partition]!.Metadata);
-        Assert.Equal(2, committed[partition]!.LeaderEpoch);
+        Assert.Equal(31, committed[partition]!.Offset());
+        Assert.Equal("no-callback-meta", committed[partition]!.Metadata());
+        Assert.Equal(2, committed[partition]!.LeaderEpoch());
     }
 
     [Fact]
@@ -224,7 +224,7 @@ public sealed class PublicConsumerCommitCallbackTests
                 new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(i) });
         }
 
-        Assert.Equal(499, consumer.Committed(new[] { partition })[partition]!.Offset);
+        Assert.Equal(499, consumer.Committed(new[] { partition })[partition]!.Offset());
     }
 
     [Fact]
@@ -243,14 +243,14 @@ public sealed class PublicConsumerCommitCallbackTests
 
         Assert.Same(thrown, propagated);
         Assert.Equal(1, throwing.Invocations);
-        Assert.Equal(3, consumer.Committed(new[] { partition })[partition]!.Offset);
+        Assert.Equal(3, consumer.Committed(new[] { partition })[partition]!.Offset());
 
         RecordingCommitCallback recording = new RecordingCommitCallback();
         consumer.CommitAsync(
             new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(4) },
             recording);
         Assert.Single(recording.Completions);
-        Assert.Equal(4, consumer.Committed(new[] { partition })[partition]!.Offset);
+        Assert.Equal(4, consumer.Committed(new[] { partition })[partition]!.Offset());
     }
 
     [Fact]
@@ -271,10 +271,10 @@ public sealed class PublicConsumerCommitCallbackTests
             callback);
 
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(Assert.Single(callback.Completions).Offsets!);
-        Assert.Equal(NonAscii, entry.Key.Topic);
-        Assert.Equal(0, entry.Key.Partition);
-        Assert.Equal(12, entry.Value.Offset);
-        Assert.Equal("métadonnées-メタ", entry.Value.Metadata);
+        Assert.Equal(NonAscii, entry.Key.Topic());
+        Assert.Equal(0, entry.Key.Partition());
+        Assert.Equal(12, entry.Value.Offset());
+        Assert.Equal("métadonnées-メタ", entry.Value.Metadata());
     }
 
     [Fact]
@@ -342,7 +342,7 @@ public sealed class PublicConsumerCommitCallbackTests
 
         Completion completion = Assert.Single(callback.Completions);
         Assert.Null(completion.Exception);
-        Assert.Equal(1, Assert.Contains(negative, completion.Offsets!).Offset);
+        Assert.Equal(1, Assert.Contains(negative, completion.Offsets!).Offset());
     }
 
     [Fact]
@@ -422,9 +422,9 @@ public sealed class PublicConsumerCommitCallbackTests
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(completion.Offsets!);
         Assert.Equal(partition, entry.Key);
         Assert.Equal(new OffsetAndMetadata(1), entry.Value);
-        Assert.Equal(1L, entry.Value.Offset);
-        Assert.Equal(string.Empty, entry.Value.Metadata);
-        Assert.Null(entry.Value.LeaderEpoch);
+        Assert.Equal(1L, entry.Value.Offset());
+        Assert.Equal(string.Empty, entry.Value.Metadata());
+        Assert.Null(entry.Value.LeaderEpoch());
     }
 
     /// <summary>One completion: its offsets, its exception and the thread it ran on.</summary>

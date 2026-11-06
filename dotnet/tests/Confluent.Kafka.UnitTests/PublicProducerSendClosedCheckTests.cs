@@ -136,7 +136,7 @@ public sealed class PublicProducerSendClosedCheckTests
 
         RecordMetadata metadata = producer.Send(Record()).Get();
 
-        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(Topic, metadata.Topic());
         Assert.Equal(1, key.InvocationCount);
         Assert.Equal(1, value.InvocationCount);
     }

@@ -48,9 +48,9 @@ public sealed class PublicProducerSendTests
             producer,
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2));
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(2, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(2, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
         // RecordMetadata.ToString mirrors Java's "topic-partition@offset".
         Assert.Equal("send-topic-2@0", metadata.ToString());
     }
@@ -66,8 +66,8 @@ public sealed class PublicProducerSendTests
             RecordMetadata metadata = await SendOf(
                 producer,
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{i}"), partition: 0));
-            Assert.Equal(0, metadata.Partition);
-            Assert.Equal((long)i, metadata.Offset);
+            Assert.Equal(0, metadata.Partition());
+            Assert.Equal((long)i, metadata.Offset());
         }
     }
 
@@ -115,8 +115,8 @@ public sealed class PublicProducerSendTests
 
         RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, value: null, key: null, partition: 1));
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(1, metadata.Partition);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(1, metadata.Partition());
     }
 
     [Fact]
@@ -130,8 +130,8 @@ public sealed class PublicProducerSendTests
             producer,
             new ProducerRecord<byte[], byte[]>(Topic, Array.Empty<byte>(), Array.Empty<byte>(), partition: 1));
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(1, metadata.Partition);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(1, metadata.Partition());
     }
 
     [Fact]
@@ -151,9 +151,9 @@ public sealed class PublicProducerSendTests
         Array.Clear(key, 0, key.Length);
 
         RecordMetadata metadata = await WithTimeout(sendTask);
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
     }
 
     [Fact]
@@ -167,7 +167,7 @@ public sealed class PublicProducerSendTests
             producer,
             new ProducerRecord<byte[], byte[]>(nonAsciiTopic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
-        Assert.Equal(nonAsciiTopic, metadata.Topic);
+        Assert.Equal(nonAsciiTopic, metadata.Topic());
     }
 
     [Fact]
@@ -199,7 +199,7 @@ public sealed class PublicProducerSendTests
 
         int total = results.Sum(r => r.Length);
         Assert.Equal(threadCount * perThread, total);
-        Assert.All(results.SelectMany(r => r), md => Assert.Equal(Topic, md.Topic));
+        Assert.All(results.SelectMany(r => r), md => Assert.Equal(Topic, md.Topic()));
     }
 
     [Fact]
@@ -241,7 +241,7 @@ public sealed class PublicProducerSendTests
 
         // The producer is still usable after a rejected send.
         RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
-        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(Topic, metadata.Topic());
     }
 
     [Fact]
@@ -263,7 +263,7 @@ public sealed class PublicProducerSendTests
 
         Assert.True(producer.CompleteNext());
         RecordMetadata metadata = await WithTimeout(future.Get());
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(0L, metadata.Offset());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }
@@ -546,8 +546,8 @@ public sealed class PublicProducerSendTests
         Assert.True(pending.IsCompleted, "the uncompleted send was still pending when the teardown returned");
         Assert.Equal(1, callback.Count);
         RecordMetadata metadata = await pending;
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
         await Task.Delay(200);
         Assert.Equal(1, callback.Count);
     }

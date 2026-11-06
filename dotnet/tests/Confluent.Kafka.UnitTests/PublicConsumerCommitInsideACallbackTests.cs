@@ -122,7 +122,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
             }));
 
             Assert.Equal(new[] { "first", "nested " + Topic + "-0@2", "first end" }, Snapshot(events));
-            Assert.Equal(2, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset);
+            Assert.Equal(2, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset());
         }
         finally
         {
@@ -196,7 +196,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
             Assert.Equal(new[] { "first", "nested", "first end" }, Snapshot(events));
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => consumer.Committed(new[] { s_tp0 }), s_deadline);
-            Assert.Equal(2, committed[s_tp0]!.Offset);
+            Assert.Equal(2, committed[s_tp0]!.Offset());
         }
         finally
         {
@@ -276,12 +276,12 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     }
 
     private static string Format(IReadOnlyCollection<TopicPartition> partitions) =>
-        "[" + string.Join(", ", partitions.Select(tp => tp.Topic + "-" + tp.Partition)) + "]";
+        "[" + string.Join(", ", partitions.Select(tp => tp.Topic() + "-" + tp.Partition())) + "]";
 
     private static string Format(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets) =>
         offsets is null
             ? "null"
-            : string.Join(", ", offsets.Select(entry => entry.Key.Topic + "-" + entry.Key.Partition + "@" + entry.Value.Offset));
+            : string.Join(", ", offsets.Select(entry => entry.Key.Topic() + "-" + entry.Key.Partition() + "@" + entry.Value.Offset()));
 
     private static void Add<T>(List<T> list, T item)
     {

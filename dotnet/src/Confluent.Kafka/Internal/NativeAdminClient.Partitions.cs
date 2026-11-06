@@ -197,14 +197,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, RecordsToDelete> entry in recordsToDelete)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The records-to-delete map must not contain a topic partition with a null topic.",
                         nameof(recordsToDelete));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(recordsToDelete));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(recordsToDelete));
                 if (entry.Value is null)
                 {
                     throw new ArgumentException(
@@ -322,14 +322,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, OffsetSpec> entry in topicPartitionOffsets)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The offsets map must not contain a topic partition with a null topic.",
                         nameof(topicPartitionOffsets));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(topicPartitionOffsets));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(topicPartitionOffsets));
                 CheckOffsetSpec(entry.Value, nameof(topicPartitionOffsets));
                 if (seen.Add(entry.Key))
                 {
@@ -501,9 +501,9 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic))
+        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic()))
         {
-            native = NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition, ref outErr);
+            native = NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition(), ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);

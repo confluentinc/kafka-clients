@@ -197,7 +197,7 @@ public sealed class AdminStringsTests
             Config config = await TestTimeout.Run(
                 () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values[topic].Get(),
                 s_deadline);
-            Assert.Equal("1000", config.Get("retention.ms")!.Value);
+            Assert.Equal("1000", config.Get("retention.ms")!.Value());
         }
         finally
         {

@@ -149,9 +149,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(filter));
             }
 
-            AdminStrings.Validate(filter.PatternFilter.Name, nameof(filter));
-            AdminStrings.Validate(filter.EntryFilter.Principal, nameof(filter));
-            AdminStrings.Validate(filter.EntryFilter.Host, nameof(filter));
+            AdminStrings.Validate(filter.PatternFilter().Name(), nameof(filter));
+            AdminStrings.Validate(filter.EntryFilter().Principal(), nameof(filter));
+            AdminStrings.Validate(filter.EntryFilter().Host(), nameof(filter));
 
             IntPtr native = IntPtr.Zero;
             SafeAdminResultHandle result;
@@ -282,9 +282,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentException("The ACL bindings must not contain a null element.", parameterName);
             }
 
-            AdminStrings.Validate(acl.Pattern.Name, parameterName);
-            AdminStrings.Validate(acl.Entry.Principal, parameterName);
-            AdminStrings.Validate(acl.Entry.Host, parameterName);
+            AdminStrings.Validate(acl.Pattern().Name(), parameterName);
+            AdminStrings.Validate(acl.Entry().Principal(), parameterName);
+            AdminStrings.Validate(acl.Entry().Host(), parameterName);
             if (seen.Add(acl))
             {
                 keys.Add(acl);
@@ -305,9 +305,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentException("The ACL filters must not contain a null element.", parameterName);
             }
 
-            AdminStrings.Validate(filter.PatternFilter.Name, parameterName);
-            AdminStrings.Validate(filter.EntryFilter.Principal, parameterName);
-            AdminStrings.Validate(filter.EntryFilter.Host, parameterName);
+            AdminStrings.Validate(filter.PatternFilter().Name(), parameterName);
+            AdminStrings.Validate(filter.EntryFilter().Principal(), parameterName);
+            AdminStrings.Validate(filter.EntryFilter().Host(), parameterName);
             if (seen.Add(filter))
             {
                 keys.Add(filter);

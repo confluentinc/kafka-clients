@@ -84,7 +84,7 @@ public sealed class ConsumerAsyncOperationTests
         NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("proof-group"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Equal("proof-group", consumer.GroupMetadata().GroupId);
+        Assert.Equal("proof-group", consumer.GroupMetadata().GroupId());
     }
 
     [Fact]
@@ -93,6 +93,6 @@ public sealed class ConsumerAsyncOperationTests
         NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("grüße-café-Ω"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Equal("grüße-café-Ω", consumer.GroupMetadata().GroupId);
+        Assert.Equal("grüße-café-Ω", consumer.GroupMetadata().GroupId());
     }
 }

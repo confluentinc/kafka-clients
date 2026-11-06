@@ -171,7 +171,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.Equal("ok", outcome);
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => consumer.Committed(s_partitions), s_deadline);
-            Assert.Equal(8, committed[s_tp0]!.Offset);
+            Assert.Equal(8, committed[s_tp0]!.Offset());
         }
         finally
         {
@@ -502,7 +502,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             Assert.Equal("ok", outcome);
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => consumer.Committed(s_partitions), s_deadline);
-            Assert.Equal(4, committed[s_tp0]!.Offset);
+            Assert.Equal(4, committed[s_tp0]!.Offset());
         }
         finally
         {
@@ -937,7 +937,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("ListTopics", Call(() => consumer.ListTopics()));
         Add("ListTopics(timeout)", Call(() => consumer.ListTopics(s_short)));
         Add("Subscription", Call(() => Format(consumer.Subscription())));
-        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId));
+        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId()));
         Add("EnforceRebalance", Call(() => consumer.EnforceRebalance()));
         Add("Metrics", Call(() => consumer.Metrics() is null ? "null" : "a map"));
         return outcomes;
@@ -985,7 +985,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("ListTopics", CallAsync(() => consumer.ListTopics()));
         Add("ListTopics(timeout)", CallAsync(() => consumer.ListTopics(s_short)));
         Add("Subscription", Call(() => Format(consumer.Subscription())));
-        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId));
+        Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId()));
         Add("EnforceRebalance", Call(() => consumer.EnforceRebalance()));
         Add("Metrics", Call(() => consumer.Metrics() is null ? "null" : "a map"));
         return outcomes;
@@ -1284,7 +1284,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     }
 
     private static string Format(IReadOnlyCollection<TopicPartition> partitions) =>
-        "[" + string.Join(",", partitions.Select(p => p.Topic + "-" + p.Partition.ToString(CultureInfo.InvariantCulture))) + "]";
+        "[" + string.Join(",", partitions.Select(p => p.Topic() + "-" + p.Partition().ToString(CultureInfo.InvariantCulture))) + "]";
 
     private static string Format(IReadOnlyCollection<string> topics) => "[" + string.Join(",", topics) + "]";
 
@@ -1293,11 +1293,11 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static string Format(long value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static string Format(ConsumerGroupMetadata metadata) =>
-        metadata.GroupId + "/" + metadata.GenerationId.ToString(CultureInfo.InvariantCulture) + "/" + metadata.MemberId
-        + "/" + (metadata.GroupInstanceId ?? "null");
+        metadata.GroupId() + "/" + metadata.GenerationId().ToString(CultureInfo.InvariantCulture) + "/" + metadata.MemberId()
+        + "/" + (metadata.GroupInstanceId() ?? "null");
 
     private static string Format<TValue>(IReadOnlyDictionary<TopicPartition, TValue> values) =>
-        "{" + string.Join(",", values.Select(entry => entry.Key.Topic + "-" + entry.Key.Partition.ToString(CultureInfo.InvariantCulture)
+        "{" + string.Join(",", values.Select(entry => entry.Key.Topic() + "-" + entry.Key.Partition().ToString(CultureInfo.InvariantCulture)
             + "=" + (entry.Value?.ToString() ?? "null"))) + "}";
 
     private static Func<(bool BeforeTheRelease, bool AfterTheRelease)?> WatchTheRoutingHandle(object consumer)

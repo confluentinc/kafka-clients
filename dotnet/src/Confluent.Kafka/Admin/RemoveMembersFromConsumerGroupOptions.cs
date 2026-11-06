@@ -36,7 +36,7 @@ public sealed class RemoveMembersFromConsumerGroupOptions
     /// <summary>
     /// Removes the given members — Java's
     /// <c>RemoveMembersFromConsumerGroupOptions(Collection&lt;MemberToRemove&gt; members)</c>.
-    /// Duplicates (by <see cref="MemberToRemove.GroupInstanceId"/>) collapse, as in Java's
+    /// Duplicates (by <see cref="MemberToRemove.GroupInstanceId()"/>) collapse, as in Java's
     /// <c>Set</c>.
     /// </summary>
     /// <param name="members">The members to remove. Must not be empty.</param>

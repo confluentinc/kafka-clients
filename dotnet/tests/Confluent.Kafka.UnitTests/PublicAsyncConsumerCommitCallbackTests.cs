@@ -414,7 +414,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             Assert.Equal(expected, Snapshot(seen));
             if (kind == "mock")
             {
-                Assert.Equal(1, Assert.Single(delivered!).Value.Offset);
+                Assert.Equal(1, Assert.Single(delivered!).Value.Offset());
             }
             else
             {

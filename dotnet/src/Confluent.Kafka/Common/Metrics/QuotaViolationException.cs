@@ -32,7 +32,7 @@ public class QuotaViolationException : global::Confluent.Kafka.Common.KafkaExcep
     /// bound)</c>.
     /// </summary>
     public QuotaViolationException(KafkaMetric metric, double value, double bound)
-        : base("'" + JavaText.ValueOf((metric ?? throw new ArgumentNullException(nameof(metric))).Name) + "' violated quota. Actual: " + JavaText.ValueOf(value) + ", Threshold: " + JavaText.ValueOf(bound))
+        : base("'" + JavaText.ValueOf((metric ?? throw new ArgumentNullException(nameof(metric))).MetricName()) + "' violated quota. Actual: " + JavaText.ValueOf(value) + ", Threshold: " + JavaText.ValueOf(bound))
     {
         Metric = metric;
         Value = value;

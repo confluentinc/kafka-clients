@@ -240,7 +240,7 @@ public sealed class PublicKafkaFutureTests
         AssertDefaultThrows(() => future.IsCancelled);
         AssertDefaultThrows(() => future.IsCompletedExceptionally);
         AssertDefaultThrows(() => future.Cancel(true));
-        AssertDefaultThrows(() => future.ThenApply(metadata => metadata.Offset));
+        AssertDefaultThrows(() => future.ThenApply(metadata => metadata.Offset()));
         AssertDefaultThrows(() => future.WhenComplete((metadata, error) => { }));
 
         Assert.Equal(typeof(KafkaFuture<RecordMetadata>).ToString(), future.ToString());
@@ -285,7 +285,7 @@ public sealed class PublicKafkaFutureTests
         KafkaFuture<long> applied = future.ThenApply(value =>
         {
             appliedOn = Environment.CurrentManagedThreadId;
-            return value.Offset;
+            return value.Offset();
         });
         KafkaFuture<RecordMetadata> completed = future.WhenComplete((value, error) =>
         {
@@ -302,7 +302,7 @@ public sealed class PublicKafkaFutureTests
         if (outcome == "succeeded")
         {
             Assert.Equal(caller, appliedOn);
-            Assert.Equal(metadata.Offset, applied.Get());
+            Assert.Equal(metadata.Offset(), applied.Get());
             Assert.Same(metadata, seenValue);
             Assert.Null(seenError);
             Assert.Same(metadata, completed.Get());

@@ -425,11 +425,11 @@ public sealed class ErrorPayloadReaderTests
                 Assert.Same(cause, e.InnerException);
                 Assert.Equal(12.5, e.Value);
                 Assert.Equal(10.0, e.Bound);
-                Assert.Equal("produce-throttle-Ω", e.Metric.Name.Name);
-                Assert.Equal("producer-metrics", e.Metric.Name.Group);
-                Assert.Equal("d-é", e.Metric.Name.Description);
-                Assert.Equal(new Dictionary<string, string> { ["client-id"] = "c-日本" }, e.Metric.Name.Tags);
-                Assert.Equal(12.5, e.Metric.Value);
+                Assert.Equal("produce-throttle-Ω", e.Metric.MetricName().Name());
+                Assert.Equal("producer-metrics", e.Metric.MetricName().Group());
+                Assert.Equal("d-é", e.Metric.MetricName().Description());
+                Assert.Equal(new Dictionary<string, string> { ["client-id"] = "c-日本" }, e.Metric.MetricName().Tags());
+                Assert.Equal(12.5, e.Metric.MetricValue());
             }
 
             views.AssertOnlyAsked(View.QuotaViolation);

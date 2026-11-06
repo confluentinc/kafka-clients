@@ -478,13 +478,13 @@ public sealed class AdminP7SubmitArgumentTests
     }
 
     [Theory]
-    [InlineData((short)3, FeatureUpdate.UpgradeType.UPGRADE, 1)]
-    [InlineData((short)2, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE, 2)]
-    [InlineData((short)0, FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE, 3)]
-    [InlineData(short.MaxValue, FeatureUpdate.UpgradeType.UPGRADE, 1)]
-    [InlineData((short)1, FeatureUpdate.UpgradeType.UNKNOWN, 0)]
+    [InlineData((short)3, UpgradeType.UPGRADE, 1)]
+    [InlineData((short)2, UpgradeType.SAFE_DOWNGRADE, 2)]
+    [InlineData((short)0, UpgradeType.UNSAFE_DOWNGRADE, 3)]
+    [InlineData(short.MaxValue, UpgradeType.UPGRADE, 1)]
+    [InlineData((short)1, UpgradeType.UNKNOWN, 0)]
     public void FeatureUpdate_CrossesItsLevelAndItsUpgradeTypeCode(
-        short maxVersionLevel, FeatureUpdate.UpgradeType upgradeType, int expectedCode) =>
+        short maxVersionLevel, UpgradeType upgradeType, int expectedCode) =>
         Assert.Equal(
             (maxVersionLevel, (sbyte)expectedCode),
             ReadFeatureUpdate(new FeatureUpdate(maxVersionLevel, upgradeType)));
@@ -493,7 +493,7 @@ public sealed class AdminP7SubmitArgumentTests
     public void FeatureUpdate_AnUndefinedUpgradeType_CrossesAsUnknown() =>
         Assert.Equal(
             ((short)1, (sbyte)0),
-            ReadFeatureUpdate(new FeatureUpdate(1, (FeatureUpdate.UpgradeType)9)));
+            ReadFeatureUpdate(new FeatureUpdate(1, (UpgradeType)9)));
 
     [Fact]
     public void UnregisterControllerOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()

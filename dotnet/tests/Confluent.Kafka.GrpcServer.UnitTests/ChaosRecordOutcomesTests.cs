@@ -83,7 +83,7 @@ public sealed class ChaosRecordOutcomesTests
         Proto.WorkloadEvent delivered = Assert.Single(events);
         Assert.Equal(Proto.WorkloadEvent.EventOneofCase.Delivered, delivered.EventCase);
         Assert.Equal(
-            (5UL, metadata.Partition, metadata.Offset),
+            (5UL, Partition: metadata.Partition(), Offset: metadata.Offset()),
             (delivered.Delivered.Index, delivered.Delivered.Partition, delivered.Delivered.Offset));
         Assert.Equal(
             "dotnet server: chaos producer w-late: Send() of record 5 threw after its callback had settled it: " +

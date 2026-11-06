@@ -340,7 +340,7 @@ public sealed class AdminP6SubmitArgumentTests
             Assert.Equal(
                 new[] { "client-id=c", "user=u" },
                 EntityEntries(entity).Select(entry => entry.Type + "=" + entry.Name).OrderBy(pair => pair, StringComparer.Ordinal));
-            Assert.Equal(alteration.Entity, ClientQuotaMarshal.CopyOutEntity(entity));
+            Assert.Equal(alteration.Entity(), ClientQuotaMarshal.CopyOutEntity(entity));
             Assert.Equal(new[] { "first", "second", "third" }, ops.Select(OpKey));
             Assert.Equal(1d, OpValue(ops[0]));
             Assert.True(double.IsNaN(OpValue(ops[1])));

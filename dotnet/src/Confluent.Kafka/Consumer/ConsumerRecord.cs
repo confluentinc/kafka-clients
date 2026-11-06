@@ -39,6 +39,18 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// <summary>The timestamp of a record with no timestamp, Java's <c>NO_TIMESTAMP</c>.</summary>
     public const long NO_TIMESTAMP = -1;
 
+    private readonly string _topic;
+    private readonly int _partition;
+    private readonly long _offset;
+    private readonly long _timestamp;
+    private readonly TimestampType _timestampType;
+    private readonly TKey _key;
+    private readonly TValue _value;
+    private readonly Headers _headers;
+    private readonly int? _leaderEpoch;
+    private readonly int _serializedKeySize;
+    private readonly int _serializedValueSize;
+
     internal ConsumerRecord(
         string topic,
         int partition,
@@ -52,65 +64,82 @@ public sealed class ConsumerRecord<TKey, TValue>
         int serializedKeySize,
         int serializedValueSize)
     {
-        Topic = topic;
-        Partition = partition;
-        Offset = offset;
-        Timestamp = timestamp;
-        TimestampType = timestampType;
-        Key = key;
-        Value = value;
-        Headers = headers;
-        LeaderEpoch = leaderEpoch;
-        SerializedKeySize = serializedKeySize;
-        SerializedValueSize = serializedValueSize;
+        _topic = topic;
+        _partition = partition;
+        _offset = offset;
+        _timestamp = timestamp;
+        _timestampType = timestampType;
+        _key = key;
+        _value = value;
+        _headers = headers;
+        _leaderEpoch = leaderEpoch;
+        _serializedKeySize = serializedKeySize;
+        _serializedValueSize = serializedValueSize;
     }
 
     /// <summary>The topic name.</summary>
-    public string Topic { get; }
+    /// <returns>The topic name.</returns>
+    public string Topic() => _topic;
 
     /// <summary>The partition the record was read from.</summary>
-    public int Partition { get; }
+    /// <returns>The partition the record was read from.</returns>
+    public int Partition() => _partition;
 
     /// <summary>The record's offset within its partition.</summary>
-    public long Offset { get; }
+    /// <returns>The record's offset within its partition.</returns>
+    public long Offset() => _offset;
 
     /// <summary>
     /// The record timestamp in milliseconds since the epoch, or
     /// <see cref="NO_TIMESTAMP"/> (<c>-1</c>) when absent.
     /// </summary>
-    public long Timestamp { get; }
+    /// <returns>The record timestamp in milliseconds since the epoch, or <see cref="NO_TIMESTAMP"/> (<c>-1</c>)
+    /// when absent.</returns>
+    public long Timestamp() => _timestamp;
 
-    /// <summary>The kind of <see cref="Timestamp"/> the record carries.</summary>
-    public TimestampType TimestampType { get; }
+    /// <summary>The kind of <see cref="Timestamp()"/> the record carries.</summary>
+    /// <returns>The kind of <see cref="Timestamp()"/> the record carries.</returns>
+    public TimestampType TimestampType() => _timestampType;
 
     /// <summary>
     /// The deserialized key, or <c>default(TKey)</c> when the key is absent; the deserializer is not called then.
     /// </summary>
-    public TKey Key { get; }
+    /// <returns>The deserialized key, or <c>default(TKey)</c> when the key is absent; the deserializer is not
+    /// called then.</returns>
+    public TKey Key() => _key;
 
     /// <summary>
     /// The deserialized value, or <c>default(TValue)</c> for a tombstone; the deserializer is not called then.
     /// </summary>
-    public TValue Value { get; }
+    /// <returns>The deserialized value, or <c>default(TValue)</c> for a tombstone; the deserializer is not called
+    /// then.</returns>
+    public TValue Value() => _value;
 
     /// <summary>The record headers; empty when the record has none.</summary>
-    public Headers Headers { get; }
+    /// <returns>The record headers; empty when the record has none.</returns>
+    public Headers Headers() => _headers;
 
     /// <summary>
     /// The record's leader epoch, or <see langword="null"/> when the record format has none (Java's
     /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
     /// </summary>
-    public int? LeaderEpoch { get; }
+    /// <returns>The record's leader epoch, or <see langword="null"/> when the record format has none (Java's
+    /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>).</returns>
+    public int? LeaderEpoch() => _leaderEpoch;
 
     /// <summary>
     /// The size of the serialized, uncompressed key in bytes, or <c>-1</c> if the key is
     /// <see langword="null"/> (Java's <c>serializedKeySize()</c>).
     /// </summary>
-    public int SerializedKeySize { get; }
+    /// <returns>The size of the serialized, uncompressed key in bytes, or <c>-1</c> if the key is
+    /// <see langword="null"/>.</returns>
+    public int SerializedKeySize() => _serializedKeySize;
 
     /// <summary>
     /// The size of the serialized, uncompressed value in bytes, or <c>-1</c> if the value is
     /// <see langword="null"/> (Java's <c>serializedValueSize()</c>).
     /// </summary>
-    public int SerializedValueSize { get; }
+    /// <returns>The size of the serialized, uncompressed value in bytes, or <c>-1</c> if the value is
+    /// <see langword="null"/>.</returns>
+    public int SerializedValueSize() => _serializedValueSize;
 }

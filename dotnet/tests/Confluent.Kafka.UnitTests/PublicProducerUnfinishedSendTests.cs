@@ -82,7 +82,7 @@ public sealed class PublicProducerUnfinishedSendTests
         {
             string? appliedOn = null;
             using ManualResetEventSlim applied = new ManualResetEventSlim();
-            KafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset);
+            KafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) =>
             {
                 appliedOn = Thread.CurrentThread.Name;
@@ -169,7 +169,7 @@ public sealed class PublicProducerUnfinishedSendTests
 
             Assert.True(producer.CompleteNext());
             RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), Deadline);
-            Assert.Equal(0L, metadata.Offset);
+            Assert.Equal(0L, metadata.Offset());
             Assert.False(future.IsCancelled);
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Equal(1, callback.Calls);
@@ -188,7 +188,7 @@ public sealed class PublicProducerUnfinishedSendTests
 
             Assert.True(producer.CompleteNext());
             RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), Deadline);
-            Assert.Equal(0L, metadata.Offset);
+            Assert.Equal(0L, metadata.Offset());
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Equal(1, callback.Calls);
         });
@@ -207,7 +207,7 @@ public sealed class PublicProducerUnfinishedSendTests
             MockProducer<byte[], byte[]> producer =
                 new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-            KafkaFuture<long> offset = producer.Send(UnreachableProducers.Record(topic)).ThenApply(metadata => metadata.Offset);
+            KafkaFuture<long> offset = producer.Send(UnreachableProducers.Record(topic)).ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
             Assert.False(appliedOn.Task.IsCompleted);
 
@@ -222,7 +222,7 @@ public sealed class PublicProducerUnfinishedSendTests
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future =
                 await TestTimeout.Run(() => producer.Send(UnreachableProducers.Record(topic)).AsTask(), Deadline);
-            AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset);
+            AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
             Assert.False(appliedOn.Task.IsCompleted);
 

@@ -146,8 +146,8 @@ public sealed class PublicConsumerSyncReadTests
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
         TopicPartition only = Assert.Single(consumer.Assignment());
-        Assert.Equal(nonAscii, only.Topic);
-        Assert.Equal(7, only.Partition);
+        Assert.Equal(nonAscii, only.Topic());
+        Assert.Equal(7, only.Partition());
     }
 
     [Fact]

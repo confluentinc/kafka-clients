@@ -175,10 +175,10 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 () => admin.ListPartitionReassignments(new[] { partition }).Reassignments().Get(), s_deadline);
 
         PartitionReassignment reassignment = Assert.Contains(partition, reassignments);
-        Assert.NotEmpty(reassignment.Replicas);
+        Assert.NotEmpty(reassignment.Replicas());
 
-        Assert.All(reassignment.AddingReplicas, broker => Assert.DoesNotContain(broker, reassignment.Replicas));
-        Assert.All(reassignment.RemovingReplicas, broker => Assert.Contains(broker, reassignment.Replicas));
+        Assert.All(reassignment.AddingReplicas(), broker => Assert.DoesNotContain(broker, reassignment.Replicas()));
+        Assert.All(reassignment.RemovingReplicas(), broker => Assert.Contains(broker, reassignment.Replicas()));
     }
 
     [Fact]
@@ -309,7 +309,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         Assert.Equal(new[] { partition }, explicitNull.Keys);
         Assert.Equal(new[] { partition }, zeroArg.Keys);
         Assert.Equal(new[] { partition }, optionsOnly.Keys);
-        Assert.Equal(explicitNull[partition].Replicas, optionsOnly[partition].Replicas);
+        Assert.Equal(explicitNull[partition].Replicas(), optionsOnly[partition].Replicas());
 
         // The control: an empty selection is a different request, and lists nothing.
         Assert.Empty(await TestTimeout.Run(

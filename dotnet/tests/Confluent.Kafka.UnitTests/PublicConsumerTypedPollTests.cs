@@ -58,9 +58,9 @@ public sealed class PublicConsumerTypedPollTests
 
         ConsumerRecord<string, long> record = Assert.Single(Poll(consumer));
 
-        Assert.Equal("hello", record.Key);
-        Assert.Equal(1_234_567_890_123L, record.Value);
-        Assert.Equal(11, record.Offset);
+        Assert.Equal("hello", record.Key());
+        Assert.Equal(1_234_567_890_123L, record.Value());
+        Assert.Equal(11, record.Offset());
     }
 
     [Fact]
@@ -80,8 +80,8 @@ public sealed class PublicConsumerTypedPollTests
             await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
 
             ConsumerRecord<string, long> record = Assert.Single(records);
-            Assert.Equal("wörld-Ω", record.Key);
-            Assert.Equal(-7L, record.Value);
+            Assert.Equal("wörld-Ω", record.Key());
+            Assert.Equal(-7L, record.Value());
         }
         finally
         {
@@ -100,8 +100,8 @@ public sealed class PublicConsumerTypedPollTests
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
     }
 
     [Fact]
@@ -114,7 +114,7 @@ public sealed class PublicConsumerTypedPollTests
 
         ConsumerRecord<byte[], int> record = Assert.Single(Poll(consumer));
 
-        Assert.Equal(0, record.Value);
+        Assert.Equal(0, record.Value());
         Assert.Equal(0, valueDeserializer.InvocationCount);
     }
 
@@ -128,7 +128,7 @@ public sealed class PublicConsumerTypedPollTests
 
         ConsumerRecord<byte[], int> record = Assert.Single(Poll(consumer));
 
-        Assert.Equal(0, record.Value);
+        Assert.Equal(0, record.Value());
         Assert.Equal(0, valueDeserializer.InvocationCount);
     }
 
@@ -144,7 +144,7 @@ public sealed class PublicConsumerTypedPollTests
 
         Assert.Equal(1, valueDeserializer.InvocationCount);
         Assert.Equal(0, valueDeserializer.LastSpanLength);
-        Assert.Equal(0, record.Value);
+        Assert.Equal(0, record.Value());
     }
 
     [Fact]
@@ -159,7 +159,7 @@ public sealed class PublicConsumerTypedPollTests
 
         Assert.Equal(1, valueDeserializer.InvocationCount);
         Assert.Equal(3, valueDeserializer.LastSpanLength);
-        Assert.Equal(3, record.Value);
+        Assert.Equal(3, record.Value());
     }
 
     [Fact]
@@ -172,7 +172,7 @@ public sealed class PublicConsumerTypedPollTests
             {
                 consumer.AddRecord(Topic, Partition, offset: 5, key: new byte[] { 7 }, value: null);
                 ConsumerRecord<byte[], long?> record = Assert.Single(Poll(consumer));
-                Assert.Null(record.Value);
+                Assert.Null(record.Value());
                 Assert.Equal(0, tombstone.InvocationCount);
             }
         }
@@ -184,7 +184,7 @@ public sealed class PublicConsumerTypedPollTests
             {
                 consumer.AddRecord(Topic, Partition, offset: 6, key: new byte[] { 7 }, value: Serdes.Int64.Serialize(Topic, 0L)!);
                 ConsumerRecord<byte[], long?> record = Assert.Single(Poll(consumer));
-                Assert.Equal(0L, record.Value);
+                Assert.Equal(0L, record.Value());
                 Assert.Equal(1, zero.InvocationCount);
             }
         }

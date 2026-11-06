@@ -59,8 +59,8 @@ public sealed class ConsumerPollHeadersTests
         ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.NotNull(record.Headers);
-        Assert.Empty(record.Headers);
+        Assert.NotNull(record.Headers());
+        Assert.Empty(record.Headers());
     }
 
     [Fact]
@@ -81,22 +81,22 @@ public sealed class ConsumerPollHeadersTests
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.Collection(
-            record.Headers,
+            record.Headers(),
             header =>
             {
-                Assert.Equal("null-value", header.Key);
-                Assert.Null(header.Value);
+                Assert.Equal("null-value", header.Key());
+                Assert.Null(header.Value());
             },
             header =>
             {
-                Assert.Equal(NonAsciiKey, header.Key);
-                Assert.Equal(s_valueWithNul, header.Value);
+                Assert.Equal(NonAsciiKey, header.Key());
+                Assert.Equal(s_valueWithNul, header.Value());
             },
             header =>
             {
-                Assert.Equal("empty-value", header.Key);
-                Assert.NotNull(header.Value);
-                Assert.Empty(header.Value);
+                Assert.Equal("empty-value", header.Key());
+                Assert.NotNull(header.Value());
+                Assert.Empty(header.Value()!);
             });
     }
 

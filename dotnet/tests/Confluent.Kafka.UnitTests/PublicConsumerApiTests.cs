@@ -109,7 +109,7 @@ public sealed class PublicConsumerApiTests
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("sync-group"), Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
-        Assert.Equal("sync-group", meta.GroupId);
+        Assert.Equal("sync-group", meta.GroupId());
     }
 
     // Java's MockConsumer.seek checks no offset: an unassigned partition is refused as unassigned.
@@ -142,10 +142,10 @@ public sealed class PublicConsumerApiTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("public-group", meta.GroupId);
-        Assert.Equal(-1, meta.GenerationId);
-        Assert.Equal(string.Empty, meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("public-group", meta.GroupId());
+        Assert.Equal(-1, meta.GenerationId());
+        Assert.Equal(string.Empty, meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Fact]
@@ -154,7 +154,7 @@ public sealed class PublicConsumerApiTests
         AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("café-Ω-日本語-😀"), Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Equal("café-Ω-日本語-😀", consumer.GroupMetadata().GroupId);
+        Assert.Equal("café-Ω-日本語-😀", consumer.GroupMetadata().GroupId());
     }
 
     [Fact]
@@ -165,10 +165,10 @@ public sealed class PublicConsumerApiTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("dummy.group.id", meta.GroupId);
-        Assert.Equal(1, meta.GenerationId);
-        Assert.Equal("1", meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("dummy.group.id", meta.GroupId());
+        Assert.Equal(1, meta.GenerationId());
+        Assert.Equal("1", meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Fact]
@@ -220,10 +220,10 @@ public sealed class PublicConsumerApiTests
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-        Assert.Equal("sync-public-group", meta.GroupId);
-        Assert.Equal(-1, meta.GenerationId);
-        Assert.Equal(string.Empty, meta.MemberId);
-        Assert.Null(meta.GroupInstanceId);
+        Assert.Equal("sync-public-group", meta.GroupId());
+        Assert.Equal(-1, meta.GenerationId());
+        Assert.Equal(string.Empty, meta.MemberId());
+        Assert.Null(meta.GroupInstanceId());
     }
 
     [Theory]
@@ -238,10 +238,10 @@ public sealed class PublicConsumerApiTests
         {
             ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
-            Assert.Equal("dummy.group.id", meta.GroupId);
-            Assert.Equal(1, meta.GenerationId);
-            Assert.Equal("1", meta.MemberId);
-            Assert.Null(meta.GroupInstanceId);
+            Assert.Equal("dummy.group.id", meta.GroupId());
+            Assert.Equal(1, meta.GenerationId());
+            Assert.Equal("1", meta.MemberId());
+            Assert.Null(meta.GroupInstanceId());
         }
         finally
         {

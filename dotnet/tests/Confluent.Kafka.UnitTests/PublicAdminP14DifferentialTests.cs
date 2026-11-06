@@ -227,10 +227,10 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(syncResult.TopicNameValues["diff-d"]),
                 FutureProbe.Of(asyncResult.TopicNameValues["diff-d"]),
                 static outcome => outcome.ToString()!));
-        Assert.Equal("diff-d", described.Name);
-        Assert.False(described.IsInternal);
-        Assert.Equal(2, described.Partitions.Count);
-        Assert.NotEqual(Uuid.ZERO_UUID, described.TopicId);
+        Assert.Equal("diff-d", described.Name());
+        Assert.False(described.IsInternal());
+        Assert.Equal(2, described.Partitions().Count);
+        Assert.NotEqual(Uuid.ZERO_UUID, described.TopicId());
 
         const string NotFound = "Topic diff-nope not found.";
         AssertKafka(
@@ -282,8 +282,8 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(syncResult.TopicIdValues![syncId]),
                 FutureProbe.Of(asyncResult.TopicIdValues![asyncId]),
                 static outcome => outcome.ToString()!));
-        Assert.Equal("diff-e", described.Name);
-        Assert.Equal(syncId, described.TopicId);
+        Assert.Equal("diff-e", described.Name());
+        Assert.Equal(syncId, described.TopicId());
 
         string notFound = "Topic id" + s_missingId + " not found.";
         AssertKafka(
@@ -332,7 +332,7 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(asyncResult.NamesToListings()),
                 static outcome => Listed(((IReadOnlyDictionary<string, TopicListing>)outcome).Values)));
         Assert.Equal(expected, Sorted(map.Keys));
-        Assert.All(map, static entry => Assert.Equal(entry.Key, entry.Value.Name));
+        Assert.All(map, static entry => Assert.Equal(entry.Key, entry.Value.Name()));
 
         IReadOnlyCollection<string> names = Assert.IsAssignableFrom<IReadOnlyCollection<string>>(
             await Agree(
@@ -346,8 +346,8 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(syncResult.Listings()),
                 FutureProbe.Of(asyncResult.Listings()),
                 static outcome => Listed((IReadOnlyCollection<TopicListing>)outcome)));
-        Assert.Equal(expected, Sorted(listings.Select(static listing => listing.Name)));
-        Assert.All(listings, static listing => Assert.False(listing.IsInternal));
+        Assert.Equal(expected, Sorted(listings.Select(static listing => listing.Name())));
+        Assert.All(listings, static listing => Assert.False(listing.IsInternal()));
     }
 
     [Fact]
@@ -427,14 +427,14 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(syncResult.Nodes()),
                 FutureProbe.Of(asyncResult.Nodes()),
                 static outcome => string.Join(",", Sorted(((IReadOnlyCollection<Node>)outcome).Select(static node => node.ToString())))));
-        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(static node => node.Id).OrderBy(static id => id));
+        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(static node => node.Id()).OrderBy(static id => id));
 
         Node controller = Assert.IsType<Node>(
             await Agree(
                 FutureProbe.Of(syncResult.Controller()),
                 FutureProbe.Of(asyncResult.Controller()),
                 static outcome => outcome.ToString()!));
-        Assert.Equal(0, controller.Id);
+        Assert.Equal(0, controller.Id());
 
         Assert.Equal(
             (object)"I4ZmrWqfT2e-upky_4fdPA",
@@ -470,7 +470,7 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(async.ListConfigResources().All()),
                 static outcome => Resources((IReadOnlyCollection<ConfigResource>)outcome)));
         Assert.Contains(new ConfigResource(ConfigResourceType.TOPIC, "diff-j"), every);
-        Assert.Contains(every, static resource => resource.Type == ConfigResourceType.BROKER);
+        Assert.Contains(every, static resource => resource.Type() == ConfigResourceType.BROKER);
     }
 
     [Fact]
@@ -503,7 +503,7 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(syncResult.Values[present]),
                 FutureProbe.Of(asyncResult.Values[present]),
                 static outcome => string.Join(",", Entries((Config)outcome))));
-        Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
+        Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
 
         Assert.IsType<Config>(
             await Agree(
@@ -564,7 +564,7 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(sync.DescribeConfigs(new[] { present }).Values[present]),
                 FutureProbe.Of(async.DescribeConfigs(new[] { present }).Values[present]),
                 static outcome => string.Join(",", Entries((Config)outcome))));
-        Assert.Equal("1000", described.Get("retention.ms")!.Value);
+        Assert.Equal("1000", described.Get("retention.ms")!.Value());
     }
 
     [Fact]
@@ -1648,9 +1648,9 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
+        byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac();
         byte[] asyncMac =
-            (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
+            (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac();
         RenewDelegationTokenOptions options = new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L };
 
         object? renewed = await Agree(
@@ -1680,9 +1680,9 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
+        byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac();
         byte[] asyncMac =
-            (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
+            (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac();
         ExpireDelegationTokenOptions options = new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L };
 
         object? expired = await Agree(
@@ -1770,7 +1770,7 @@ public sealed class PublicAdminP14DifferentialTests
         // One key, so the core mock's first-failure-aborts-the-batch is not ordered by its map.
         Dictionary<string, FeatureUpdate> rejected = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
         {
-            ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+            ["metadata.version"] = new FeatureUpdate(1, UpgradeType.UPGRADE),
         };
         UpdateFeaturesResult syncRejected = sync.UpdateFeatures(rejected);
         AsyncUpdateFeaturesResult asyncRejected = async.UpdateFeatures(rejected);
@@ -1787,7 +1787,7 @@ public sealed class PublicAdminP14DifferentialTests
 
         string[] features = { "metadata.version", "group.version" };
         Dictionary<string, FeatureUpdate> accepted = features.ToDictionary(
-            feature => feature, _ => new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE), StringComparer.Ordinal);
+            feature => feature, _ => new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE), StringComparer.Ordinal);
         UpdateFeaturesResult syncAccepted = sync.UpdateFeatures(accepted);
         AsyncUpdateFeaturesResult asyncAccepted = async.UpdateFeatures(accepted);
         Assert.Equal(
@@ -1829,7 +1829,7 @@ public sealed class PublicAdminP14DifferentialTests
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal) { ["metadata.version"] = null! };
         Dictionary<string, FeatureUpdate> nulFeature = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
         {
-            ["metadata\0version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+            ["metadata\0version"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
         };
         CreateDelegationTokenOptions noRenewers = new CreateDelegationTokenOptions { Renewers = null! };
         CreateDelegationTokenOptions nullRenewer = new CreateDelegationTokenOptions { Renewers = new KafkaPrincipal[] { null! } };
@@ -2223,13 +2223,13 @@ public sealed class PublicAdminP14DifferentialTests
         replicas.Select(static replica => replica.ToString()).OrderBy(static r => r, StringComparer.Ordinal).ToList();
 
     private static List<string> Entries(Config config) =>
-        config.Entries.Select(static entry => entry.Name + "=" + entry.Value).OrderBy(static e => e, StringComparer.Ordinal).ToList();
+        config.Entries().Select(static entry => entry.Name() + "=" + entry.Value()).OrderBy(static e => e, StringComparer.Ordinal).ToList();
 
     private static List<string> Sorted(IEnumerable<string> values) =>
         values.OrderBy(static value => value, StringComparer.Ordinal).ToList();
 
     private static string Listed(IEnumerable<TopicListing> listings) =>
-        string.Join(",", Sorted(listings.Select(static listing => listing.Name + "/" + (listing.IsInternal ? "internal" : "user"))));
+        string.Join(",", Sorted(listings.Select(static listing => listing.Name() + "/" + (listing.IsInternal() ? "internal" : "user"))));
 
     private static string Resources(IEnumerable<ConfigResource> resources) =>
         string.Join(",", Sorted(resources.Select(static resource => resource.ToString())));
@@ -2238,9 +2238,9 @@ public sealed class PublicAdminP14DifferentialTests
         string.Join("|", Sorted(reassignments.Select(static entry => entry.Key + "=" + entry.Value)));
 
     private static List<int> Target(PartitionReassignment reassignment) =>
-        reassignment.Replicas
-            .Concat(reassignment.AddingReplicas)
-            .Except(reassignment.RemovingReplicas)
+        reassignment.Replicas()
+            .Concat(reassignment.AddingReplicas())
+            .Except(reassignment.RemovingReplicas())
             .Distinct()
             .OrderBy(static broker => broker)
             .ToList();
@@ -2252,7 +2252,7 @@ public sealed class PublicAdminP14DifferentialTests
         string.Join(
             ",",
             Sorted(listings.Select(static listing =>
-                listing.GroupId + "/" + listing.Type + "/" + listing.GroupState + "/" + listing.Protocol)));
+                listing.GroupId() + "/" + listing.Type() + "/" + listing.GroupState() + "/" + listing.Protocol())));
 
     private static string GroupOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets) =>
         string.Join(
@@ -2261,7 +2261,7 @@ public sealed class PublicAdminP14DifferentialTests
                 entry.Key + "="
                 + (entry.Value is null
                     ? "null"
-                    : entry.Value.Offset + "/" + (entry.Value.LeaderEpoch?.ToString() ?? "none") + "/'" + entry.Value.Metadata + "'"))));
+                    : entry.Value.Offset() + "/" + (entry.Value.LeaderEpoch()?.ToString() ?? "none") + "/'" + entry.Value.Metadata() + "'"))));
 
     private static string AllGroupOffsets(
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> groups) =>
@@ -2309,9 +2309,9 @@ public sealed class PublicAdminP14DifferentialTests
             "|",
             directories.OrderBy(static entry => entry.Key, StringComparer.Ordinal).Select(static entry =>
                 entry.Key
-                + (entry.Value.Error is null ? string.Empty : "!" + entry.Value.Error.Message)
+                + (entry.Value.Error() is null ? string.Empty : "!" + entry.Value.Error()!.Message)
                 + ":"
-                + string.Join(";", Sorted(entry.Value.ReplicaInfos.Keys.Select(static partition => partition.ToString())))));
+                + string.Join(";", Sorted(entry.Value.ReplicaInfos().Keys.Select(static partition => partition.ToString())))));
 
     private static async Task<(Uuid Sync, Uuid Async)> Seed(
         MockAdminClient sync, AsyncMockAdminClient async, params NewTopic[] topics)
@@ -2361,8 +2361,8 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.IsType<DelegationToken>(await minted.Outcome());
 
     private static string TokenOf(DelegationToken token) =>
-        $"owner={token.TokenInfo.OwnerAsString};renewers={string.Join(",", token.TokenInfo.RenewersAsString)};" +
-        $"max={token.TokenInfo.MaxTimestamp};expiry={token.TokenInfo.ExpiryTimestamp}";
+        $"owner={token.TokenInfo().OwnerAsString()};renewers={string.Join(",", token.TokenInfo().RenewersAsString())};" +
+        $"max={token.TokenInfo().MaxTimestamp()};expiry={token.TokenInfo().ExpiryTimestamp()}";
 
     private static string TokensOf(IReadOnlyList<DelegationToken> tokens) =>
         string.Join("|", tokens.Select(TokenOf).OrderBy(token => token, StringComparer.Ordinal));
@@ -2370,14 +2370,14 @@ public sealed class PublicAdminP14DifferentialTests
     private static string FeaturesOf(FeatureMetadata metadata) =>
         "finalized=" + string.Join(
             ",",
-            metadata.FinalizedFeatures
+            metadata.FinalizedFeatures()
                 .OrderBy(entry => entry.Key, StringComparer.Ordinal)
-                .Select(entry => $"{entry.Key}:{entry.Value.MinVersionLevel}-{entry.Value.MaxVersionLevel}")) +
-        $";epoch={metadata.FinalizedFeaturesEpoch};supported=" + string.Join(
+                .Select(entry => $"{entry.Key}:{entry.Value.MinVersionLevel()}-{entry.Value.MaxVersionLevel()}")) +
+        $";epoch={metadata.FinalizedFeaturesEpoch()};supported=" + string.Join(
             ",",
-            metadata.SupportedFeatures
+            metadata.SupportedFeatures()
                 .OrderBy(entry => entry.Key, StringComparer.Ordinal)
-                .Select(entry => $"{entry.Key}:{entry.Value.MinVersion}-{entry.Value.MaxVersion}"));
+                .Select(entry => $"{entry.Key}:{entry.Value.MinVersion()}-{entry.Value.MaxVersion()}"));
 
     private static ClientQuotaAlteration QuotaAlteration(ClientQuotaEntity entity, string quota, double? value) =>
         new ClientQuotaAlteration(entity, new[] { new ClientQuotaAlteration.Op(quota, value) });

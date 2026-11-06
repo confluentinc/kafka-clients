@@ -23,20 +23,23 @@ namespace Confluent.Kafka.Common.Quota;
 public sealed class ClientQuotaFilter
 {
     private readonly ClientQuotaFilterComponent[] _components;
+    private readonly bool _strict;
 
     private ClientQuotaFilter(ClientQuotaFilterComponent[] components, bool strict)
     {
         _components = components;
-        Strict = strict;
+        _strict = strict;
     }
 
     /// <summary>The filter's components — Java's <c>components()</c>.</summary>
-    public IReadOnlyCollection<ClientQuotaFilterComponent> Components => _components;
+    /// <returns>The filter's components.</returns>
+    public IReadOnlyCollection<ClientQuotaFilterComponent> Components() => _components;
 
     /// <summary>
     /// Whether the filter includes only the specified component types — Java's <c>strict()</c>.
     /// </summary>
-    public bool Strict { get; }
+    /// <returns>Whether the filter includes only the specified component types.</returns>
+    public bool Strict() => _strict;
 
     /// <summary>
     /// A filter matching all the given components, also including entities with entity types no
@@ -77,7 +80,7 @@ public sealed class ClientQuotaFilter
     public override bool Equals(object? obj)
     {
         if (obj is not ClientQuotaFilter other
-            || Strict != other.Strict
+            || Strict() != other.Strict()
             || _components.Length != other._components.Length)
         {
             return false;
@@ -108,7 +111,7 @@ public sealed class ClientQuotaFilter
 
             int hash = 1;
             hash = (hash * 31) + componentsHash;
-            hash = (hash * 31) + Strict.GetHashCode();
+            hash = (hash * 31) + Strict().GetHashCode();
             return hash;
         }
     }
@@ -130,7 +133,7 @@ public sealed class ClientQuotaFilter
             "ClientQuotaFilter(components=[",
             string.Join(", ", parts),
             "], strict=",
-            Strict ? "true" : "false",
+            Strict() ? "true" : "false",
             ")");
     }
 

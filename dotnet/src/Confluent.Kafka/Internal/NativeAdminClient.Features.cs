@@ -158,9 +158,9 @@ internal sealed partial class NativeAdminClient
     internal static IntPtr NewFeatureUpdate(FeatureUpdate update)
     {
         IntPtr outErr = IntPtr.Zero;
-        IntPtr upgradeType = NativeMethods.UpgradeTypeFromCode((int)update.Type, ref outErr);
+        IntPtr upgradeType = NativeMethods.UpgradeTypeFromCode((int)update.UpgradeType(), ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        IntPtr native = NativeMethods.FeatureUpdateNew(update.MaxVersionLevel, upgradeType, ref outErr);
+        IntPtr native = NativeMethods.FeatureUpdateNew(update.MaxVersionLevel(), upgradeType, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return native;
     }

@@ -96,7 +96,7 @@ public sealed class PublicAdminTfmSmokeTests
                 await TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline);
             Assert.Equal(2, all.Count);
 
-            Uuid topicId = all[Identified].TopicId;
+            Uuid topicId = all[Identified].TopicId();
 
             await TestTimeout.Run(
                 () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { Named })).All().Get(), s_deadline);

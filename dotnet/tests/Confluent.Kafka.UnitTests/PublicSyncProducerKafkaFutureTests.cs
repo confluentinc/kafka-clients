@@ -76,9 +76,9 @@ public sealed class PublicSyncProducerKafkaFutureTests
                     Assert.Equal(1, callback.Count);
                     Assert.Same(metadata, callback.Metadata);
                     Assert.Null(callback.Exception);
-                    Assert.Equal(Topic, metadata.Topic);
-                    Assert.Equal(0, metadata.Partition);
-                    Assert.Equal(0L, metadata.Offset);
+                    Assert.Equal(Topic, metadata.Topic());
+                    Assert.Equal(0, metadata.Partition());
+                    Assert.Equal(0L, metadata.Offset());
                 },
                 s_deadline);
         }
@@ -194,12 +194,12 @@ public sealed class PublicSyncProducerKafkaFutureTests
             Assert.Same(failure, callback.Exception);
             Assert.Equal(CompletionThreadName, callback.ThreadName);
             RecordMetadata placeholder = callback.Metadata ?? throw new XunitException("the callback saw null metadata");
-            Assert.Equal(ApiTopic, placeholder.Topic);
-            Assert.Equal(-1, placeholder.Partition);
-            Assert.Equal(-1L, placeholder.Offset);
-            Assert.False(placeholder.HasTimestamp);
-            Assert.Equal(-1, placeholder.SerializedKeySize);
-            Assert.Equal(-1, placeholder.SerializedValueSize);
+            Assert.Equal(ApiTopic, placeholder.Topic());
+            Assert.Equal(-1, placeholder.Partition());
+            Assert.Equal(-1L, placeholder.Offset());
+            Assert.False(placeholder.HasTimestamp());
+            Assert.Equal(-1, placeholder.SerializedKeySize());
+            Assert.Equal(-1, placeholder.SerializedValueSize());
         }
         finally
         {
@@ -227,8 +227,8 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
                 // Waited on from this thread, not the completion thread, so it completes.
                 RecordMetadata second = reentrant.Get();
-                Assert.Equal(0L, first.Offset);
-                Assert.Equal(1L, second.Offset);
+                Assert.Equal(0L, first.Offset());
+                Assert.Equal(1L, second.Offset());
             },
             s_deadline);
     }
@@ -248,7 +248,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
         TestTimeout.Run(producer.Dispose, s_deadline);
 
         Assert.True(future.IsDone);
-        Assert.Equal(0L, future.Get(s_deadline).Offset);
+        Assert.Equal(0L, future.Get(s_deadline).Offset());
         Assert.Equal(1, callback.Count);
     }
 

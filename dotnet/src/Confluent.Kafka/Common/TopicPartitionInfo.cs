@@ -22,10 +22,10 @@ namespace Confluent.Kafka.Common;
 /// <summary>
 /// Leadership and replica information for one topic partition — Java's
 /// <c>org.apache.kafka.common.TopicPartitionInfo</c>, reached through
-/// <see cref="Admin.TopicDescription.Partitions"/>.
+/// <see cref="Admin.TopicDescription.Partitions()"/>.
 /// </summary>
 /// <remarks>
-/// <see cref="Elr"/> and <see cref="LastKnownElr"/> are <see langword="null"/> when the broker
+/// <see cref="Elr()"/> and <see cref="LastKnownElr()"/> are <see langword="null"/> when the broker
 /// reported no eligible-leader-replica set, which differs from an empty set. A partition reported
 /// with only one of the two sets reads both as absent, as Python's binding does. Value equality
 /// is deliberately not implemented, although Java's class overrides <c>equals</c>, as for
@@ -34,14 +34,16 @@ namespace Confluent.Kafka.Common;
 public sealed class TopicPartitionInfo
 {
     private readonly List<Node> _replicas;
-    private readonly List<Node> _inSyncReplicas;
+    private readonly List<Node> _isr;
     private readonly List<Node>? _elr;
     private readonly List<Node>? _lastKnownElr;
+    private readonly int _partition;
+    private readonly Node? _leader;
 
     /// <summary>
     /// Creates an instance with no eligible-leader-replica information — Java's
     /// four-argument constructor, which leaves
-    /// <see cref="Elr"/> and <see cref="LastKnownElr"/> <see langword="null"/>.
+    /// <see cref="Elr()"/> and <see cref="LastKnownElr()"/> <see langword="null"/>.
     /// </summary>
     /// <param name="partition">The partition id.</param>
     /// <param name="leader">The partition leader, or <see langword="null"/> if there is none.</param>
@@ -105,10 +107,10 @@ public sealed class TopicPartitionInfo
         int partition,
         Node? leader)
     {
-        Partition = partition;
-        Leader = leader;
+        _partition = partition;
+        _leader = leader;
         _replicas = replicas;
-        _inSyncReplicas = inSyncReplicas;
+        _isr = inSyncReplicas;
         _elr = elr;
         _lastKnownElr = lastKnownElr;
     }
@@ -117,37 +119,43 @@ public sealed class TopicPartitionInfo
         nodes is null ? throw new ArgumentNullException(parameterName) : new List<Node>(nodes);
 
     /// <summary>The partition id — Java's <c>partition()</c>.</summary>
-    public int Partition { get; }
+    /// <returns>The partition id.</returns>
+    public int Partition() => _partition;
 
     /// <summary>
     /// The partition leader, or <see langword="null"/> if there is none — Java's
     /// <c>leader()</c>.
     /// </summary>
-    public Node? Leader { get; }
+    /// <returns>The partition leader, or <see langword="null"/> if there is none.</returns>
+    public Node? Leader() => _leader;
 
     /// <summary>
     /// The replicas, in replica-assignment order (the preferred replica is first) —
     /// Java's <c>replicas()</c>.
     /// </summary>
-    public IReadOnlyList<Node> Replicas => _replicas;
+    /// <returns>The replicas, in replica-assignment order (the preferred replica is first).</returns>
+    public IReadOnlyList<Node> Replicas() => _replicas;
 
     /// <summary>
     /// The in-sync replicas; the order is unspecified — Java's <c>isr()</c>.
     /// </summary>
-    /// <remarks>Named as <see cref="PartitionInfo.InSyncReplicas"/>, rather than <c>Isr</c>.</remarks>
-    public IReadOnlyList<Node> InSyncReplicas => _inSyncReplicas;
+    /// <returns>The in-sync replicas.</returns>
+    public IReadOnlyList<Node> Isr() => _isr;
 
     /// <summary>
     /// The eligible leader replicas, or <see langword="null"/> if the broker reported no
     /// such set — Java's <c>elr()</c>. The order is unspecified.
     /// </summary>
-    public IReadOnlyList<Node>? Elr => _elr;
+    /// <returns>The eligible leader replicas, or <see langword="null"/> if the broker reported no such set.</returns>
+    public IReadOnlyList<Node>? Elr() => _elr;
 
     /// <summary>
     /// The last known eligible leader replicas, or <see langword="null"/> if the broker
     /// reported no such set — Java's <c>lastKnownElr()</c>. The order is unspecified.
     /// </summary>
-    public IReadOnlyList<Node>? LastKnownElr => _lastKnownElr;
+    /// <returns>The last known eligible leader replicas, or <see langword="null"/> if the broker reported no such
+    /// set.</returns>
+    public IReadOnlyList<Node>? LastKnownElr() => _lastKnownElr;
 
     /// <summary>
     /// A diagnostic rendering matching Java's <c>toString()</c>, including its
@@ -158,10 +166,10 @@ public sealed class TopicPartitionInfo
         string.Format(
             CultureInfo.InvariantCulture,
             "(partition={0}, leader={1}, replicas={2}, isr={3}, elr={4}, lastKnownElr={5})",
-            Partition,
-            Leader,
+            Partition(),
+            Leader(),
             Join(_replicas),
-            Join(_inSyncReplicas),
+            Join(_isr),
             _elr is null ? "N/A" : Join(_elr),
             _lastKnownElr is null ? "N/A" : Join(_lastKnownElr));
 

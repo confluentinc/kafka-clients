@@ -189,9 +189,9 @@ public sealed class AdminP4SubmitArgumentTests
         altered.All().Get(s_deadline);
 
         PartitionReassignment reassignment = Assert.Single(List(admin, new[] { first })).Value;
-        Assert.Equal(new[] { 0 }, reassignment.Replicas);
-        Assert.Equal(new[] { 1 }, reassignment.AddingReplicas);
-        Assert.Empty(reassignment.RemovingReplicas);
+        Assert.Equal(new[] { 0 }, reassignment.Replicas());
+        Assert.Equal(new[] { 1 }, reassignment.AddingReplicas());
+        Assert.Empty(reassignment.RemovingReplicas());
     }
 
     [Fact]

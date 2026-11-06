@@ -56,26 +56,26 @@ public sealed class PublicConsumerPartitionMetadataTests
         {
             PartitionInfo info = FindPartition(partitions, p);
 
-            Assert.Equal(Topic, info.Topic);
-            Assert.Equal(p, info.Partition);
+            Assert.Equal(Topic, info.Topic());
+            Assert.Equal(p, info.Partition());
 
-            Assert.NotNull(info.Leader);
-            Node leader = info.Leader!;
-            Assert.Equal(LeaderId, leader.Id);
-            Assert.Equal(LeaderHost, leader.Host);
-            Assert.Equal(LeaderPort, leader.Port);
+            Assert.NotNull(info.Leader());
+            Node leader = info.Leader()!;
+            Assert.Equal(LeaderId, leader.Id());
+            Assert.Equal(LeaderHost, leader.Host());
+            Assert.Equal(LeaderPort, leader.Port());
 
-            Node replica = Assert.Single(info.Replicas);
-            Assert.Equal(LeaderId, replica.Id);
-            Assert.Equal(LeaderHost, replica.Host);
-            Assert.Equal(LeaderPort, replica.Port);
+            Node replica = Assert.Single(info.Replicas());
+            Assert.Equal(LeaderId, replica.Id());
+            Assert.Equal(LeaderHost, replica.Host());
+            Assert.Equal(LeaderPort, replica.Port());
 
-            Node isr = Assert.Single(info.InSyncReplicas);
-            Assert.Equal(LeaderId, isr.Id);
-            Assert.Equal(LeaderHost, isr.Host);
+            Node isr = Assert.Single(info.InSyncReplicas());
+            Assert.Equal(LeaderId, isr.Id());
+            Assert.Equal(LeaderHost, isr.Host());
 
-            Assert.Empty(info.OfflineReplicas);
-            Assert.Null(leader.Rack);
+            Assert.Empty(info.OfflineReplicas());
+            Assert.Null(leader.Rack());
         }
     }
 
@@ -101,7 +101,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, nonAscii);
 
         PartitionInfo info = Assert.Single(partitions);
-        Assert.Equal(nonAscii, info.Topic);
+        Assert.Equal(nonAscii, info.Topic());
     }
 
     [Fact]
@@ -115,8 +115,8 @@ public sealed class PublicConsumerPartitionMetadataTests
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
 
         PartitionInfo info = Assert.Single(partitions);
-        Assert.Equal(nonAsciiHost, info.Leader!.Host);
-        Assert.Equal(nonAsciiHost, info.Replicas[0].Host);
+        Assert.Equal(nonAsciiHost, info.Leader()!.Host());
+        Assert.Equal(nonAsciiHost, info.Replicas()[0].Host());
     }
 
     [Fact]
@@ -145,18 +145,18 @@ public sealed class PublicConsumerPartitionMetadataTests
 
         IReadOnlyList<PartitionInfo> a = map["topic-a"];
         Assert.Equal(2, a.Count);
-        Assert.Equal("topic-a", a[0].Topic);
-        Node aLeader = a[0].Leader!;
-        Assert.Equal(LeaderId, aLeader.Id);
-        Assert.Equal(LeaderHost, aLeader.Host);
+        Assert.Equal("topic-a", a[0].Topic());
+        Node aLeader = a[0].Leader()!;
+        Assert.Equal(LeaderId, aLeader.Id());
+        Assert.Equal(LeaderHost, aLeader.Host());
 
         IReadOnlyList<PartitionInfo> b = map["topic-b"];
         PartitionInfo bInfo = Assert.Single(b);
-        Assert.Equal("topic-b", bInfo.Topic);
-        Node bLeader = bInfo.Leader!;
-        Assert.Equal(9, bLeader.Id);
-        Assert.Equal("broker-2", bLeader.Host);
-        Assert.Equal(9093, bLeader.Port);
+        Assert.Equal("topic-b", bInfo.Topic());
+        Node bLeader = bInfo.Leader()!;
+        Assert.Equal(9, bLeader.Id());
+        Assert.Equal("broker-2", bLeader.Host());
+        Assert.Equal(9093, bLeader.Port());
     }
 
     [Fact]
@@ -181,7 +181,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
 
         Assert.True(map.ContainsKey(nonAscii));
-        Assert.Equal(nonAscii, map[nonAscii][0].Topic);
+        Assert.Equal(nonAscii, map[nonAscii][0].Topic());
     }
 
     [Fact]
@@ -269,7 +269,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         foreach (PartitionInfo info in partitions)
         {
-            if (info.Partition == partition)
+            if (info.Partition() == partition)
             {
                 return info;
             }

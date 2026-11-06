@@ -79,7 +79,7 @@ public sealed class TopicSetupTests
     {
         IReadOnlyDictionary<string, TopicDescription> described =
             await admin.DescribeTopics(new[] { topic }).AllTopicNames()!.Value.Get();
-        return described[topic].Partitions.Count;
+        return described[topic].Partitions().Count;
     }
 
     [Fact]
@@ -130,7 +130,7 @@ public sealed class TopicSetupTests
         Assert.Equal(new[] { ("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
         IReadOnlyDictionary<string, TopicDescription> described =
             await mock.DescribeTopics(new[] { "t" }).AllTopicNames()!.Value.Get();
-        Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions).Replicas.Count);
+        Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions()).Replicas().Count);
     }
 
     [Fact]

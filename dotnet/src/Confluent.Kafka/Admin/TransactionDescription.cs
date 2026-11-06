@@ -24,13 +24,19 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.TransactionDescription</c>.
 /// </summary>
 /// <remarks>
-/// <see cref="TransactionStartTimeMs"/> is Java's <c>OptionalLong</c>: absent is
-/// <see langword="null"/>, never <c>0</c> or <c>-1</c>. <see cref="TransactionTimeoutMs"/> is a
+/// <see cref="TransactionStartTimeMs()"/> is Java's <c>OptionalLong</c>: absent is
+/// <see langword="null"/>, never <c>0</c> or <c>-1</c>. <see cref="TransactionTimeoutMs()"/> is a
 /// <see langword="long"/> because Java's is, although the wire field is an int.
 /// </remarks>
 public sealed class TransactionDescription
 {
     private readonly List<TopicPartition> _topicPartitions;
+    private readonly int _coordinatorId;
+    private readonly TransactionState _state;
+    private readonly long _producerId;
+    private readonly int _producerEpoch;
+    private readonly long _transactionTimeoutMs;
+    private readonly long? _transactionStartTimeMs;
 
     /// <summary>Creates a transaction description — Java's constructor.</summary>
     /// <param name="coordinatorId">The id of the transaction coordinator broker.</param>
@@ -43,7 +49,7 @@ public sealed class TransactionDescription
     /// </param>
     /// <param name="topicPartitions">The partitions enlisted in the transaction; null means none.</param>
     /// <remarks>
-    /// A null <paramref name="topicPartitions"/> becomes an empty <see cref="TopicPartitions"/>,
+    /// A null <paramref name="topicPartitions"/> becomes an empty <see cref="TopicPartitions()"/>,
     /// where Java's <c>topicPartitions()</c> would return null: a recorded deviation. Repeated
     /// partitions are kept once, as Java's <c>Set</c> field keeps them.
     /// </remarks>
@@ -56,12 +62,12 @@ public sealed class TransactionDescription
         long? transactionStartTimeMs,
         IEnumerable<TopicPartition>? topicPartitions)
     {
-        CoordinatorId = coordinatorId;
-        State = state;
-        ProducerId = producerId;
-        ProducerEpoch = producerEpoch;
-        TransactionTimeoutMs = transactionTimeoutMs;
-        TransactionStartTimeMs = transactionStartTimeMs;
+        _coordinatorId = coordinatorId;
+        _state = state;
+        _producerId = producerId;
+        _producerEpoch = producerEpoch;
+        _transactionTimeoutMs = transactionTimeoutMs;
+        _transactionStartTimeMs = transactionStartTimeMs;
 
         _topicPartitions = new List<TopicPartition>();
         if (topicPartitions is not null)
@@ -78,43 +84,50 @@ public sealed class TransactionDescription
     }
 
     /// <summary>The coordinator broker id — Java's <c>coordinatorId()</c>.</summary>
-    public int CoordinatorId { get; }
+    /// <returns>The coordinator broker id.</returns>
+    public int CoordinatorId() => _coordinatorId;
 
     /// <summary>The transaction state — Java's <c>state()</c>.</summary>
-    public TransactionState State { get; }
+    /// <returns>The transaction state.</returns>
+    public TransactionState State() => _state;
 
     /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
-    public long ProducerId { get; }
+    /// <returns>The producer id.</returns>
+    public long ProducerId() => _producerId;
 
     /// <summary>The producer epoch — Java's <c>producerEpoch()</c>.</summary>
-    public int ProducerEpoch { get; }
+    /// <returns>The producer epoch.</returns>
+    public int ProducerEpoch() => _producerEpoch;
 
     /// <summary>The transaction timeout in ms — Java's <c>transactionTimeoutMs()</c>.</summary>
-    public long TransactionTimeoutMs { get; }
+    /// <returns>The transaction timeout in ms.</returns>
+    public long TransactionTimeoutMs() => _transactionTimeoutMs;
 
     /// <summary>
     /// When the transaction started in ms, or <see langword="null"/> when absent — Java's
     /// <c>transactionStartTimeMs()</c>.
     /// </summary>
-    public long? TransactionStartTimeMs { get; }
+    /// <returns>When the transaction started in ms, or <see langword="null"/> when absent.</returns>
+    public long? TransactionStartTimeMs() => _transactionStartTimeMs;
 
     /// <summary>
     /// The partitions enlisted in the transaction — Java's <c>topicPartitions()</c>. Never
     /// <see langword="null"/>.
     /// </summary>
-    public IReadOnlyCollection<TopicPartition> TopicPartitions => _topicPartitions;
+    /// <returns>The partitions enlisted in the transaction.</returns>
+    public IReadOnlyCollection<TopicPartition> TopicPartitions() => _topicPartitions;
 
     /// <summary>Value equality over all seven fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same transaction.</returns>
     public override bool Equals(object? obj) =>
         obj is TransactionDescription other
-        && CoordinatorId == other.CoordinatorId
-        && ProducerId == other.ProducerId
-        && ProducerEpoch == other.ProducerEpoch
-        && TransactionTimeoutMs == other.TransactionTimeoutMs
-        && State == other.State
-        && TransactionStartTimeMs == other.TransactionStartTimeMs
+        && _coordinatorId == other._coordinatorId
+        && _producerId == other._producerId
+        && _producerEpoch == other._producerEpoch
+        && _transactionTimeoutMs == other._transactionTimeoutMs
+        && _state == other._state
+        && _transactionStartTimeMs == other._transactionStartTimeMs
         && _topicPartitions.Count == other._topicPartitions.Count
         && new HashSet<TopicPartition>(_topicPartitions).SetEquals(other._topicPartitions);
 
@@ -124,12 +137,12 @@ public sealed class TransactionDescription
     {
         unchecked
         {
-            int hash = CoordinatorId;
-            hash = (hash * 31) + (int)State;
-            hash = (hash * 31) + ProducerId.GetHashCode();
-            hash = (hash * 31) + ProducerEpoch;
-            hash = (hash * 31) + TransactionTimeoutMs.GetHashCode();
-            hash = (hash * 31) + (TransactionStartTimeMs?.GetHashCode() ?? 0);
+            int hash = _coordinatorId;
+            hash = (hash * 31) + (int)_state;
+            hash = (hash * 31) + _producerId.GetHashCode();
+            hash = (hash * 31) + _producerEpoch;
+            hash = (hash * 31) + _transactionTimeoutMs.GetHashCode();
+            hash = (hash * 31) + (_transactionStartTimeMs?.GetHashCode() ?? 0);
 
             int partitions = 0;
             foreach (TopicPartition topicPartition in _topicPartitions)
@@ -151,13 +164,13 @@ public sealed class TransactionDescription
             CultureInfo.InvariantCulture,
             "TransactionDescription(coordinatorId={0}, state={1}, producerId={2}, producerEpoch={3}"
                 + ", transactionTimeoutMs={4}, transactionStartTimeMs={5}, topicPartitions=[{6}])",
-            CoordinatorId,
-            TransactionMarshal.NameFromState(State) ?? State.ToString(),
-            ProducerId,
-            ProducerEpoch,
-            TransactionTimeoutMs,
-            TransactionStartTimeMs.HasValue
-                ? "OptionalLong[" + TransactionStartTimeMs.Value.ToString(CultureInfo.InvariantCulture) + "]"
+            _coordinatorId,
+            TransactionMarshal.NameFromState(_state) ?? _state.ToString(),
+            _producerId,
+            _producerEpoch,
+            _transactionTimeoutMs,
+            _transactionStartTimeMs.HasValue
+                ? "OptionalLong[" + _transactionStartTimeMs.Value.ToString(CultureInfo.InvariantCulture) + "]"
                 : "OptionalLong.empty",
             string.Join(", ", _topicPartitions));
 }

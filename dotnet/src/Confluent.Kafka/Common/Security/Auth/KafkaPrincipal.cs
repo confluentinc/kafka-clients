@@ -22,13 +22,16 @@ namespace Confluent.Kafka.Common.Security.Auth;
 /// <c>org.apache.kafka.common.security.auth.KafkaPrincipal</c>.
 /// </summary>
 /// <remarks>
-/// Java's <c>tokenAuthenticated</c> field is mutable; this type is immutable (a recorded
-/// deviation). Java's <c>SecurityUtils.parseKafkaPrincipal</c> string parser is not bound.
+/// Java's <c>SecurityUtils.parseKafkaPrincipal</c> string parser is not bound.
 /// </remarks>
 public sealed class KafkaPrincipal
 {
     /// <summary>The <c>"User"</c> principal type — Java's <c>USER_TYPE</c>.</summary>
     public const string USER_TYPE = "User";
+
+    private readonly string _principalType;
+    private readonly string _name;
+    private bool _tokenAuthenticated;
 
     /// <summary>Creates a principal that was not token-authenticated — Java's two-argument constructor.</summary>
     /// <param name="principalType">The principal type, e.g. <see cref="USER_TYPE"/>.</param>
@@ -48,37 +51,47 @@ public sealed class KafkaPrincipal
     /// </exception>
     public KafkaPrincipal(string principalType, string name, bool tokenAuthenticated)
     {
-        PrincipalType = principalType
+        _principalType = principalType
             ?? throw new ArgumentNullException(nameof(principalType), "Principal type cannot be null");
-        Name = name ?? throw new ArgumentNullException(nameof(name), "Principal name cannot be null");
-        TokenAuthenticated = tokenAuthenticated;
+        _name = name ?? throw new ArgumentNullException(nameof(name), "Principal name cannot be null");
+        _tokenAuthenticated = tokenAuthenticated;
     }
 
     /// <summary>The anonymous principal — Java's <c>ANONYMOUS</c>.</summary>
     public static KafkaPrincipal ANONYMOUS { get; } = new KafkaPrincipal(USER_TYPE, "ANONYMOUS");
 
     /// <summary>The principal type — Java's <c>getPrincipalType()</c>.</summary>
-    public string PrincipalType { get; }
+    /// <returns>The principal type.</returns>
+    public string GetPrincipalType() => _principalType;
 
     /// <summary>The principal name — Java's <c>getName()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The principal name.</returns>
+    public string GetName() => _name;
+
+    /// <summary>
+    /// Records whether the principal was authenticated by a delegation token — Java's
+    /// <c>tokenAuthenticated(boolean)</c>. Equality and the hash code do not read it.
+    /// </summary>
+    /// <param name="tokenAuthenticated">Whether the principal was authenticated by a delegation token.</param>
+    public void TokenAuthenticated(bool tokenAuthenticated) => _tokenAuthenticated = tokenAuthenticated;
 
     /// <summary>
     /// Whether the principal was authenticated by a delegation token — Java's
     /// <c>tokenAuthenticated()</c>.
     /// </summary>
-    public bool TokenAuthenticated { get; }
+    /// <returns>Whether the principal was authenticated by a delegation token.</returns>
+    public bool TokenAuthenticated() => _tokenAuthenticated;
 
     /// <summary>
-    /// Value equality over <see cref="PrincipalType"/> and <see cref="Name"/> only — Java's
+    /// Value equality over <see cref="GetPrincipalType()"/> and <see cref="GetName()"/> only — Java's
     /// <c>equals</c>, which leaves out <c>tokenAuthenticated</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same principal.</returns>
     public override bool Equals(object? obj) =>
         obj is KafkaPrincipal other
-        && string.Equals(PrincipalType, other.PrincipalType, StringComparison.Ordinal)
-        && string.Equals(Name, other.Name, StringComparison.Ordinal);
+        && string.Equals(GetPrincipalType(), other.GetPrincipalType(), StringComparison.Ordinal)
+        && string.Equals(GetName(), other.GetName(), StringComparison.Ordinal);
 
     /// <summary>The hash of the same two fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -86,13 +99,13 @@ public sealed class KafkaPrincipal
     {
         unchecked
         {
-            int hash = StringComparer.Ordinal.GetHashCode(PrincipalType);
-            return (hash * 31) + StringComparer.Ordinal.GetHashCode(Name);
+            int hash = StringComparer.Ordinal.GetHashCode(GetPrincipalType());
+            return (hash * 31) + StringComparer.Ordinal.GetHashCode(GetName());
         }
     }
 
     /// <summary><c>"{type}:{name}"</c> — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
-        string.Format(CultureInfo.InvariantCulture, "{0}:{1}", PrincipalType, Name);
+        string.Format(CultureInfo.InvariantCulture, "{0}:{1}", GetPrincipalType(), GetName());
 }

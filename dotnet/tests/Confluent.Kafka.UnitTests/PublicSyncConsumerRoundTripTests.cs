@@ -59,14 +59,14 @@ public sealed class PublicSyncConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(Topic, record.Topic);
-        Assert.Equal(Partition, record.Partition);
-        Assert.Equal(42, record.Offset);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
-        Assert.Empty(record.Headers);
+        Assert.Equal(Topic, record.Topic());
+        Assert.Equal(Partition, record.Partition());
+        Assert.Equal(42, record.Offset());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
+        Assert.Empty(record.Headers());
         Assert.True(
-            record.TimestampType is TimestampType.NO_TIMESTAMP_TYPE
+            record.TimestampType() is TimestampType.NO_TIMESTAMP_TYPE
                 or TimestampType.CREATE_TIME
                 or TimestampType.LOG_APPEND_TIME);
     }
@@ -84,9 +84,9 @@ public sealed class PublicSyncConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(nonAsciiTopic, record.Topic);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
+        Assert.Equal(nonAsciiTopic, record.Topic());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
     }
 
     [Fact]
@@ -97,8 +97,8 @@ public sealed class PublicSyncConsumerRoundTripTests
         consumer.AddRecord(Topic, Partition, offset: 1, key: null, value: null);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
-        Assert.Null(record.Key);
-        Assert.Null(record.Value);
+        Assert.Null(record.Key());
+        Assert.Null(record.Value());
     }
 
     [Fact]
@@ -109,10 +109,10 @@ public sealed class PublicSyncConsumerRoundTripTests
         consumer.AddRecord(Topic, Partition, offset: 2, key: Array.Empty<byte>(), value: Array.Empty<byte>());
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
-        Assert.NotNull(record.Key);
-        Assert.NotNull(record.Value);
-        Assert.Empty(record.Key!);
-        Assert.Empty(record.Value!);
+        Assert.NotNull(record.Key());
+        Assert.NotNull(record.Value());
+        Assert.Empty(record.Key()!);
+        Assert.Empty(record.Value()!);
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public sealed class PublicSyncConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         Assert.Equal(5, records.Count);
-        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset).ToArray());
+        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset()).ToArray());
     }
 
     [Fact]
