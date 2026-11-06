@@ -82,7 +82,7 @@ internal sealed class NativeCallArguments : IDisposable
         return Track(handle, Kind.OffsetAndMetadata, ref outErr);
     }
 
-    internal IntPtr OffsetMap(NativeConsumer.CommitOffsetsSnapshot snapshot)
+    internal IntPtr OffsetMap(OffsetsSnapshot snapshot)
     {
         IntPtr map = Map();
         for (int i = 0; i < snapshot.Count; i++)

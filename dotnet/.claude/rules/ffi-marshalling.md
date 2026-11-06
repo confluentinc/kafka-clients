@@ -1048,9 +1048,14 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
         queues each completed record's delivery callback (BH:38957-38968) where Java's mock runs
         it inline, as Python's async mock schedules it; it runs after the calling callback
         returns. `Close` from any mock callback returns at once and leaves the teardown to the
-        `CompletionThread`, as on the real producer. From an async mock callback after an
-        `await`, a commit or an abort keeps the flag: it waits with the `max.block.ms` deadline
-        and ends with the Kafka `TimeoutException` below. That is a recorded deviation from Java's and
+        `CompletionThread`, as on the real producer. The transaction calls follow the same split:
+        from a sync callback the drain runs, all five take the blocking form; from a mock callback
+        the core cannot see, `InitTransactions`, `BeginTransaction` and
+        `SendOffsetsToTransaction`, which wait for no report, take the blocking form too and
+        complete at once (it runs no queued callback, `rust/src/ffi/producer/mod.rs` `with_txn_control`), while a commit or an abort
+        keeps the flag: it waits with the `max.block.ms` deadline (60000 on a mock) and ends with
+        the Kafka `TimeoutException` below, since its blocking form would wait for the calling
+        callback's own report without a bound. That is a recorded deviation from Java's and
         Python's mocks, which only a `_cb` form that skips the report wait would remove.
       - A queued wait waits at most `max.block.ms` (read from the config dictionary, default
         60000): from a sync callback `PartitionsFor` and the five transaction operations, whose
