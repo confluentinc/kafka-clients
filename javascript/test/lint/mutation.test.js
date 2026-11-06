@@ -242,6 +242,17 @@ MUTATIONS.push(
       ),
   },
   {
+    rule: 'check-cb-twin-only',
+    what: "the hand-over's future read through get_cb",
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (value != NULL) FFI_DISCARD(kafka_common_KafkaFuture_destroy_err(value, &ffi_err));',
+        '    if (value != NULL) kafka_common_KafkaFuture_get_cb(value, send_on_future, ctx);\n    if (value != NULL) FFI_DISCARD(kafka_common_KafkaFuture_destroy_err(value, &ffi_err));',
+      ),
+  },
+  {
     rule: 'check-out-err',
     what: 'an FFI_ERR dropped',
     apply: (root) =>

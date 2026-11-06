@@ -21,6 +21,10 @@
 // test/static/header_conformance.test.js's fixed producer list to every
 // client. The one exception is listed with its reason and the exact call it
 // allows; an entry that allows nothing is a finding.
+//
+// It also owns javascript/CLAUDE.md boundary rule 5 (never read the future):
+// no function named by `FORBIDDEN` is called in src/, its `_cb` twins
+// included (`kafka_common_KafkaFuture_get_cb`), which read the future too.
 
 const { cModel, applyAllowlist } = require('../c_model');
 
@@ -34,9 +38,20 @@ const ALLOWED = [
   },
 ];
 
+/** The header functions src/ never calls, whatever their form: each prefix with its reason. */
+const FORBIDDEN = [
+  {
+    prefix: 'kafka_common_KafkaFuture_get',
+    reason:
+      "never read the future (javascript/CLAUDE.md rule 5): a send's future is destroyed unread, the delivery " +
+      "result comes from the record's Callback_t",
+  },
+];
+
 module.exports = {
   name: 'check-cb-twin-only',
-  kinds: ['blocking-call', 'cb-unused-allowance'],
+  kinds: ['blocking-call', 'forbidden-call', 'cb-unused-allowance'],
+  FORBIDDEN,
   needs: ['src', 'header'],
   hint: 'Call the _cb twin and complete in its callback (javascript/CLAUDE.md boundary rule 4).',
   ALLOWED,
@@ -54,6 +69,11 @@ module.exports = {
     for (const c of calls) {
       if (!header.has(c.name) || c.directive) continue;
       checked += 1;
+      const forbidden = this.FORBIDDEN.find((f) => c.name.startsWith(f.prefix));
+      if (forbidden) {
+        raw.push({ kind: 'forbidden-call', subject: `${c.file}:${c.line}`, message: `${c.function} calls ${c.name}: ${forbidden.reason}` });
+        continue;
+      }
       const twin = blocking.get(c.name);
       if (!twin) continue;
       raw.push({
