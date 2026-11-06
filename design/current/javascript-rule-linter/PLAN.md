@@ -315,46 +315,77 @@ properties are checked against the Java parameters of their names.
   `lib/producer/`.
 
 **As built in P4.** Every N rule reads `scripts/lint/c_model.js` (the bodies, calls and
-header prototypes, with their doc comments). Each allowlist entry carries its reason, and
-an entry that waives nothing is the rule's `*-unused-allowance` finding.
+header prototypes, with their doc comments). Bodies are keyed by file and name, and a call
+reaches the definition C's linkage gives it (`resolve`): its own file's first, then a
+non-`static` one in another file, so two files' `static` functions of one name are each
+checked. A call in a `#define` body carries the macro's name. Each allowlist entry carries
+its reason, and an entry that waives nothing is the rule's `*-unused-allowance` finding.
 
 - A C call site is named `file:function:callee#n`, `n` its rank among that callee's calls
   in the function (from 1): N1's subjects and the N1 / N7 / N8 allowlist keys use it, so a
   key names one call and survives edits elsewhere in the file.
-- N1: a slot is read when the call is an argument of `FFI_ERR` / `FFI_SET` /
-  `FFI_DISCARD` (possibly behind a cast), when `ffi_take(&slot)` comes in the next
-  statement, or when the slot is the calling function's own `out_err` parameter.
-- N2: the blocking forms are `f` and `f_err` for every header `f_cb`. One entry: the
-  finalizer's `kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)` in
-  `producer_force_close`.
-- N3: the hooks are the functions passed to `__set_callbacks_notify_err`; a hook that
-  calls nothing (the finalizer's no-op) passes. The guard is the positive
-  `if (q->notify_open)`; a negated one is `notify-unguarded`.
+- N1: the calls checked are those of a header function ending in `out_err`, of a src/
+  function that passes a `kafka_common_Error_t **` parameter of its own on as a slot
+  (a forwarder, `producer_execute`, found to a fixed point), and through a function
+  pointer whose typedef takes a slot (`cbq_execute_fn`, `q->execute(...)`). A slot is
+  read when the call is an argument of `FFI_ERR` / `FFI_SET` / `FFI_DISCARD` (possibly
+  behind a cast) with the slot those macros read, `&ffi_err`; when `ffi_take(&slot)`
+  comes in the next statement; or when the slot is a forwarder's own parameter, whose
+  callers are checked in turn.
+- N2: the blocking forms are `f` and `f_err` for every header `f_cb`, in function bodies
+  and in `#define` bodies (src/*.c and src/*.h), a macro's call checked at its
+  definition. One entry: the finalizer's
+  `kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)` in
+  `producer_force_close`. N2 also owns rule 5: `FORBIDDEN` makes every
+  `kafka_common_KafkaFuture_get*` call a `forbidden-call`, the `_cb` forms included.
+- N3: the hooks are the functions passed to `__set_callbacks_notify_err`. A hook is,
+  statement for statement, an optional declaration casting the opaque to the queue,
+  `pthread_mutex_lock(&q->notify_mtx);`, `if (q->notify_open)` guarding exactly one
+  `napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_nonblocking);` (braced or
+  not), and `pthread_mutex_unlock(&q->notify_mtx);`. A negated or compared guard is
+  `notify-unguarded`; any other statement, a `return` included, is `notify-body`, which
+  names the first stray one. A hook that calls nothing (the finalizer's no-op) may only
+  `(void)` its opaque.
 - N4: `__execute_callbacks_err` is called from the queue's executor (`producer_execute`,
   listed), which nothing calls directly, and `q->execute` is called only in `cbq_drain`.
   `cbq_drain`'s callers are listed (`call_js`, `js_producer_pump`). Its loop, `while`,
-  `for` or `do`, holds no destroy (no loop is `drain-missing`), and no function that runs
-  inside the drain (a completion handed to a `_cb` twin or to an interface's constructor)
-  reaches a client's destroy through the C call graph (`destroy-in-completion`).
+  `for` or `do`, holds no destroy (no loop is `drain-missing`) and no call through
+  `->after_drain` (`after-drain-in-loop`). What runs inside the drain reaches no client
+  destroy through the C call graph: the executor each client hands to `cbq_init` (its
+  `cbq_execute_fn` argument) and every src function the loop calls (`destroy-in-drain`),
+  and every completion handed to a `_cb` twin or to an interface's constructor
+  (`destroy-in-completion`). A `cbq_init` call with no executor the rule can follow is
+  `drain-missing`. The after-drain hook runs after the loop and may destroy.
 - N5: in C, a delivery completion is a function src/ hands to an interface's constructor
   (`..._new` / `..._new_err`) as an `_fn_t`; it calls `call_ref` once and
-  `__set_callback_result_err` once, after it. In TypeScript, the function handed to a
-  `native.<fn>` call that completes a future (`['_complete']`) calls the user callback
-  (a value of the `Callback` type) once, before it. The C report sits under an
-  `if (!…destroying)` guard (rule 6: no report once destroy has begun).
+  `__set_callback_result_err` once, after it, the report being the statement an
+  `if (!…destroying)` guards or inside its braced block (rule 6: no report once destroy
+  has begun). In TypeScript, a delivery callback is an argument for a native parameter
+  whose function type takes a `RecordMetadata`, plus any function argument of a
+  `native.<fn>` call that completes a future (`['_complete']`). It resolves to a function
+  (a literal, or a `const`, `readonly` or module function of lib/), else
+  `completion-unresolved`; the lib/ functions it calls are followed in call order; and
+  it calls the user callback (a value of the `Callback` type itself) once, before it
+  completes the future, once.
 - N6: **owned** is a non-const `kafka_..._t *` returned by a header function (an `__as_`
   view excepted), an `out_err` error, or a non-const handle parameter of a completion of a
   `_cb` twin. Each owned type is destroyed somewhere (`<Type>_destroy[_err]`), or handed to
   a header function whose doc says that parameter is "(consumed)". **Borrowed** is a
   `const` handle parameter of an interface method src/ implements; it is never passed to
-  a destroy, or to a src/ function that destroys that parameter (found to a fixed point).
+  a destroy, or to a src/ function that destroys that parameter (found to a fixed point),
+  arguments compared without their casts and parentheses.
 - N7 and N8: the lists are in the rules (`ALLOWED`) with their reasons. N7 covers
   allocations on the send path; a copy (`memcpy`, `memmove`, `strdup`,
-  `napi_create_buffer_copy`) is never allowed. N8 looks for lock identifiers outside
+  `napi_create_buffer_copy`) is never allowed. In lib/'s hand-written modules, N7 also
+  reports a copy of a value typed as bytes (a `Uint8Array`, a `Buffer`, or a union
+  holding one, such as `Data`): `Buffer.from(x)`, `Buffer.copyBytesFrom(x)`,
+  `new Uint8Array(x)`, `Uint8Array.from(x)`, `x.slice()`; encoding a `string` and a view
+  over the same memory are no copy. N8 looks for lock identifiers outside
   `callback_queue.c` (a declaration keyed by its declarator,
   `src/util.h:CallbackQueue.notify_mtx`), and for array / `Map` / `Set` class fields,
   constructor parameter properties and module variables, and cap-named constants, in
-  `lib/producer/`. A2's `TEST_ONLY` entry also checks that its test still calls the
+  every hand-written module of `lib/` (the generated ones, marked `GENERATED, DO NOT
+  EDIT`, are not read). A2's `TEST_ONLY` entry also checks that its test still calls the
   registration.
 - Known limit: the C tokenizer reads both sides of an `#if` / `#ifdef`, so a call under a
   disabled branch counts as made.
