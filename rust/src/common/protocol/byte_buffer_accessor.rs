@@ -337,6 +337,24 @@ mod tests {
         assert_eq!(read_data, data);
     }
 
+    /// Java's `testReadArray` / `testReadByteBuffer` reject a negative size: a
+    /// 5-byte unsigned varint with the sign bit set, read as an unknown tagged
+    /// field's size. Here the size stays unsigned, so it is rejected as larger
+    /// than the bytes remaining.
+    #[test]
+    fn test_read_unknown_tagged_field_with_sign_bit_size() {
+        let mut buf = ByteBufferAccessor::new(Vec::with_capacity(8));
+        buf.write_unsigned_varint(u32::MAX).unwrap();
+        buf.flip();
+        let size = buf.read_unsigned_varint().unwrap();
+        assert_eq!(size as i32, -1);
+        let error = buf.read_unknown_tagged_field(Vec::new(), 0, size).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Error reading byte array of 4294967295 byte(s): only 0 byte(s) available"
+        );
+    }
+
     #[test]
     fn test_read_write_varint() {
         let mut buf = ByteBufferAccessor::new(Vec::with_capacity(20));
