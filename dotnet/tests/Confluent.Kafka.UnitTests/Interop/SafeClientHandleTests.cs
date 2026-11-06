@@ -37,7 +37,9 @@ public sealed class SafeClientHandleTests
         (IntPtr view, IntPtr classPointer) = FakePointers();
         var destroyed = new List<IntPtr>();
         var handle = new RecordingClientHandle(view, classPointer, destroyed);
+#pragma warning disable CKRDA0005 // The test reads the view the handle holds; nothing passes it to native code.
         Assert.Equal(view, handle.DangerousGetHandle());
+#pragma warning restore CKRDA0005
 
         handle.CloseExplicitly();
 

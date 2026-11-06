@@ -48,7 +48,9 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description: "The GC sees only managed references, not the native thunk of a delegate. A delegate handed to a "
             + "P/Invoke, or to any parameter of a native callback type, is a static readonly field, null (a Java "
-            + "default) or a parameter of the same native callback type forwarded as it is, whose callers this rule checks.");
+            + "default) or a parameter of the same native callback type that the method never writes, whose callers "
+            + "this rule checks. Does not cover: a delegate that reaches native code another way "
+            + "(Marshal.GetFunctionPointerForDelegate, a struct field), and a parameter written through a ref alias.");
 
     // Reported when the compilation ends: a callback's body is judged from the bodies of the methods it calls, which
     // can sit in other files of a partial type.
@@ -64,7 +66,10 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             + "whose catch and finally blocks only make calls; or one call. Each call is a non-virtual call of a "
             + "method of the same type whose body is one of these, and passes only parameters, locals, constants, "
             + "static fields of the BCL's primitive types and conversions of them that cannot throw. A callback is "
-            + "not an overridable method.",
+            + "not an overridable method. Does not cover: a delegate created by reflection or from a function pointer, "
+            + "and what the runtime itself can raise anywhere (a stack overflow, an out-of-memory). It reports, "
+            + "although they may be safe: forwarding more than three calls deep or to another type, and any other "
+            + "argument or body shape.",
         customTags: WellKnownDiagnosticTags.CompilationEnd);
 
     /// <inheritdoc/>
@@ -134,7 +139,8 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             if ((value.ConstantValue.HasValue && value.ConstantValue.Value is null)
                 || value is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } }
                 || (value is IParameterReferenceOperation forwarded
-                    && IsNativeCallbackType(forwarded.Parameter.Type, unmanagedFunctionPointer)))
+                    && IsNativeCallbackType(forwarded.Parameter.Type, unmanagedFunctionPointer)
+                    && !IsWritten(forwarded.Parameter, context.Operation)))
             {
                 continue;
             }
@@ -142,6 +148,23 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             context.ReportDiagnostic(Diagnostic.Create(
                 s_rootedDelegate, argument.Syntax.GetLocation(), target.Name, argument.Parameter.Name));
         }
+    }
+
+    // A parameter is forwarded as its caller passed it only when nothing in the method writes it: an assignment, a
+    // deconstruction, or a ref or out argument.
+    private static bool IsWritten(IParameterSymbol parameter, IOperation use)
+    {
+        IOperation root = use;
+        while (root.Parent is not null)
+        {
+            root = root.Parent;
+        }
+
+        return root.Descendants().OfType<IParameterReferenceOperation>().Any(reference =>
+            SymbolEqualityComparer.Default.Equals(reference.Parameter, parameter)
+            && (reference.Parent is IAssignmentOperation assignment && assignment.Target == reference
+                || reference.Parent is ITupleOperation { Parent: IDeconstructionAssignmentOperation }
+                || reference.Parent is IArgumentOperation { Parameter.RefKind: RefKind.Ref or RefKind.Out }));
     }
 
     private static void RecordMethodBody(
@@ -382,7 +405,8 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
 
         // The method a statement calls when the statement is only that call, a non-virtual call of a method of the
         // owner type on no receiver or this, with arguments that cannot throw; null otherwise. A virtual call can
-        // reach an override whose body this rule never sees.
+        // reach an override whose body this rule never sees. The owner is compared as constructed: C<int> and
+        // C<string> run separate static constructors.
         private static ISymbol? Call(IOperation statement, INamedTypeSymbol owner)
         {
             IOperation? expression = statement switch
@@ -398,7 +422,7 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
 
             if (expression is not IInvocationOperation call
                 || call.IsVirtual
-                || !SymbolEqualityComparer.Default.Equals(call.TargetMethod.ContainingType.OriginalDefinition, owner.OriginalDefinition)
+                || !SymbolEqualityComparer.Default.Equals(call.TargetMethod.ContainingType, owner)
                 || call.Instance is not (null or IInstanceReferenceOperation)
                 || !call.Arguments.All(argument => ArgumentCannotThrow(argument.Value)))
             {
@@ -434,6 +458,17 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
 
             Conversion kind = conversion.GetConversion();
             if (kind.IsUserDefined)
+            {
+                return false;
+            }
+
+            // decimal's conversions check their range in any context: from a float or a double, and to an integral,
+            // char or enum type, they can throw OverflowException.
+            SpecialType from = conversion.Operand.Type?.SpecialType ?? SpecialType.None;
+            SpecialType to = conversion.Type?.SpecialType ?? SpecialType.None;
+            if ((kind.IsNumeric || kind.IsEnumeration)
+                && ((from == SpecialType.System_Decimal && to is not (SpecialType.System_Single or SpecialType.System_Double))
+                    || (to == SpecialType.System_Decimal && from is SpecialType.System_Single or SpecialType.System_Double)))
             {
                 return false;
             }

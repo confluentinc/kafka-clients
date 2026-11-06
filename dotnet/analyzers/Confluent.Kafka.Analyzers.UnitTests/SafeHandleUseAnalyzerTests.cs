@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Threading.Tasks;
+
+using Microsoft.CodeAnalysis.Testing;
 
 using Xunit;
 
@@ -21,7 +24,7 @@ using Verifier = Confluent.Kafka.Analyzers.UnitTests.AnalyzerVerifier<Confluent.
 namespace Confluent.Kafka.Analyzers.UnitTests;
 
 /// <summary>
-/// CKRDA0005 keeps a client handle's raw pointer out of a P/Invoke, and CKRDA0006 requires every
+/// CKRDA0005 allows a client handle's raw pointer only in <c>ReleaseHandle</c>, and CKRDA0006 requires every
 /// <c>DangerousAddRef</c> to be taken inside a <c>try</c> whose <c>finally</c> block releases it when it succeeded.
 /// </summary>
 public sealed class SafeHandleUseAnalyzerTests
@@ -113,28 +116,33 @@ public sealed class SafeHandleUseAnalyzerTests
                 }
                 """,
             Verifier.Diagnostic(DiagnosticIds.RawClientHandle).WithLocation(0)
-                .WithMessage("'Destroy' is passed 'producer.DangerousGetHandle()' instead of the SafeHandle, so nothing keeps the handle alive during the call"));
+                .WithMessage("'producer.DangerousGetHandle()' takes a client handle's raw pointer; pass the SafeHandle to a P/Invoke, so the marshaller keeps the handle alive during the call"));
 
     [Theory]
-    [InlineData("IntPtr raw = producer.DangerousGetHandle();")]
-    [InlineData("IntPtr raw;\nraw = producer.DangerousGetHandle();")]
-    [InlineData("var raw = (IntPtr)producer.DangerousGetHandle();")]
-    public Task AClientHandlesRawPointerPassedThroughALocal_IsReported(string store) =>
+    [InlineData("IntPtr raw = {|#0:producer.DangerousGetHandle()|};\nNativeMethods.Destroy(raw);")]
+    [InlineData("IntPtr raw = {|#0:producer.DangerousGetHandle()|};\nIntPtr copy = raw;\nNativeMethods.Destroy(copy);")]
+    [InlineData("IntPtr raw = map.DangerousGetHandle();\nNativeMethods.Destroy(raw);\nraw = {|#0:producer.DangerousGetHandle()|};")]
+    [InlineData("s_raw = {|#0:producer.DangerousGetHandle()|};")]
+    [InlineData("Keep({|#0:producer.DangerousGetHandle()|});")]
+    public Task AClientHandlesRawPointer_IsReportedWhereverItGoes(string code) =>
         Verifier.VerifyAsync(
             Handles + $$"""
                 namespace Confluent.Kafka.Internal.Interop
                 {
                     internal static class C
                     {
-                        internal static void Run(SafeProducerHandle producer)
+                        private static IntPtr s_raw;
+
+                        internal static void Run(SafeProducerHandle producer, SafeMapHandle map)
                         {
-                            {{store}}
-                            NativeMethods.Destroy({|#0:raw|});
+                            {{code}}
                         }
+
+                        private static void Keep(IntPtr pointer) => s_raw = pointer;
                     }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.RawClientHandle).WithLocation(0).WithArguments("Destroy", "producer"));
+            Verifier.Diagnostic(DiagnosticIds.RawClientHandle).WithLocation(0).WithArguments("producer"));
 
     [Theory]
     [InlineData("handle.DangerousAddRef(ref added);")]
@@ -212,7 +220,7 @@ public sealed class SafeHandleUseAnalyzerTests
                     }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle", "DangerousAddRef", "added"));
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle.DangerousAddRef", "handle", "added"));
 
     [Theory]
     [InlineData("handle.DangerousRelease();")]
@@ -243,7 +251,7 @@ public sealed class SafeHandleUseAnalyzerTests
                     }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle", "DangerousAddRef", "added"));
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle.DangerousAddRef", "handle", "added"));
 
     [Fact]
     public Task AReleaseGuardedByTheAddRefsFieldFlag_WithoutBraces_IsNotReported() =>
@@ -269,6 +277,101 @@ public sealed class SafeHandleUseAnalyzerTests
                 }
             }
             """);
+
+    [Fact]
+    public Task AWrappersReleaseOfAnotherHandle_IsReported() =>
+        Verifier.VerifyAsync(
+            Handles + """
+                namespace Confluent.Kafka.Internal.Interop
+                {
+                    internal sealed class Source
+                    {
+                        private readonly SafeProducerHandle _handle = null!;
+
+                        private readonly SafeProducerHandle _other = null!;
+
+                        internal void Run()
+                        {
+                            bool added = false;
+                            try
+                            {
+                                {|#0:TryAddRef(ref added)|};
+                            }
+                            finally
+                            {
+                                if (added)
+                                {
+                                    _other.DangerousRelease();
+                                }
+                            }
+                        }
+
+                        private bool TryAddRef(ref bool added)
+                        {
+                            _handle.DangerousAddRef(ref added);
+                            return true;
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0)
+                .WithMessage("'TryAddRef' is not inside a try whose finally block calls '_handle.DangerousRelease()' under 'if (added)'"));
+
+    [Fact]
+    public Task AnAddRefInAWrapperThatSetsALocalFlag_IsChecked() =>
+        Verifier.VerifyAsync(
+            Handles + """
+                namespace Confluent.Kafka.Internal.Interop
+                {
+                    internal sealed class Source
+                    {
+                        private readonly SafeProducerHandle _handle = null!;
+
+                        private bool TryAddRef(ref bool added)
+                        {
+                            bool local = false;
+                            {|#0:_handle.DangerousAddRef(ref local)|};
+                            return local;
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("_handle.DangerousAddRef", "_handle", "local"));
+
+    [Theory]
+    [InlineData("Risky();\nif (added)\n{\n    handle.DangerousRelease();\n}", true)]
+    [InlineData("if (added)\n{\n    Risky();\n    handle.DangerousRelease();\n}", true)]
+    [InlineData("if (added)\n{\n    handle.DangerousRelease();\n}\nRisky();", false)]
+    [InlineData("if (otherAdded)\n{\n    other.DangerousRelease();\n}\nif (added)\n{\n    handle.DangerousRelease();\n}", false)]
+    public Task WorkThatCanThrowBeforeTheRelease_IsReported(string release, bool reported) =>
+        Verifier.VerifyAsync(
+            Handles + $$"""
+                namespace Confluent.Kafka.Internal.Interop
+                {
+                    internal static class C
+                    {
+                        internal static void Run(SafeProducerHandle handle, SafeProducerHandle other, bool otherAdded)
+                        {
+                            bool added = false;
+                            try
+                            {
+                                {{(reported ? "{|#0:handle.DangerousAddRef(ref added)|}" : "handle.DangerousAddRef(ref added)")}};
+                            }
+                            finally
+                            {
+                                {{release}}
+                            }
+                        }
+
+                        private static void Risky()
+                        {
+                        }
+                    }
+                }
+                """,
+            reported
+                ? new[] { Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle.DangerousAddRef", "handle", "added") }
+                : Array.Empty<DiagnosticResult>());
 
     [Fact]
     public Task AnAddRefInACatchBlockOfTheReleasingTry_IsNotReported() =>
@@ -315,7 +418,7 @@ public sealed class SafeHandleUseAnalyzerTests
                     }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle", "DangerousAddRef", "added"));
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle.DangerousAddRef", "handle", "added"));
 
     [Fact]
     public Task AWrapperHandsItsReferenceToItsCaller_WhoseReleaseIsChecked() =>
@@ -357,5 +460,5 @@ public sealed class SafeHandleUseAnalyzerTests
                     }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("this", "TryAddRef", "added"));
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("TryAddRef", "_handle", "added"));
 }

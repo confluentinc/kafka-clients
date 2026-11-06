@@ -45,6 +45,9 @@ public sealed class NativeCallbackAnalyzerTests
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void ScalarCallback(sbyte present, IntPtr opaque);
 
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate void NumberCallback(double number, decimal amount, int count);
+
             [DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]
             internal static extern void Submit(Callback cb, IntPtr opaque);
         }
@@ -510,6 +513,96 @@ public sealed class NativeCallbackAnalyzerTests
                     private void {{(reported ? "{|#0:OnCallback|}" : "OnCallback")}}(IntPtr opaque) => Deliver(opaque);
 
                     {{modifiers}} void Deliver(IntPtr opaque)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+                """,
+            reported
+                ? new[] { Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap) }
+                : Array.Empty<DiagnosticResult>());
+
+    [Theory]
+    [InlineData("cb = OnOther;")]
+    [InlineData("cb ??= OnOther;")]
+    [InlineData("(cb, _) = (s_other, 0);")]
+    public Task AForwardedParameterTheMethodWrites_IsReported(string write) =>
+        Verifier.VerifyAsync(
+            Native + $$"""
+                internal static class C
+                {
+                    private static readonly NativeMethods.Callback s_other = OnOther;
+
+                    internal static void Run() => Forward(s_other);
+
+                    private static void Forward(NativeMethods.Callback cb)
+                    {
+                        {{write}}
+                        NativeMethods.Submit({|#0:cb|}, IntPtr.Zero);
+                    }
+
+                    private static void OnOther(IntPtr opaque)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.RootedCallbackDelegate).WithLocation(0).WithArguments("Submit", "cb"));
+
+    [Theory]
+    [InlineData("C<string>.Deliver(opaque)", true)]
+    [InlineData("Deliver(opaque)", false)]
+    public Task ForwardingToAnotherInstantiationOfAGenericType_IsReported(string call, bool reported) =>
+        Verifier.VerifyAsync(
+            Native + $$"""
+                internal static class C<T>
+                {
+                    private static readonly NativeMethods.Callback s_callback = OnCallback;
+
+                    private static void {{(reported ? "{|#0:OnCallback|}" : "OnCallback")}}(IntPtr opaque) => {{call}};
+
+                    internal static void Deliver(IntPtr opaque)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+                """,
+            reported
+                ? new[] { Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap) }
+                : Array.Empty<DiagnosticResult>());
+
+    [Theory]
+    [InlineData("(decimal)number", true)]
+    [InlineData("(int)amount", true)]
+    [InlineData("(Kind)amount", true)]
+    [InlineData("(double)amount", false)]
+    [InlineData("(decimal)count", false)]
+    public Task AForwardedDecimalConversionThatCanOverflow_IsReported(string argument, bool reported) =>
+        Verifier.VerifyAsync(
+            Native + $$"""
+                internal static class C
+                {
+                    private static readonly NativeMethods.NumberCallback s_callback = OnCallback;
+
+                    private static void {{(reported ? "{|#0:OnCallback|}" : "OnCallback")}}(double number, decimal amount, int count) =>
+                        Deliver({{argument}});
+
+                    private static void Deliver(object value)
                     {
                         try
                         {

@@ -196,11 +196,12 @@ dotnet_diagnostic.CKRDA0001.severity = warning
 [tests/**.cs]
 dotnet_diagnostic.CKRDA0001.severity = warning
 
-# The P/Invoke, handle, native-callback and comment rules, on everywhere.
+# The P/Invoke, handle, native-callback and comment rules, on everywhere. Each rule's description says what it
+# does not cover.
 #   CKRDA0002  a delegate type passed to native code is Cdecl (ffi-marshalling.md §A6, §B6)
 #   CKRDA0003  a delegate passed to native code is a static readonly field (§A6, §B6)
 #   CKRDA0004  a native callback cannot throw into native code, wherever it is created (§A6, §B6)
-#   CKRDA0005  a client handle reaches a P/Invoke as its SafeHandle (§A2, §B2)
+#   CKRDA0005  a client handle's raw pointer is taken only in ReleaseHandle (§A2, §B2)
 #   CKRDA0006  a DangerousAddRef is taken inside a try whose finally block releases it under its flag (§A2)
 #   CKRDA0007  a P/Invoke imports confluent_kafka with CallingConvention.Cdecl (§0.1)
 #   CKRDA0008  a bool, or a bool[]'s elements, crossing a P/Invoke is one byte (§0.1)

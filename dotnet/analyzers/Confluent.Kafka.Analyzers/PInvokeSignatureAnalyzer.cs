@@ -62,7 +62,7 @@ public sealed class PInvokeSignatureAnalyzer : DiagnosticAnalyzer
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
         description: "By default a bool, and each element of a bool[], is marshalled as a four-byte Win32 BOOL, so it "
-            + "reads three bytes too many.");
+            + "reads three bytes too many. Does not cover: a bool inside a struct passed by value or behind a pointer.");
 
     private static readonly DiagnosticDescriptor s_noManagedString = new DiagnosticDescriptor(
         DiagnosticIds.NoManagedString,
