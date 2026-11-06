@@ -28,13 +28,18 @@ VENV = . venv/bin/activate
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
-	pack-dotnet package-check-dotnet \
+	pack-dotnet package-check-dotnet pack-javascript package-check-javascript \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
 	transactional-producer-perf-test-python \
 	producer-perf-test-dotnet consumer-perf-test-dotnet \
+	build-javascript test-javascript lint-javascript verify-javascript \
+	test-javascript-macos-docker verify-javascript-macos-docker \
+	build-grpc-images-javascript test-integration-javascript \
+	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
+	build-grpc-native-javascript test-integration-javascript-native \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-dotnet-macos-docker \
@@ -84,6 +89,14 @@ init-venv-librdkafka:
 build-python: init-venv build-rust-all-features
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release build)
 
+# The Node.js client (javascript/): standalone for now, not part of `build`,
+# `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
+# (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
+# Its build is the addon and the TypeScript library, which needs `npm ci` in
+# javascript/ first (typescript is a devDependency).
+build-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) build
+
 devel-build: devel-build-rust devel-build-c devel-build-python
 
 devel-build-rust:
@@ -132,6 +145,13 @@ build-grpc-images-c: build-rust-all-features
 # Makefile-baked --platform.
 build-grpc-images-dotnet: build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) grpc-image grpc-image-async
+
+# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
+# against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
+# as the JavaScript client is not yet part of `build` either.
+build-grpc-images-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) grpc-image
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests) and the
@@ -189,7 +209,14 @@ test-integration-c: build-rust-all-features
 test-integration-dotnet: build-rust-all-features
 	$(MAKE) -C dotnet $(ROOTS) test-integration
 
-# The gRPC Python/C/.NET arms above default to the PLAINTEXT CONTAINER listener.
+# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# arms (the image copies the host-built Linux libconfluent_kafka.so); use
+# `test-integration-javascript-native` there. Part of `verify-javascript`
+# (through javascript/'s `test`), not of `verify`.
+test-integration-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) test-integration-grpc
+
+# The gRPC Python/C/.NET/JavaScript arms above default to the PLAINTEXT CONTAINER listener.
 # These variants drive the same arm over the SSL / SASL_SSL CONTAINER
 # listeners (CTLSONLY :9100 / CSASLTLS :9101 — the container-reachable twins
 # of the client SSL/SASL_SSL listeners, advertised on the container hostname
@@ -210,11 +237,15 @@ test-integration-dotnet-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-dotnet
 test-integration-dotnet-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-dotnet
+test-integration-javascript-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+test-integration-javascript-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
 
 # ── Native (non-container) gRPC multilanguage arms ───────────────────────
 #
-# The same `__grpc_python` / `__grpc_c` / `__grpc_dotnet` arms, but with each
-# gRPC server run as a host process instead of a Docker container
+# The same `__grpc_python` / `__grpc_c` / `__grpc_dotnet` / `__grpc_js` arms,
+# but with each gRPC server run as a host process instead of a Docker container
 # (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs). Only
 # the broker runs in Docker. These targets are used on macOS, where containers
 # run Linux: the container arms can only test the Linux build of the bindings
@@ -227,6 +258,8 @@ test-integration-dotnet-sasl-ssl:
 #   c/       the kafka_grpc_server binary
 #   dotnet/  the .NET gRPC server's net10.0 build (Confluent.Kafka.GrpcServer.dll
 #            plus the native library), run with the `dotnet` host
+#   javascript/node_modules  @grpc/grpc-js + @grpc/proto-loader, put on
+#            NODE_PATH by the harness (MULTILANG_JS_NODE_PATH overrides it)
 build-grpc-native-python: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) grpc-native)
 
@@ -250,6 +283,12 @@ test-integration-c-native: build-grpc-native-c
 # (DOTNET_GRPC_SKIPS, see rust/Makefile).
 test-integration-dotnet-native: build-grpc-native-dotnet
 	$(MAKE) -C rust test-integration-grpc-dotnet-native
+
+build-grpc-native-javascript: build-javascript
+	$(MAKE) -C javascript $(ROOTS) grpc-native
+
+test-integration-javascript-native: build-grpc-native-javascript
+	$(MAKE) -C rust test-integration-grpc-js-native
 
 # ── Performance integration tests ────────────────────────────────────────
 #
@@ -357,6 +396,17 @@ pack-dotnet:
 package-check-dotnet:
 	$(MAKE) -C dotnet $(ROOTS) package-check-dotnet
 
+# The npm packages of the Node.js client, with this machine's addon only:
+# pack-javascript packs them into javascript/build/pack, and
+# package-check-javascript packs them, then installs them into a fresh project
+# and runs the smoke program there. See javascript/Makefile; the release
+# packages are built by semaphore.yml's "Release (JavaScript):" blocks.
+pack-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) pack
+
+package-check-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) pack-check
+
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
@@ -364,6 +414,35 @@ test-python-macos-docker: build-python
 	@($(VENV) && $(MAKE) -C python $(ROOTS) PROFILE=release test-unit)
 
 verify: build format-check check-generated lint test check-bindings
+
+# The Node.js client's static, unit and typing tests, its broker-backed test
+# against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
+# when set), then the container gRPC multilanguage arm (Linux only; see
+# test-integration-javascript), as test-python and test-c end with theirs. The
+# build needs the devDependencies (`npm ci` in javascript/): typescript compiles
+# the library (javascript/lib/*.ts -> javascript/dist/).
+test-javascript: build-javascript
+	$(MAKE) -C javascript $(ROOTS) test
+
+# macOS variant of test-javascript: the unit tests only, as
+# test-python-macos-docker runs pytest test/unit only. On macOS the gRPC
+# multilanguage arm runs natively instead (see verify-javascript-macos-docker).
+test-javascript-macos-docker: build-javascript
+	$(MAKE) -C javascript $(ROOTS) test-unit
+
+# The Node.js client's rule linter (javascript/scripts/lint_rules.js) and its
+# own tests. It reads the bindings header the Rust build writes and the Java
+# index `cargo xtask java-index` makes from the kafka submodule, which needs the
+# Kafka tags pinned in xtask (`cargo xtask fetch-java-refs` on a shallow clone).
+lint-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint
+
+verify-javascript: test-javascript lint-javascript
+
+# macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
+# the gRPC server as a native host process, as verify-python-macos-docker does.
+verify-javascript-macos-docker: test-javascript-macos-docker
+	$(MAKE) test-integration-javascript-native
 
 verify-c: test-c
 
@@ -441,8 +520,9 @@ check-api-compat:
 audit:
 	$(MAKE) -C rust audit
 
-# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`:
-# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]
+# [JAVASCRIPT_VERSION=...]`: see rust/Makefile. VERSION, PYTHON_VERSION,
+# DOTNET_VERSION and JAVASCRIPT_VERSION reach the
 # sub-make through its environment (make passes command-line variables down);
 # this recipe never pastes them in.
 bump-version:

@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 use crate::config_consts;
 use crate::java_parse::{parse_expr, strip_comments, Expr};
 
+pub(crate) mod js;
+
 type Res<T> = anyhow::Result<T>;
 
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
@@ -44,12 +46,13 @@ const TYPES: &[&str] = &[
     "BOOLEAN", "STRING", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS", "PASSWORD",
 ];
 
-/// One key of a `ConfigDef`: its type, the class whose source defines it and
-/// its validator's source, if any.
+/// One key of a `ConfigDef`: its type, the class whose source defines it,
+/// its validator's source, if any, and its documentation argument's source.
 struct KeyDef {
     ty: String,
     class: String,
     validator: Option<String>,
+    doc: Option<String>,
 }
 
 /// A Java source file: its package, imports, superclass and `String`
@@ -150,7 +153,12 @@ impl Reader {
                         4 => Some(parts[3].split_whitespace().collect::<Vec<_>>().join(" ")),
                         _ => anyhow::bail!("config types: `{name}` in `{fqn}` has an unknown `{method}` form"),
                     };
-                    out.insert(name, KeyDef { ty, class: fqn.to_string(), validator });
+                    // The documentation follows the importance.
+                    let doc = parts
+                        .get(importance + 1)
+                        .map(|d| d.trim().to_string())
+                        .filter(|d| !d.is_empty());
+                    out.insert(name, KeyDef { ty, class: fqn.to_string(), validator, doc });
                 },
                 // ConfigDef.withClientSslSupport() / withClientSaslSupport() call
                 // SslConfigs.addClientSslSupport(this) / SaslConfigs.addClientSaslSupport(this).
@@ -339,6 +347,18 @@ fn first_args(args: &str, n: usize) -> Vec<&str> {
     parts
 }
 
+/// The documentation argument of each key the `ConfigDef` of client config
+/// class `fqn` defines (its own `define` calls and the SSL / SASL support it
+/// adds): key -> (the class whose source has the `define`, the argument's
+/// source).
+pub(crate) fn define_docs(repo_root: &Path, fqn: &str) -> Res<BTreeMap<String, (String, String)>> {
+    let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
+    Ok(client_types(&mut reader, fqn)?
+        .into_iter()
+        .filter_map(|(key, def)| def.doc.map(|doc| (key, (def.class, doc))))
+        .collect())
+}
+
 /// Every key of a client's `ConfigDef`, with its type.
 fn client_types(reader: &mut Reader, fqn: &str) -> Res<BTreeMap<String, KeyDef>> {
     let text = reader.load(fqn)?.text.clone();
@@ -436,8 +456,15 @@ fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> 
 
 /// The null rule of a key from its validator's source, read as Java's
 /// `ConfigDef` validators treat `null`. An unknown validator kind stops
-/// generation.
-fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str, def: &KeyDef) -> Res<NullRule> {
+/// generation. `null_spelling` is how the binding's language spells Java's
+/// `null` in a message the validator builds from the value (`None`, `null`).
+fn null_rule(
+    reader: &mut Reader,
+    consts: &mut config_consts::Reader,
+    key: &str,
+    def: &KeyDef,
+    null_spelling: &str,
+) -> Res<NullRule> {
     let Some(src) = def.validator.as_deref() else {
         return Ok(NullRule::Allowed);
     };
@@ -549,8 +576,9 @@ fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str,
         if !rejects_null {
             anyhow::bail!("config types: `{fqn}.{parser}` does not reject null");
         }
-        // The message as Python builds it, `null` spelled `None` (Types).
-        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, "None"), ("name", key)])?;
+        // The message as the binding builds it, `null` spelled its way
+        // (Python's `None`, Types).
+        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, null_spelling), ("name", key)])?;
         return Ok(NullRule::Named { kind: "custom Validator", message });
     }
     anyhow::bail!("config types: `{key}` in `{}` has an unknown validator `{src}`", def.class)
@@ -640,7 +668,7 @@ pub fn generated_output(repo_root: &Path) -> Res<(PathBuf, String)> {
     for (name, fqn) in CLIENTS {
         let mut table = Table::new();
         for (key, def) in client_types(&mut reader, fqn)? {
-            let rule = null_rule(&mut reader, &mut consts, &key, &def)?;
+            let rule = null_rule(&mut reader, &mut consts, &key, &def, "None")?;
             table.insert(key, (def.ty, rule));
         }
         tables.push((name, table));
