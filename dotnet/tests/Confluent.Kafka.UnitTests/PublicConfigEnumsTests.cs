@@ -146,7 +146,7 @@ public sealed class PublicConfigEnumsTests
         var e = Assert.Throws<ArgumentNullException>(() => SecurityProtocols.ForName(null!));
 
         Assert.Equal("name", e.ParamName);
-        Assert.Equal("Value cannot be null. (Parameter 'name')", e.Message);
+        Assert.Equal(new ArgumentNullException("name").Message, e.Message);
     }
 
     [Fact]
@@ -290,7 +290,7 @@ public sealed class PublicConfigEnumsTests
         var e = Assert.Throws<ArgumentNullException>(() => GroupProtocols.Of(null!));
 
         Assert.Equal("name", e.ParamName);
-        Assert.Equal("Value cannot be null. (Parameter 'name')", e.Message);
+        Assert.Equal(new ArgumentNullException("name").Message, e.Message);
     }
 
     [Theory]
