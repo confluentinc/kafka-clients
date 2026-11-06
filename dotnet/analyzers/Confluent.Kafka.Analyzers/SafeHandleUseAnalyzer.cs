@@ -58,11 +58,13 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description: "A reference is call-scoped: it is taken inside a try statement, or one of its catch blocks, and "
             + "released in that try's finally block under 'if' on the flag the AddRef sets, on the same thread, with "
-            + "nothing but other releases running before it. So no exception can leak it, and a failed AddRef is not "
-            + "released. A wrapper (a method named like AddRef that takes a ref bool) hands the reference it takes with "
-            + "that flag to its caller, whose release of the same handle this rule checks. Does not cover: a wrapper "
-            + "whose body is not in source, after which any release in the finally block counts. It reports, although "
-            + "they are safe: a flag tested other than as 'if (flag)', and a release on another thread.");
+            + "nothing but releases of plain variables running before it. One flag and one release answer one AddRef, "
+            + "outside any loop in the try. So no exception can leak it, and a failed AddRef is not released. A wrapper "
+            + "(a method named like AddRef that takes a ref bool) hands the reference it takes with that flag to its "
+            + "caller, whose release of the same handle, or of the argument passed for it, this rule checks. Does not "
+            + "cover: a wrapper whose body is not in source, after which any release in the finally block counts. It "
+            + "reports, although they are safe: a flag tested other than as 'if (flag)', a balanced AddRef in a loop, "
+            + "and a release on another thread.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
@@ -123,9 +125,9 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         }
 
         string receiver = Receiver(syntax.Expression);
-        string? released = onSafeHandle ? receiver : AcquiredBy(invocation.TargetMethod, receiver, context.CancellationToken);
+        string? released = onSafeHandle ? receiver : AcquiredBy(invocation, receiver, context.CancellationToken);
         string? flag = SuccessFlag(syntax);
-        if (flag is null || !IsReleasedInAFinally(syntax, released, flag))
+        if (flag is null || !IsReleasedInAFinally(syntax, released, flag, invocation.SemanticModel))
         {
             context.ReportDiagnostic(Diagnostic.Create(
                 s_addRefReleased,
@@ -180,9 +182,11 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
             && IsRefBool(flag.Parameter));
 
     // The handle a wrapper takes its reference on, as its body names it: the receiver of the AddRef that sets the
-    // wrapper's own ref bool, after the receiver the wrapper is called on. Null when the body is not in source.
-    private static string? AcquiredBy(IMethodSymbol wrapper, string callReceiver, CancellationToken cancellationToken)
+    // wrapper's own ref bool, after the receiver the wrapper is called on; a parameter of the wrapper is the argument
+    // the call passes it. Null when the body is not in source.
+    private static string? AcquiredBy(IInvocationOperation call, string callReceiver, CancellationToken cancellationToken)
     {
+        IMethodSymbol wrapper = call.TargetMethod;
         IParameterSymbol? flag = wrapper.Parameters.FirstOrDefault(IsRefBool);
         if (flag is null)
         {
@@ -196,6 +200,12 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
                 if (IsAddRef(Name(addRef.Expression)) && SuccessFlag(addRef) == flag.Name)
                 {
                     string acquired = Receiver(addRef.Expression);
+                    if (acquired.Length > 0
+                        && call.Arguments.FirstOrDefault(argument => argument.Parameter?.Name == acquired) is { } passed)
+                    {
+                        return WithoutThis(passed.Value.Syntax.WithoutTrivia().ToString());
+                    }
+
                     return callReceiver.Length == 0 ? acquired
                         : acquired.Length == 0 ? callReceiver
                         : callReceiver + "." + acquired;
@@ -217,7 +227,7 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
     // The AddRef sits in a try, or one of its catch blocks, whose finally block releases it under 'if (flag)', with no
     // lambda or local function between them: then the release runs whatever happens after the reference is taken,
     // and only when it was taken.
-    private static bool IsReleasedInAFinally(InvocationExpressionSyntax addRef, string? receiver, string flag)
+    private static bool IsReleasedInAFinally(InvocationExpressionSyntax addRef, string? receiver, string flag, SemanticModel? model)
     {
         foreach (SyntaxNode ancestor in addRef.Ancestors())
         {
@@ -226,25 +236,36 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
                 return false;
             }
 
-            if (ancestor is TryStatementSyntax { Finally: { } @finally }
+            if (ancestor is TryStatementSyntax { Finally: { } @finally } tryStatement
                 && !@finally.Span.Contains(addRef.Span)
                 && @finally.Block.DescendantNodes(node => !IsFunction(node))
                     .OfType<InvocationExpressionSyntax>()
                     .Any(release => Name(release.Expression) == "DangerousRelease"
                         && (receiver is null || Receiver(release.Expression) == receiver)
-                        && IsGuardedBy(release, @finally.Block, flag)))
+                        && IsGuardedBy(release, @finally.Block, flag, model)))
             {
-                return true;
+                return IsTheOnlyAcquisition(addRef, tryStatement, flag);
             }
         }
 
         return false;
     }
 
+    // One guarded release answers one acquisition: the AddRef is not in a loop inside the try, and no other AddRef in
+    // the try sets the same flag.
+    private static bool IsTheOnlyAcquisition(InvocationExpressionSyntax addRef, TryStatementSyntax tryStatement, string flag) =>
+        !addRef.Ancestors().TakeWhile(node => node != tryStatement).Any(node =>
+            node is ForStatementSyntax or ForEachStatementSyntax or ForEachVariableStatementSyntax
+                or WhileStatementSyntax or DoStatementSyntax)
+        && !tryStatement.Block.DescendantNodes(node => !IsFunction(node))
+            .Concat(tryStatement.Catches.SelectMany(clause => clause.DescendantNodes(node => !IsFunction(node))))
+            .OfType<InvocationExpressionSyntax>()
+            .Any(other => other != addRef && IsAddRef(Name(other.Expression)) && SuccessFlag(other) == flag);
+
     // The release is a statement of its own, reached from the finally block only through blocks and 'if (flag)'
     // branches, at least one of them, with only other releases ahead of it in each block, so nothing that can throw
     // runs first. An else branch, another condition, a loop or a switch does not count.
-    private static bool IsGuardedBy(InvocationExpressionSyntax release, BlockSyntax finallyBlock, string flag)
+    private static bool IsGuardedBy(InvocationExpressionSyntax release, BlockSyntax finallyBlock, string flag, SemanticModel? model)
     {
         if (release.Parent is not ExpressionStatementSyntax statement)
         {
@@ -257,7 +278,7 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         {
             switch (node)
             {
-                case BlockSyntax block when block.Statements.TakeWhile(ahead => ahead != child).All(IsOnlyReleases):
+                case BlockSyntax block when block.Statements.TakeWhile(ahead => ahead != child).All(ahead => IsOnlyReleases(ahead, model)):
                     break;
                 case IfStatementSyntax branch
                     when branch.Statement == child && WithoutThis(branch.Condition.WithoutTrivia().ToString()) == flag:
@@ -276,13 +297,22 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsOnlyReleases(StatementSyntax statement) => statement switch
+    // Releases whose receivers and conditions are plain variables, so evaluating them cannot throw.
+    private static bool IsOnlyReleases(StatementSyntax statement, SemanticModel? model) => statement switch
     {
-        ExpressionStatementSyntax { Expression: InvocationExpressionSyntax call } => Name(call.Expression) == "DangerousRelease",
-        IfStatementSyntax { Else: null } branch => IsOnlyReleases(branch.Statement),
-        BlockSyntax block => block.Statements.All(IsOnlyReleases),
+        ExpressionStatementSyntax { Expression: InvocationExpressionSyntax call } =>
+            Name(call.Expression) == "DangerousRelease"
+            && (call.Expression is not MemberAccessExpressionSyntax member || IsVariable(member.Expression, model)),
+        IfStatementSyntax { Else: null } branch => IsVariable(branch.Condition, model) && IsOnlyReleases(branch.Statement, model),
+        BlockSyntax block => block.Statements.All(inner => IsOnlyReleases(inner, model)),
         _ => false,
     };
+
+    // A local, a parameter, a field or this: reading it runs no code that can throw. A property or a call does.
+    private static bool IsVariable(ExpressionSyntax expression, SemanticModel? model) =>
+        expression is ThisExpressionSyntax
+        || (expression is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }
+            && model?.GetSymbolInfo(expression).Symbol is ILocalSymbol or IParameterSymbol or IFieldSymbol);
 
     private static bool IsFunction(SyntaxNode node) =>
         node is BaseMethodDeclarationSyntax

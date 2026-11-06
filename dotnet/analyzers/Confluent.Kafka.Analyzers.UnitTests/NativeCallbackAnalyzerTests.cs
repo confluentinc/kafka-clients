@@ -531,6 +531,7 @@ public sealed class NativeCallbackAnalyzerTests
     [InlineData("cb = OnOther;")]
     [InlineData("cb ??= OnOther;")]
     [InlineData("(cb, _) = (s_other, 0);")]
+    [InlineData("((cb, _), _) = ((s_other, 0), 0);")]
     public Task AForwardedParameterTheMethodWrites_IsReported(string write) =>
         Verifier.VerifyAsync(
             Native + $$"""
@@ -558,6 +559,34 @@ public sealed class NativeCallbackAnalyzerTests
                 }
                 """,
             Verifier.Diagnostic(DiagnosticIds.RootedCallbackDelegate).WithLocation(0).WithArguments("Submit", "cb"));
+
+    [Fact]
+    public Task AParameterReadOnADeconstructionsRightHandSide_IsStillForwardedUnchanged() =>
+        Verifier.VerifyAsync(Native + """
+            internal static class C
+            {
+                private static readonly NativeMethods.Callback s_other = OnOther;
+
+                internal static void Run() => Forward(s_other);
+
+                private static void Forward(NativeMethods.Callback cb)
+                {
+                    var (copy, count) = (cb, 0);
+                    GC.KeepAlive(copy);
+                    NativeMethods.Submit(cb, IntPtr.Zero);
+                }
+
+                private static void OnOther(IntPtr opaque)
+                {
+                    try
+                    {
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+            """);
 
     [Theory]
     [InlineData("C<string>.Deliver(opaque)", true)]

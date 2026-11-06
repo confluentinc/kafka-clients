@@ -150,8 +150,9 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // A parameter is forwarded as its caller passed it only when nothing in the method writes it: an assignment, a
-    // deconstruction, or a ref or out argument.
+    // A parameter is forwarded as its caller passed it only when nothing in the method writes it: an assignment, an
+    // element of a deconstruction's target at any depth, or a ref or out argument. A read on a deconstruction's
+    // right-hand side is not a write.
     private static bool IsWritten(IParameterSymbol parameter, IOperation use)
     {
         IOperation root = use;
@@ -161,10 +162,23 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         }
 
         return root.Descendants().OfType<IParameterReferenceOperation>().Any(reference =>
-            SymbolEqualityComparer.Default.Equals(reference.Parameter, parameter)
-            && (reference.Parent is IAssignmentOperation assignment && assignment.Target == reference
-                || reference.Parent is ITupleOperation { Parent: IDeconstructionAssignmentOperation }
-                || reference.Parent is IArgumentOperation { Parameter.RefKind: RefKind.Ref or RefKind.Out }));
+            SymbolEqualityComparer.Default.Equals(reference.Parameter, parameter) && IsWrite(reference));
+    }
+
+    private static bool IsWrite(IParameterReferenceOperation reference)
+    {
+        IOperation target = reference;
+        while (target.Parent is ITupleOperation tuple)
+        {
+            target = tuple;
+        }
+
+        return target.Parent switch
+        {
+            IAssignmentOperation assignment => assignment.Target == target,
+            IArgumentOperation { Parameter.RefKind: RefKind.Ref or RefKind.Out } => target == reference,
+            _ => false,
+        };
     }
 
     private static void RecordMethodBody(

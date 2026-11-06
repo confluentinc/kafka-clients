@@ -18,14 +18,17 @@ using System.Globalization;
 using System.Linq;
 
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
+using Microsoft.CodeAnalysis.Text;
 
 namespace Confluent.Kafka.Analyzers;
 
 /// <summary>
 /// Reports a <c>TaskCompletionSource</c> or <c>TaskCompletionSource&lt;T&gt;</c> created without
-/// <c>TaskCreationOptions.RunContinuationsAsynchronously</c> as a compile-time constant argument (CKRDA0001).
+/// <c>TaskCreationOptions.RunContinuationsAsynchronously</c> as a compile-time constant argument, by a <c>new</c> or by
+/// the base call of a class derived from one (CKRDA0001).
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
@@ -39,7 +42,8 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description: "The binding completes its TaskCompletionSources on a client's drain thread. Without "
             + "RunContinuationsAsynchronously an awaiter's continuation runs on that thread and stalls every later "
-            + "completion. The option must be a compile-time constant argument, so the rule can see it.");
+            + "completion. The option must be a compile-time constant argument, so the rule can see it. A class derived "
+            + "from one passes it in each constructor's base call; a constructor without one calls base() without it.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(s_rule);
@@ -79,6 +83,10 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
         context.RegisterOperationAction(
             operationContext => AnalyzeCreation(operationContext, sources, options, required),
             OperationKind.ObjectCreation);
+        context.RegisterOperationAction(
+            operationContext => AnalyzeBaseCall(operationContext, sources, options, required),
+            OperationKind.Invocation);
+        context.RegisterSymbolAction(symbolContext => AnalyzeDerivedSource(symbolContext, sources), SymbolKind.NamedType);
     }
 
     private static void AnalyzeCreation(
@@ -88,20 +96,9 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
         long required)
     {
         IObjectCreationOperation creation = (IObjectCreationOperation)context.Operation;
-        if (creation.Type is not INamedTypeSymbol type
-            || !sources.Any(source => SymbolEqualityComparer.Default.Equals(source, type.OriginalDefinition)))
+        if (creation.Type is not INamedTypeSymbol type || !IsSource(type, sources) || HasOption(creation.Arguments, options, required))
         {
             return;
-        }
-
-        foreach (IArgumentOperation argument in creation.Arguments)
-        {
-            if (SymbolEqualityComparer.Default.Equals(argument.Parameter?.Type, options)
-                && argument.Value.ConstantValue is { HasValue: true, Value: { } value }
-                && (Convert.ToInt64(value, CultureInfo.InvariantCulture) & required) != 0)
-            {
-                return;
-            }
         }
 
         context.ReportDiagnostic(Diagnostic.Create(
@@ -109,4 +106,68 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
             creation.Syntax.GetLocation(),
             type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
     }
+
+    // A derived class's ': base(...)' call. An implicit base() call is left to AnalyzeDerivedSource.
+    private static void AnalyzeBaseCall(
+        OperationAnalysisContext context,
+        ImmutableArray<INamedTypeSymbol> sources,
+        INamedTypeSymbol options,
+        long required)
+    {
+        IInvocationOperation call = (IInvocationOperation)context.Operation;
+        if (call.IsImplicit
+            || call.TargetMethod.MethodKind != MethodKind.Constructor
+            || call.Instance is not IInstanceReferenceOperation
+            || !IsSource(call.TargetMethod.ContainingType, sources)
+            || HasOption(call.Arguments, options, required))
+        {
+            return;
+        }
+
+        Location location = call.Syntax is ConstructorInitializerSyntax initializer
+            ? Location.Create(initializer.SyntaxTree, TextSpan.FromBounds(initializer.ThisOrBaseKeyword.SpanStart, initializer.Span.End))
+            : call.Syntax.GetLocation();
+        context.ReportDiagnostic(Diagnostic.Create(
+            s_rule,
+            location,
+            call.TargetMethod.ContainingType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)));
+    }
+
+    // A class derived from a TaskCompletionSource whose constructor calls base() without the option: one with no base
+    // or this call, or the default constructor of a class that declares none.
+    private static void AnalyzeDerivedSource(SymbolAnalysisContext context, ImmutableArray<INamedTypeSymbol> sources)
+    {
+        INamedTypeSymbol type = (INamedTypeSymbol)context.Symbol;
+        if (type.BaseType is not { } baseType || !IsSource(baseType, sources))
+        {
+            return;
+        }
+
+        string display = baseType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
+        foreach (IMethodSymbol constructor in type.InstanceConstructors)
+        {
+            if (constructor.IsImplicitlyDeclared)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(s_rule, type.Locations.FirstOrDefault() ?? Location.None, display));
+                continue;
+            }
+
+            foreach (SyntaxReference reference in constructor.DeclaringSyntaxReferences)
+            {
+                if (reference.GetSyntax(context.CancellationToken) is ConstructorDeclarationSyntax { Initializer: null } declaration)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(s_rule, declaration.Identifier.GetLocation(), display));
+                }
+            }
+        }
+    }
+
+    private static bool IsSource(INamedTypeSymbol type, ImmutableArray<INamedTypeSymbol> sources) =>
+        sources.Any(source => SymbolEqualityComparer.Default.Equals(source, type.OriginalDefinition));
+
+    private static bool HasOption(ImmutableArray<IArgumentOperation> arguments, INamedTypeSymbol options, long required) =>
+        arguments.Any(argument =>
+            SymbolEqualityComparer.Default.Equals(argument.Parameter?.Type, options)
+            && argument.Value.ConstantValue is { HasValue: true, Value: { } value }
+            && (Convert.ToInt64(value, CultureInfo.InvariantCulture) & required) != 0);
 }

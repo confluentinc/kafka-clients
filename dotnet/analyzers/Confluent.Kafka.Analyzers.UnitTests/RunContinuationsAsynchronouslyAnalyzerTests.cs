@@ -99,6 +99,38 @@ public sealed class RunContinuationsAsynchronouslyAnalyzerTests
                 .WithLocation(0)
                 .WithArguments("TaskCompletionSource<int>"));
 
+    [Theory]
+    [InlineData("internal Source() : {|#0:base()|} { }")]
+    [InlineData("internal Source() : {|#0:base(TaskCreationOptions.None)|} { }")]
+    [InlineData("internal {|#0:Source|}() { }")]
+    [InlineData("internal Source() : base(TaskCreationOptions.RunContinuationsAsynchronously) { }\ninternal {|#0:Source|}(int value) { }")]
+    public Task ADerivedSourceWhoseBaseCallLacksTheOption_IsReported(string constructors) =>
+        VerifyAsync(
+            Derived(constructors),
+            CSharpAnalyzerVerifier<RunContinuationsAsynchronouslyAnalyzer, DefaultVerifier>.Diagnostic()
+                .WithLocation(0)
+                .WithArguments("TaskCompletionSource<int>"));
+
+    [Fact]
+    public Task ADerivedSourceWithoutAConstructor_IsReported() =>
+        VerifyAsync(
+            """
+            using System.Threading.Tasks;
+
+            class {|#0:Source|} : TaskCompletionSource<int>
+            {
+            }
+            """,
+            CSharpAnalyzerVerifier<RunContinuationsAsynchronouslyAnalyzer, DefaultVerifier>.Diagnostic()
+                .WithLocation(0)
+                .WithArguments("TaskCompletionSource<int>"));
+
+    [Theory]
+    [InlineData("internal Source() : base(TaskCreationOptions.RunContinuationsAsynchronously) { }")]
+    [InlineData("internal Source() : base(TaskCreationOptions.RunContinuationsAsynchronously) { }\ninternal Source(int value) : this() { }")]
+    public Task ADerivedSourceWhoseBaseCallsPassTheOption_IsNotReported(string constructors) =>
+        VerifyAsync(Derived(constructors) + "\nclass User\n{\n    object M() => new Source();\n}\n");
+
     [Fact]
     public Task ATypeOfTheSameNameInAnotherNamespace_IsNotReported() =>
         VerifyAsync(
@@ -113,6 +145,16 @@ public sealed class RunContinuationsAsynchronouslyAnalyzerTests
                 }
             }
             """);
+
+    private static string Derived(string constructors) =>
+        $$"""
+        using System.Threading.Tasks;
+
+        class Source : TaskCompletionSource<int>
+        {
+            {{constructors}}
+        }
+        """;
 
     private static string Expression(string returnType, string creation) =>
         $$"""
