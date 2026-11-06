@@ -92,6 +92,8 @@ build-python: init-venv build-rust-all-features
 # The Node.js client (javascript/): standalone for now, not part of `build`,
 # `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
 # (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
+# Its build is the addon and the TypeScript library, which needs `npm ci` in
+# javascript/ first (typescript is a devDependency).
 build-javascript: build-rust-all-features
 	$(MAKE) -C javascript $(ROOTS) build
 
@@ -406,8 +408,8 @@ verify: build format-check check-generated lint test check-bindings
 # against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
 # when set), then the container gRPC multilanguage arm (Linux only; see
 # test-integration-javascript), as test-python and test-c end with theirs. The
-# typing tests need the devDependencies (`npm ci` in javascript/) and skip, with
-# a message, without them.
+# build needs the devDependencies (`npm ci` in javascript/): typescript compiles
+# the library (javascript/lib/*.ts -> javascript/dist/).
 test-javascript: build-javascript
 	$(MAKE) -C javascript $(ROOTS) test
 

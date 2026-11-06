@@ -64,10 +64,10 @@ static inline kafka_common_Error_t* ffi_take(kafka_common_Error_t** slot) {
 
 // Per-addon-instance state (napi_set_instance_data).
 typedef struct {
-    // lib/common/kafka_error.js's factory, turning the plain error object
+    // lib/_native.ts's error factory, turning the plain error object
     // error_to_js builds into a KafkaError; NULL until registered.
     napi_ref error_factory;
-    // lib/producer/record_metadata.js's factory for a RecordMetadata.
+    // lib/_native.ts's factory for a RecordMetadata.
     napi_ref metadata_factory;
 } AddonData;
 

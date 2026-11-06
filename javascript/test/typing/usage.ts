@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // The typing test: compiled by test/typing/typing.test.js with
-// `tsc --noEmit --strict` against the committed declarations, resolved
-// through package.json's `exports` (the package's own name). Every
+// `tsc --noEmit --strict` against the declarations tsc compiles into dist/,
+// resolved through package.json's `exports` (the package's own name). Every
 // `@ts-expect-error` line must be a type error.
 
 import { common, producer } from '@confluentinc/kafka-javascript';
@@ -144,8 +144,8 @@ new ProducerRecord({ topic: 't', key: 1 });
 const badCallback: Callback = (metadata: string) => void metadata;
 void badCallback;
 
-// The private files are not entry points.
-// @ts-expect-error lib/_config.js is not exported
-import('@confluentinc/kafka-javascript/lib/_config');
-// @ts-expect-error lib/_errors.js is not exported
-import('@confluentinc/kafka-javascript/lib/_errors');
+// The private files are not entry points, and have no declarations.
+// @ts-expect-error dist/_config.js is not exported
+import('@confluentinc/kafka-javascript/dist/_config');
+// @ts-expect-error dist/_errors.js is not exported
+import('@confluentinc/kafka-javascript/dist/_errors');

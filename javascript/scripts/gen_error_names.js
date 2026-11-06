@@ -16,7 +16,7 @@
 
 // Build step (binding.gyp action): writes the C switch from each
 // `kafka_common_Error_e` value to its enumerator name, read from the bindings
-// header, so an error's `errorName` (lib/_errors.js `fromNative`) is the
+// header, so an error's `errorName` (lib/_errors.ts `fromNative`) is the
 // header's own name for its code.
 //
 // Usage: node scripts/gen_error_names.js <confluent_kafka_bindings.h> <out.h>
