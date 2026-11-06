@@ -21,10 +21,11 @@
 //     `rwlock` / `spin` or libuv / C11 lock declared (each declaration keyed
 //     by its declarator, `src/util.h:CallbackQueue.notify_mtx`) or called
 //     (`file:function:callee#n`) in another src/ file;
-//   - no store of records in lib/producer/: no class field, constructor
-//     parameter property or module variable holding an array, a `Map` or a
-//     `Set`, and no module constant naming a cap (`MAX`, `LIMIT`, `CAP`,
-//     `QUEUE`).
+//   - no store of records in a hand-written module of lib/ (lib/producer/,
+//     and the private helpers, `lib/_*.ts`, where one would go): no class
+//     field, constructor parameter property or module variable holding an
+//     array, a `Map` or a `Set`, and no module constant naming a cap (`MAX`,
+//     `LIMIT`, `CAP`, `QUEUE`). The generated modules are not read.
 // What is listed is allowed, with its reason; an entry that matches nothing
 // is a finding.
 
@@ -69,6 +70,8 @@ function functionAt(ctx, file, at) {
 
 const LOCK = /^(pthread_(mutex|cond|rwlock|spin)\w*|uv_(mutex|rwlock|cond|sem)\w*|mtx_\w+|cnd_\w+)$/;
 const CAP = /(^|_)(MAX|LIMIT|CAP|QUEUE)(_|$)/;
+/** The mark of a file `cargo xtask generate-error-codes` writes. */
+const GENERATED = /GENERATED, DO NOT EDIT/;
 
 /** What is allowed, by `<file>:<identifier>` (C) or `<Class>.<field>` (TypeScript). */
 const ALLOWED = [
@@ -78,6 +81,17 @@ const ALLOWED = [
     reason: "the largest partition the C ABI's int32_t carries: a range check of one record, not a cap of records",
   },
   { key: 'ProducerRecord.#headers', reason: "a record's own headers (Java's ProducerRecord#headers), not a store of records" },
+  { key: 'lib/_config.ts:INT_LABELS', reason: "the ConfigDef type names of Java's parseType messages, a constant table" },
+  { key: 'lib/_errors.ts:classes', reason: 'the generated error classes, loaded once: a table of classes, not records' },
+  { key: 'lib/_errors.ts:byId', reason: 'the error classes by FFI id, built once from the generated registry' },
+  { key: 'lib/_native_loader.ts:SUPPORTED_PLATFORMS', reason: 'the platform packages the loader knows, a constant list' },
+  { key: 'lib/_throwable.ts:ids', reason: 'the FFI id of each error class, keyed weakly by the class' },
+  { key: 'lib/_throwable.ts:cachedBases', reason: 'the two abstract error bases, looked up once' },
+  { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
+  {
+    key: 'KafkaFuture.#waiters',
+    reason: "the get() Promises waiting on one record's future, settled once at its completion: not a store of records",
+  },
   {
     key: 'KafkaProducer.#deferred',
     reason: "the settlements waiting for the event-loop turn (javascript/CLAUDE.md rule 3); the records are handed over at once",
@@ -140,7 +154,9 @@ module.exports = {
     };
     for (const sf of sourceFiles) {
       const rel = ctx.rel(sf.fileName);
-      if (!rel.startsWith('lib/producer/')) continue;
+      // Every hand-written module of lib/, the private helpers (`lib/_*.ts`) included:
+      // a generated one holds the error and config tables, never records.
+      if (!rel.startsWith('lib/') || GENERATED.test(sf.text.slice(0, 2000))) continue;
       for (const st of sf.statements) {
         if (ts.isVariableStatement(st)) {
           for (const d of st.declarationList.declarations) {

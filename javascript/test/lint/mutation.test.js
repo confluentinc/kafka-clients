@@ -379,6 +379,17 @@ MUTATIONS.push(
     apply: (root) => edit(root, 'src/producer.c', 'typedef struct SendCtx SendCtx;', 'static pthread_mutex_t producer_lock = PTHREAD_MUTEX_INITIALIZER;\n\ntypedef struct SendCtx SendCtx;'),
   },
   {
+    rule: 'check-no-binding-queue',
+    what: 'a send queue in a private helper of lib/',
+    apply: (root) =>
+      add(
+        root,
+        'lib/_send_queue.ts',
+        `${fs.readFileSync(path.join(root, 'lib/_native.ts'), 'utf8').split(LICENSE_END)[0]}${LICENSE_END}\n` +
+          '// Holds records back.\nexport class SendQueue {\n  private readonly records: unknown[] = [];\n}\n',
+      ),
+  },
+  {
     rule: 'check-single-drainer',
     what: 'the producer destroyed in its close completion',
     apply: (root) => edit(root, 'src/producer.c', '    p->close_error = error;\n', '    p->close_error = error;\n    producer_destroy(env, p);\n'),
