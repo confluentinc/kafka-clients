@@ -31,7 +31,7 @@ namespace Confluent.Kafka.Internal;
 /// the calls in flight, and tears down in order: refuse new calls, close, join the completion thread, wait for the
 /// calls in flight, then destroy on the closing thread.
 /// </summary>
-internal sealed class NativeProducer : IDisposable, IAsyncDisposable
+internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 {
     internal const string CompletionThreadName = "confluent-kafka-producer-completion";
 
@@ -76,6 +76,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
     private int _closed;
+    private int _disposing;
 
     private NativeProducer(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
     {
@@ -412,6 +413,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
+        Interlocked.Exchange(ref _disposing, 1);
         FlushOpenMock();
         if (!TryBeginClose())
         {
@@ -438,6 +440,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        Interlocked.Exchange(ref _disposing, 1);
         await FlushOpenMockAsync().ConfigureAwait(false);
         if (!TryBeginClose())
         {
@@ -910,7 +913,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        return _failureCallbacks.After(CloseAndTearDownAsync(timeoutMs), CancellationToken.None);
+        return _failureCallbacks.After(
+            CloseAndTearDownAsync(timeoutMs, keepMockOpenOnError: true), CancellationToken.None);
     }
 
     private void CloseWithin(long? timeoutMs)
@@ -928,7 +932,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         try
         {
-            CloseAndTearDown(timeoutMs);
+            CloseAndTearDown(timeoutMs, keepMockOpenOnError: true);
         }
         finally
         {
@@ -977,39 +981,64 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             }),
             opaque => NativeMethods.ProducerCloseWithTimeoutCb(_handle, 0, s_voidCompletion, opaque));
 
-    private void CloseAndTearDown(long? timeoutMs)
+    private void CloseAndTearDown(long? timeoutMs, bool keepMockOpenOnError = false)
     {
         Completion<IntPtr> closed = new Completion<IntPtr>(FreeError);
         IntPtr error = IntPtr.Zero;
+        bool reopened = false;
         try
         {
             SubmitClose(timeoutMs, closed.Complete);
             _ = closed.Wait(Timeout.InfiniteTimeSpan, out error);
+            reopened = keepMockOpenOnError && error != IntPtr.Zero && TryReopenMock();
         }
         finally
         {
-            TearDownKeeping(ref error);
+            if (!reopened)
+            {
+                TearDownKeeping(ref error);
+            }
         }
 
         KafkaException.ThrowIfFfiFailed(ref error);
     }
 
-    private async Task CloseAndTearDownAsync(long? timeoutMs)
+    private async Task CloseAndTearDownAsync(long? timeoutMs, bool keepMockOpenOnError = false)
     {
         TaskCompletionSource<IntPtr> closed =
             new TaskCompletionSource<IntPtr>(TaskCreationOptions.RunContinuationsAsynchronously);
         IntPtr error = IntPtr.Zero;
+        bool reopened = false;
         try
         {
             SubmitClose(timeoutMs, e => closed.SetResult(e));
             error = await closed.Task.ConfigureAwait(false);
+            reopened = keepMockOpenOnError && error != IntPtr.Zero && TryReopenMock();
         }
         finally
         {
-            TearDownKeeping(ref error);
+            if (!reopened)
+            {
+                TearDownKeeping(ref error);
+            }
         }
 
         KafkaException.ThrowIfFfiFailed(ref error);
+    }
+
+    // Java's MockProducer.close() throws its closeException before it sets closed, so a mock whose close failed stays
+    // open, as Python's does. A Dispose that met the close in progress returned at once, leaving the teardown to it:
+    // the full fences on both sides make one of them see the other, and whichever wins the close tears down. A real
+    // producer is torn down whatever its close reports, as Java's KafkaProducer.close() closes it anyway.
+    private bool TryReopenMock()
+    {
+        if (!IsMock)
+        {
+            return false;
+        }
+
+        Interlocked.Exchange(ref _closed, 0);
+        return Volatile.Read(ref _disposing) == 0 || !TryBeginClose();
     }
 
     private void TearDownKeeping(ref IntPtr closeError)
