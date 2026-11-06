@@ -1,46 +1,106 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.FileReader;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.Locale;
 import java.util.Properties;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.serialization.Deserializer;
 
 /* Time-based e2e latency benchmark, Java kafka-clients consumer.
  * Methodology matches the repo librdkafka_e2e.c (Run A): exact 1ms histogram,
  * per-batch clock, message-count warmup. Reports latency stddev (from the
- * histogram) and CURRENT RSS avg/min/max (/proc/self/status VmRSS) like B. */
+ * histogram) and CURRENT RSS avg/min/max (/proc/self/status VmRSS) like B.
+ * Fetch settings left unset keep the client defaults. With --results-file the
+ * summary is also written in the shape of the producer harnesses'
+ * results.json (client "java-consumer"), which `cargo xtask perf-cloud`
+ * reads. Exits 1 when no record arrives within 120 s or none is measured. The
+ * summary and results.json are written before the consumer is closed; a close
+ * error is only a warning. */
 public class JavaE2E {
     static final int MAXLAT = 600000;
-    static long[] B = new long[MAXLAT + 1];
+    /* Each histogram is MAXLAT + 1 buckets in 4 KiB chunks (512 longs), a chunk
+     * allocated on its first write: the JVM zeroes every array it allocates, so
+     * a flat long[MAXLAT + 1] would make all 4.8 MB resident, where the Rust and
+     * C harnesses' calloc'd arrays keep only the written pages. The per-interval
+     * one is reset in place (resetIv), so the reported RSS is the client's, not
+     * the harness's. */
+    static final int CHUNK_BITS = 9, CHUNK = 1 << CHUNK_BITS;
+    static final long[][] B = new long[(MAXLAT >> CHUNK_BITS) + 1][];
     static long cnt, sum, min = Long.MAX_VALUE, max = Long.MIN_VALUE;
-    static long[] iB = new long[MAXLAT + 1];
+    static final long[][] iB = new long[(MAXLAT >> CHUNK_BITS) + 1][];
     static long icnt, isum, imin = Long.MAX_VALUE, imax = Long.MIN_VALUE;
+    /* Lowest / highest iB bucket written since the last resetIv(): only the
+     * chunks of that range are cleared. */
+    static int iLo = Integer.MAX_VALUE, iHi = -1;
 
-    static void rec(long[] b, long lat, boolean iv) {
+    /* Returns the key / value length only: the harness needs the record's size,
+     * not its bytes, so it makes no per-record copy (ByteArrayDeserializer copies
+     * every key and value out of the fetch buffer), like the Rust harness's
+     * length-only deserializer. A null key / value never reaches a deserializer;
+     * the record then holds null. */
+    public static final class LengthDeserializer implements Deserializer<Integer> {
+        @Override public Integer deserialize(String topic, byte[] data) { return data == null ? 0 : data.length; }
+        @Override public Integer deserialize(String topic, Headers headers, ByteBuffer data) {
+            return data == null ? 0 : data.remaining();
+        }
+    }
+
+    static long get(long[][] b, int i) { long[] c = b[i >> CHUNK_BITS]; return c == null ? 0 : c[i & (CHUNK - 1)]; }
+    static void rec(long[][] b, long lat, boolean iv) {
         int idx = (int) Math.min(Math.max(lat, 0), MAXLAT);
-        b[idx]++;
-        if (iv) { icnt++; isum += lat; if (lat < imin) imin = lat; if (lat > imax) imax = lat; }
+        long[] c = b[idx >> CHUNK_BITS];
+        if (c == null) c = b[idx >> CHUNK_BITS] = new long[CHUNK];
+        c[idx & (CHUNK - 1)]++;
+        if (iv) {
+            if (idx < iLo) iLo = idx; if (idx > iHi) iHi = idx;
+            icnt++; isum += lat; if (lat < imin) imin = lat; if (lat > imax) imax = lat;
+        }
         else { cnt++; sum += lat; if (lat < min) min = lat; if (lat > max) max = lat; }
     }
-    static long pct(long[] b, long c, double p) {
+    static long pct(long[][] b, long c, double p) {
         if (c == 0) return 0;
         long t = (long) Math.ceil(p / 100.0 * c), cum = 0;
-        for (int i = 0; i <= MAXLAT; i++) { cum += b[i]; if (cum >= t) return i; }
+        for (int i = 0; i <= MAXLAT; i++) { cum += get(b, i); if (cum >= t) return i; }
         return MAXLAT;
     }
     /* Latency stddev from the exact histogram (1 ms quantized). */
-    static double sd(long[] b, long c, long s) {
+    static double sd(long[][] b, long c, long s) {
         if (c == 0) return 0.0;
         double mean = (double) s / c, var = 0.0;
-        for (int i = 0; i <= MAXLAT; i++) if (b[i] != 0) { double d = i - mean; var += (double) b[i] * d * d; }
+        for (int i = 0; i <= MAXLAT; i++) { long n = get(b, i); if (n != 0) { double d = i - mean; var += (double) n * d * d; } }
         return Math.sqrt(var / c);
     }
-    static void resetIv() { iB = new long[MAXLAT + 1]; icnt = 0; isum = 0; imin = Long.MAX_VALUE; imax = Long.MIN_VALUE; }
+    /* Reset the interval histogram in place, clearing only the touched chunks. */
+    static void resetIv() {
+        if (iHi >= iLo) for (int k = iLo >> CHUNK_BITS; k <= iHi >> CHUNK_BITS; k++) if (iB[k] != null) Arrays.fill(iB[k], 0L);
+        iLo = Integer.MAX_VALUE; iHi = -1;
+        icnt = 0; isum = 0; imin = Long.MAX_VALUE; imax = Long.MIN_VALUE;
+    }
     /* Current RSS in MB from /proc/self/status (VmRSS, kB). */
     static double readRssMb() {
         try (BufferedReader r = new BufferedReader(new FileReader("/proc/self/status"))) {
@@ -79,7 +139,10 @@ public class JavaE2E {
 
     public static void main(String[] a) throws Exception {
         String bootstrap = "localhost:9092", topic = "bench", proto = "consumer", cfg = null, gid = null;
-        int durationS = 1800, warmup = 200000, intervalS = 10, pollMs = 500, maxPoll = 2500;
+        String resultsFile = null, fetchMinBytes = null, fetchMaxWaitMs = null, maxPartitionFetchBytes = null,
+            maxPoll = null;
+        int durationS = 1800, intervalS = 5, pollMs = 500;
+        long warmup = 200000;
         for (int i = 0; i < a.length; i++) switch (a[i]) {
             case "--bootstrap": bootstrap = a[++i]; break;
             case "--topic": topic = a[++i]; break;
@@ -87,10 +150,14 @@ public class JavaE2E {
             case "--client-config": cfg = a[++i]; break;
             case "--group-id": gid = a[++i]; break;
             case "--duration": durationS = Integer.parseInt(a[++i]); break;
-            case "--warmup": warmup = Integer.parseInt(a[++i]); break;
+            case "--warmup": warmup = Long.parseLong(a[++i]); break;
             case "--interval": intervalS = Integer.parseInt(a[++i]); break;
             case "--poll-timeout": pollMs = Integer.parseInt(a[++i]); break;
-            case "--max-poll-records": maxPoll = Integer.parseInt(a[++i]); break;
+            case "--max-poll-records": maxPoll = a[++i]; break;
+            case "--fetch-min-bytes": fetchMinBytes = a[++i]; break;
+            case "--fetch-max-wait-ms": fetchMaxWaitMs = a[++i]; break;
+            case "--max-partition-fetch-bytes": maxPartitionFetchBytes = a[++i]; break;
+            case "--results-file": resultsFile = a[++i]; break;
         }
         Properties p = new Properties();
         if (cfg != null) try (FileInputStream f = new FileInputStream(cfg)) { p.load(f); }
@@ -98,37 +165,54 @@ public class JavaE2E {
         p.put(ConsumerConfig.GROUP_ID_CONFIG, gid != null ? gid : "e2e-java-" + System.currentTimeMillis());
         p.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
         p.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
-        p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, String.valueOf(maxPoll));
+        if (maxPoll != null) p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxPoll);
+        if (fetchMinBytes != null) p.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, fetchMinBytes);
+        if (fetchMaxWaitMs != null) p.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, fetchMaxWaitMs);
+        if (maxPartitionFetchBytes != null) p.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, maxPartitionFetchBytes);
         p.put("group.protocol", proto);
 
-        System.out.printf("Java e2e: bootstrap=%s topic=%s proto=%s maxPoll=%d fetch.min=4MiB partFetch=4MiB crc=off dur=%ds warmup=%d%n",
-                bootstrap, topic, proto, maxPoll, durationS, warmup);
+        String dflt = "default";
+        System.out.printf(Locale.ROOT, "Java e2e: bootstrap=%s topic=%s proto=%s max.poll.records=%s fetch.min.bytes=%s "
+                + "fetch.max.wait.ms=%s max.partition.fetch.bytes=%s dur=%ds warmup=%d%n",
+                bootstrap, topic, proto, maxPoll != null ? maxPoll : dflt, fetchMinBytes != null ? fetchMinBytes : dflt,
+                fetchMaxWaitMs != null ? fetchMaxWaitMs : dflt,
+                maxPartitionFetchBytes != null ? maxPartitionFetchBytes : dflt, durationS, warmup);
         long durationMs = durationS * 1000L, intervalMs = intervalS * 1000L, totalBytes = 0;
-        long seen = 0, measured = 0, measureStart = 0, deadline = 0, ivStart = 0; int ivIdx = 0;
+        long seen = 0, measured = 0, measureStart = 0, measureStartNs = 0, deadline = 0, ivStart = 0; int ivIdx = 0;
         boolean warm = false;
+        // A dead or missing producer must not leave the run waiting forever.
+        long noDataDeadline = System.currentTimeMillis() + 120_000L;
         double rssSum = 0, rssMin = Double.MAX_VALUE, rssMax = 0; long rssN = 0;
         double cpuSum = 0, cpuMin = Double.MAX_VALUE, cpuMax = 0; long cpuN = 0;
-        try (KafkaConsumer<byte[], byte[]> c = new KafkaConsumer<>(p)) {
+        // Length-only deserializers (no per-record copy of the record's bytes).
+        KafkaConsumer<Integer, Integer> c = new KafkaConsumer<>(p, new LengthDeserializer(), new LengthDeserializer());
+        try {
             c.subscribe(Collections.singletonList(topic));
             System.out.println("subscribed; waiting for assignment/records...");
             while (true) {
-                ConsumerRecords<byte[], byte[]> recs = c.poll(Duration.ofMillis(pollMs));
+                ConsumerRecords<Integer, Integer> recs = c.poll(Duration.ofMillis(pollMs));
                 long now = System.currentTimeMillis();
-                if (recs.isEmpty()) { if (warm && now >= deadline) break; else continue; }
-                for (ConsumerRecord<byte[], byte[]> r : recs) {
+                if (recs.isEmpty()) {
+                    if (seen == 0 && measured == 0 && now >= noDataDeadline) {
+                        System.err.println("ERROR: no records within 120s (producer not running?)");
+                        System.exit(1);
+                    }
+                    if (warm && now >= deadline) break; else continue;
+                }
+                for (ConsumerRecord<Integer, Integer> r : recs) {
                     if (!warm) {
-                        if (++seen >= warmup) { warm = true; measureStart = System.currentTimeMillis();
+                        // With no warmup the first record starts the measurement (and is measured).
+                        if (warmup <= 0 || ++seen >= warmup) { warm = true; measureStart = System.currentTimeMillis(); measureStartNs = System.nanoTime();
                             deadline = measureStart + durationMs; ivStart = measureStart;
                             sampleCpuPct(); // prime the CPU baseline at measure start
-                            System.out.printf("warmup complete (%d msgs); measuring %ds now%n", warmup, durationS); }
-                        continue;
+                            System.out.printf(Locale.ROOT, "warmup complete (%d msgs); measuring %ds now%n", warmup, durationS); }
+                        if (warmup > 0) continue;
                     }
                     long lat = now - r.timestamp();
                     rec(B, lat, false); rec(iB, lat, true);
                     measured++;
-                    totalBytes += (r.value() != null ? r.value().length : 0) + (r.key() != null ? r.key().length : 0);
+                    // The deserialized key / value is its length; null when the record has none.
+                    totalBytes += (r.value() != null ? r.value() : 0) + (r.key() != null ? r.key() : 0);
                 }
                 if (warm && now - ivStart >= intervalMs) {
                     double es = (now - ivStart) / 1000.0, thr = es > 0 ? icnt / es : 0;
@@ -136,32 +220,64 @@ public class JavaE2E {
                     rssSum += rss; if (rss < rssMin) rssMin = rss; if (rss > rssMax) rssMax = rss; rssN++;
                     double cpu = sampleCpuPct();
                     cpuSum += cpu; if (cpu < cpuMin) cpuMin = cpu; if (cpu > cpuMax) cpuMax = cpu; cpuN++;
-                    System.out.printf("[interval %d] t=%6.1fs msgs=%7d thr=%9.0f msg/s avg=%6.2f p50=%d p99=%d p999=%d max=%d ms cpu=%5.1f%% rss=%.1fMB%n",
+                    System.out.printf(Locale.ROOT, "[interval %d] t=%6.1fs msgs=%7d thr=%9.0f msg/s avg=%6.2f p50=%d p99=%d p999=%d max=%d ms cpu=%5.1f%% rss=%.1fMB%n",
                         ivIdx, (now - measureStart) / 1000.0, icnt, thr, icnt == 0 ? 0.0 : (double) isum / icnt,
                         pct(iB, icnt, 50), pct(iB, icnt, 99), pct(iB, icnt, 99.9), imax == Long.MIN_VALUE ? 0 : imax, cpu, rss);
                     resetIv(); ivStart = System.currentTimeMillis(); ivIdx++;
                 }
                 if (warm && System.currentTimeMillis() >= deadline) break;
             }
+            // Measured duration from the monotonic clock (latency needs the wall clock).
+            double durS = measureStart > 0 ? (System.nanoTime() - measureStartNs) / 1e9 : 0;
+            double thrMsg = durS > 0 ? measured / durS : 0, thrMiB = durS > 0 ? (totalBytes / 1048576.0) / durS : 0;
+            double sdv = sd(B, cnt, sum);
+            double rssAvg = rssN > 0 ? rssSum / rssN : 0.0; if (rssN == 0) rssMin = 0.0;
+            double cpuAvg = cpuN > 0 ? cpuSum / cpuN : 0.0; if (cpuN == 0) cpuMin = 0.0;
+            System.out.println("======================================================================");
+            System.out.println("SUMMARY - Java kafka-clients (KIP-848=" + proto + ", warmup " + warmup + " excluded)");
+            System.out.printf(Locale.ROOT, "Measured messages: %d%n", cnt);
+            System.out.printf(Locale.ROOT, "Duration:          %.2f s%n", durS);
+            System.out.printf(Locale.ROOT, "Throughput:        %.0f msg/s  (%.2f MiB/s)%n", thrMsg, thrMiB);
+            System.out.printf(Locale.ROOT, "E2E latency (ms):  min=%d avg=%.2f stddev=%.2f p50=%d p90=%d p95=%d p99=%d p99.9=%d max=%d%n",
+                cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv, pct(B, cnt, 50), pct(B, cnt, 90),
+                pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max);
+            System.out.printf(Locale.ROOT, "CPU (%% one core):  avg=%.1f min=%.1f max=%.1f (%d samples)%n", cpuAvg, cpuMin, cpuMax, cpuN);
+            System.out.printf(Locale.ROOT, "RSS (MB, current): avg=%.1f min=%.1f max=%.1f (%d samples)%n", rssAvg, rssMin, rssMax, rssN);
+            System.out.printf(Locale.ROOT, "{\"client\":\"java\",\"protocol\":\"%s\",\"messages\":%d,\"duration_s\":%.2f,\"throughput_msg_s\":%.2f,\"throughput_mib_s\":%.2f,\"lat_min_ms\":%d,\"lat_avg_ms\":%.2f,\"lat_stddev_ms\":%.2f,\"lat_p50_ms\":%d,\"lat_p90_ms\":%d,\"lat_p95_ms\":%d,\"lat_p99_ms\":%d,\"lat_p999_ms\":%d,\"lat_max_ms\":%d,\"cpu_avg_pct\":%.1f,\"cpu_min_pct\":%.1f,\"cpu_max_pct\":%.1f,\"rss_avg_mb\":%.1f,\"rss_min_mb\":%.1f,\"rss_max_mb\":%.1f}%n",
+                proto, cnt, durS, thrMsg, thrMiB, cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv,
+                pct(B, cnt, 50), pct(B, cnt, 90), pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max,
+                cpuAvg, cpuMin, cpuMax, rssAvg, rssMin, rssMax);
+            if (cnt == 0) {
+                System.err.println("ERROR: no records measured");
+            } else if (resultsFile != null) {
+                String json = String.format(Locale.ROOT,
+                    "{%n"
+                    + "  \"test\": \"consumer\",%n"
+                    + "  \"client\": \"java-consumer\",%n"
+                    + "  \"topic\": \"%s\",%n"
+                    + "  \"messages_measured\": %d,%n"
+                    + "  \"duration_s\": %.2f,%n"
+                    + "  \"throughput_msg_s\": %.2f,%n"
+                    + "  \"throughput_mib_s\": %.2f,%n"
+                    + "  \"latency_ms\": {\"min\": %d, \"avg\": %.2f, \"p50\": %d, \"p90\": %d, \"p95\": %d, "
+                    + "\"p99\": %d, \"p999\": %d, \"max\": %d},%n"
+                    + "  \"cpu_avg_pct\": %.2f,%n"
+                    + "  \"rss_avg_kib\": %.2f%n"
+                    + "}%n",
+                    topic, cnt, durS, thrMsg, thrMiB, min, (double) sum / cnt, pct(B, cnt, 50), pct(B, cnt, 90),
+                    pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), max, cpuAvg, rssAvg * 1024.0);
+                Files.write(Paths.get(resultsFile), json.getBytes(StandardCharsets.UTF_8));
+            }
+        } finally {
+            // Closed only after the summary and results.json are written: a close
+            // error is a warning that neither discards them nor changes the exit
+            // status.
+            try {
+                c.close();
+            } catch (Exception e) {
+                System.err.println("WARN: closing the consumer failed: " + e);
+            }
         }
-        double durS = measureStart > 0 ? (System.currentTimeMillis() - measureStart) / 1000.0 : 0;
-        double thrMsg = durS > 0 ? measured / durS : 0, thrMiB = durS > 0 ? (totalBytes / 1048576.0) / durS : 0;
-        double sdv = sd(B, cnt, sum);
-        double rssAvg = rssN > 0 ? rssSum / rssN : 0.0; if (rssN == 0) rssMin = 0.0;
-        double cpuAvg = cpuN > 0 ? cpuSum / cpuN : 0.0; if (cpuN == 0) cpuMin = 0.0;
-        System.out.println("======================================================================");
-        System.out.println("SUMMARY - Java kafka-clients (KIP-848=" + proto + ", warmup " + warmup + " excluded)");
-        System.out.printf("Measured messages: %d%n", cnt);
-        System.out.printf("Duration:          %.2f s%n", durS);
-        System.out.printf("Throughput:        %.0f msg/s  (%.2f MiB/s)%n", thrMsg, thrMiB);
-        System.out.printf("E2E latency (ms):  min=%d avg=%.2f stddev=%.2f p50=%d p90=%d p95=%d p99=%d p99.9=%d max=%d%n",
-            cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv, pct(B, cnt, 50), pct(B, cnt, 90),
-            pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max);
-        System.out.printf("CPU (%% one core):  avg=%.1f min=%.1f max=%.1f (%d samples)%n", cpuAvg, cpuMin, cpuMax, cpuN);
-        System.out.printf("RSS (MB, current): avg=%.1f min=%.1f max=%.1f (%d samples)%n", rssAvg, rssMin, rssMax, rssN);
-        System.out.printf("{\"client\":\"java\",\"protocol\":\"%s\",\"messages\":%d,\"duration_s\":%.2f,\"throughput_msg_s\":%.2f,\"throughput_mib_s\":%.2f,\"lat_min_ms\":%d,\"lat_avg_ms\":%.2f,\"lat_stddev_ms\":%.2f,\"lat_p50_ms\":%d,\"lat_p90_ms\":%d,\"lat_p95_ms\":%d,\"lat_p99_ms\":%d,\"lat_p999_ms\":%d,\"lat_max_ms\":%d,\"cpu_avg_pct\":%.1f,\"cpu_min_pct\":%.1f,\"cpu_max_pct\":%.1f,\"rss_avg_mb\":%.1f,\"rss_min_mb\":%.1f,\"rss_max_mb\":%.1f}%n",
-            proto, cnt, durS, thrMsg, thrMiB, cnt == 0 ? 0 : min, cnt == 0 ? 0.0 : (double) sum / cnt, sdv,
-            pct(B, cnt, 50), pct(B, cnt, 90), pct(B, cnt, 95), pct(B, cnt, 99), pct(B, cnt, 99.9), cnt == 0 ? 0 : max,
-            cpuAvg, cpuMin, cpuMax, rssAvg, rssMin, rssMax);
+        System.exit(cnt == 0 ? 1 : 0);
     }
 }
