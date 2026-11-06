@@ -68,8 +68,8 @@ RUN make -C /workspace/javascript build && \
     test -f /workspace/javascript/dist/producer/index.js
 
 # The gRPC packages, at the versions pinned in package.json's devDependencies
-# (the single source of truth, shared with the native `make -C javascript
-# grpc-native`). Installed by name into a prefix of their own rather than by a
+# (the single source of truth: the native arm loads the ones `npm ci`
+# installs). Installed by name into a prefix of their own rather than by a
 # bare `npm install` of the package, which would add its other devDependencies.
 RUN mkdir -p /workspace/grpc-deps && \
     cd /workspace/grpc-deps && \
