@@ -11,13 +11,34 @@ and from TypeScript alike (see "Layout" for the import forms).
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
 `RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
 blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). This first
-slice covers the producer only; the package is private and not published.
+slice covers the producer only.
 
 The package is `@confluentinc/kafka-javascript`, the npm name of the
 librdkafka-based client, at version `4.4.0-beta.1`: like the Rust-based Python
 client, which reuses PyPI's `confluent-kafka` at `4.4.0b1`, it is told apart
-from the earlier client (0.x and 1.x releases) by version. It stays `private`:
-publishing under the shared name needs the agreement of the team that owns it.
+from the earlier client (0.x and 1.x releases) by version, 4.0.0 or higher.
+Its pre-releases are published under npm's `preview` dist-tag, never `latest`,
+`rc` or `alpha`, which the earlier client's 1.x releases hold. The
+repository's `package.json` stays `private`; the release pipeline writes the
+published one (see "Packaging").
+
+## Install from npm
+
+```bash
+npm install @confluentinc/kafka-javascript@preview
+```
+
+Prebuilt for Linux x64 and arm64 with glibc 2.28 or newer (RHEL 8, Debian 10,
+Ubuntu 20.04 and later) and for macOS 11 or newer on Apple silicon, on
+Node.js 18 or newer. The main package carries the compiled library only; npm
+installs the one platform package of the machine,
+`@confluentinc/kafka-javascript-linux-x64-gnu`, `-linux-arm64-gnu` or
+`-darwin-arm64`, from its optional dependencies. Each carries the addon with
+the Rust client linked in, so nothing is built at install time and
+`--ignore-scripts` changes nothing; do not install with `--omit=optional`.
+Installing for another machine (a container image built on a laptop) needs
+npm's `--os`, `--cpu` and `--libc` of that machine. musl (Alpine) and Windows
+have no platform package yet: build from source there.
 
 ## Requirements
 
@@ -63,8 +84,39 @@ tests use; without a runnable `tsc` the build fails, telling you to run
 
 `CONFLUENT_KAFKA_LIB_DIR` (default `../rust/target/release`) and
 `CONFLUENT_KAFKA_INCLUDE_DIR` (default `../rust/target/include`) select the
-library and header; the addon links the library dynamically with an rpath to
-that directory.
+library and header.
+
+`CONFLUENT_KAFKA_LINK` (binding.gyp) chooses how the addon links the library:
+
+- `dynamic`, the default, for development, the tests and the gRPC image: it
+  links `libconfluent_kafka.{so,dylib}` with an rpath to that directory.
+- `static`, for a release: it links `libconfluent_kafka.a` into the addon,
+  keeps only the code the addon reaches and exports only the two Node-API
+  entry points, so the addon is a single file that needs only the system's
+  libraries: `make -C javascript build CONFLUENT_KAFKA_LINK=static`.
+
+## Packaging
+
+The release is four npm packages: the main package (`dist/`, this README, the
+changelog and the LICENSE) and one platform package per platform, each holding
+the statically linked addon. The main package's `package.json` is the
+repository's without `private`, `devDependencies` and `scripts`, with the
+three platform packages as `optionalDependencies` at its exact version.
+
+```bash
+make -C javascript pack        # this machine's static addon, packed into build/pack/ with the
+                               # main package (.semaphore/pack-npm.sh --dev), and checked
+make -C javascript pack-check  # then installed into a fresh project from the tarballs,
+                               # where the smoke program runs (.semaphore/test-npm.sh)
+```
+
+`make package-check-javascript`, from the repository root, builds the Rust
+library first; the macOS CI job runs it on every build. The release packages
+are built, tested and recorded by the tag build of `javascript/v<version>`
+(the "Release (JavaScript):" blocks of `.semaphore/semaphore.yml`), and
+published to npmjs.com by hand from the recorded bundle
+(`release/README.txt`). `tools/package-smoke/` is the smoke program the
+install tests run; it is not published.
 
 ### The Rust multilanguage suite
 
@@ -131,7 +183,8 @@ test/static|unit|typing|integration
 ```
 
 The addon builds as `build/Release/confluent-kafka-javascript.node`, beside
-`dist/`, which loads it; installing the package runs no build
+`dist/`. `lib/_native_loader.ts` loads the platform package's addon first and
+falls back to that development build; installing the package runs no build
 (`"gypfile": false`, no install scripts).
 
 ## Example
