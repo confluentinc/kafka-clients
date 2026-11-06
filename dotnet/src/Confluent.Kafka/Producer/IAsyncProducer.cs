@@ -81,6 +81,8 @@ namespace Confluent.Kafka.Producer;
 /// <see cref="IAsyncDisposable.DisposeAsync"/> closes and then frees the producer;
 /// <see cref="IDisposable.Dispose"/> is its blocking form. Both swallow a close error and are idempotent.
 /// What a delivery callback may call on its own producer is in <see cref="IDeliveryCallback"/>.
+/// An <see cref="AsyncKafkaProducer{TKey, TValue}"/> disposes the serializers it was given when it closes, as its
+/// constructor says; an <see cref="AsyncMockProducer{TKey, TValue}"/> does not.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
