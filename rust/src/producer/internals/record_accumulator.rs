@@ -26,6 +26,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
+
 use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
 
@@ -470,7 +472,7 @@ impl TopicInfo {
 struct AppendGuard<'a> {
     free: &'a BufferPool,
     appends_in_progress: &'a AtomicI32,
-    buffer: Option<Vec<u8>>,
+    buffer: Option<BytesMut>,
 }
 
 impl<'a> AppendGuard<'a> {
@@ -1320,7 +1322,7 @@ impl RecordAccumulator {
     /// `MemoryRecords.builder(batchBuffer, RecordBatch.CURRENT_MAGIC_VALUE, compression,
     /// TimestampType.CREATE_TIME, 0L)` supplier in `append` (Java 4.4 removed the
     /// `recordsBuilder(ByteBuffer)` helper that held it before, so this carries no Java marker).
-    fn new_records_builder(&self, buffer: Vec<u8>) -> MemoryRecordsBuilder {
+    fn new_records_builder(&self, buffer: BytesMut) -> MemoryRecordsBuilder {
         MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -4260,7 +4262,7 @@ mod tests {
         let large_value = vec![0u8; 4 * 1024]; // 4KB > 1KB
         let k = key();
 
-        let builder_buffer = vec![0u8; small_batch_size as usize];
+        let builder_buffer = BytesMut::zeroed(small_batch_size as usize);
         let mut builder = MemoryRecords::builder_with_buffer_magic(
             builder_buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -4801,7 +4803,7 @@ mod tests {
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
 
         // Create a big batch manually
-        let buffer = vec![0u8; 4096];
+        let buffer = BytesMut::zeroed(4096);
         let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -4999,7 +5001,7 @@ mod tests {
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
 
         // Create an oversized batch manually that will need splitting
-        let buffer = vec![0u8; 4096];
+        let buffer = BytesMut::zeroed(4096);
         let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -5032,7 +5034,7 @@ mod tests {
                 ProducerBatch::with_split(
                     tp1(),
                     MemoryRecords::builder_with_buffer_magic(
-                        vec![0u8; 2048],
+                        BytesMut::zeroed(2048),
                         RecordBatch::CURRENT_MAGIC_VALUE,
                         Compression::none().build(),
                         TimestampType::CreateTime,
@@ -5474,7 +5476,7 @@ mod tests {
         let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
 
         // Create a large producer batch manually
-        let buffer = vec![0u8; batch_size as usize];
+        let buffer = BytesMut::zeroed(batch_size as usize);
         let builder = MemoryRecords::builder_with_buffer_magic(
             buffer,
             RecordBatch::CURRENT_MAGIC_VALUE,
@@ -5842,7 +5844,7 @@ mod tests {
         // which is the precondition
         // `assignProducerStateToBatches` needs.
         let builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 4096],
+            BytesMut::zeroed(4096),
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
             TimestampType::CreateTime,
@@ -5930,7 +5932,7 @@ mod tests {
         // (`ProducerBatch::try_append_for_split`), so awaiting them proves the records do
         // not hang when the sub-batch fails to re-track.
         let builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 4096],
+            BytesMut::zeroed(4096),
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
             TimestampType::CreateTime,
@@ -6646,7 +6648,7 @@ mod tests {
         // partition switch eligible (`allBatchesFull(dq)` is true for an empty
         // deque).
         topic_info.batches.get(&0).unwrap().lock().unwrap().clear();
-        accum.free.deallocate(vec![0u8; batch_size as usize]);
+        accum.free.deallocate(BytesMut::zeroed(batch_size as usize));
 
         let new_batch_created = appender.await.unwrap().expect("the append must succeed");
 
