@@ -45,9 +45,9 @@ public sealed class ListTopicsOptions
     /// </summary>
     /// <returns>Include internal topics such as <c>__consumer_offsets</c> — Java's <c>listInternal(boolean)</c> /
     /// <c>shouldListInternal()</c>. Defaults to <see langword="false"/>, as Java's does.</returns>
-    public bool ListInternal() => _listInternal;
+    public bool ShouldListInternal() => _listInternal;
 
-    /// <summary>Sets <see cref="ListInternal()"/>.</summary>
+    /// <summary>Sets <see cref="ShouldListInternal()"/>.</summary>
     /// <param name="listInternal">Include internal topics such as <c>__consumer_offsets</c> — Java's
     /// <c>listInternal(boolean)</c> / <c>shouldListInternal()</c>. Defaults to <see langword="false"/>, as Java's
     /// does.</param>
@@ -62,7 +62,7 @@ public sealed class ListTopicsOptions
     internal OptionSetters Setters { get; } = new OptionSetters();
 
     /// <summary>
-    /// Value equality over <see cref="ListInternal()"/> only, as Java's <c>equals</c>: two
+    /// Value equality over <see cref="ShouldListInternal()"/> only, as Java's <c>equals</c>: two
     /// options that differ only in their timeout are equal.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
@@ -71,7 +71,7 @@ public sealed class ListTopicsOptions
         obj is ListTopicsOptions other && _listInternal == other._listInternal;
 
     /// <summary>
-    /// The hash of <see cref="ListInternal()"/> alone — Java's <c>hashCode</c>.
+    /// The hash of <see cref="ShouldListInternal()"/> alone — Java's <c>hashCode</c>.
     /// </summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode() => _listInternal.GetHashCode();

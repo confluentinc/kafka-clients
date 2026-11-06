@@ -444,8 +444,22 @@ public sealed class PublicAdminCreateTopicsTests
         CreateTopicsOptions options = new CreateTopicsOptions();
 
         Assert.Null(options.TimeoutMs());
-        Assert.False(options.ValidateOnly());
-        Assert.True(options.RetryOnQuotaViolation());
+        Assert.False(options.ShouldValidateOnly());
+        Assert.True(options.ShouldRetryOnQuotaViolation());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(CreateTopicsOptions),
+            getters: new[]
+            {
+                nameof(CreateTopicsOptions.ShouldRetryOnQuotaViolation),
+                nameof(CreateTopicsOptions.ShouldValidateOnly),
+                nameof(CreateTopicsOptions.TimeoutMs),
+            },
+            setters: new[]
+            {
+                nameof(CreateTopicsOptions.RetryOnQuotaViolation),
+                nameof(CreateTopicsOptions.TimeoutMs),
+                nameof(CreateTopicsOptions.ValidateOnly),
+            });
     }
 
     [Theory]

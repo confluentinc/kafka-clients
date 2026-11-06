@@ -140,9 +140,9 @@ public sealed class PublicAdminListGroupsOptionsTests
         options.WithTypes(new[] { GroupType.CONSUMER });
         options.WithProtocolTypes(new[] { "consumer" });
 
-        options.InGroupStates(null!);
-        options.WithTypes(null!);
-        options.WithProtocolTypes(null!);
+        options.InGroupStates(null);
+        options.WithTypes(null);
+        options.WithProtocolTypes(null);
 
         Assert.Empty(options.GroupStates());
         Assert.Empty(options.Types());

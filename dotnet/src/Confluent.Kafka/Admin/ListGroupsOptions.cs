@@ -60,10 +60,10 @@ public sealed class ListGroupsOptions
     public IReadOnlyCollection<GroupState> GroupStates() => _groupStates;
 
     /// <summary>Sets <see cref="GroupStates()"/>.</summary>
-    /// <param name="groupStates">The group states to filter on, or an empty collection — the default — to return
+    /// <param name="groupStates">The group states to filter on, or <see langword="null"/> or an empty collection — the default — to return
     /// groups in every state.</param>
     /// <returns>This instance, so calls can be chained.</returns>
-    public ListGroupsOptions InGroupStates(IReadOnlyCollection<GroupState> groupStates)
+    public ListGroupsOptions InGroupStates(IReadOnlyCollection<GroupState>? groupStates)
     {
         _groupStates = CopyOf(groupStates);
         Setters.Ran(nameof(InGroupStates));
@@ -86,14 +86,14 @@ public sealed class ListGroupsOptions
     public IReadOnlyCollection<string> ProtocolTypes() => _protocolTypes;
 
     /// <summary>Sets <see cref="ProtocolTypes()"/>.</summary>
-    /// <param name="protocolTypes">The group protocol types to filter on, or an empty collection — the default — to
+    /// <param name="protocolTypes">The group protocol types to filter on, or <see langword="null"/> or an empty collection — the default — to
     /// return groups of every protocol type.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentException">
     /// The collection contains a <see langword="null"/> element, which Java's
     /// <c>Set.copyOf</c> rejects.
     /// </exception>
-    public ListGroupsOptions WithProtocolTypes(IReadOnlyCollection<string> protocolTypes)
+    public ListGroupsOptions WithProtocolTypes(IReadOnlyCollection<string>? protocolTypes)
     {
         _protocolTypes = CopyOfProtocolTypes(protocolTypes);
         Setters.Ran(nameof(WithProtocolTypes));
@@ -111,10 +111,10 @@ public sealed class ListGroupsOptions
     public IReadOnlyCollection<GroupType> Types() => _types;
 
     /// <summary>Sets <see cref="Types()"/>.</summary>
-    /// <param name="types">The group types to filter on, or an empty collection — the default — to return groups of
+    /// <param name="types">The group types to filter on, or <see langword="null"/> or an empty collection — the default — to return groups of
     /// every type.</param>
     /// <returns>This instance, so calls can be chained.</returns>
-    public ListGroupsOptions WithTypes(IReadOnlyCollection<GroupType> types)
+    public ListGroupsOptions WithTypes(IReadOnlyCollection<GroupType>? types)
     {
         _types = CopyOf(types);
         Setters.Ran(nameof(WithTypes));
@@ -156,13 +156,13 @@ public sealed class ListGroupsOptions
         new ListGroupsOptions().WithTypes(new[] { GroupType.STREAMS });
 
     // Immutable, as Java's Set.copyOf: a retained HashSet could be downcast and mutated.
-    private static IReadOnlyCollection<T> CopyOf<T>(IReadOnlyCollection<T> value)
+    private static IReadOnlyCollection<T> CopyOf<T>(IReadOnlyCollection<T>? value)
         where T : struct =>
         value is null || value.Count == 0
             ? (IReadOnlyCollection<T>)Array.Empty<T>()
             : new ReadOnlyCollection<T>(new List<T>(new HashSet<T>(value)));
 
-    private static IReadOnlyCollection<string> CopyOfProtocolTypes(IReadOnlyCollection<string> protocolTypes)
+    private static IReadOnlyCollection<string> CopyOfProtocolTypes(IReadOnlyCollection<string>? protocolTypes)
     {
         if (protocolTypes is null || protocolTypes.Count == 0)
         {

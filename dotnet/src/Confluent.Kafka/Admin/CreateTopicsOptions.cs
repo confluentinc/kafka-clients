@@ -64,15 +64,15 @@ public sealed class CreateTopicsOptions
 
     /// <summary>
     /// Validate the request without actually creating the topics — Java's
-    /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
+    /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
-    /// <returns>Validate the request without actually creating the topics — Java's <c>validateOnly()</c>. Defaults
+    /// <returns>Validate the request without actually creating the topics — Java's <c>shouldValidateOnly()</c>. Defaults
     /// to <see langword="false"/>, as Java's does.</returns>
-    public bool ValidateOnly() => _validateOnly;
+    public bool ShouldValidateOnly() => _validateOnly;
 
-    /// <summary>Sets <see cref="ValidateOnly()"/>.</summary>
+    /// <summary>Sets <see cref="ShouldValidateOnly()"/>.</summary>
     /// <param name="validateOnly">Validate the request without actually creating the topics — Java's
-    /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
+    /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateTopicsOptions ValidateOnly(bool validateOnly)
     {
@@ -83,15 +83,15 @@ public sealed class CreateTopicsOptions
 
     /// <summary>
     /// Retry automatically when the broker reports a quota violation — Java's
-    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
+    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
     /// </summary>
     /// <returns>Retry automatically when the broker reports a quota violation — Java's
-    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
-    public bool RetryOnQuotaViolation() => _retryOnQuotaViolation;
+    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
+    public bool ShouldRetryOnQuotaViolation() => _retryOnQuotaViolation;
 
-    /// <summary>Sets <see cref="RetryOnQuotaViolation()"/>.</summary>
+    /// <summary>Sets <see cref="ShouldRetryOnQuotaViolation()"/>.</summary>
     /// <param name="retryOnQuotaViolation">Retry automatically when the broker reports a quota violation — Java's
-    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
+    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateTopicsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {

@@ -156,7 +156,11 @@ public sealed class PublicAdminP2aShapeParityTests
         Assert.Null(deleteOptions.TimeoutMs());
 
         // The one option whose Java default is not the C# default for its type.
-        Assert.True(deleteOptions.RetryOnQuotaViolation());
+        Assert.True(deleteOptions.ShouldRetryOnQuotaViolation());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(DeleteTopicsOptions),
+            getters: new[] { nameof(DeleteTopicsOptions.ShouldRetryOnQuotaViolation), nameof(deleteOptions.TimeoutMs) },
+            setters: new[] { nameof(DeleteTopicsOptions.RetryOnQuotaViolation), nameof(deleteOptions.TimeoutMs) });
     }
 
     [Fact]

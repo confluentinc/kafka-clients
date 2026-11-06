@@ -342,11 +342,11 @@ internal sealed partial class NativeAdminClient
                 NativeMethods.CreateTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(CreateTopicsOptions.ValidateOnly):
-                NativeMethods.CreateTopicsOptionsSetValidateOnly(native, options.ValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.CreateTopicsOptionsSetValidateOnly(native, options.ShouldValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(CreateTopicsOptions.RetryOnQuotaViolation):
                 NativeMethods.CreateTopicsOptionsSetRetryOnQuotaViolation(
-                    native, options.RetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ShouldRetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("CreateTopicsOptions has no C setter for " + setter + ".");
@@ -488,7 +488,7 @@ internal sealed partial class NativeAdminClient
                 NativeMethods.ListTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(ListTopicsOptions.ListInternal):
-                NativeMethods.ListTopicsOptionsSetListInternal(native, options.ListInternal() ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.ListTopicsOptionsSetListInternal(native, options.ShouldListInternal() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListTopicsOptions has no C setter for " + setter + ".");
@@ -656,7 +656,7 @@ internal sealed partial class NativeAdminClient
                 break;
             case nameof(DeleteTopicsOptions.RetryOnQuotaViolation):
                 NativeMethods.DeleteTopicsOptionsSetRetryOnQuotaViolation(
-                    native, options.RetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ShouldRetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteTopicsOptions has no C setter for " + setter + ".");
