@@ -166,6 +166,11 @@ package sets `__esModule`, so the helper reads a `default` export it does not
 have. TypeScript rejects such an import (TS1192, "has no default export");
 import by name or as a namespace instead.
 
+A TypeScript project needs `@types/node` (`npm install --save-dev
+@types/node`): the declarations type keys and values with Node's `Buffer`, and
+the package does not depend on `@types/node` itself, so without it (and without
+`skipLibCheck`) tsc reports TS2688 / TS2580 in `producer_record.d.ts`.
+
 ```
 lib/index.ts           the namespaces { producer, common, consumer } and the Java built-in
                        errors (IllegalStateError, IllegalArgumentError, ...)
