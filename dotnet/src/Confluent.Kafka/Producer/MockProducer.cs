@@ -219,6 +219,41 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     public void SetAbortTransactionException(Exception? exception) => _native.MockSetAbortTransactionError(exception);
 
     /// <summary>
+    /// Sets the exception that <c>Send</c> throws, as Java's <c>MockProducer.sendException</c> field: every later
+    /// call throws this same instance, after the closed and fenced checks. The key and value are serialized first,
+    /// so a serializer's exception is thrown instead.
+    /// </summary>
+    /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public void SetSendException(Exception? exception) => _native.MockSetSendError(exception);
+
+    /// <summary>
+    /// Sets the exception that <see cref="Flush"/> throws, as Java's <c>MockProducer.flushException</c> field: every later
+    /// call throws this same instance after the closed check, and completes no pending send; <see cref="CommitTransaction"/> and <see cref="AbortTransaction"/>, which flush first, throw it too.
+    /// </summary>
+    /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public void SetFlushException(Exception? exception) => _native.MockSetFlushError(exception);
+
+    /// <summary>
+    /// Sets the exception that <see cref="PartitionsFor"/> throws, as Java's <c>MockProducer.partitionsForException</c>
+    /// field: every later call throws this same instance.
+    /// </summary>
+    /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public void SetPartitionsForException(Exception? exception) => _native.MockSetPartitionsForError(exception);
+
+    /// <summary>
+    /// Sets the exception that <c>Close</c> throws, as Java's <c>MockProducer.closeException</c> field: every
+    /// later call throws this same instance and leaves the producer open (<see cref="Closed"/> stays
+    /// <see langword="false"/>). A <c>Close</c> from inside a delivery callback returns at once and closes the producer
+    /// without it, and <c>Dispose</c> releases the producer whatever it is set to.
+    /// </summary>
+    /// <param name="exception">The exception to throw; <see langword="null"/> clears it.</param>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public void SetCloseException(Exception? exception) => _native.MockSetCloseError(exception);
+
+    /// <summary>
     /// Fences the producer (Java <c>MockProducer.fenceProducer()</c>): the transaction operations then throw
     /// <see cref="Common.Errors.ProducerFencedException"/>, and <c>Send</c> a <see cref="KafkaException"/> caused by one.
     /// </summary>
@@ -249,6 +284,12 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// </summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public bool TransactionAborted => _native.MockTransactionAborted();
+
+    /// <summary>
+    /// Whether the producer is closed (Java <c>MockProducer.closed()</c>): <see langword="true"/> once <c>Close</c> or
+    /// <c>Dispose</c> has begun, unless <c>Close</c> failed with the exception <see cref="SetCloseException"/> set.
+    /// </summary>
+    public bool Closed => _native.MockClosed;
 
     /// <summary>Whether no send is pending completion (Java <c>MockProducer.flushed()</c>).</summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>

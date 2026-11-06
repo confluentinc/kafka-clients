@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -28,13 +29,15 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The mock producers' transaction controls that Java's <c>MockProducerTest</c> does not exercise: the five injected
-/// exceptions, the uncommitted offsets, the <see cref="AsyncMockProducer{TKey, TValue}"/> forms, and the calls after
+/// The mock producers' controls that Java's <c>MockProducerTest</c> does not exercise: the nine injected exceptions,
+/// <c>Closed</c>, the uncommitted offsets, the <see cref="AsyncMockProducer{TKey, TValue}"/> forms, and the calls after
 /// close. Each test runs on both mocks.
 /// </summary>
 public sealed class PublicMockProducerTransactionControlTests
 {
     private const string MockClosed = "MockProducer is already closed.";
+
+    private const string Topic = "topic";
 
     private static readonly TopicPartition s_partition = new TopicPartition("txn-input", 0);
 
@@ -211,6 +214,124 @@ public sealed class PublicMockProducerTransactionControlTests
 
     [Theory]
     [MemberData(nameof(Flavors))]
+    public async Task SetSendException_ThrowsTheSameInstanceUntilCleared(bool async)
+    {
+        using Mock producer = new Mock(async);
+        KafkaException injected = new KafkaException("send");
+        producer.SetSendException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.Send));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.Send));
+        Assert.Equal(0, producer.HistoryCount());
+
+        producer.SetSendException(null);
+        await producer.Send();
+        Assert.Equal(1, producer.HistoryCount());
+    }
+
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task SetFlushException_ThrowsTheSameInstanceAndCompletesNoSend(bool async)
+    {
+        using Mock producer = new Mock(async, autoComplete: false);
+        await producer.Send();
+        IllegalStateException injected = new IllegalStateException("flush");
+        producer.SetFlushException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<IllegalStateException>(producer.Flush));
+        Assert.Same(injected, await Assert.ThrowsAsync<IllegalStateException>(producer.Flush));
+        Assert.False(producer.Flushed);
+
+        producer.SetFlushException(null);
+        await producer.Flush();
+        Assert.True(producer.Flushed);
+    }
+
+    // Java's MockProducer.commitTransaction() and abortTransaction() call flush() after their own checks.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task SetFlushException_FailsCommitAndAbort(bool async)
+    {
+        using Mock producer = new Mock(async);
+        await producer.InitTransactions();
+        producer.BeginTransaction();
+        KafkaException injected = new KafkaException("flush");
+        producer.SetFlushException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.CommitTransaction));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.AbortTransaction));
+        Assert.True(producer.TransactionInFlight);
+        Assert.Equal(0L, producer.CommitCount);
+
+        producer.SetFlushException(null);
+        await producer.CommitTransaction();
+        Assert.True(producer.TransactionCommitted);
+        Assert.Equal(1L, producer.CommitCount);
+    }
+
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task SetPartitionsForException_ThrowsTheSameInstanceUntilCleared(bool async)
+    {
+        using Mock producer = new Mock(async);
+        KafkaException injected = new KafkaException("partitionsFor");
+        producer.SetPartitionsForException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.PartitionsFor));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.PartitionsFor));
+
+        producer.SetPartitionsForException(null);
+        Assert.Empty(await producer.PartitionsFor());
+    }
+
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task SetCloseException_ThrowsTheSameInstanceAndLeavesTheProducerOpen(bool async)
+    {
+        using Mock producer = new Mock(async);
+        KafkaException injected = new KafkaException("close");
+        producer.SetCloseException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => producer.CloseAsTask()));
+        Assert.Same(
+            injected,
+            await Assert.ThrowsAsync<KafkaException>(() => producer.CloseAsTask(TimeSpan.FromSeconds(1))));
+        Assert.False(producer.Closed);
+        await producer.Send();
+        Assert.Equal(1, producer.HistoryCount());
+
+        producer.SetCloseException(null);
+        await producer.CloseAsTask();
+        Assert.True(producer.Closed);
+        await producer.CloseAsTask();
+    }
+
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public void Closed_IsFalseUntilClose(bool async)
+    {
+        using Mock producer = new Mock(async);
+        Assert.False(producer.Closed);
+
+        producer.Close();
+        Assert.True(producer.Closed);
+    }
+
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public void Dispose_WithACloseException_ReleasesTheProducer(bool async)
+    {
+        Mock producer = new Mock(async);
+        producer.SetCloseException(new KafkaException("close"));
+
+        producer.Dispose();
+
+        Assert.True(producer.Closed);
+        Assert.Equal(MockClosed, Assert.Throws<IllegalStateException>(() => producer.HistoryCount()).Message);
+    }
+
+    [Theory]
+    [MemberData(nameof(Flavors))]
     public void Controls_AfterClose_ThrowIllegalState(bool async)
     {
         using Mock producer = new Mock(async);
@@ -223,6 +344,10 @@ public sealed class PublicMockProducerTransactionControlTests
             () => producer.SetSendOffsetsToTransactionException(null),
             () => producer.SetCommitTransactionException(null),
             () => producer.SetAbortTransactionException(null),
+            () => producer.SetSendException(null),
+            () => producer.SetFlushException(null),
+            () => producer.SetPartitionsForException(null),
+            () => producer.SetCloseException(null),
             producer.FenceProducer,
             () => _ = producer.TransactionInitialized,
             () => _ = producer.TransactionInFlight,
@@ -274,15 +399,89 @@ public sealed class PublicMockProducerTransactionControlTests
 
         private readonly AsyncMockProducer<byte[], byte[]>? _async;
 
-        internal Mock(bool async)
+        internal Mock(bool async, bool autoComplete = true)
         {
             if (async)
             {
-                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete);
             }
             else
             {
-                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete);
+            }
+        }
+
+        internal bool Closed => _sync?.Closed ?? _async!.Closed;
+
+        internal int HistoryCount() => _sync?.HistoryCount() ?? _async!.HistoryCount();
+
+        // The first stage only: a send's delivery is not awaited.
+        internal Task Send() =>
+            Run(
+                () => _sync!.Send(Record()),
+                async () => await _async!.Send(Record()).ConfigureAwait(false));
+
+        internal Task Flush() => Run(() => _sync!.Flush(), () => _async!.Flush());
+
+        internal async Task<IReadOnlyList<PartitionInfo>> PartitionsFor()
+        {
+            if (_sync is not null)
+            {
+                return _sync.PartitionsFor(Topic);
+            }
+
+            return await _async!.PartitionsFor(Topic).ConfigureAwait(false);
+        }
+
+        internal Task CloseAsTask() => Run(() => _sync!.Close(), () => _async!.Close());
+
+        internal Task CloseAsTask(TimeSpan timeout) => Run(() => _sync!.Close(timeout), () => _async!.Close(timeout));
+
+        internal void SetSendException(Exception? exception)
+        {
+            if (_sync is not null)
+            {
+                _sync.SetSendException(exception);
+            }
+            else
+            {
+                _async!.SetSendException(exception);
+            }
+        }
+
+        internal void SetFlushException(Exception? exception)
+        {
+            if (_sync is not null)
+            {
+                _sync.SetFlushException(exception);
+            }
+            else
+            {
+                _async!.SetFlushException(exception);
+            }
+        }
+
+        internal void SetPartitionsForException(Exception? exception)
+        {
+            if (_sync is not null)
+            {
+                _sync.SetPartitionsForException(exception);
+            }
+            else
+            {
+                _async!.SetPartitionsForException(exception);
+            }
+        }
+
+        internal void SetCloseException(Exception? exception)
+        {
+            if (_sync is not null)
+            {
+                _sync.SetCloseException(exception);
+            }
+            else
+            {
+                _async!.SetCloseException(exception);
             }
         }
 
@@ -419,6 +618,9 @@ public sealed class PublicMockProducerTransactionControlTests
             TestTimeout.Dispose(_sync);
             TestTimeout.Dispose(_async);
         }
+
+        private static ProducerRecord<byte[], byte[]> Record() =>
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
 
         private Task Run(Action sync, Func<Task> async)
         {
