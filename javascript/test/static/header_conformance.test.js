@@ -24,19 +24,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { headerPath, stripComments, declaredFunctions, errorEnumerators } = require('../../scripts/header');
+const { calledFunctions: calledIn } = require('../../scripts/lint/c_source');
 
 const SRC = path.join(__dirname, '..', '..', 'src');
 const header = fs.readFileSync(headerPath(), 'utf8');
 const declared = declaredFunctions(header);
 
-/** The kafka_* functions a C source calls (an identifier followed by `(`). */
+/** The kafka_* functions a C source file calls (an identifier followed by `(`). */
 function calledFunctions(file) {
-  const code = stripComments(fs.readFileSync(file, 'utf8'));
-  const names = new Set();
-  const re = /\b(kafka_\w+)\s*\(/g;
-  let m;
-  while ((m = re.exec(code)) !== null) names.add(m[1]);
-  return names;
+  return calledIn(fs.readFileSync(file, 'utf8'));
 }
 
 const sources = fs.readdirSync(SRC).filter((f) => f.endsWith('.c'));
@@ -69,17 +65,9 @@ test('the producer uses the functions of the plan', () => {
   ]) {
     assert.ok(called.has(name), `${name} is not called`);
   }
-  // Rules 4 and 5: no blocking twin, never read the future.
-  for (const name of [
-    'kafka_producer_Producer_send',
-    'kafka_producer_Producer_send_with_callback',
-    'kafka_producer_Producer_flush',
-    'kafka_producer_Producer_close',
-    'kafka_common_KafkaFuture_get',
-    'kafka_common_KafkaFuture_get_err',
-  ]) {
-    assert.ok(!called.has(name), `${name} must not be called`);
-  }
+  // Rules 4 and 5 (no blocking twin, never read the future) are the rule
+  // linter's check-cb-twin-only, which forbids every function with a `_cb`
+  // twin, these included (make lint-rules).
 });
 
 test('the one blocking close is the finalizer force-close (rule 4 exception)', () => {
