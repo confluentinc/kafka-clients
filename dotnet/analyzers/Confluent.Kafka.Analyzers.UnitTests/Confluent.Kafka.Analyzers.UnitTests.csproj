@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests of the binding's own analyzers (Confluent.Kafka.Analyzers), on the Roslyn analyzer
+    testing library. The analyzer compiles each test's source against the .NET 8 reference
+    assemblies, which the library downloads from NuGet on its first run.
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Analyzers.UnitTests</RootNamespace>
+    <AssemblyName>Confluent.Kafka.Analyzers.UnitTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Analyzer.Testing" Version="1.1.4" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <!-- The testing library's NuGet.Packaging 7.0.3 brings System.Security.Cryptography.Pkcs 9.0.6, which
+         NuGet's audit reports (GHSA-2fmv-rv2c-59x7, GHSA-846f-f764-76mx); this pins a patched release. -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="9.0.22" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Confluent.Kafka.Analyzers\Confluent.Kafka.Analyzers.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -78,7 +78,9 @@ public sealed class TestTimeoutDiagnosticsTests
     public async Task TheAsyncRun_ThatTimesOut_DescribesThePoolAndTheProcess()
     {
         System.TimeoutException timedOut = await Assert.ThrowsAsync<System.TimeoutException>(
-            () => TestTimeout.Run(() => new TaskCompletionSource<bool>().Task, s_short));
+            () => TestTimeout.Run(
+                () => new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task,
+                s_short));
 
         Assert.Matches(
             $@"^Operation did not complete within {Escaped(s_short)} — treated as a hang \(fail fast\)\. Diagnostics: "
