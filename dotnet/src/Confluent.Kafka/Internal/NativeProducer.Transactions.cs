@@ -62,14 +62,15 @@ internal sealed partial class NativeProducer
         ConsumerGroupMetadata? groupMetadata)
     {
         ThrowIfClosed();
-        using TransactionOffsets arguments = new TransactionOffsets(offsets, groupMetadata);
-        IntPtr map = arguments.Offsets;
-        IntPtr metadata = arguments.GroupMetadata;
-        Transaction(
-            SendOffsetsOperation,
-            waitsForReports: false,
-            opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
-            (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr));
+        WithTransactionOffsets(offsets, groupMetadata, (map, metadata) =>
+        {
+            Transaction(
+                SendOffsetsOperation,
+                waitsForReports: false,
+                opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
+                (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr));
+            return 0;
+        });
     }
 
     internal void CommitTransaction() =>
@@ -104,15 +105,13 @@ internal sealed partial class NativeProducer
 
         // The core copies the map and takes its own reference on the metadata during the call, so both are freed
         // once the submit has returned.
-        using TransactionOffsets arguments = new TransactionOffsets(offsets, groupMetadata);
-        IntPtr map = arguments.Offsets;
-        IntPtr metadata = arguments.GroupMetadata;
-        return TransactionWithCallback(
-            SendOffsetsOperation,
-            waitsForReports: false,
-            opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
-            (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr),
-            cancellationToken);
+        return WithTransactionOffsets(offsets, groupMetadata, (map, metadata) =>
+            TransactionWithCallback(
+                SendOffsetsOperation,
+                waitsForReports: false,
+                opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
+                (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr),
+                cancellationToken));
     }
 
     // Commit and abort flush, so they also wait for the async callbacks of serializer failures, as Flush does.
@@ -205,58 +204,44 @@ internal sealed partial class NativeProducer
     }
 
     /// <summary>
-    /// The native arguments of one <c>SendOffsetsToTransaction</c> call: the offsets map and a reference on the group
-    /// metadata's handle, both released after the call. A null argument crosses as <c>NULL</c>, which the core reports
-    /// with Java's error; with a null group metadata the offsets are not read, as the core reads them only after it.
+    /// Runs one <c>SendOffsetsToTransaction</c> call with its native arguments: the offsets map and a reference on the
+    /// group metadata's handle, both released after the call. A null argument crosses as <c>NULL</c>, which the core
+    /// reports with Java's error; with a null group metadata the offsets are not read, as the core reads them only
+    /// after it.
     /// </summary>
-    private sealed class TransactionOffsets : IDisposable
+    private static T WithTransactionOffsets<T>(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
+        ConsumerGroupMetadata? groupMetadata,
+        Func<IntPtr, IntPtr, T> call)
     {
-        private readonly NativeCallArguments? _arguments;
-        private readonly SafeConsumerGroupMetadataHandle? _metadata;
-        private bool _added;
-
-        internal TransactionOffsets(
-            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
-            ConsumerGroupMetadata? groupMetadata)
+        if (groupMetadata is null)
         {
-            if (groupMetadata is null)
-            {
-                return;
-            }
-
-            try
-            {
-                if (offsets is not null)
-                {
-                    OffsetsSnapshot snapshot = OffsetsSnapshot.Of(offsets);
-                    _arguments = new NativeCallArguments();
-                    Offsets = _arguments.OffsetMap(snapshot);
-                }
-
-                _metadata = groupMetadata.Handle;
-                _metadata.DangerousAddRef(ref _added);
-                GroupMetadata = _metadata.DangerousGetHandle();
-            }
-            catch
-            {
-                Dispose();
-                throw;
-            }
+            return call(IntPtr.Zero, IntPtr.Zero);
         }
 
-        internal IntPtr Offsets { get; }
-
-        internal IntPtr GroupMetadata { get; }
-
-        public void Dispose()
+        SafeConsumerGroupMetadataHandle metadata = groupMetadata.Handle;
+        NativeCallArguments? arguments = null;
+        bool added = false;
+        try
         {
-            if (_added)
+            IntPtr map = IntPtr.Zero;
+            if (offsets is not null)
             {
-                _added = false;
-                _metadata!.DangerousRelease();
+                arguments = new NativeCallArguments();
+                map = arguments.OffsetMap(OffsetsSnapshot.Of(offsets));
             }
 
-            _arguments?.Dispose();
+            metadata.DangerousAddRef(ref added);
+            return call(map, metadata.DangerousGetHandle());
+        }
+        finally
+        {
+            if (added)
+            {
+                metadata.DangerousRelease();
+            }
+
+            arguments?.Dispose();
         }
     }
 }
