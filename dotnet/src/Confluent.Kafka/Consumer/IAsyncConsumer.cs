@@ -56,6 +56,8 @@ namespace Confluent.Kafka.Consumer;
 /// <para>
 /// <see cref="IAsyncDisposable.DisposeAsync"/> closes and then frees the consumer;
 /// <see cref="IDisposable.Dispose"/> is its blocking form. Both swallow a close error and are idempotent.
+/// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> disposes the deserializers it was given when it closes, as its
+/// constructor says; an <see cref="AsyncMockConsumer{TKey, TValue}"/> does not.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
