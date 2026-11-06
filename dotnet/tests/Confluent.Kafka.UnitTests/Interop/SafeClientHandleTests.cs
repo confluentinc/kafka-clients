@@ -37,7 +37,9 @@ public sealed class SafeClientHandleTests
         (IntPtr view, IntPtr classPointer) = FakePointers();
         var destroyed = new List<IntPtr>();
         var handle = new RecordingClientHandle(view, classPointer, destroyed);
+#pragma warning disable CKRDA0005 // The test reads the view the handle holds; nothing passes it to native code.
         Assert.Equal(view, handle.DangerousGetHandle());
+#pragma warning restore CKRDA0005
 
         handle.CloseExplicitly();
 
@@ -129,11 +131,13 @@ public sealed class SafeClientHandleTests
         handle.CloseExplicitly();
 
         bool added = false;
+#pragma warning disable CKRDA0006 // The handle is closed, so each call throws before it takes a reference.
         ObjectDisposedException refused = Assert.Throws<ObjectDisposedException>(() => handle.DangerousAddRefClass(ref added));
 
         Assert.False(added);
         bool marshallerAdded = false;
         ObjectDisposedException reference = Assert.Throws<ObjectDisposedException>(() => handle.DangerousAddRef(ref marshallerAdded));
+#pragma warning restore CKRDA0006
         Assert.Equal(reference.Message, refused.Message);
         Assert.Equal(new[] { classPointer }, destroyed);
     }
