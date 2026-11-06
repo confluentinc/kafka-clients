@@ -71,12 +71,10 @@ KAFKA_PORT ?= 39092
 # Rust build); run standalone, build it first.
 # The gRPC server of the Rust multilanguage harness's `__grpc_js` producer arm
 # (grpc_server.js; see rust/tests/common/backend_pool.rs). Its two packages are
-# pinned once, in package.json's devDependencies; GRPC_NPM_PACKAGES lists them
-# as name@version for the native install (Dockerfile.grpc reads the same pins).
+# pinned once, in package.json's devDependencies: `npm ci` installs them in
+# node_modules/, where the server finds them natively, and Dockerfile.grpc
+# reads the same pins for the image.
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/javascript-grpc-server:dev
-GRPC_NATIVE_DIR ?= $(RUST_PROJECT_ROOT)/target/grpc-native/javascript
-GRPC_NPM_PACKAGES = $(shell $(NODE) -p "Object.entries(require('./package.json').devDependencies) \
-	.filter(([n]) => n.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')")
 
 # The npm packages of this machine's platform (`pack`), and their install test
 # (`pack-check`): the addon linked statically, the main package and this
@@ -181,24 +179,15 @@ grpc-image:
 		-f $(REPO_ROOT)/javascript/Dockerfile.grpc \
 		$(REPO_ROOT)
 
-# The native (host-process) arm's gRPC packages, installed into
-# $(GRPC_NATIVE_DIR)/node_modules, which the harness puts on NODE_PATH (the
-# addon itself is `build`, which the root `build-grpc-native-javascript` runs
-# first). With MULTILANG_JS_NODE_PATH set to a node_modules that already holds
-# them, nothing is installed and the harness uses that one instead.
+# The native (host-process) arm loads its gRPC packages from node_modules/,
+# beside grpc_server.js, where `npm ci` installs them with the other
+# devDependencies; this only checks they are there (the addon itself is
+# `build`, which the root `build-grpc-native-javascript` runs first).
 grpc-native:
-	@if [ -n "$$MULTILANG_JS_NODE_PATH" ]; then \
-	  for pkg in @grpc/grpc-js @grpc/proto-loader; do \
-	    [ -d "$$MULTILANG_JS_NODE_PATH/$$pkg" ] || { \
-	      echo "MULTILANG_JS_NODE_PATH=$$MULTILANG_JS_NODE_PATH has no $$pkg" >&2; exit 1; }; \
-	  done; \
-	  echo "grpc-native: using MULTILANG_JS_NODE_PATH=$$MULTILANG_JS_NODE_PATH"; \
-	else \
-	  mkdir -p $(GRPC_NATIVE_DIR) && \
-	  echo '{"private": true}' > $(GRPC_NATIVE_DIR)/package.json && \
-	  $(NPM) install --prefix $(GRPC_NATIVE_DIR) --no-save --no-package-lock --ignore-scripts \
-	    --no-audit --no-fund $(GRPC_NPM_PACKAGES); \
-	fi
+	@for pkg in @grpc/grpc-js @grpc/proto-loader; do \
+	  [ -d node_modules/$$pkg ] || { \
+	    echo "grpc-native: javascript/node_modules/$$pkg is missing: run \`npm ci\` in javascript/" >&2; exit 1; }; \
+	done
 
 # The container arm of the multilanguage suite for this binding: builds the
 # image, then runs the `__grpc_js` tests of the Rust harness. Linux only, like

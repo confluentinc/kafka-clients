@@ -130,10 +130,9 @@ make test-integration-javascript-native  # from the repository root: the server 
 make test-integration-javascript         # Linux only: the server in a container (Dockerfile.grpc)
 ```
 
-The native arm needs `@grpc/grpc-js` and `@grpc/proto-loader` (devDependencies);
-`make -C javascript grpc-native` installs them under
-`rust/target/grpc-native/javascript`, or `MULTILANG_JS_NODE_PATH` names a
-`node_modules` that already holds them. The transaction, `partitionsFor` and
+The native arm loads `@grpc/grpc-js` and `@grpc/proto-loader`, two of the
+devDependencies, from `javascript/node_modules` (`npm ci`);
+`make -C javascript grpc-native` checks they are there. The transaction, `partitionsFor` and
 metrics cases are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`),
 as the producer has none of them yet.
 
