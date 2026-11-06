@@ -1,0 +1,25 @@
+/*
+ * Copyright 2026 Confluent Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * The linker version script of the statically linked addon on Linux
+ * (binding.gyp, CONFLUENT_KAFKA_LINK=static): the addon exports the two
+ * Node-API entry points Node looks up, and nothing of the Rust core it carries.
+ */
+{
+  global:
+    napi_register_module_v1;
+    node_api_module_get_api_version_v1;
+  local: *;
+};
