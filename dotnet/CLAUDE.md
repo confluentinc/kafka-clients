@@ -335,6 +335,23 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
     public void Clear();
+    // Java's transaction controls (§4 Producer transactions); MockProducer has the same members
+    public void SetInitTransactionException(Exception? exception);          // Java's field is a RuntimeException; null clears
+    public void SetBeginTransactionException(Exception? exception);
+    public void SetSendOffsetsToTransactionException(Exception? exception);
+    public void SetCommitTransactionException(Exception? exception);
+    public void SetAbortTransactionException(Exception? exception);
+    public void FenceProducer();
+    public bool TransactionInitialized { get; }   // Java transactionInitialized(), and likewise below
+    public bool TransactionInFlight { get; }
+    public bool TransactionCommitted { get; }
+    public bool TransactionAborted { get; }
+    public bool Flushed { get; }
+    public bool SentOffsets { get; }
+    public long CommitCount { get; }
+    public IReadOnlyList<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>>>
+        ConsumerGroupOffsetsHistory();                                       // METHOD: a fresh copy per call
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> UncommittedOffsets();
 }
 ```
 
@@ -344,8 +361,9 @@ longer** among them: it shipped in M11/P8 as a Mode-A port over the already-pres
 `kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
 `send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10;
 `ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` (Java returns the full record list; the ABI gives
-only a count, hence the .NET-only method `HistoryCount()`, as Python's `history_count()`). Add each when the
-ABI grows to cover it.
+only a count, hence the .NET-only method `HistoryCount()`, as Python's `history_count()`), and for the same
+reason `MockProducer.uncommittedRecords()`, which also returns records; `closed()` is not exposed either. Add
+each when the ABI grows to cover it.
 
 **The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
 the binding, **above** the bytes-based native producer and **before** the P/Invoke
@@ -725,10 +743,12 @@ each goes when the reason it gives goes:
   after the call, and with the call's error if the call failed; the Result cannot see that)*, and
   `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
 - **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
-  `Metrics`, and `MockProducer`'s `PartitionsFor`, `Metrics`, `CompleteNext`, `ErrorNext`, `Clear`
-  and `HistoryCount` throw the closed client's `IllegalStateException`, because the native handle
-  is gone; Java answers (Java's mock checks for close only in `send`, `flush` and the transaction
-  methods). Goes when the native object outlives `Close`.
+  `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
+  `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, the five `Set*TransactionException` setters
+  and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
+  closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
+  mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
+  when the native object outlives `Close`.
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
@@ -1237,6 +1257,17 @@ object keeps from the consumer that gave it, the mocks' included. Recorded devia
   take the blocking form there, which waits for no report, and complete at once (§A7).
 - **A serializer's fatal error** does not make a transactional producer fatal (§3, the
   serializer's throw).
+
+The mocks carry Java's `MockProducer` transaction controls (§3 sketch), over the core mock's
+`kafka_producer_MockProducer_*` functions:
+- The five setters take `Exception?`, as `ErrorNext` does, since Java's fields are
+  `RuntimeException`; the call throws the same instance, and `null` clears it.
+- The flags and `CommitCount` are properties, as Java's getters read state.
+  `ConsumerGroupOffsetsHistory()` and `UncommittedOffsets()` are methods: each copies a native
+  container out, so every call returns a fresh copy.
+- `UncommittedRecords()` and `History()` are left out: the ABI gives no record list
+  (`HistoryCount()` stands in). So the ports of Java's history tests check `HistoryCount()`, not
+  the records.
 
 ### Threads and teardown (M19/P1)
 

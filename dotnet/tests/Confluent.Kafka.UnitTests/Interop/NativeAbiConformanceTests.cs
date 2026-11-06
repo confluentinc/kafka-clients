@@ -61,8 +61,8 @@ public sealed class NativeAbiConformanceTests
             + string.Join(Environment.NewLine, failures));
     }
 
-    // The transaction imports also pin their parameter names, so a reordering of two pointers of the same type
-    // (offsets and group_metadata) that keeps the types fails here.
+    // The transaction imports, and the mock's transaction controls, also pin their parameter names, so a reordering
+    // of two pointers of the same type (offsets and group_metadata) that keeps the types fails here.
     [Theory]
     [InlineData("kafka_producer_Producer_init_transactions_cb")]
     [InlineData("kafka_producer_Producer_init_transactions")]
@@ -74,6 +74,21 @@ public sealed class NativeAbiConformanceTests
     [InlineData("kafka_producer_Producer_commit_transaction")]
     [InlineData("kafka_producer_Producer_abort_transaction_cb")]
     [InlineData("kafka_producer_Producer_abort_transaction")]
+    [InlineData("kafka_producer_MockProducer_fence_producer")]
+    [InlineData("kafka_producer_MockProducer_transaction_initialized_err")]
+    [InlineData("kafka_producer_MockProducer_transaction_in_flight_err")]
+    [InlineData("kafka_producer_MockProducer_transaction_committed_err")]
+    [InlineData("kafka_producer_MockProducer_transaction_aborted_err")]
+    [InlineData("kafka_producer_MockProducer_flushed_err")]
+    [InlineData("kafka_producer_MockProducer_sent_offsets_err")]
+    [InlineData("kafka_producer_MockProducer_commit_count_err")]
+    [InlineData("kafka_producer_MockProducer_consumer_group_offsets_history_err")]
+    [InlineData("kafka_producer_MockProducer_uncommitted_offsets_err")]
+    [InlineData("kafka_producer_MockProducer_set_init_transaction_error_err")]
+    [InlineData("kafka_producer_MockProducer_set_begin_transaction_error_err")]
+    [InlineData("kafka_producer_MockProducer_set_send_offsets_to_transaction_error_err")]
+    [InlineData("kafka_producer_MockProducer_set_commit_transaction_error_err")]
+    [InlineData("kafka_producer_MockProducer_set_abort_transaction_error_err")]
     public void TransactionImports_MatchTheHeaderParameterNames(string entryPoint)
     {
         CSignature signature = CHeader.Parse(s_headerText.Value).Functions[entryPoint];
