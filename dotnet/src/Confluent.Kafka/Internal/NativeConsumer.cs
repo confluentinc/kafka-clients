@@ -139,7 +139,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         _handle = handle;
         _groupIdDefined = groupIdDefined;
+#pragma warning disable CKRDA0005 // Reports use the raw view: the destroy runs pending callbacks while this SafeHandle is being released.
         _reporter = new ConsumerCallbackReporter(handle.DangerousGetHandle(), PulseOwnerWaiters);
+#pragma warning restore CKRDA0005
         if (withPump)
         {
             _pump = new CompletionThread(PumpThreadName, DrainOf(handle, _uses));
