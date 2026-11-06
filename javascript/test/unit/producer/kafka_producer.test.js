@@ -349,7 +349,8 @@ test('a pending send keeps the process alive until it completes', () => {
 
 test('terminating a worker with records in flight tears its producer down cleanly', () => {
   // Environment teardown finalizes the threadsafe function while the producer
-  // still runs and its tasks still fire the notify hook (COMMENTS.100 item 5).
+  // still runs and its tasks still fire the notify hook: a hook call racing
+  // the finalizer must not reach the released threadsafe function.
   const r = runNode(`
     const { Worker } = require('node:worker_threads');
     const body = \`
