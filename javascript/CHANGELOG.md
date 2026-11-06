@@ -8,12 +8,27 @@ minor release.
 
 ## [4.4.0-beta.1] - Unreleased
 
-Not published: the package is `private`. It takes the npm name of the
-librdkafka-based client, `@confluentinc/kafka-javascript`, and is told apart
-from it by version, as the Rust-based Python client reuses PyPI's
-`confluent-kafka` at `4.4.0b1`: `4.4.0-beta.1` is npm's form of that version
-(the existing package's releases are 0.x and 1.x). Publishing under the shared
-name needs the agreement of the team that owns it.
+Not published yet. It takes the npm name of the librdkafka-based client,
+`@confluentinc/kafka-javascript`, and is told apart from it by version, as the
+Rust-based Python client reuses PyPI's `confluent-kafka` at `4.4.0b1`:
+`4.4.0-beta.1` is npm's form of that version (the existing package's releases
+are 0.x and 1.x). Publishing under the shared name needs the agreement of the
+team that owns it.
+
+### Packaging
+
+- Released as four npm packages: `@confluentinc/kafka-javascript`, the
+  compiled library, and a platform package per platform,
+  `@confluentinc/kafka-javascript-linux-x64-gnu`, `-linux-arm64-gnu` and
+  `-darwin-arm64`, each carrying the addon with the Rust client linked
+  statically, which npm installs from the main package's optional
+  dependencies. No package builds or runs a script at install.
+- Pre-releases are published under the `preview` dist-tag
+  (`npm install @confluentinc/kafka-javascript@preview`); `latest`, `rc` and
+  `alpha` stay with the earlier client.
+- The addon is loaded from the platform package, or else from the development
+  build, `build/Release/`; when neither loads, the error names the platform,
+  the supported ones and how to install or build for it.
 
 ### Producer
 

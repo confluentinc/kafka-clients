@@ -2941,6 +2941,9 @@ fn print_help() {
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
                     by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
+                    --javascript-version SEMVER sets the Node.js package's version
+                    (javascript/package.json and its lockfile), 4.0.0 or higher, a fourth
+                    line, left as it is without it; it only moves up too
   select-tests    Ask an agent which tests the changes from a base branch can affect and write
                   them to ../test-selection/test-selection-<HEAD>.json, keeping the four most
                   recent files there (or to $TEST_SELECTION, relative to the repository root, when
@@ -3033,7 +3036,7 @@ Usage:
   cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER] [--javascript-version SEMVER]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]

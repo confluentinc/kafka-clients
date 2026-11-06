@@ -17,14 +17,13 @@
 // here, so every module that needs the addon requires this one, and no
 // index.ts does any setup.
 //
-// The addon is `confluent-kafka-javascript.node`. Until prebuilt per-platform
-// packages exist, the only place it is looked for is the development build,
-// build/Release/ (`make -C javascript build`), beside dist/, which holds this
-// module compiled.
+// The addon is `confluent-kafka-javascript.node`, from this machine's
+// platform package or else the development build (`_native_loader.ts`).
 
 import { join } from 'node:path';
 
 import { fromNative } from './_errors';
+import { loadAddon, platformKey } from './_native_loader';
 import { RecordMetadata } from './producer/record_metadata';
 
 /** The fields the native layer reads a delivered record's metadata into (src/producer.c). */
@@ -73,18 +72,9 @@ interface Native {
   producerPump(handle: ProducerHandle): void;
 }
 
-const ADDON = join(__dirname, '..', 'build', 'Release', 'confluent-kafka-javascript.node');
-
-let native: Native;
-try {
-  native = require(ADDON) as Native;
-} catch (e) {
-  throw new Error(
-    `cannot load the native addon ${ADDON}: build it with \`make -C javascript build\` ` +
-      `after building libconfluent_kafka (\`make -C rust build-all-features\`)`,
-    { cause: e },
-  );
-}
+// dist/ is beside build/ in the checkout, so the development build is
+// <dist>/../build/Release/.
+const native = loadAddon(require, platformKey(process), join(__dirname, '..')).addon as Native;
 
 // RecordMetadata's constructor is private: users never build one. The native
 // layer does, through this factory; the cast only lifts the compile-time

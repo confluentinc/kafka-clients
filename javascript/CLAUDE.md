@@ -244,7 +244,9 @@ These decide every question, in this order:
   namespaces (`producer`, `common`, `consumer`) and the root's own modules,
   the Java built-in errors (Java's `java.*` packages map to the root, as in the
   Python client). The addon is loaded, and its one-time setup done, in
-  `lib/_native.ts`, never in an `index.ts`. Java getters stay properties.
+  `lib/_native.ts`, never in an `index.ts`; `lib/_native_loader.ts` finds it,
+  the platform package's (`@confluentinc/kafka-javascript-<platform>`) first,
+  then the development build `build/Release/`. Java getters stay properties.
 - Types are TypeScript, under `strict` (`tsconfig.json`); the prose docs are
   TSDoc comments (`@param name -`, `@returns`, `@throws` with the error class in
   backquotes), with no JSDoc type annotations. `make build` (`build-ts`)
@@ -263,7 +265,7 @@ These decide every question, in this order:
 - `package.json`: `main`, `types`, an `exports` entry (`types` + `default`) per
   module folder and its `typesVersions` all point into `dist/`;
   `"gypfile": false`, no install scripts, `files` the compiled `dist/` (not
-  `lib/`, the build inputs, the tests or the gRPC harness).
+  `lib/`, the build inputs, the tests, `tools/` or the gRPC harness).
 - Tests: `test/static` (no build),
   `test/unit/<module>/<file>.test.js` for a Java test class, named after the
   `lib/<module>/<file>.ts` it tests: the Java test class without its `Test`
@@ -277,6 +279,34 @@ These decide every question, in this order:
   (`require('@confluentinc/kafka-javascript/producer')`, Node's
   self-reference), so no install is needed; tests of private helpers, and the
   gRPC server, require `dist/_*.js` directly.
+
+## Packaging
+
+- The repository's `package.json` stays `"private": true` and has no
+  dependencies of any kind; it is not what is published. The published one is
+  written by `.semaphore/check-npm.py manifest`: this one without `private`,
+  `devDependencies` and `scripts`, with the three platform packages as
+  `optionalDependencies` at exactly its version. Each platform package
+  (`@confluentinc/kafka-javascript-linux-x64-gnu`, `-linux-arm64-gnu`,
+  `-darwin-arm64`) holds only the addon, a README and the LICENSE, with npm's
+  `os`, `cpu` and, on Linux, `libc` set. `test/static/layout.test.js` pins the
+  repository's side.
+- No package has an install script or builds at install; `binding.gyp`,
+  `src/`, `lib/`, `scripts/`, `test/`, `tools/` and the gRPC harness are never
+  published (`check-npm.py package` checks each tarball's exact file list).
+- The released addon links the Rust core statically
+  (`CONFLUENT_KAFKA_LINK=static`, binding.gyp), needs glibc 2.28 or macOS 11.0
+  at most, loads only the system's libraries and exports only
+  `napi_register_module_v1` and `node_api_module_get_api_version_v1`
+  (`check-npm.py native`). Development builds, the tests and the gRPC image
+  link it dynamically, the default.
+- The version is `"version"` in `package.json`, repeated in
+  `package-lock.json`, 4.0.0 or higher; `make bump-version
+  JAVASCRIPT_VERSION=...` changes all three. Pre-releases go under the
+  `preview` dist-tag only. The release pipeline publishes nothing: the tag
+  build of `javascript/v<version>` records the tested tarballs, and
+  `release/publish.sh` publishes them by hand (`release/README.txt`,
+  `design/current/javascript-release/PLAN.md`).
 
 ## Generated files
 

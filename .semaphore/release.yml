@@ -2,13 +2,15 @@ version: v1.0
 name: release
 
 # The release of a client, started on the build of its release tag
-# (rust/v<version>, python/v<version>, dotnet/v<version>) by the automatic
+# (rust/v<version>, python/v<version>, dotnet/v<version>,
+# javascript/v<version>) by the automatic
 # "Release" promotion of semaphore.yml once CI has finished, passed or failed.
 # The release process, the tags and the versions are described at the top of
 # semaphore.yml; create-release-tag.yml creates the tags.
 #
 # Each block runs only on the tag of its client and is skipped otherwise, so a
-# rust/v tag runs the Rust blocks and skips the Python and .NET ones. The
+# rust/v tag runs the Rust blocks and skips the Python, .NET and JavaScript
+# ones. The
 # pipeline shares the workflow's artifacts with the CI pipeline of the tag
 # build, and its own "Publish to Test PyPI" promotion (publish-testpypi.yml)
 # publishes the wheels it records.
@@ -21,7 +23,8 @@ agent:
     type: s1-prod-ubuntu24-04-amd64-2
 
 # The release checks, the publish and the post-publish checks run one after
-# another (for Python and .NET, after the wheel and native library builds). The
+# another (for Python, .NET and JavaScript, after the wheel, native library and
+# addon builds). The
 # limit is explicit so that it does not depend on Semaphore's default for a
 # pipeline.
 execution_time_limit:
@@ -40,6 +43,11 @@ global_job_config:
     # in dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj.
     - name: NUGET_PACKAGE
       value: Confluent.Kafka
+    # The main npm package that the "Release (JavaScript):" blocks record:
+    # "name" in javascript/package.json. Its platform packages are
+    # ${NPM_PACKAGE}-<platform>.
+    - name: NPM_PACKAGE
+      value: "@confluentinc/kafka-javascript"
   # Shell-neutral, because the Windows blocks run it too and their shell is PowerShell. Each
   # block's task prologue starts with the rest for its shell: `. .semaphore/job-start.sh` on Linux
   # and macOS (the "Run on branch" switch, the `running` result of the epilogue's comment below,
@@ -1190,6 +1198,276 @@ blocks:
         - name: "Package the tested package"
           commands:
             - bash .semaphore/release-nupkg.sh
+
+  # JavaScript release blocks. They run only on the build of a JavaScript
+  # release tag, javascript/v<version> with an optional -alpha.N, -beta.N,
+  # -dev.N or -rc.N suffix, and are skipped on every other build. The pattern
+  # must stay identical in all of the blocks that use it, and in the scripts
+  # that check it: release-npm.sh (release_version) and create-release-tag.yml
+  # for the tag, and, for the version without its javascript/v prefix,
+  # check-npm.py (VERSION_PATTERN) and test-published-npm.sh. The version is
+  # "version" in javascript/package.json, 4.0.0 or higher: the npm name is
+  # shared with confluent-kafka-javascript, the librdkafka-based client, whose
+  # versions are 1.x.
+  #
+  # The release is four npm packages: one per platform,
+  # @confluentinc/kafka-javascript-<platform> (linux-x64-gnu, linux-arm64-gnu,
+  # darwin-arm64), carrying the addon with the Rust core linked statically, and
+  # the main package, @confluentinc/kafka-javascript, whose
+  # optionalDependencies name the three at its exact version, so that npm
+  # installs the one of the user's platform.
+  # The blocks run in this order, each on a VM of its own:
+  #   1. "Release (JavaScript): native addon (<platform>)" builds the addon of
+  #      one platform, alongside CI (.semaphore/build-javascript-native.sh):
+  #      the Rust core as the wheels and the NuGet package build it, then the
+  #      addon linked statically against it, in the manylinux_2_28 image on
+  #      Linux, so that it needs glibc 2.28 at most, and for macOS 11.0 on
+  #      macOS. check-npm.py checks that it loads only system libraries and
+  #      exports only the two Node-API entry points. It records the addon.
+  #   2. "Release (JavaScript): pack" packs the three platform packages and the
+  #      main package (.semaphore/pack-npm.sh), checks them (check-npm.py) and
+  #      records the four tarballs under npm/built.
+  #   3. "Release (JavaScript): package verification (<platform>)" installs the
+  #      main package and the platform's package from those tarballs into a
+  #      project outside the repository, on a VM that built nothing, with no
+  #      registry reachable, and runs the smoke program there
+  #      (.semaphore/test-npm.sh). It records the SHA-256 of the tested
+  #      tarballs.
+  #   4. "Release (JavaScript): record" depends on the three verification
+  #      blocks, so it starts only when all of them have passed. It checks the
+  #      tag, the version and that
+  #      npmjs.com does not have the version yet, and records the tested
+  #      tarballs as the release: the bundle
+  #      npm/release/confluent-kafka-javascript-<version>-release.zip, holding
+  #      them with their SHA256SUMS, publish.sh and README.txt
+  #      (javascript/release/), with their checksums in npm/release/SHA256SUMS
+  #      (.semaphore/release-npm.sh). The release ends here.
+  # The pipeline publishes nothing, and no VM of it holds an npm token: the
+  # bundle is downloaded from the workflow's artifacts and published to
+  # npmjs.com by hand with its publish.sh, under the preview dist-tag; the
+  # javascript-post-install task (.semaphore/javascript-post-install.yml) then
+  # checks the published packages (javascript/release/README.txt).
+  #
+  # To resume an interrupted release, rerun the failed blocks of this pipeline.
+  - name: "Release (JavaScript): native addon (Linux amd64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: NPM_PLATFORM
+          value: linux-x64-gnu
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Build the native addon (Linux amd64)"
+          commands:
+            - sh .semaphore/build-javascript-native.sh /tmp/native
+            - artifact push workflow "/tmp/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --destination "npm/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --force
+
+  - name: "Release (JavaScript): native addon (Linux arm64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: NPM_PLATFORM
+          value: linux-arm64-gnu
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Build the native addon (Linux arm64)"
+          commands:
+            - sh .semaphore/build-javascript-native.sh /tmp/native
+            - artifact push workflow "/tmp/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --destination "npm/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --force
+
+  - name: "Release (JavaScript): native addon (macOS arm64)"
+    dependencies: []
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 60
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: NPM_PLATFORM
+          value: darwin-arm64
+        # The oldest macOS the package supports (javascript/README.md), for the Rust core, the C
+        # code it compiles (aws-lc) and the addon alike; build-javascript-native.sh refuses to
+        # build without it. check-npm.py refuses an addon whose own minimum is newer, but cannot
+        # see the minimum of the objects linked into it, so this variable is what sets theirs.
+        - name: MACOSX_DEPLOYMENT_TARGET
+          value: "11.0"
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Build the native addon (macOS arm64)"
+          commands:
+            - sem-version node 22
+            - sh .semaphore/build-javascript-native.sh /tmp/native
+            - artifact push workflow "/tmp/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --destination "npm/native/${NPM_PLATFORM}/confluent-kafka-javascript.node" --force
+
+  - name: "Release (JavaScript): pack"
+    dependencies:
+      - "Release (JavaScript): native addon (Linux amd64)"
+      - "Release (JavaScript): native addon (Linux arm64)"
+      - "Release (JavaScript): native addon (macOS arm64)"
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 20
+    task:
+      env_vars:
+        # npm ci installs the devDependencies (typescript, @types/node) from
+        # the public registry; see "Verify Rust and language bindings (Linux
+        # amd64)" in semaphore.yml.
+        - name: NPM_CONFIG_REGISTRY
+          value: https://registry.npmjs.org/
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Pack the packages"
+          commands:
+            - sem-version node 22
+            # The compiler of the library (dist/); --ignore-scripts, as no
+            # install script of a dependency needs to run for it.
+            - (cd javascript && npm ci --no-audit --no-fund --ignore-scripts)
+            # pack-npm.sh takes a directory that holds <platform>/<addon> for
+            # each platform and nothing else.
+            - |
+              for platform in linux-x64-gnu linux-arm64-gnu darwin-arm64; do
+                mkdir -p "/tmp/natives/${platform}" \
+                  && artifact pull workflow "npm/native/${platform}/confluent-kafka-javascript.node" --destination "/tmp/natives/${platform}/confluent-kafka-javascript.node" \
+                  || exit 1
+              done
+            # The version packed is "version" in javascript/package.json, which
+            # must be the tag's; the record block checks it again before
+            # anything is released.
+            - NPM_VERSION=$(python3 .semaphore/check-npm.py version) && export NPM_VERSION
+            - test "${SEMAPHORE_GIT_TAG_NAME#javascript/v}" = "${NPM_VERSION}"
+            - sh .semaphore/pack-npm.sh /tmp/natives /tmp/packages
+            # The four tarballs, and nothing else, under npm/built.
+            - |
+              for file in /tmp/packages/*.tgz; do
+                artifact push workflow "${file}" --destination "npm/built/$(basename "${file}")" --force || exit 1
+              done
+
+  - name: "Release (JavaScript): package verification (Linux amd64)"
+    dependencies: ["Release (JavaScript): pack"]
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-3
+      env_vars:
+        - name: NPM_PLATFORM
+          value: linux-x64-gnu
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Test the packages (Linux amd64)"
+          commands:
+            - sem-version node 22
+            # test-npm.sh takes a directory that holds the tarballs and nothing else.
+            - artifact pull workflow npm/built --destination /tmp/packages
+            - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
+            - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
+
+  - name: "Release (JavaScript): package verification (Linux arm64)"
+    dependencies: ["Release (JavaScript): pack"]
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      env_vars:
+        - name: NPM_PLATFORM
+          value: linux-arm64-gnu
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Test the packages (Linux arm64)"
+          commands:
+            - sem-version node 22
+            # test-npm.sh takes a directory that holds the tarballs and nothing else.
+            - artifact pull workflow npm/built --destination /tmp/packages
+            - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
+            - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
+
+  - name: "Release (JavaScript): package verification (macOS arm64)"
+    dependencies: ["Release (JavaScript): pack"]
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: NPM_PLATFORM
+          value: darwin-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Test the packages (macOS arm64)"
+          commands:
+            - sem-version node 22
+            # test-npm.sh takes a directory that holds the tarballs and nothing else.
+            - artifact pull workflow npm/built --destination /tmp/packages
+            - sh .semaphore/test-npm.sh /tmp/packages "${NPM_PLATFORM}" /tmp/tested.sha256
+            - artifact push workflow /tmp/tested.sha256 --destination "npm/tested/${NPM_PLATFORM}" --force
+
+  - name: "Release (JavaScript): record"
+    # Starts only when the packages were tested on every platform. The checks
+    # this block makes are listed in release-npm.sh; it loads no token.
+    dependencies:
+      - "Release (JavaScript): package verification (Linux amd64)"
+      - "Release (JavaScript): package verification (Linux arm64)"
+      - "Release (JavaScript): package verification (macOS arm64)"
+    run:
+      when: "tag =~ '^javascript/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\\.(0|[1-9][0-9]*))?$'"
+    execution_time_limit:
+      minutes: 20
+    task:
+      env_vars:
+        # The platforms of the verification blocks above, whose checksums are
+        # recorded under npm/tested/<platform>.
+        - name: NPM_PLATFORMS
+          value: linux-x64-gnu linux-arm64-gnu darwin-arm64
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+      jobs:
+        - name: "Record the tested packages"
+          commands:
+            - bash .semaphore/release-npm.sh
+
 
 promotions:
   # Manual. Publishes a Python version to Test PyPI and checks it there

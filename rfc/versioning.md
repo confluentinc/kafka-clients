@@ -74,8 +74,8 @@ example, the new client defaults to the KIP-848 consumer group protocol.
 
 ## Versions before the proposal is adopted
 
-Until this proposal is adopted, the Rust crates, the Python packages and the .NET package
-are on separate version lines, and `cargo xtask bump-version` (`make bump-version`) keeps
+Until this proposal is adopted, the Rust crates, the Python packages, the .NET package and
+the JavaScript package are on separate version lines, and `cargo xtask bump-version` (`make bump-version`) keeps
 them so:
 
 - **Rust crates** follow plain semantic versioning from the first release (`0.1.1`,
@@ -94,8 +94,17 @@ them so:
   `--dotnet-version` (`DOTNET_VERSION=`) and only moves up. To change it alone, give the
   crates and the Python packages their current versions, for example
   `make bump-version VERSION=0.3.0-beta.1 PYTHON_VERSION=4.4.0a1.dev2 DOTNET_VERSION=4.4.0-beta.1`.
+- **The JavaScript package** (`@confluentinc/kafka-javascript`, `"version"` in
+  `javascript/package.json` and its two copies in `javascript/package-lock.json`) follows
+  its own SemVer line, which tracks Apache Kafka like the .NET one (`4.4.0-beta.1`). Its
+  major version is at least 4, above the 1.x versions of the librdkafka-based client that
+  shares the npm name; the command refuses a version below 4.0.0. Its three platform
+  packages (`@confluentinc/kafka-javascript-<platform>`) always have its version. It
+  changes only with `--javascript-version` (`JAVASCRIPT_VERSION=`) and only moves up. To
+  change it alone, give the crates and the Python packages their current versions, for
+  example `make bump-version VERSION=0.3.0-beta.1 PYTHON_VERSION=4.4.0a1.dev2 JAVASCRIPT_VERSION=4.4.0-beta.2`.
 
 Versions only move forward: the command refuses a version below the current one, in SemVer
-order for the crates and the .NET package and PEP 440 order for the Python packages, where a
+order for the crates, the .NET package and the JavaScript package and PEP 440 order for the Python packages, where a
 pre-release comes before its release, so a pre-release `X.Y.Z-beta.N` is cut before `X.Y.Z`,
 never after.

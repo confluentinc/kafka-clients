@@ -18,7 +18,8 @@
 	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
-	build-grpc-native-javascript test-integration-javascript-native
+	build-grpc-native-javascript test-integration-javascript-native \
+	pack-javascript package-check-javascript
 
 build: init-hooks build-all
 
@@ -178,11 +179,25 @@ build-grpc-native-javascript: build-javascript
 test-integration-javascript-native: build-grpc-native-javascript
 	$(MAKE) -C rust test-integration-grpc-js-native
 
-# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`
-# bumps the versions of the Rust crate, the Python wheels and the .NET package:
-# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
-# sub-make through its environment (make passes command-line variables down);
-# this recipe never pastes them in.
+# The npm packages of the Node.js client, with this machine's addon only:
+# pack-javascript packs them into javascript/build/pack, and
+# package-check-javascript packs them, then installs them into a fresh project
+# and runs the smoke program there. See javascript/Makefile; the release
+# packages are built by release.yml's "Release (JavaScript):" blocks.
+pack-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript pack
+
+package-check-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript pack-check
+
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]
+# [JAVASCRIPT_VERSION=...]` bumps the versions of the Rust crate, the Python
+# wheels, the .NET package and the Node.js package: see rust/Makefile. VERSION,
+# PYTHON_VERSION, DOTNET_VERSION and JAVASCRIPT_VERSION reach the sub-make
+# through its environment (make passes command-line variables down); this
+# recipe never pastes them in.
 bump-version:
 	$(MAKE) -C rust bump-version
 
