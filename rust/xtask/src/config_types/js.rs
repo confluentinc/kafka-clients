@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The Node.js client's `lib/_config_types.js`: the `ConfigDef` type of every
+//! The Node.js client's `lib/_config_types.ts`: the `ConfigDef` type of every
 //! producer config key and what its validator does with `null`, as the Python
 //! client's `_config_types.py` (the producer table only: the Node.js client
 //! has no consumer or admin client yet).
@@ -28,7 +28,7 @@ type Res<T> = anyhow::Result<T>;
 
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
-/// `lib/_config_types.js` and its content.
+/// `lib/_config_types.ts` and its content.
 pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let mut consts = config_consts::Reader::new(repo_root);
@@ -64,20 +64,22 @@ pub(crate) fn output(repo_root: &Path) -> Res<(PathBuf, String)> {
          // `ConfigException(name, null, message)`, ['plain', message] for\n\
          // `ConfigException(message)`. A key that is not there holds `null` in Java.\n\n",
     );
-    text.push_str("/** @type {ReadonlyMap<string, string>} */\nconst PRODUCER = new Map([\n");
+    text.push_str("export const PRODUCER: ReadonlyMap<string, string> = new Map<string, string>([\n");
     for t in &types {
         text.push_str(t);
         text.push('\n');
     }
     text.push_str(
-        "]);\n\n/** @type {ReadonlyMap<string, ['named' | 'plain', string]>} */\nconst PRODUCER_NULL = new Map([\n",
+        "]);\n\n/** The `ConfigException` a key's validator throws for `null`: its form and message. */\n\
+         type NullRule = readonly ['named' | 'plain', string];\n\n\
+         export const PRODUCER_NULL: ReadonlyMap<string, NullRule> = new Map<string, NullRule>([\n",
     );
     for n in &nulls {
         text.push_str(n);
         text.push('\n');
     }
-    text.push_str("]);\n\nmodule.exports = { PRODUCER, PRODUCER_NULL };\n");
-    Ok((repo_root.join(JS_LIB).join("_config_types.js"), text))
+    text.push_str("]);\n");
+    Ok((repo_root.join(JS_LIB).join("_config_types.ts"), text))
 }
 
 #[cfg(test)]
@@ -95,7 +97,12 @@ mod tests {
     #[test]
     fn test_producer_table() {
         let (path, text) = output(&repo_root()).unwrap();
-        assert!(path.ends_with("javascript/lib/_config_types.js"));
+        assert!(path.ends_with("javascript/lib/_config_types.ts"));
+        assert!(text.contains("export const PRODUCER: ReadonlyMap<string, string> = new Map<string, string>([\n"));
+        assert!(
+            text.contains("export const PRODUCER_NULL: ReadonlyMap<string, NullRule> = new Map<string, NullRule>([\n")
+        );
+        assert!(!text.contains("module.exports"));
         for line in [
             "  ['bootstrap.servers', 'LIST'],",
             "  ['ssl.keystore.password', 'PASSWORD'],",
