@@ -5,7 +5,7 @@
     (consumer M8/P1+P2; producer M12/P1). NOT part of the shipped Confluent.Kafka
     package — it is a test-harness artifact that exposes the binding's generic
     KafkaProducer/MockProducer and KafkaConsumer/MockConsumer (both
-    <byte[],byte[]> with Serdes.ByteArray) over the ProducerService +
+    <byte[],byte[]> with Serdes.ByteArray()) over the ProducerService +
     ConsumerService gRPC contracts, so the repo's producer AND consumer
     integration tests can run against the .NET binding (the .NET twin of the
     Python / C backends). One server per flavor hosts BOTH services

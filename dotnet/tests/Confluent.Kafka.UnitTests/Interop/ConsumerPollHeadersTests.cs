@@ -56,7 +56,7 @@ public sealed class ConsumerPollHeadersTests
         consumer.Seek(Topic, Partition, offset: 0);
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
-        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.NotNull(record.Headers());
@@ -77,7 +77,7 @@ public sealed class ConsumerPollHeadersTests
             (NonAsciiKey, s_valueWithNul),
             ("empty-value", Array.Empty<byte>()));
 
-        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.Collection(

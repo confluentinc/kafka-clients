@@ -47,7 +47,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
     [Fact]
     public void Send_MutatingBufferAfterSend_ProducesUnchangedRecord()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         byte[] key = Encoding.UTF8.GetBytes("key");
@@ -109,7 +109,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Pre-allocated OUTSIDE every measured window; storing a struct into it allocates nothing.
@@ -160,7 +160,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Warm up the send path (JIT) so the measured runs are steady-state.

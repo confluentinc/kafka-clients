@@ -37,32 +37,32 @@ public sealed class SerdesTests
     [InlineData("日本語 🎉")]
     public void String_RoundTrips(string value)
     {
-        byte[]? bytes = Serdes.String.Serialize(Topic, value);
+        byte[]? bytes = Serdes.String().Serialize(Topic, value);
         Assert.NotNull(bytes);
-        string decoded = Serdes.String.Deserialize(Topic, bytes);
+        string decoded = Serdes.String().Deserialize(Topic, bytes);
         Assert.Equal(value, decoded);
     }
 
     [Fact]
     public void String_WireFormat_IsUtf8()
     {
-        byte[]? bytes = Serdes.String.Serialize(Topic, "café");
+        byte[]? bytes = Serdes.String().Serialize(Topic, "café");
         Assert.Equal(new byte[] { 0x63, 0x61, 0x66, 0xC3, 0xA9 }, bytes);
     }
 
     [Fact]
     public void String_UnpairedSurrogate_SerializesAsQuestionMark_AsJavasGetBytes()
     {
-        Assert.Equal(new byte[] { 0x61, 0x3F, 0x62 }, Serdes.String.Serialize(Topic, "a\uD800b"));
-        Assert.Equal(new byte[] { 0x61, 0x3F, 0x62 }, Serdes.String.Serialize(Topic, "a\uDC00b"));
-        Assert.Equal(new byte[] { 0xF0, 0x9F, 0x8E, 0x88 }, Serdes.String.Serialize(Topic, "🎈"));
+        Assert.Equal(new byte[] { 0x61, 0x3F, 0x62 }, Serdes.String().Serialize(Topic, "a\uD800b"));
+        Assert.Equal(new byte[] { 0x61, 0x3F, 0x62 }, Serdes.String().Serialize(Topic, "a\uDC00b"));
+        Assert.Equal(new byte[] { 0xF0, 0x9F, 0x8E, 0x88 }, Serdes.String().Serialize(Topic, "🎈"));
     }
 
     [Fact]
     public void String_SerializeNull_ReturnsNull()
     {
         string? nil = null;
-        Assert.Null(Serdes.String.Serialize(Topic, nil!));
+        Assert.Null(Serdes.String().Serialize(Topic, nil!));
     }
 
     [Fact]
@@ -70,10 +70,10 @@ public sealed class SerdesTests
     {
         byte[] value = { 0x00, 0x01, 0xFE, 0xFF };
 
-        byte[]? serialized = Serdes.ByteArray.Serialize(Topic, value);
+        byte[]? serialized = Serdes.ByteArray().Serialize(Topic, value);
         Assert.Same(value, serialized);
 
-        byte[] decoded = Serdes.ByteArray.Deserialize(Topic, value);
+        byte[] decoded = Serdes.ByteArray().Deserialize(Topic, value);
         Assert.Equal(value, decoded);
         Assert.NotSame(value, decoded);
     }
@@ -81,7 +81,7 @@ public sealed class SerdesTests
     [Fact]
     public void ByteArray_DeserializeEmpty_ReturnsEmptyOwnedArray()
     {
-        byte[] decoded = Serdes.ByteArray.Deserialize(Topic, ReadOnlySpan<byte>.Empty);
+        byte[] decoded = Serdes.ByteArray().Deserialize(Topic, ReadOnlySpan<byte>.Empty);
         Assert.Empty(decoded);
     }
 
@@ -89,7 +89,7 @@ public sealed class SerdesTests
     public void ByteArray_SerializeNull_ReturnsNull()
     {
         byte[]? nil = null;
-        Assert.Null(Serdes.ByteArray.Serialize(Topic, nil!));
+        Assert.Null(Serdes.ByteArray().Serialize(Topic, nil!));
     }
 
     [Theory]
@@ -101,18 +101,18 @@ public sealed class SerdesTests
     [InlineData(int.MinValue)]
     public void Int32_RoundTrips(int value)
     {
-        byte[]? bytes = Serdes.Int32.Serialize(Topic, value);
+        byte[]? bytes = Serdes.Integer().Serialize(Topic, value);
         Assert.NotNull(bytes);
-        Assert.Equal(value, Serdes.Int32.Deserialize(Topic, bytes));
+        Assert.Equal(value, Serdes.Integer().Deserialize(Topic, bytes));
     }
 
     [Fact]
     public void Int32_WireFormat_IsBigEndian()
     {
-        Assert.Equal(new byte[] { 0x00, 0x00, 0x00, 0x01 }, Serdes.Int32.Serialize(Topic, 1));
-        Assert.Equal(new byte[] { 0x00, 0x00, 0x01, 0x00 }, Serdes.Int32.Serialize(Topic, 256));
-        Assert.Equal(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, Serdes.Int32.Serialize(Topic, -1));
-        Assert.Equal(new byte[] { 0x7F, 0xFF, 0xFF, 0xFF }, Serdes.Int32.Serialize(Topic, int.MaxValue));
+        Assert.Equal(new byte[] { 0x00, 0x00, 0x00, 0x01 }, Serdes.Integer().Serialize(Topic, 1));
+        Assert.Equal(new byte[] { 0x00, 0x00, 0x01, 0x00 }, Serdes.Integer().Serialize(Topic, 256));
+        Assert.Equal(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, Serdes.Integer().Serialize(Topic, -1));
+        Assert.Equal(new byte[] { 0x7F, 0xFF, 0xFF, 0xFF }, Serdes.Integer().Serialize(Topic, int.MaxValue));
     }
 
     [Theory]
@@ -123,9 +123,9 @@ public sealed class SerdesTests
     [InlineData(long.MinValue)]
     public void Int64_RoundTrips(long value)
     {
-        byte[]? bytes = Serdes.Int64.Serialize(Topic, value);
+        byte[]? bytes = Serdes.Long().Serialize(Topic, value);
         Assert.NotNull(bytes);
-        Assert.Equal(value, Serdes.Int64.Deserialize(Topic, bytes));
+        Assert.Equal(value, Serdes.Long().Deserialize(Topic, bytes));
     }
 
     [Fact]
@@ -133,10 +133,10 @@ public sealed class SerdesTests
     {
         Assert.Equal(
             new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
-            Serdes.Int64.Serialize(Topic, 1L));
+            Serdes.Long().Serialize(Topic, 1L));
         Assert.Equal(
             new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 },
-            Serdes.Int64.Serialize(Topic, 0x0102030405060708L));
+            Serdes.Long().Serialize(Topic, 0x0102030405060708L));
     }
 
     [Theory]
@@ -149,17 +149,17 @@ public sealed class SerdesTests
     [InlineData(double.NegativeInfinity)]
     public void Double_RoundTrips(double value)
     {
-        byte[]? bytes = Serdes.Double.Serialize(Topic, value);
+        byte[]? bytes = Serdes.Double().Serialize(Topic, value);
         Assert.NotNull(bytes);
-        Assert.Equal(value, Serdes.Double.Deserialize(Topic, bytes));
+        Assert.Equal(value, Serdes.Double().Deserialize(Topic, bytes));
     }
 
     [Fact]
     public void Double_NaN_RoundTrips()
     {
-        byte[]? bytes = Serdes.Double.Serialize(Topic, double.NaN);
+        byte[]? bytes = Serdes.Double().Serialize(Topic, double.NaN);
         Assert.NotNull(bytes);
-        Assert.True(double.IsNaN(Serdes.Double.Deserialize(Topic, bytes)));
+        Assert.True(double.IsNaN(Serdes.Double().Deserialize(Topic, bytes)));
     }
 
     [Fact]
@@ -167,20 +167,20 @@ public sealed class SerdesTests
     {
         Assert.Equal(
             new byte[] { 0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-            Serdes.Double.Serialize(Topic, 1.0));
+            Serdes.Double().Serialize(Topic, 1.0));
 
         Assert.Equal(
             new byte[] { 0x7F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-            Serdes.Double.Serialize(Topic, double.NaN));
+            Serdes.Double().Serialize(Topic, double.NaN));
     }
 
     [Fact]
     public void Guid_RoundTrips()
     {
         Guid value = Guid.NewGuid();
-        byte[]? bytes = Serdes.Guid.Serialize(Topic, value);
+        byte[]? bytes = Serdes.UUID().Serialize(Topic, value);
         Assert.NotNull(bytes);
-        Assert.Equal(value, Serdes.Guid.Deserialize(Topic, bytes));
+        Assert.Equal(value, Serdes.UUID().Deserialize(Topic, bytes));
     }
 
     [Fact]
@@ -189,7 +189,7 @@ public sealed class SerdesTests
         var value = new Guid("A1B2C3D4-E5F6-7788-99AA-BBCCDDEEFF00");
         const string canonical = "a1b2c3d4-e5f6-7788-99aa-bbccddeeff00";
 
-        byte[]? bytes = Serdes.Guid.Serialize(Topic, value);
+        byte[]? bytes = Serdes.UUID().Serialize(Topic, value);
 
         Assert.Equal(Encoding.UTF8.GetBytes(canonical), bytes);
         Assert.Equal(36, bytes!.Length);
@@ -200,24 +200,24 @@ public sealed class SerdesTests
     public void Guid_DeserializeParsesCanonicalString()
     {
         byte[] wire = Encoding.UTF8.GetBytes("12345678-9abc-def0-1234-56789abcdef0");
-        Guid decoded = Serdes.Guid.Deserialize(Topic, wire);
+        Guid decoded = Serdes.UUID().Deserialize(Topic, wire);
         Assert.Equal(new Guid("12345678-9abc-def0-1234-56789abcdef0"), decoded);
     }
 
     [Fact]
     public void Null_SerializeReturnsNull_DeserializeReturnsDefault()
     {
-        Assert.Null(Serdes.Null.Serialize(Topic, null));
-        Assert.Null(Serdes.Null.Serialize(Topic, new object()));
-        Assert.Null(Serdes.Null.Deserialize(Topic, ReadOnlySpan<byte>.Empty));
-        Assert.Null(Serdes.Null.Deserialize(Topic, new byte[] { 1, 2, 3 }));
+        Assert.Null(Serdes.Void().Serialize(Topic, null));
+        Assert.Null(Serdes.Void().Serialize(Topic, new object()));
+        Assert.Null(Serdes.Void().Deserialize(Topic, ReadOnlySpan<byte>.Empty));
+        Assert.Null(Serdes.Void().Deserialize(Topic, new byte[] { 1, 2, 3 }));
     }
 
     [Fact]
     public void Int32_WrongLength_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
-            () => Serdes.Int32.Deserialize(Topic, new byte[] { 0x00, 0x00, 0x01 }));
+            () => Serdes.Integer().Deserialize(Topic, new byte[] { 0x00, 0x00, 0x01 }));
         Assert.Equal("Size of data received by IntegerDeserializer is not 4", ex.Message);
     }
 
@@ -225,7 +225,7 @@ public sealed class SerdesTests
     public void Int64_WrongLength_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
-            () => Serdes.Int64.Deserialize(Topic, new byte[] { 0x00, 0x00, 0x00, 0x01 }));
+            () => Serdes.Long().Deserialize(Topic, new byte[] { 0x00, 0x00, 0x00, 0x01 }));
         Assert.Equal("Size of data received by LongDeserializer is not 8", ex.Message);
     }
 
@@ -233,7 +233,7 @@ public sealed class SerdesTests
     public void Double_WrongLength_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
-            () => Serdes.Double.Deserialize(Topic, new byte[] { 0x00, 0x00, 0x00, 0x01 }));
+            () => Serdes.Double().Deserialize(Topic, new byte[] { 0x00, 0x00, 0x00, 0x01 }));
         Assert.Equal("Size of data received by Deserializer is not 8", ex.Message);
     }
 
@@ -241,7 +241,7 @@ public sealed class SerdesTests
     public void Guid_MalformedText_ThrowsSerializationException()
     {
         var ex = Assert.Throws<SerializationException>(
-            () => Serdes.Guid.Deserialize(Topic, Encoding.UTF8.GetBytes("not-a-uuid")));
+            () => Serdes.UUID().Deserialize(Topic, Encoding.UTF8.GetBytes("not-a-uuid")));
         Assert.Equal("Error parsing data into UUID", ex.Message);
         Assert.NotNull(ex.InnerException);
     }
@@ -250,7 +250,7 @@ public sealed class SerdesTests
     public void SerializationException_IsCatchableAsKafkaException()
     {
         KafkaException ex = Assert.ThrowsAny<KafkaException>(
-            () => Serdes.Int32.Deserialize(Topic, new byte[] { 0x00 }));
+            () => Serdes.Integer().Deserialize(Topic, new byte[] { 0x00 }));
         Assert.IsType<SerializationException>(ex);
         Assert.IsAssignableFrom<KafkaException>(ex);
 

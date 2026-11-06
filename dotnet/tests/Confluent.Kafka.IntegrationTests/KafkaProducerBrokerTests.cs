@@ -67,7 +67,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray());
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(Record(topic, 0, "a"));
         Assert.False(firstStage.IsCompleted, "the first record was taken inside the call");
@@ -85,7 +85,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         using KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray(), Serdes.ByteArray());
 
         KafkaFuture<RecordMetadata> warmUp = producer.Send(Record(topic, 0, "warm-up"));
         Assert.Equal(0L, warmUp.Get(s_get).Offset());
@@ -123,7 +123,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray(), Serdes.ByteArray());
 
         AsyncKafkaFuture<RecordMetadata> warmUp = await producer.Send(Record(topic, 0, "warm-up"));
         Assert.Equal(0L, (await warmUp.Get(s_get)).Offset());
@@ -147,7 +147,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         using KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray());
 
         AssertDelivered(producer.Send(SizedRecord(topic)).Get(s_get), keySize: 3, valueSize: 5);
         AssertDelivered(producer.Send(TombstoneRecord(topic)).Get(s_get), keySize: -1, valueSize: -1);
@@ -158,7 +158,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray());
 
         AssertDelivered(await (await producer.Send(SizedRecord(topic))).Get(s_get), keySize: 3, valueSize: 5);
         AssertDelivered(await (await producer.Send(TombstoneRecord(topic))).Get(s_get), keySize: -1, valueSize: -1);
@@ -169,7 +169,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         using (KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray))
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray()))
         {
             Assert.Equal(0L, producer.Send(HeadersRecord(topic, HeadersOf(s_headers))).Get(s_get).Offset());
         }
@@ -182,7 +182,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         using (KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray))
+            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray()))
         {
             ProducerRecord<byte[], byte[]> record =
                 HeadersRecord(topic, new[] { new Header("given", Encoding.UTF8.GetBytes("1")) });
@@ -204,7 +204,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
     {
         string topic = await TopicAsync();
         await using (AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray))
+            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray(), Serdes.ByteArray()))
         {
             AsyncKafkaFuture<RecordMetadata> future = await producer.Send(HeadersRecord(topic, HeadersOf(s_headers)));
             Assert.Equal(0L, (await future.Get(s_get)).Offset());
@@ -280,7 +280,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             ["enable.auto.commit"] = "false",
         };
         using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
         TopicPartition tp = new TopicPartition(topic, 0);
         consumer.Assign(new[] { tp });
         consumer.Seek(tp, 0);
@@ -306,7 +306,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             ["enable.auto.commit"] = "false",
         };
         using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
         TopicPartition tp = new TopicPartition(topic, partition);
         consumer.Assign(new[] { tp });
         consumer.Seek(tp, fromOffset);

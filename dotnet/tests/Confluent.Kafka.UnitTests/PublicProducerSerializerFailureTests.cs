@@ -71,7 +71,7 @@ public sealed class PublicProducerSerializerFailureTests
     public async Task ApiException_ReachesTheCallbackOnce_AndFailsTheFuture(string flavor)
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
-        using Producer producer = Producer.Create(flavor, Serdes.String, value);
+        using Producer producer = Producer.Create(flavor, Serdes.String(), value);
         RecordingCallback callback = new RecordingCallback();
 
         Task<RecordMetadata> future = producer.Send(
@@ -94,7 +94,7 @@ public sealed class PublicProducerSerializerFailureTests
     public async Task ApiException_WithoutACallback_FailsTheFuture(string flavor)
     {
         ThrowingSerializer<string> key = new ThrowingSerializer<string>(() => new TopicAuthorizationException("denied"));
-        using Producer producer = Producer.Create(flavor, key, Serdes.String);
+        using Producer producer = Producer.Create(flavor, key, Serdes.String());
 
         Task<RecordMetadata> future = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), null);
 
@@ -107,7 +107,7 @@ public sealed class PublicProducerSerializerFailureTests
     public void ApiException_WithoutAPartition_HasThePlaceholderPartition(string flavor)
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
-        using Producer producer = Producer.Create(flavor, Serdes.String, value);
+        using Producer producer = Producer.Create(flavor, Serdes.String(), value);
         RecordingCallback callback = new RecordingCallback();
 
         _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback);
@@ -121,7 +121,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         // Java calls the callback without a try, so its throw leaves send.
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
-        using Producer producer = Producer.Create(flavor, Serdes.String, value);
+        using Producer producer = Producer.Create(flavor, Serdes.String(), value);
         InvalidOperationException thrown = new InvalidOperationException("from-callback");
 
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
@@ -138,7 +138,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
         using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
-            flavor, Serdes.String, value);
+            flavor, Serdes.String(), value);
         TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         GatedAsyncCallback callback = new GatedAsyncCallback(release.Task);
@@ -167,7 +167,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
         using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
-            flavor, Serdes.String, value);
+            flavor, Serdes.String(), value);
         TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         GatedAsyncCallback callback = new GatedAsyncCallback(release.Task);
@@ -194,7 +194,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
         using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
-            flavor, Serdes.String, value);
+            flavor, Serdes.String(), value);
         NestingAsyncCallback callback = new NestingAsyncCallback(producer);
 
         _ = await producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), callback);
@@ -209,7 +209,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
         using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
-            flavor, Serdes.String, value);
+            flavor, Serdes.String(), value);
 
         AsyncKafkaFuture<RecordMetadata> future = await producer.Send(
             new ProducerRecord<string, string>(Topic, "v", key: "k"),
@@ -226,7 +226,7 @@ public sealed class PublicProducerSerializerFailureTests
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new RecordTooLargeException("too large"));
         using IAsyncProducer<string, string> producer = (IAsyncProducer<string, string>)Producer.CreateRaw(
-            flavor, Serdes.String, value);
+            flavor, Serdes.String(), value);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource canceled = new CancellationTokenSource();
         canceled.Cancel();
@@ -243,7 +243,7 @@ public sealed class PublicProducerSerializerFailureTests
     public void InvalidCastException_FromTheKeySerializer_IsWrapped(string flavor)
     {
         InvalidCastSerializer key = new InvalidCastSerializer();
-        using Producer producer = Producer.Create(flavor, key, Serdes.String);
+        using Producer producer = Producer.Create(flavor, key, Serdes.String());
         RecordingCallback callback = new RecordingCallback();
 
         SerializationException error = Assert.Throws<SerializationException>(
@@ -263,7 +263,7 @@ public sealed class PublicProducerSerializerFailureTests
     public void InvalidCastException_FromTheValueSerializer_IsWrapped(string flavor)
     {
         InvalidCastSerializer value = new InvalidCastSerializer();
-        using Producer producer = Producer.Create(flavor, Serdes.String, value);
+        using Producer producer = Producer.Create(flavor, Serdes.String(), value);
 
         SerializationException error = Assert.Throws<SerializationException>(
             () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v", key: "k"), null); });
@@ -280,7 +280,7 @@ public sealed class PublicProducerSerializerFailureTests
     public void InvalidCastException_ForANullKey_NamesNull(string flavor)
     {
         InvalidCastSerializer key = new InvalidCastSerializer();
-        using Producer producer = Producer.Create(flavor, key, Serdes.String);
+        using Producer producer = Producer.Create(flavor, key, Serdes.String());
 
         SerializationException error = Assert.Throws<SerializationException>(
             () => { _ = producer.Send(new ProducerRecord<string, string>(Topic, "v"), null); });
@@ -296,7 +296,7 @@ public sealed class PublicProducerSerializerFailureTests
     public void AnyOtherException_LeavesTheSendAsItIs(string flavor)
     {
         ThrowingSerializer<string> value = new ThrowingSerializer<string>(() => new KafkaException("not an api error"));
-        using Producer producer = Producer.Create(flavor, Serdes.String, value);
+        using Producer producer = Producer.Create(flavor, Serdes.String(), value);
         RecordingCallback callback = new RecordingCallback();
 
         KafkaException error = Assert.Throws<KafkaException>(
@@ -314,8 +314,8 @@ public sealed class PublicProducerSerializerFailureTests
         // Java's MockProducer calls the serializers with no try: no wrap, no callback, no history entry.
         ISerializer<string> failing = Failing(kind, out Func<Exception?> lastThrown);
         using Producer producer = onKey
-            ? Producer.Create(flavor, failing, Serdes.String)
-            : Producer.Create(flavor, Serdes.String, failing);
+            ? Producer.Create(flavor, failing, Serdes.String())
+            : Producer.Create(flavor, Serdes.String(), failing);
         RecordingCallback callback = new RecordingCallback();
 
         Exception error = Assert.ThrowsAny<Exception>(
@@ -334,7 +334,7 @@ public sealed class PublicProducerSerializerFailureTests
     public void OnTheAsyncMock_ASerializerThrow_LeavesTheSend_WithoutTheAsyncCallback(string kind)
     {
         ISerializer<string> failing = Failing(kind, out Func<Exception?> lastThrown);
-        using AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(Serdes.String, failing);
+        using AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(Serdes.String(), failing);
         GatedAsyncCallback callback = new GatedAsyncCallback(Task.CompletedTask);
 
         Exception error = Assert.ThrowsAny<Exception>(

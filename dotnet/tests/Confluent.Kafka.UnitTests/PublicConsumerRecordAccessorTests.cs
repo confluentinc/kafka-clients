@@ -42,7 +42,7 @@ public sealed class PublicConsumerRecordAccessorTests
     private static MockConsumer<byte[], byte[]> ReadyToPoll()
     {
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;
@@ -90,7 +90,7 @@ public sealed class PublicConsumerRecordAccessorTests
     public async Task AsyncPoll_Accessors_MockReachableContract()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             await TestTimeout.Run(

@@ -411,10 +411,10 @@ public sealed class PublicConsumerCommitCallbackTests
             m => m.Name == "CommitAsync" && m.GetParameters().Select(p => p.ParameterType).SequenceEqual(parameters));
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static void AssertTheConsumedPosition(TopicPartition partition, Completion completion)
     {

@@ -46,7 +46,7 @@ public sealed class AccessControlEntryFilter
     private readonly AclPermissionType _permissionType;
 
     /// <summary>A filter matching every access control entry — Java's <c>ANY</c>.</summary>
-    public static AccessControlEntryFilter ANY { get; } =
+    public static readonly AccessControlEntryFilter ANY =
         new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
 
     /// <summary>

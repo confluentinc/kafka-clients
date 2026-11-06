@@ -70,7 +70,7 @@ internal static class Program
             throw new InvalidOperationException($"loaded the Confluent.Kafka assembly built for {built}, not for {expected}");
         }
 
-        using (var mock = new MockProducer<string, string>(Serdes.String, Serdes.String))
+        using (var mock = new MockProducer<string, string>(Serdes.String(), Serdes.String()))
         {
             RecordMetadata metadata = mock.Send(new ProducerRecord<string, string>("smoke", "value", "key")).Get();
             Console.WriteLine($"OK: MockProducer sent to {metadata.Topic()}-{metadata.Partition()}@{metadata.Offset()}");
@@ -101,7 +101,7 @@ internal static class Program
             ["group.id"] = "package-smoke",
             ["group.protocol"] = "consumer",
         };
-        using (var consumer = new KafkaConsumer<string, string>(consumerConfig, Serdes.String, Serdes.String))
+        using (var consumer = new KafkaConsumer<string, string>(consumerConfig, Serdes.String(), Serdes.String()))
         {
             consumer.Close();
         }
@@ -111,7 +111,7 @@ internal static class Program
 
     private static void CloseProducer(Dictionary<string, object?> config)
     {
-        using var producer = new KafkaProducer<string, string>(config, Serdes.String, Serdes.String);
+        using var producer = new KafkaProducer<string, string>(config, Serdes.String(), Serdes.String());
         producer.Close(TimeSpan.FromSeconds(10));
     }
 

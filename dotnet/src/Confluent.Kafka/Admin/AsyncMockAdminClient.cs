@@ -46,7 +46,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
     /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    public static IReadOnlyList<string> DEFAULT_LOG_DIRS { get; } = MockAdminClient.DEFAULT_LOG_DIRS;
+    public static readonly IReadOnlyList<string> DEFAULT_LOG_DIRS = MockAdminClient.DEFAULT_LOG_DIRS;
 
     private readonly NativeAdminClient _native;
 

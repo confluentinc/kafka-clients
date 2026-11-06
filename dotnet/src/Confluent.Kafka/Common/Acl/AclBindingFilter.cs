@@ -38,7 +38,7 @@ public sealed class AclBindingFilter
     private readonly AccessControlEntryFilter _entryFilter;
 
     /// <summary>A filter matching every ACL binding — Java's <c>ANY</c>.</summary>
-    public static AclBindingFilter ANY { get; } =
+    public static readonly AclBindingFilter ANY =
         new AclBindingFilter(ResourcePatternFilter.ANY, AccessControlEntryFilter.ANY);
 
     /// <summary>Creates a binding filter — Java's constructor.</summary>

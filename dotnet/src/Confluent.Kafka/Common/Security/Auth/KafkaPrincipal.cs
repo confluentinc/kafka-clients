@@ -58,7 +58,7 @@ public sealed class KafkaPrincipal
     }
 
     /// <summary>The anonymous principal — Java's <c>ANONYMOUS</c>.</summary>
-    public static KafkaPrincipal ANONYMOUS { get; } = new KafkaPrincipal(USER_TYPE, "ANONYMOUS");
+    public static readonly KafkaPrincipal ANONYMOUS = new KafkaPrincipal(USER_TYPE, "ANONYMOUS");
 
     /// <summary>The principal type — Java's <c>getPrincipalType()</c>.</summary>
     /// <returns>The principal type.</returns>

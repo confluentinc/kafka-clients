@@ -200,7 +200,7 @@ public sealed class PublicRecordMetadataTests
     private static RecordMetadata SendOnMockProducer(RecordingCallback callback, bool fail)
     {
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: !fail);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: !fail);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordMetadata metadata = null!;
         TestTimeout.Run(
@@ -224,7 +224,7 @@ public sealed class PublicRecordMetadataTests
     private static async Task<RecordMetadata> SendOnAsyncMockProducer(RecordingCallback callback, bool fail)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: !fail);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: !fail);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordMetadata metadata = null!;
         await TestTimeout.Run(
