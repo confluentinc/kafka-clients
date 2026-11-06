@@ -1689,9 +1689,7 @@ mod tests {
         assert!(double.contains(
             "\"' violated quota. Actual: \" + JavaText.ValueOf(value) + \", Threshold: \" + JavaText.ValueOf(bound)"
         ));
-        assert!(
-            double.contains("internal override string TypeAndMessage() => JavaText.TypeAndMessage(this, Message);")
-        );
+        assert!(double.contains("internal override string TypeAndMessage() => JavaText.TypeAndMessage(this, Message);"));
     }
 
     #[test]
