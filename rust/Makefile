@@ -25,6 +25,7 @@ MACOS_P99_LIMIT_MS ?= 150
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
+	test-integration-grpc-js test-integration-grpc-js-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test \
 	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -162,7 +163,8 @@ test-all-features-sasl-ssl:
 #
 # The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
 # case into one test per backend, named `<case>__rust`, `<case>__grpc_python`,
-# `<case>__grpc_python_async` and `<case>__grpc_c`. So a backend is selectable
+# `<case>__grpc_python_async`, `<case>__grpc_c` and (producer only)
+# `<case>__grpc_js`. So a backend is selectable
 # with a plain libtest name filter -- no cargo feature or env var needed.
 #
 # The shared `__grpc_` infix is what lets `test-all-features` exclude every
@@ -265,6 +267,62 @@ test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
 		$(DOTNET_GRPC_SKIPS)
+
+# ── The JavaScript-backend arms ───────────────────────────────────────────
+#
+# The same pair for the Node.js binding: the container arm, run by javascript/'s
+# `test-integration-grpc` after it builds the javascript gRPC image, and the
+# native arm, run by the root `test-integration-javascript-native` after the root
+# `build-grpc-native-javascript` installs the gRPC packages under
+# target/grpc-native/javascript (MULTILANG_JS_NODE_PATH may point at another
+# node_modules instead).
+#
+# The binding is producer-only, so only `multilanguage_test!` has a `__grpc_js`
+# arm (the consumer and admin macros do not), and javascript/grpc_server.js
+# registers ProducerService alone.
+#
+# NINE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
+# JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
+# __grpc_js, so no other backend loses coverage.
+#
+# The producer transaction tests. The JS producer has no transaction surface
+# (initTransactions / beginTransaction / sendOffsetsToTransaction /
+# commitTransaction / abortTransaction), so grpc_server.js leaves the five
+# transaction RPCs out and they answer gRPC UNIMPLEMENTED.
+# test_consume_transform_produce_with_offsets also needs ConsumerService.
+# REMOVE these three when the JS producer implements transactions (and, for the
+# third, a JS consumer with a ConsumerService in grpc_server.js).
+#
+# The metrics tests. The JS producer has no metrics() yet, so the Metrics RPC is
+# left out. REMOVE test_produce_and_check_metrics and
+# test_metrics_follow_configuration_and_traffic when the JS producer implements
+# metrics() and grpc_server.js serves the Metrics RPC.
+#
+# The partitionsFor tests. The JS producer has no partitionsFor() yet, so the
+# PartitionsFor RPC is left out; test_produce_invalid_partition reads the
+# partition count back through it. REMOVE these four when the JS producer
+# implements partitionsFor() and grpc_server.js serves the PartitionsFor RPC.
+#
+# With all nine gone, remove JS_GRPC_SKIPS (the definition below and its uses in
+# test-integration-grpc-js and test-integration-grpc-js-native).
+JS_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
+	--skip test_aborted_transaction_records_are_discarded \
+	--skip test_consume_transform_produce_with_offsets \
+	--skip test_produce_and_check_metrics \
+	--skip test_metrics_follow_configuration_and_traffic \
+	--skip test_produce_partitions_for \
+	--skip test_partitions_for_timeout_error_when_topic_does_not_exist \
+	--skip test_partitions_for_freshly_created_topic \
+	--skip test_produce_invalid_partition
+
+test-integration-grpc-js:
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_js \
+		$(JS_GRPC_SKIPS)
+
+test-integration-grpc-js-native:
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_js \
+		$(JS_GRPC_SKIPS)
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
