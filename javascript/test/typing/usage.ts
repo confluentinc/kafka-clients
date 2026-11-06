@@ -127,11 +127,13 @@ SslConfigs.SSL_PROTOCOL_CONFIG = 'x';
 // @ts-expect-error ProducerConfig holds Java's constants only: its constructor is private
 new ProducerConfig();
 
-// Made by the client only.
+// Made by the client only. Each call passes arguments of the constructor's own
+// shape, so the private constructor is the one error left to expect.
+const fields = { topic: 't', partition: 0, hasOffset: true, offset: 0, hasTimestamp: true, timestamp: 0, serializedKeySize: -1, serializedValueSize: -1 };
 // @ts-expect-error RecordMetadata's constructor is private
-new RecordMetadata();
+new RecordMetadata(fields);
 // @ts-expect-error KafkaFuture's constructor is private
-new KafkaFuture();
+new KafkaFuture(Symbol('token'));
 // @ts-expect-error SecurityProtocol's constructor is private
 new SecurityProtocol();
 // @ts-expect-error the client's own members are private
