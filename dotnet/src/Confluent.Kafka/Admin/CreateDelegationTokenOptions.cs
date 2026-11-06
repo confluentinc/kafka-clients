@@ -55,10 +55,8 @@ public sealed class CreateDelegationTokenOptions
     /// <see cref="DescribeDelegationTokenOptions.Owners()"/>.</returns>
     public IReadOnlyList<KafkaPrincipal> Renewers() => _renewers;
 
-    /// <summary>Sets <see cref="Renewers()"/>.</summary>
-    /// <param name="renewers">The principals allowed to renew the token — Java's <c>renewers()</c>. Never null, as
-    /// in Java: an empty list is a request for no renewers, unlike an unset
-    /// <see cref="DescribeDelegationTokenOptions.Owners()"/>.</param>
+    /// <summary>Sets the principals allowed to renew the token.</summary>
+    /// <param name="renewers">The renewers; an empty list, the default, means none.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateDelegationTokenOptions Renewers(IReadOnlyList<KafkaPrincipal> renewers)
     {
@@ -75,9 +73,8 @@ public sealed class CreateDelegationTokenOptions
     /// <c>owner()</c>, an <c>Optional</c>.</returns>
     public KafkaPrincipal? Owner() => _owner;
 
-    /// <summary>Sets <see cref="Owner()"/>.</summary>
-    /// <param name="owner">The token owner, or <see langword="null"/> to use the authenticated principal — Java's
-    /// <c>owner()</c>, an <c>Optional</c>.</param>
+    /// <summary>Sets the token's owner.</summary>
+    /// <param name="owner">The owner, or <see langword="null"/>, the default, for the authenticated principal.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateDelegationTokenOptions Owner(KafkaPrincipal? owner)
     {
@@ -94,9 +91,9 @@ public sealed class CreateDelegationTokenOptions
     /// <c>maxLifetimeMs()</c>, default <c>-1</c>.</returns>
     public long MaxLifetimeMs() => _maxLifetimeMs;
 
-    /// <summary>Sets <see cref="MaxLifetimeMs()"/>.</summary>
-    /// <param name="maxLifetimeMs">The token's maximum lifetime in milliseconds, or <c>-1</c> for the server
-    /// default — Java's <c>maxLifetimeMs()</c>, default <c>-1</c>.</param>
+    /// <summary>Sets the token's maximum lifetime.</summary>
+    /// <param name="maxLifetimeMs">The maximum lifetime in milliseconds, or <c>-1</c>, the default, for the
+    /// server's.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateDelegationTokenOptions MaxLifetimeMs(long maxLifetimeMs)
     {

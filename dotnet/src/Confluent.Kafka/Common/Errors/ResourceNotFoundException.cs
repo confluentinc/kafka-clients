@@ -69,6 +69,7 @@ public class ResourceNotFoundException : global::Confluent.Kafka.Common.Errors.A
     }
 
     /// <summary>Java's <c>resource()</c>.</summary>
+    /// <returns>The resource.</returns>
     public string? Resource() => _resource;
 
     internal override int FfiId => 91;

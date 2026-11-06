@@ -52,6 +52,7 @@ public class ThrottlingQuotaExceededException : global::Confluent.Kafka.Common.E
     }
 
     /// <summary>Java's <c>throttleTimeMs()</c>.</summary>
+    /// <returns>The throttle time, in milliseconds.</returns>
     public int ThrottleTimeMs() => _throttleTimeMs;
 
     internal override int FfiId => 89;

@@ -97,6 +97,11 @@ public sealed class GeneratedErrorClassesTests
         Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
     }
 
+    /// <summary>
+    /// No error class declares a public property: a payload getter Java adds is a method of Java's name. For a
+    /// generated class the generator emits it from the Java source; for a hand-written one, write it as a method and
+    /// add an <c>InlineData</c> row to <c>PayloadGetters_AreJavasMethods_AndNotProperties</c>.
+    /// </summary>
     [Fact]
     public void NoPublicErrorClass_DeclaresAPublicProperty()
     {

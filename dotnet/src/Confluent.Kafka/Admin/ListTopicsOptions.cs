@@ -47,10 +47,8 @@ public sealed class ListTopicsOptions
     /// <c>shouldListInternal()</c>. Defaults to <see langword="false"/>, as Java's does.</returns>
     public bool ShouldListInternal() => _listInternal;
 
-    /// <summary>Sets <see cref="ShouldListInternal()"/>.</summary>
-    /// <param name="listInternal">Include internal topics such as <c>__consumer_offsets</c> — Java's
-    /// <c>listInternal(boolean)</c> / <c>shouldListInternal()</c>. Defaults to <see langword="false"/>, as Java's
-    /// does.</param>
+    /// <summary>Set whether we should list internal topics.</summary>
+    /// <param name="listInternal">Whether we should list internal topics. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public ListTopicsOptions ListInternal(bool listInternal)
     {

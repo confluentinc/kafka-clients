@@ -56,10 +56,8 @@ public sealed class DescribeClusterOptions
     /// </remarks>
     public bool IncludeAuthorizedOperations() => _includeAuthorizedOperations;
 
-    /// <summary>Sets <see cref="IncludeAuthorizedOperations()"/>.</summary>
-    /// <param name="includeAuthorizedOperations">Ask the broker to report the cluster's authorized operations —
-    /// Java's <c>includeAuthorizedOperations(boolean)</c> / <c>includeAuthorizedOperations()</c>. Defaults to
-    /// <see langword="false"/>, as Java's does.</param>
+    /// <summary>Sets whether the cluster's authorized operations are included in the response.</summary>
+    /// <param name="includeAuthorizedOperations">Whether to include them. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeClusterOptions IncludeAuthorizedOperations(bool includeAuthorizedOperations)
     {
@@ -77,10 +75,8 @@ public sealed class DescribeClusterOptions
     /// <c>includeFencedBrokers()</c>. Defaults to <see langword="false"/>, as Java's does.</returns>
     public bool IncludeFencedBrokers() => _includeFencedBrokers;
 
-    /// <summary>Sets <see cref="IncludeFencedBrokers()"/>.</summary>
-    /// <param name="includeFencedBrokers">Include fenced brokers in the reported node set — Java's
-    /// <c>includeFencedBrokers(boolean)</c> / <c>includeFencedBrokers()</c>. Defaults to <see langword="false"/>,
-    /// as Java's does.</param>
+    /// <summary>Sets whether fenced brokers are included in the response.</summary>
+    /// <param name="includeFencedBrokers">Whether to include them. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeClusterOptions IncludeFencedBrokers(bool includeFencedBrokers)
     {

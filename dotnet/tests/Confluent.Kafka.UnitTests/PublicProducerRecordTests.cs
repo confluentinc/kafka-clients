@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// <see cref="ProducerRecord{TKey, TValue}"/>'s constructor checks (a null topic, a negative timestamp, a negative
-/// partition, a null header, in Java's order and with Java's messages), its properties and headers, and Java's
+/// partition, a null header, in Java's order and with Java's messages), its getters and headers, and Java's
 /// equality, hash and string form: Java's <c>ProducerRecordTest</c> and Python's <c>test_producer_types.py</c>, as
 /// far as .NET has the constructor forms.
 /// </summary>

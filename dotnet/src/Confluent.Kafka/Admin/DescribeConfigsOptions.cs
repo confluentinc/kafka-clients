@@ -53,10 +53,8 @@ public sealed class DescribeConfigsOptions
     /// <see cref="ConfigEntry.Synonyms()"/> comes back empty.</returns>
     public bool IncludeSynonyms() => _includeSynonyms;
 
-    /// <summary>Sets <see cref="IncludeSynonyms()"/>.</summary>
-    /// <param name="includeSynonyms">Return each entry's synonyms, in precedence order — Java's
-    /// <c>includeSynonyms(boolean)</c> / <c>includeSynonyms()</c>. Defaults to <see langword="false"/>, as Java's
-    /// does, in which case <see cref="ConfigEntry.Synonyms()"/> comes back empty.</param>
+    /// <summary>Set to <see langword="true"/> if synonym configs should be returned in the response.</summary>
+    /// <param name="includeSynonyms">Whether to return synonyms. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeConfigsOptions IncludeSynonyms(bool includeSynonyms)
     {
@@ -76,11 +74,8 @@ public sealed class DescribeConfigsOptions
     /// <see cref="ConfigEntry.Documentation()"/> comes back <see langword="null"/>.</returns>
     public bool IncludeDocumentation() => _includeDocumentation;
 
-    /// <summary>Sets <see cref="IncludeDocumentation()"/>.</summary>
-    /// <param name="includeDocumentation">Return each entry's documentation — Java's
-    /// <c>includeDocumentation(boolean)</c> / <c>includeDocumentation()</c>. Defaults to <see langword="false"/>,
-    /// as Java's does, in which case <see cref="ConfigEntry.Documentation()"/> comes back
-    /// <see langword="null"/>.</param>
+    /// <summary>Set to <see langword="true"/> if config documentation should be returned in the response.</summary>
+    /// <param name="includeDocumentation">Whether to return documentation. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeConfigsOptions IncludeDocumentation(bool includeDocumentation)
     {

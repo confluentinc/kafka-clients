@@ -50,10 +50,12 @@ public sealed class CreateTopicsOptions
     /// </remarks>
     public int? TimeoutMs() => _timeoutMs;
 
-    /// <summary>Sets <see cref="TimeoutMs()"/>.</summary>
-    /// <param name="timeoutMs">The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset
-    /// so the client's <c>default.api.timeout.ms</c> applies — Java's <c>AbstractOptions.timeoutMs()</c>, an
-    /// <c>Integer</c> that is likewise nullable.</param>
+    /// <summary>
+    /// Set the timeout in milliseconds for this operation or <see langword="null"/> if the default api timeout
+    /// for the AdminClient should be used.
+    /// </summary>
+    /// <param name="timeoutMs">The timeout in milliseconds, or <see langword="null"/> for
+    /// <c>default.api.timeout.ms</c>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateTopicsOptions TimeoutMs(int? timeoutMs)
     {
@@ -70,9 +72,8 @@ public sealed class CreateTopicsOptions
     /// to <see langword="false"/>, as Java's does.</returns>
     public bool ShouldValidateOnly() => _validateOnly;
 
-    /// <summary>Sets <see cref="ShouldValidateOnly()"/>.</summary>
-    /// <param name="validateOnly">Validate the request without actually creating the topics — Java's
-    /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
+    /// <summary>Set to <see langword="true"/> if the request should be validated without creating the topic.</summary>
+    /// <param name="validateOnly">Whether to validate without creating. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateTopicsOptions ValidateOnly(bool validateOnly)
     {
@@ -89,9 +90,8 @@ public sealed class CreateTopicsOptions
     /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
     public bool ShouldRetryOnQuotaViolation() => _retryOnQuotaViolation;
 
-    /// <summary>Sets <see cref="ShouldRetryOnQuotaViolation()"/>.</summary>
-    /// <param name="retryOnQuotaViolation">Retry automatically when the broker reports a quota violation — Java's
-    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
+    /// <summary>Set to <see langword="true"/> if quota violation should be automatically retried.</summary>
+    /// <param name="retryOnQuotaViolation">Whether to retry. Defaults to <see langword="true"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreateTopicsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {

@@ -48,9 +48,8 @@ public sealed class AlterClientQuotasOptions
     /// <see langword="false"/>.</returns>
     public bool ValidateOnly() => _validateOnly;
 
-    /// <summary>Sets <see cref="ValidateOnly()"/>.</summary>
-    /// <param name="validateOnly">Whether to validate the alterations without applying them — Java's
-    /// <c>validateOnly()</c>, default <see langword="false"/>.</param>
+    /// <summary>Sets whether the request should be validated without altering the configs.</summary>
+    /// <param name="validateOnly">Whether to validate without altering. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public AlterClientQuotasOptions ValidateOnly(bool validateOnly)
     {

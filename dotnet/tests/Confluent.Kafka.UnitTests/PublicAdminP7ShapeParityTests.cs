@@ -34,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <remarks>
 /// Four result shapes across eight RPCs: two per-key void (<c>AlterUserScramCredentials</c>, <c>UpdateFeatures</c>),
 /// one a collection, four a single value, and one deriving three accessors from one snapshot. Each discriminant is a
-/// nullable property, not a sentinel.
+/// nullable getter, not a sentinel.
 /// </remarks>
 public sealed class PublicAdminP7ShapeParityTests
 {

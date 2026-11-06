@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// <see cref="RecordMetadata"/>: Java's constructor and its batch-index rule, a null topic partition, the <c>Has*</c>
-/// and serialized-size properties, <see cref="RecordMetadata.UNKNOWN_PARTITION"/>, the metadata the core reports, and
+/// and serialized-size getters, <see cref="RecordMetadata.UNKNOWN_PARTITION"/>, the metadata the core reports, and
 /// what the two producer mocks deliver on success and on failure.
 /// </summary>
 public sealed class PublicRecordMetadataTests

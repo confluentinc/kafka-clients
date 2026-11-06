@@ -34,12 +34,18 @@ namespace Confluent.Kafka.UnitTests;
 /// Java <c>public static final</c> constant is a <c>static readonly</c> field. The only public properties left are
 /// the ones .NET requires.
 /// </summary>
+/// <remarks>
+/// A new Java member needs no change here: translate a Java method, a getter included, as a C# method with Java's
+/// name. A new Java <c>public static final</c> constant is added to <c>s_javaConstants</c>, under the Java name, and
+/// a property .NET requires is added to <c>s_requiredProperties</c>, with its reason.
+/// </remarks>
 public class PublicJavaMemberShapeTests
 {
     /// <summary>
     /// The public properties .NET requires, each with its reason: <c>ConsumerRecords.Count</c> implements
     /// <see cref="IReadOnlyCollection{T}.Count"/>, which <see cref="ConsumerRecords{TKey, TValue}"/> implements as
-    /// Java's <c>ConsumerRecords</c> implements <c>Iterable</c>, and Java's <c>count()</c> is that property.
+    /// Java's <c>ConsumerRecords</c> implements <c>Iterable</c>, and Java's <c>count()</c> is that property. Add a
+    /// name only for a property that a .NET interface the type implements requires, and give the reason here.
     /// </summary>
     private static readonly HashSet<string> s_requiredProperties = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -148,7 +154,10 @@ public class PublicJavaMemberShapeTests
 
     /// <summary>
     /// Every public static field and const outside an enum, each the <c>public static final</c> field of the same
-    /// name on the Java class it translates (checked against Kafka 4.4), so a new one cannot take a .NET name.
+    /// name on the Java class it translates (checked against Kafka 4.4), so a new one cannot take a .NET name. To
+    /// add one, check the Java class declares it <c>public static final</c>, declare it with Java's spelling, as a
+    /// <c>const</c> for a primitive or a string and a <c>static readonly</c> field otherwise, and add its full name
+    /// here in ordinal order.
     /// </summary>
     private static readonly string[] s_javaConstants =
     {

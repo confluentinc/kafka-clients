@@ -48,6 +48,7 @@ public class GroupAuthorizationException : global::Confluent.Kafka.Common.Errors
     }
 
     /// <summary>Java's <c>groupId()</c>.</summary>
+    /// <returns>The group id.</returns>
     public string? GroupId() => _groupId;
 
     /// <summary>Creates the exception, as Java's <c>forGroupId(String groupId)</c>.</summary>

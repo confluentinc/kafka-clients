@@ -50,9 +50,8 @@ public sealed class DeleteTopicsOptions
     /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
     public bool ShouldRetryOnQuotaViolation() => _retryOnQuotaViolation;
 
-    /// <summary>Sets <see cref="ShouldRetryOnQuotaViolation()"/>.</summary>
-    /// <param name="retryOnQuotaViolation">Retry automatically when the broker reports a quota violation — Java's
-    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
+    /// <summary>Set to <see langword="true"/> if quota violation should be automatically retried.</summary>
+    /// <param name="retryOnQuotaViolation">Whether to retry. Defaults to <see langword="true"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DeleteTopicsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {

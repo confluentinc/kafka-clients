@@ -57,9 +57,11 @@ public sealed class ListTransactionsOptions
     /// <returns>Never <see langword="null"/>; a de-duplicated read-only copy.</returns>
     public IReadOnlyCollection<TransactionState> FilteredStates() => _filteredStates;
 
-    /// <summary>Sets <see cref="FilteredStates()"/>.</summary>
-    /// <param name="states">The transaction states to filter on, or an empty collection — the default — to return
-    /// transactions in every state.</param>
+    /// <summary>
+    /// Filter only the transactions that are in a specific set of states. If no filter is specified or if the
+    /// passed set of states is empty, then transactions in all states will be returned.
+    /// </summary>
+    /// <param name="states">The set of states to filter by.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value is <see langword="null"/>, which Java's <c>new HashSet&lt;&gt;(states)</c>
@@ -80,9 +82,11 @@ public sealed class ListTransactionsOptions
     /// <returns>Never <see langword="null"/>; a de-duplicated read-only copy.</returns>
     public IReadOnlyCollection<long> FilteredProducerIds() => _filteredProducerIds;
 
-    /// <summary>Sets <see cref="FilteredProducerIds()"/>.</summary>
-    /// <param name="producerIdFilters">The producer ids to filter on, or an empty collection — the default — to
-    /// return transactions from every producer.</param>
+    /// <summary>
+    /// Filter only the transactions from producers in a specific set of producerIds. If no filter is specified or
+    /// if the passed collection of producerIds is empty, then the transactions of all producerIds will be returned.
+    /// </summary>
+    /// <param name="producerIdFilters">The set of producerIds to filter by.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value is <see langword="null"/>, which Java's
@@ -105,9 +109,11 @@ public sealed class ListTransactionsOptions
     /// <remarks><c>0</c> is a filter ("longer than 0 ms"), not the neutral value.</remarks>
     public long FilteredDuration() => _filteredDuration;
 
-    /// <summary>Sets <see cref="FilteredDuration()"/>.</summary>
-    /// <param name="durationMs">Return only transactions running longer than this many milliseconds; negative — the
-    /// default <c>-1</c> — applies no duration filter.</param>
+    /// <summary>
+    /// Filter only the transactions that are running longer than the specified duration. If no filter is specified
+    /// or if the passed duration ms is less than 0, then all transactions will be returned.
+    /// </summary>
+    /// <param name="durationMs">The duration in milliseconds to filter by.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public ListTransactionsOptions FilterOnDuration(long durationMs)
     {
@@ -129,9 +135,11 @@ public sealed class ListTransactionsOptions
     /// </remarks>
     public string? FilteredTransactionalIdPattern() => _filteredTransactionalIdPattern;
 
-    /// <summary>Sets <see cref="FilteredTransactionalIdPattern()"/>.</summary>
-    /// <param name="pattern">A transactional-id regular-expression pattern to filter on, or <see langword="null"/>
-    /// — the default — for no filter.</param>
+    /// <summary>
+    /// Filter only the transactions that match with the given transactional ID pattern. If the filter is
+    /// <see langword="null"/> or if the passed string is empty, then all the transactions will be returned.
+    /// </summary>
+    /// <param name="pattern">The transactional ID regular expression pattern to filter by.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public ListTransactionsOptions FilterOnTransactionalIdPattern(string? pattern)
     {

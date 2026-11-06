@@ -41,5 +41,6 @@ public abstract class InvalidOffsetException : global::Confluent.Kafka.Common.Ka
     }
 
     /// <summary>Java's <c>partitions()</c>.</summary>
+    /// <returns>The partitions.</returns>
     public abstract IReadOnlyCollection<TopicPartition> Partitions();
 }

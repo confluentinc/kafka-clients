@@ -50,8 +50,10 @@ public class CorrelationIdMismatchException : global::Confluent.Kafka.IllegalSta
     }
 
     /// <summary>Java's <c>requestCorrelationId()</c>.</summary>
+    /// <returns>The request correlation id.</returns>
     public int RequestCorrelationId() => _requestCorrelationId;
 
     /// <summary>Java's <c>responseCorrelationId()</c>.</summary>
+    /// <returns>The response correlation id.</returns>
     public int ResponseCorrelationId() => _responseCorrelationId;
 }

@@ -52,10 +52,8 @@ public sealed class DescribeProducersOptions
     /// <c>empty()</c>).</returns>
     public int? BrokerId() => _brokerId;
 
-    /// <summary>Sets <see cref="BrokerId()"/>.</summary>
-    /// <param name="brokerId">The broker to query, or <see langword="null"/> — the default — to query each
-    /// partition's leader. Java's <c>brokerId(int)</c> and <c>brokerId()</c> (an <c>OptionalInt</c> defaulting to
-    /// <c>empty()</c>).</param>
+    /// <summary>Sets the broker to query, in place of each partition's leader.</summary>
+    /// <param name="brokerId">The broker id.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set broker id cannot be

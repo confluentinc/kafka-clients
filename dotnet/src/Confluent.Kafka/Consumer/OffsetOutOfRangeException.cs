@@ -58,6 +58,7 @@ public class OffsetOutOfRangeException : global::Confluent.Kafka.Consumer.Invali
     }
 
     /// <summary>Java's <c>offsetOutOfRangePartitions()</c>.</summary>
+    /// <returns>The offset out of range partitions.</returns>
     public IReadOnlyDictionary<TopicPartition, long> OffsetOutOfRangePartitions() => _offsetOutOfRangePartitions;
 
     /// <inheritdoc/>

@@ -44,9 +44,8 @@ public sealed class UpdateFeaturesOptions
     /// <see langword="false"/>.</returns>
     public bool ValidateOnly() => _validateOnly;
 
-    /// <summary>Sets <see cref="ValidateOnly()"/>.</summary>
-    /// <param name="validateOnly">Whether to validate the updates without applying them — Java's
-    /// <c>validateOnly()</c>, default <see langword="false"/>.</param>
+    /// <summary>Sets whether the request should be validated without applying the updates.</summary>
+    /// <param name="validateOnly">Whether to validate without applying. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public UpdateFeaturesOptions ValidateOnly(bool validateOnly)
     {

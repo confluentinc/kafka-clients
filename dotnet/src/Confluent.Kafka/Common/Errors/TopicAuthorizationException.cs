@@ -58,6 +58,7 @@ public class TopicAuthorizationException : global::Confluent.Kafka.Common.Errors
     }
 
     /// <summary>Java's <c>unauthorizedTopics()</c>.</summary>
+    /// <returns>The unauthorized topics.</returns>
     public IReadOnlyCollection<string> UnauthorizedTopics() => _unauthorizedTopics;
 
     internal override int FfiId => 29;

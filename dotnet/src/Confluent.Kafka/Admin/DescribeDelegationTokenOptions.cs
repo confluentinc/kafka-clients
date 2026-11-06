@@ -49,8 +49,11 @@ public sealed class DescribeDelegationTokenOptions
     /// </remarks>
     public IReadOnlyList<KafkaPrincipal>? Owners() => _owners;
 
-    /// <summary>Sets <see cref="Owners()"/>.</summary>
-    /// <param name="owners">The owners to filter by.</param>
+    /// <summary>
+    /// If owners is <see langword="null"/>, all the user owned tokens and tokens where user have Describe
+    /// permission will be returned.
+    /// </summary>
+    /// <param name="owners">The owners that we want to describe delegation tokens for.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeDelegationTokenOptions Owners(IReadOnlyList<KafkaPrincipal>? owners)
     {

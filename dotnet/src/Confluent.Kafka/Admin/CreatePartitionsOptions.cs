@@ -48,9 +48,10 @@ public sealed class CreatePartitionsOptions
     /// Defaults to <see langword="false"/>, as Java's does.</returns>
     public bool ValidateOnly() => _validateOnly;
 
-    /// <summary>Sets <see cref="ValidateOnly()"/>.</summary>
-    /// <param name="validateOnly">Validate the request without actually creating the partitions — Java's
-    /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
+    /// <summary>
+    /// Set to <see langword="true"/> if the request should be validated without creating new partitions.
+    /// </summary>
+    /// <param name="validateOnly">Whether to validate without creating. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreatePartitionsOptions ValidateOnly(bool validateOnly)
     {
@@ -67,9 +68,8 @@ public sealed class CreatePartitionsOptions
     /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
     public bool ShouldRetryOnQuotaViolation() => _retryOnQuotaViolation;
 
-    /// <summary>Sets <see cref="ShouldRetryOnQuotaViolation()"/>.</summary>
-    /// <param name="retryOnQuotaViolation">Retry automatically when the broker reports a quota violation — Java's
-    /// <c>shouldRetryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
+    /// <summary>Set to <see langword="true"/> if quota violation should be automatically retried.</summary>
+    /// <param name="retryOnQuotaViolation">Whether to retry. Defaults to <see langword="true"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public CreatePartitionsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {

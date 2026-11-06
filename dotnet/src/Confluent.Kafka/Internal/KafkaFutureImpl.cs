@@ -201,9 +201,9 @@ internal abstract class KafkaFutureImpl
 /// own cancellation, not one a dependant took from its source or its function. A future made unable to cancel is never
 /// cancelled: <c>Cancel</c> does nothing and such an error is an ordinary failure. Its dependants and
 /// <c>WhenComplete</c> actions run inline on the completing thread, outside its lock, or inside the registering call
-/// once it is done. An optional value source is read first by every state read but <c>IsDone</c> and <c>Cancel</c>,
+/// once it is done. An optional value source is read first by every state read but <c>IsDone()</c> and <c>Cancel</c>,
 /// and by every wait, while it is pending, settling it on the reading thread, and waits on it re-read the source in
-/// slices. <c>IsDone</c> and <c>Cancel</c> only ask the source whether it is done, so they settle nothing and run no
+/// slices. <c>IsDone()</c> and <c>Cancel</c> only ask the source whether it is done, so they settle nothing and run no
 /// listener, and while the future is pending and its source is done <c>Cancel</c> answers false. The
 /// <see cref="Task{TResult}"/> of the async waits is made on the first of them and is the same every time, and so is
 /// the one of the wrapped async waits. A timed wait that ends first throws Java's <see cref="TimeoutException"/>,

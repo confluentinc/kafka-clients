@@ -45,9 +45,8 @@ public sealed class DescribeFeaturesOptions
     /// <c>nodeId()</c>, an <c>OptionalInt</c>, and <c>nodeId(int)</c>.</returns>
     public int? NodeId() => _nodeId;
 
-    /// <summary>Sets <see cref="NodeId()"/>.</summary>
-    /// <param name="nodeId">The broker to query, or <see langword="null"/> while unset, when the client chooses —
-    /// Java's <c>nodeId()</c>, an <c>OptionalInt</c>, and <c>nodeId(int)</c>.</param>
+    /// <summary>Set the node id to which the request should be sent.</summary>
+    /// <param name="nodeId">The node id.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set node id cannot be

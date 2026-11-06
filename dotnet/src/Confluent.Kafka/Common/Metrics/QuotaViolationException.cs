@@ -54,12 +54,15 @@ public class QuotaViolationException : global::Confluent.Kafka.Common.KafkaExcep
     }
 
     /// <summary>Java's <c>metric()</c>.</summary>
+    /// <returns>The metric.</returns>
     public KafkaMetric Metric() => _metric;
 
     /// <summary>Java's <c>value()</c>.</summary>
+    /// <returns>The value.</returns>
     public double Value() => _value;
 
     /// <summary>Java's <c>bound()</c>.</summary>
+    /// <returns>The bound.</returns>
     public double Bound() => _bound;
 
     internal override int FfiId => -26;
