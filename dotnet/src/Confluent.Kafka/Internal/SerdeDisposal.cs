@@ -71,13 +71,51 @@ internal sealed class SerdeDisposal
 
     private static void TraceDisposeFailure(object serde, Exception exception)
     {
+        string message = string.Format(
+            CultureInfo.InvariantCulture, DisposeFailedMessage, SerdeText(serde), ExceptionText(exception));
         try
         {
-            Trace.TraceWarning(string.Format(CultureInfo.InvariantCulture, DisposeFailedMessage, serde, exception));
+            Trace.TraceWarning(message);
         }
         catch (Exception)
         {
-            // A throwing ToString or TraceListener must not escape the client's teardown.
+            // A throwing TraceListener must not escape the client's teardown.
         }
     }
+
+    // A ToString that throws falls back to the type's name, so the failure is still traced, as Python's logging still
+    // reports a record it cannot format.
+    private static string SerdeText(object serde)
+    {
+        try
+        {
+            return serde.ToString() ?? string.Empty;
+        }
+        catch (Exception)
+        {
+            return TypeName(serde);
+        }
+    }
+
+    private static string ExceptionText(Exception exception)
+    {
+        try
+        {
+            return exception.ToString();
+        }
+        catch (Exception)
+        {
+            string type = TypeName(exception);
+            try
+            {
+                return type + ": " + exception.Message;
+            }
+            catch (Exception)
+            {
+                return type;
+            }
+        }
+    }
+
+    private static string TypeName(object value) => value.GetType().FullName ?? value.GetType().Name;
 }

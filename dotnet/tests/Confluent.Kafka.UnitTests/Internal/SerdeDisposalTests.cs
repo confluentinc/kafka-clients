@@ -69,6 +69,62 @@ public sealed class SerdeDisposalTests
     }
 
     [Fact]
+    public void DisposeIfDisposable_ASerdeWhoseToStringThrows_TracesOneWarningNamingItsType()
+    {
+        string id = Guid.NewGuid().ToString("N");
+        ThrowingSerde serde = new ThrowingSerde(id, toStringThrows: true);
+        using TraceCapture trace = new TraceCapture(id);
+
+        SerdeDisposal.DisposeIfDisposable(serde);
+
+        string message = $"Exception while closing serde {typeof(ThrowingSerde).FullName}: {serde.Thrown}";
+        Assert.Equal(message, Assert.Single(trace.Lines()));
+        Assert.Equal((TraceEventType.Warning, message), Assert.Single(trace.Events()));
+    }
+
+    [Fact]
+    public void DisposeIfDisposable_AnExceptionWhoseToStringThrows_TracesOneWarningWithItsTypeAndMessage()
+    {
+        string id = Guid.NewGuid().ToString("N");
+        ThrowingSerde serde = new ThrowingSerde(id, thrownText: UnprintableException.Text.ToStringThrows);
+        using TraceCapture trace = new TraceCapture(id);
+
+        SerdeDisposal.DisposeIfDisposable(serde);
+
+        string message =
+            $"Exception while closing serde {serde}: {typeof(UnprintableException).FullName}: dispose failed {id}";
+        Assert.Equal(message, Assert.Single(trace.Lines()));
+        Assert.Equal((TraceEventType.Warning, message), Assert.Single(trace.Events()));
+    }
+
+    [Fact]
+    public void DisposeIfDisposable_AnExceptionWhoseToStringAndMessageThrow_TracesOneWarningWithItsType()
+    {
+        string id = Guid.NewGuid().ToString("N");
+        ThrowingSerde serde = new ThrowingSerde(id, thrownText: UnprintableException.Text.MessageThrowsToo);
+        using TraceCapture trace = new TraceCapture(id);
+
+        SerdeDisposal.DisposeIfDisposable(serde);
+
+        string message = $"Exception while closing serde {serde}: {typeof(UnprintableException).FullName}";
+        Assert.Equal(message, Assert.Single(trace.Lines()));
+        Assert.Equal((TraceEventType.Warning, message), Assert.Single(trace.Events()));
+    }
+
+    [Fact]
+    public void DisposeIfDisposable_ATraceListenerThatThrows_DoesNotEscape()
+    {
+        string id = Guid.NewGuid().ToString("N");
+        ThrowingSerde serde = new ThrowingSerde(id);
+        using ThrowingListener listener = new ThrowingListener(id);
+
+        SerdeDisposal.DisposeIfDisposable(serde);
+
+        Assert.NotNull(serde.Thrown);
+        Assert.True(listener.Threw, "the listener never saw the warning");
+    }
+
+    [Fact]
     public void TestLifecycleHelpers_test_close_if_defined_noop_on_bare_function_LeavesASerdeThatIsNotIDisposableAlone()
     {
         AsyncOnlySerde asyncOnly = new AsyncOnlySerde();
@@ -125,16 +181,21 @@ public sealed class SerdeDisposalTests
         }
     }
 
-    /// <summary>A serializer whose <c>Dispose</c> throws, and whose <c>ToString</c> can throw too.</summary>
+    /// <summary>
+    /// A serializer whose <c>Dispose</c> throws, and whose <c>ToString</c>, or the <c>ToString</c> of what it throws, can
+    /// throw too.
+    /// </summary>
     private sealed class ThrowingSerde : ISerializer<string>, IDisposable
     {
         private readonly string _id;
         private readonly bool _toStringThrows;
+        private readonly UnprintableException.Text? _thrownText;
 
-        internal ThrowingSerde(string id, bool toStringThrows = false)
+        internal ThrowingSerde(string id, bool toStringThrows = false, UnprintableException.Text? thrownText = null)
         {
             _id = id;
             _toStringThrows = toStringThrows;
+            _thrownText = thrownText;
         }
 
         internal Exception? Thrown { get; private set; }
@@ -143,13 +204,79 @@ public sealed class SerdeDisposalTests
 
         public void Dispose()
         {
-            InvalidOperationException thrown = new InvalidOperationException("dispose failed " + _id);
+            Exception thrown = _thrownText is { } text
+                ? new UnprintableException("dispose failed " + _id, text)
+                : new InvalidOperationException("dispose failed " + _id);
             Thrown = thrown;
             throw thrown;
         }
 
         public override string ToString() =>
             _toStringThrows ? throw new InvalidOperationException("ToString failed") : "ThrowingSerde-" + _id;
+    }
+
+    /// <summary>An exception whose <c>ToString</c> throws, and whose <c>Message</c> can throw too.</summary>
+    private sealed class UnprintableException : Exception
+    {
+        private readonly Text _text;
+
+        internal UnprintableException(string message, Text text)
+            : base(message)
+        {
+            _text = text;
+        }
+
+        internal enum Text
+        {
+            ToStringThrows,
+            MessageThrowsToo,
+        }
+
+        public override string Message =>
+            _text == Text.MessageThrowsToo ? throw new InvalidOperationException("Message failed") : base.Message;
+
+        public override string ToString() => throw new InvalidOperationException("ToString failed");
+    }
+
+    /// <summary>A trace listener that throws for every message containing a given text, and records that it did.</summary>
+    private sealed class ThrowingListener : TraceListener
+    {
+        private readonly string _text;
+
+        internal ThrowingListener(string text)
+        {
+            _text = text;
+            Trace.Listeners.Add(this);
+        }
+
+        internal bool Threw { get; private set; }
+
+        public override void Write(string? message) => ThrowFor(message);
+
+        public override void WriteLine(string? message) => ThrowFor(message);
+
+        public override void TraceEvent(
+            TraceEventCache? eventCache,
+            string source,
+            TraceEventType eventType,
+            int id,
+            string? message) =>
+            ThrowFor(message);
+
+        protected override void Dispose(bool disposing)
+        {
+            Trace.Listeners.Remove(this);
+            base.Dispose(disposing);
+        }
+
+        private void ThrowFor(string? message)
+        {
+            if (message is not null && message.Contains(_text))
+            {
+                Threw = true;
+                throw new InvalidOperationException("listener failed");
+            }
+        }
     }
 
     /// <summary>
