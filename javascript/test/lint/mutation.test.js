@@ -259,6 +259,12 @@ MUTATIONS.push(
       edit(root, 'src/callback_queue.c', '    pthread_mutex_unlock(&q->notify_mtx);\n}\n\nvoid cbq_schedule', '    pthread_mutex_unlock(&q->notify_mtx);\n    cbq_schedule(q);\n}\n\nvoid cbq_schedule'),
   },
   {
+    rule: 'check-notify-hook',
+    what: 'a return between the lock and the unlock of cbq_notify',
+    apply: (root) =>
+      edit(root, 'src/callback_queue.c', '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->notify_open)', '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->stopped) return;\n    if (q->notify_open)'),
+  },
+  {
     rule: 'check-single-drainer',
     what: '__execute_callbacks_err called outside cbq_drain',
     apply: (root) =>
