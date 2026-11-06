@@ -54,8 +54,9 @@ tests and the reviewer (PLAN.md §5).
 1. "Java shape, host idiom, no Kafka logic": `(partly checked by check-no-binding-queue: no
    binding-side lock or record store; not: the checks the binding makes or repeats, nor Kafka
    logic in general)`.
-2. "The notify hook only signals": `(partly checked by check-notify-hook: the hook's body, only
-   the queue lock and one nonblocking threadsafe-function call under notify_open; not:
+2. "The notify hook only signals": `(partly checked by check-notify-hook: the hook is exactly the
+   notify_mtx lock, the notify_open test guarding one nonblocking threadsafe-function call, and
+   the unlock, no other statement; not:
    notify_open cleared under the lock before the threadsafe function is released or finalized)`.
 3. "One drainer per client": `(partly checked by check-single-drainer: __execute_callbacks_err
    only in the executor cbq_drain calls, cbq_drain only from call_js and send()'s pump, its loop,
@@ -65,9 +66,9 @@ tests and the reviewer (PLAN.md §5).
 4. "Waiting calls use the `_cb` twin": `(checked by check-cb-twin-only and
    check-waiting-call-promise; the exception's single caller, the finalizing branch, by
    test/static/header_conformance.test.js)`.
-5. "Never call `KafkaFuture_get`": `(partly checked by check-cb-twin-only: the blocking
-   kafka_common_KafkaFuture_get and kafka_common_KafkaFuture_get_with_timeout; not: their _cb
-   twins, nor the future being destroyed unread)`.
+5. "Never call `KafkaFuture_get`": `(partly checked by check-cb-twin-only: every
+   kafka_common_KafkaFuture_get* call, the _cb forms included; not: the future being destroyed
+   unread)`.
 6. "One `Callback_t` per record": `(partly checked by check-completion-order: the order (user
    callback, future, report), one report, and no report outside the destroying guard; not: the
    error passed, NULL or an owned local-callback error carrying the message thrown)`.
@@ -76,8 +77,9 @@ tests and the reviewer (PLAN.md §5).
    of records; not: that the ordering contract is documented on send, in its declaration and in
    the README)`.
 8. "Zero extra copies of key and value": `(partly checked by check-zero-copy, a heuristic with an
-   allowlist: no copy or allocation of the key and value on the send path, and the
-   kafka_Bytes_t over the buffer's own memory; not: the napi_ref kept until the hand-over
+   allowlist: no copy or allocation of the key and value on the send path, the kafka_Bytes_t
+   over the buffer's own memory, and in lib/ no copy of a bytes-typed value (Buffer.from,
+   new Uint8Array, Uint8Array.from, slice); not: the napi_ref kept until the hand-over
    completion, nor the user-facing contract)`.
 9. "Ownership follows the signature": `(partly checked by check-ownership: every owned handle type
    destroyed somewhere, by type and not per path, and no borrowed one destroyed in a delivery

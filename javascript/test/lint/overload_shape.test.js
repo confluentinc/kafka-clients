@@ -66,6 +66,40 @@ test('forms differing only by trailing parameters may take them optional (decisi
   ]);
 });
 
+test('a Java form the positional parameters leave out is its own finding, keyed by the form', () => {
+  const { javaClass } = require('./_java_fixture');
+  const index = javaIndex([
+    javaClass('common.KafkaFuture', {
+      overloads: [method('get', [], { param_names: [] }), method('get', ['long', 'TimeUnit'], { param_names: ['timeout', 'unit'] })],
+    }),
+  ]);
+  const root = (signature) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'build/java-index.json': index,
+      'lib/common/kafka_future.ts': `export class KafkaFuture {\n  ${signature} { return Promise.resolve(); }\n}\n`,
+    });
+  const missing = "KafkaFuture.get/get(long,TimeUnit): common.KafkaFuture#get's form get(long timeout, TimeUnit unit) has no translation: KafkaFuture.get takes ()";
+  let r = lint(root('get(): Promise<void>'), [RULE]);
+  assert.deepEqual(findings(r), [missing]);
+  // Baselined, the missing form waives nothing else: a positional timeout is a wrong shape.
+  const baseline = { 'lint-baseline.txt': 'overload-missing KafkaFuture.get/get(long,TimeUnit)\n' };
+  r = lint(project({ 'tsconfig.json': TSCONFIG, 'build/java-index.json': index, ...baseline, 'lib/common/kafka_future.ts': 'export class KafkaFuture {\n  get(): Promise<void> { return Promise.resolve(); }\n}\n' }), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(
+    project({
+      'tsconfig.json': TSCONFIG,
+      'build/java-index.json': index,
+      ...baseline,
+      'lib/common/kafka_future.ts': 'export class KafkaFuture {\n  get(timeoutMs?: number): Promise<void> { void timeoutMs; return Promise.resolve(); }\n}\n',
+    }),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    'KafkaFuture.get: translates 2 Java forms of common.KafkaFuture#get (get(); get(long timeout, TimeUnit unit)) but takes (timeoutMs?: number), not one options object',
+  ]);
+});
+
 test('an option whose Java parameter may be null may be left out (decision 10); same-position parameters of one host type merge', () => {
   const javadoc = (text) => ({ text: '', params: [{ name: 'label', text }], returns: null, throws: [], words: 0 });
   const classesWith = (labelDoc) =>

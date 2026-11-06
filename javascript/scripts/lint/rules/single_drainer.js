@@ -30,7 +30,7 @@
 // The executors and drain callers are listed with their reasons; an entry
 // that matches nothing is a finding.
 
-const { cModel, applyAllowlist } = require('../c_model');
+const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { scan, matching } = require('../c_source');
 
 /** The functions allowed to call `__execute_callbacks_err`: the queue's executors. */
@@ -52,6 +52,7 @@ module.exports = {
     'drain-caller',
     'destroy-in-drain',
     'destroy-in-completion',
+    'after-drain-in-loop',
     'drain-missing',
     'drain-unused-allowance',
   ],
@@ -62,10 +63,10 @@ module.exports = {
     "Run a client's __execute_callbacks only through cbq_drain, from call_js or the pump, and destroy after " +
     'the drain loop (javascript/CLAUDE.md boundary rules 3 and 10).',
   check(ctx) {
-    const { bodies, calls, header } = cModel(ctx);
+    const { calls, header, resolve } = cModel(ctx);
     const raw = [];
     let checked = 0;
-    const drain = bodies.get('cbq_drain');
+    const drain = resolve('cbq_drain');
     if (!drain) {
       return { findings: [{ kind: 'drain-missing', subject: 'cbq_drain', message: 'is defined in no src/*.c' }], checked: 1 };
     }
@@ -102,6 +103,8 @@ module.exports = {
     // The drain loop, whatever its form (`while`, `for`, `do`), read on the
     // code with comments and literals blanked: no destroy inside it.
     const code = scan(drain.body).code;
+    // The src functions the loop calls by name run inside the drain too.
+    const loopCalls = [];
     const loop = /\b(while|for)\s*\(|\bdo\s*\{/.exec(code);
     if (loop === null) {
       raw.push({ kind: 'drain-missing', subject: 'cbq_drain', message: 'has no loop (while, for, do) the rule can read' });
@@ -119,6 +122,11 @@ module.exports = {
         checked += 1;
         if (/_destroy(_err)?$/.test(c.name) && header.has(c.name)) {
           raw.push({ kind: 'destroy-in-drain', subject: `${c.file}:${c.line}`, message: `cbq_drain's loop calls ${c.name}: destroy after the loop` });
+        } else if (c.name === 'after_drain') {
+          // The client's after-drain hook destroys what a close completion marked: only once the loop ended.
+          raw.push({ kind: 'after-drain-in-loop', subject: `${c.file}:${c.line}`, message: "cbq_drain calls the queue's after_drain inside its loop: call it after the loop" });
+        } else if (resolve(c.name, c.file)) {
+          loopCalls.push(c);
         }
       }
     }
@@ -136,38 +144,66 @@ module.exports = {
       const executes = (iface) => header.has(`${prefix}_${iface}__execute_callbacks_err`) || header.has(`${prefix}_${iface}__execute_callbacks`);
       if (executes(cls) || views.some(executes)) clientDestroys.add(name);
     }
+    // The call graph, by definition (`file:name`): a call reaches the
+    // definition C's linkage gives it (`resolve`).
     const graph = new Map();
     for (const c of calls) {
       if (!c.function) continue;
-      if (!graph.has(c.function)) graph.set(c.function, []);
-      graph.get(c.function).push(c);
+      const k = `${c.file}:${c.function}`;
+      if (!graph.has(k)) graph.set(k, []);
+      graph.get(k).push(c);
     }
     const roots = new Map();
     for (const c of calls) {
       const proto = header.get(c.name);
       if (!proto) continue;
       proto.params.forEach((p, i) => {
-        const arg = c.args[i];
-        if (!bodies.has(arg)) return;
-        if (c.name.endsWith('_cb') || (/_new(_err)?$/.test(c.name) && /_fn_t$/.test(p.type))) roots.set(arg, c.name);
+        const body = resolve(c.args[i], c.file);
+        if (!body) return;
+        if (c.name.endsWith('_cb') || (/_new(_err)?$/.test(c.name) && /_fn_t$/.test(p.type))) roots.set(bodyKey(body), { body, via: c.name });
       });
     }
-    for (const [root, via] of [...roots].sort()) {
+    // The executor each client hands to cbq_init (its `cbq_execute_fn`
+    // parameter): the loop calls it through `q->execute`, so it runs inside the
+    // drain and must not reach a destroy either. The after-drain hook is not a
+    // root: it runs after the loop, where the destroy belongs.
+    const init = resolve('cbq_init');
+    const executeAt = init ? init.params.findIndex((p) => p.type === 'cbq_execute_fn') : -1;
+    let handed = 0;
+    for (const c of calls.filter((x) => x.name === 'cbq_init' && !x.directive)) {
+      const body = executeAt >= 0 ? resolve(c.args[executeAt], c.file) : undefined;
+      if (!body) continue;
+      handed += 1;
+      roots.set(bodyKey(body), { body, via: 'cbq_init as the executor', kind: 'destroy-in-drain' });
+    }
+    if (calls.some((c) => c.name === 'execute' && c.file === drain.file && c.function === 'cbq_drain') && handed === 0) {
+      raw.push({
+        kind: 'drain-missing',
+        subject: 'cbq_init',
+        message: "is passed no src function as its cbq_execute_fn: the rule cannot follow the executor cbq_drain's loop calls",
+      });
+    }
+    for (const c of loopCalls) {
+      const body = resolve(c.name, c.file);
+      if (!roots.has(bodyKey(body))) roots.set(bodyKey(body), { body, via: "cbq_drain's loop", kind: 'destroy-in-drain', called: true });
+    }
+    for (const [rootKey, { body: root, via, kind, called }] of [...roots].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       checked += 1;
-      const seen = new Map([[root, [root]]]);
-      const work = [root];
+      const seen = new Map([[rootKey, [root.name]]]);
+      const work = [rootKey];
       while (work.length > 0) {
         const fn = work.shift();
         for (const c of graph.get(fn) || []) {
+          const callee = resolve(c.name, c.file);
           if (clientDestroys.has(c.name)) {
             raw.push({
-              kind: 'destroy-in-completion',
-              subject: root,
-              message: `runs inside the drain (a completion given to ${via}) and reaches ${c.name} through ${[...seen.get(fn), c.name].join(' -> ')} (${c.file}:${c.line}): mark the client and destroy after the drain`,
+              kind: kind || 'destroy-in-completion',
+              subject: root.name,
+              message: `runs inside the drain (${called ? 'called by' : kind ? 'given to' : 'a completion given to'} ${via}) and reaches ${c.name} through ${[...seen.get(fn), c.name].join(' -> ')} (${c.file}:${c.line}): mark the client and destroy after the drain`,
             });
-          } else if (bodies.has(c.name) && !seen.has(c.name)) {
-            seen.set(c.name, [...seen.get(fn), c.name]);
-            work.push(c.name);
+          } else if (callee && !seen.has(bodyKey(callee))) {
+            seen.set(bodyKey(callee), [...seen.get(fn), c.name]);
+            work.push(bodyKey(callee));
           }
         }
       }

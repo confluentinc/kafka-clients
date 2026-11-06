@@ -28,7 +28,13 @@
 //     exactly when every form takes a parameter;
 //   - or, when the forms differ only by trailing parameters, one function
 //     taking the longest form's parameters, those the shorter forms lack
-//     optional (decision 9, `send(record, callback?)`).
+//     optional (decision 9, `send(record, callback?)`);
+//   - a function taking positional parameters translates the forms whose
+//     parameters it takes by name, the shorter ones' left optional: each
+//     other form is its own `overload-missing` finding, keyed by that form
+//     (`KafkaFuture.get/get(long,TimeUnit)`), so a form not translated yet
+//     can be baselined without hiding a wrong shape of the forms that are,
+//     and a parameter no translated form takes is `not-options`.
 // The checker gives the options type's properties and their optionality. A
 // config class (its constants only) is not asked.
 
@@ -49,6 +55,11 @@ function liveForms(overloads) {
 /** The name a Java parameter takes in an options object: a `Duration x` is `xMs`. */
 function optionName(type, name) {
   return type === 'Duration' ? `${name}Ms` : name;
+}
+
+/** A form as a finding's subject names it: `get(long,TimeUnit)`, the types erased. */
+function formKey(o) {
+  return `${o.name}(${o.params.map((t) => t.replace(/<.*>$/, '')).join(',')})`;
 }
 
 /** A form as the findings print it: `close(Duration timeout)`. */
@@ -138,6 +149,7 @@ module.exports = {
   kinds: [
     'duplicate',
     'not-options',
+    'overload-missing',
     'option-missing',
     'option-extra',
     'option-optional',
@@ -201,6 +213,29 @@ module.exports = {
       }
       if (!isOptions) {
         const written = params.map((p) => p.getText().replace(/\s+/g, ' ')).join(', ');
+        // The forms the positional parameters translate: each of its names in
+        // place, the parameters past it optional.
+        const tsNames = params.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ''));
+        const optionalAt = params.map((p) => !!(p.questionToken || p.initializer));
+        const prefix = (k) => names[k].length <= params.length && names[k].every((n, i) => tsNames[i] === n);
+        const covered = forms.filter(
+          (f, k) => !params.some((p) => p.dotDotDotToken) && prefix(k) && optionalAt.every((o, i) => i < names[k].length || o),
+        );
+        // A form whose parameters it takes but leaves required is its shape's error, not a missing form.
+        const misshapen = forms.some((f, k) => !covered.includes(f) && prefix(k));
+        if (covered.length > 0) {
+          for (const f of forms.filter((g, k) => !covered.includes(g) && !prefix(k))) {
+            findings.push({
+              kind: 'overload-missing',
+              subject: `${subject}/${formKey(f)}`,
+              message: `${javaName}'s form ${formText(f)} has no translation: ${subject} takes (${written})`,
+            });
+          }
+          const widest = Math.max(...covered.map((f) => names[forms.indexOf(f)].length));
+          const shortest = Math.min(...covered.map((f) => names[forms.indexOf(f)].length));
+          // Every positional parameter belongs to a translated form, required exactly when all of them take it.
+          if (!misshapen && params.length === widest && optionalAt.every((o, i) => o === i >= shortest)) continue;
+        }
         findings.push({
           kind: 'not-options',
           subject,

@@ -35,7 +35,8 @@ function calledFunctions(file) {
   return calledIn(fs.readFileSync(file, 'utf8'));
 }
 
-const sources = fs.readdirSync(SRC).filter((f) => f.endsWith('.c'));
+// The .h files too: a macro's body makes its calls wherever it is used.
+const sources = fs.readdirSync(SRC).filter((f) => f.endsWith('.c') || f.endsWith('.h'));
 
 test('the addon has C sources to check', () => {
   assert.ok(sources.length >= 4, sources.join(', '));
@@ -66,8 +67,9 @@ test('the producer uses the functions of the plan', () => {
     assert.ok(called.has(name), `${name} is not called`);
   }
   // Rules 4 and 5 (no blocking twin, never read the future) are the rule
-  // linter's check-cb-twin-only, which forbids every function with a `_cb`
-  // twin, these included (make lint-rules).
+  // linter's check-cb-twin-only (make lint-rules), which forbids the blocking
+  // form of every function with a `_cb` twin, and every
+  // kafka_common_KafkaFuture_get* call, the `_cb` forms included.
 });
 
 test('the one blocking close is the finalizer force-close (rule 4 exception)', () => {
