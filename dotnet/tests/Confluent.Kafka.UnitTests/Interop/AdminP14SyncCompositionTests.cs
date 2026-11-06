@@ -1433,14 +1433,14 @@ public sealed class AdminP14SyncCompositionTests
             Dictionary<ClientQuotaEntity, KafkaFuture> map =
                 new Dictionary<ClientQuotaEntity, KafkaFuture> { [entities[0]] = new KafkaFuture(impls[entities[0]]) };
             AlterClientQuotasResult result = new AlterClientQuotasResult(map);
-            Assert.Same(map, result.Values);
+            Assert.Same(map, result.Values());
 
             impls[entities[0]].Complete(null);
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
 
             map.Add(entities[1], new KafkaFuture(impls[entities[1]]));
             impls[entities[1]].CompleteWithError(failure);
-            Assert.Same(map, result.Values);
+            Assert.Same(map, result.Values());
             Assert.Same(failure, await FutureProbe.Of(result.All()).Outcome());
             return;
         }
@@ -1448,14 +1448,14 @@ public sealed class AdminP14SyncCompositionTests
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> asyncMap =
             new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [entities[0]] = new AsyncKafkaFuture(impls[entities[0]]) };
         AsyncAlterClientQuotasResult asyncResult = new AsyncAlterClientQuotasResult(asyncMap);
-        Assert.Same(asyncMap, asyncResult.Values);
+        Assert.Same(asyncMap, asyncResult.Values());
 
         impls[entities[0]].Complete(null);
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
 
         asyncMap.Add(entities[1], new AsyncKafkaFuture(impls[entities[1]]));
         impls[entities[1]].CompleteWithError(failure);
-        Assert.Same(asyncMap, asyncResult.Values);
+        Assert.Same(asyncMap, asyncResult.Values());
         Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
     }
 
@@ -1598,14 +1598,14 @@ public sealed class AdminP14SyncCompositionTests
             Dictionary<string, KafkaFuture> map =
                 new Dictionary<string, KafkaFuture>(StringComparer.Ordinal) { [s_users[0]] = new KafkaFuture(impls[s_users[0]]) };
             AlterUserScramCredentialsResult result = new AlterUserScramCredentialsResult(map);
-            Assert.Same(map, result.Values);
+            Assert.Same(map, result.Values());
 
             impls[s_users[0]].Complete(null);
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
 
             map.Add(s_users[1], new KafkaFuture(impls[s_users[1]]));
             impls[s_users[1]].CompleteWithError(failure);
-            Assert.Equal(2, result.Values.Count);
+            Assert.Equal(2, result.Values().Count);
             Assert.Same(failure, await FutureProbe.Of(result.All()).Outcome());
             return;
         }
@@ -1615,14 +1615,14 @@ public sealed class AdminP14SyncCompositionTests
             [s_users[0]] = new AsyncKafkaFuture(impls[s_users[0]]),
         };
         AsyncAlterUserScramCredentialsResult asyncResult = new AsyncAlterUserScramCredentialsResult(asyncMap);
-        Assert.Same(asyncMap, asyncResult.Values);
+        Assert.Same(asyncMap, asyncResult.Values());
 
         impls[s_users[0]].Complete(null);
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
 
         asyncMap.Add(s_users[1], new AsyncKafkaFuture(impls[s_users[1]]));
         impls[s_users[1]].CompleteWithError(failure);
-        Assert.Equal(2, asyncResult.Values.Count);
+        Assert.Equal(2, asyncResult.Values().Count);
         Assert.Same(failure, await FutureProbe.Of(asyncResult.All()).Outcome());
     }
 
@@ -2827,10 +2827,10 @@ public sealed class AdminP14SyncCompositionTests
         internal void SetException(string topic, Exception failure) => _fail[topic](failure);
 
         internal IEnumerable<string> ValuesKeys() =>
-            _sync is not null ? _sync.Values.Keys.ToList() : _async!.Values.Keys.ToList();
+            _sync is not null ? _sync.Values().Keys.ToList() : _async!.Values().Keys.ToList();
 
         internal FutureProbe Values(string topic) =>
-            _sync is not null ? FutureProbe.Of(_sync.Values[topic]) : FutureProbe.Of(_async!.Values[topic]);
+            _sync is not null ? FutureProbe.Of(_sync.Values()[topic]) : FutureProbe.Of(_async!.Values()[topic]);
 
         internal FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
 
@@ -2850,8 +2850,8 @@ public sealed class AdminP14SyncCompositionTests
 
         internal bool ValuesEqualAcrossReads(string topic) =>
             _sync is not null
-                ? _sync.Values[topic] == _sync.Values[topic]
-                : _async!.Values[topic] == _async.Values[topic];
+                ? _sync.Values()[topic] == _sync.Values()[topic]
+                : _async!.Values()[topic] == _async.Values()[topic];
 
         internal Exception? CallAccessor(string accessor, string topic) => Thrown(accessor switch
         {
@@ -2963,17 +2963,17 @@ public sealed class AdminP14SyncCompositionTests
             {
                 DeleteTopicsResult result = DeleteTopicsResult.OfClient((futures, null, NoResultHandle()));
                 return new VoidHarness<string>(
-                    futures, topics, result.TopicIdValues is null, () => result.TopicNameValues!, result.All, null, null);
+                    futures, topics, result.TopicIdValues() is null, () => result.TopicNameValues()!, result.All, null, null);
             }
 
             AsyncDeleteTopicsResult asyncResult = AsyncDeleteTopicsResult.OfClient((futures, null, NoResultHandle()));
             return new VoidHarness<string>(
                 futures,
                 topics,
-                asyncResult.TopicIdValues is null,
+                asyncResult.TopicIdValues() is null,
                 null,
                 null,
-                () => asyncResult.TopicNameValues!,
+                () => asyncResult.TopicNameValues()!,
                 asyncResult.All);
         }
 
@@ -2985,17 +2985,17 @@ public sealed class AdminP14SyncCompositionTests
             {
                 DeleteTopicsResult result = DeleteTopicsResult.OfClient((null, futures, NoResultHandle()));
                 return new VoidHarness<Uuid>(
-                    futures, ids, result.TopicNameValues is null, () => result.TopicIdValues!, result.All, null, null);
+                    futures, ids, result.TopicNameValues() is null, () => result.TopicIdValues()!, result.All, null, null);
             }
 
             AsyncDeleteTopicsResult asyncResult = AsyncDeleteTopicsResult.OfClient((null, futures, NoResultHandle()));
             return new VoidHarness<Uuid>(
                 futures,
                 ids,
-                asyncResult.TopicNameValues is null,
+                asyncResult.TopicNameValues() is null,
                 null,
                 null,
-                () => asyncResult.TopicIdValues!,
+                () => asyncResult.TopicIdValues()!,
                 asyncResult.All);
         }
 
@@ -3006,11 +3006,11 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 CreatePartitionsResult result = CreatePartitionsResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<string>(futures, topics, true, () => result.Values, result.All, null, null);
+                return new VoidHarness<string>(futures, topics, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncCreatePartitionsResult asyncResult = AsyncCreatePartitionsResult.OfClient((futures, NoResultHandle()));
-            return new VoidHarness<string>(futures, topics, true, null, null, () => asyncResult.Values, asyncResult.All);
+            return new VoidHarness<string>(futures, topics, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<ConfigResource> IncrementalAlterConfigs(
@@ -3021,12 +3021,12 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 AlterConfigsResult result = AlterConfigsResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<ConfigResource>(futures, resources, true, () => result.Values, result.All, null, null);
+                return new VoidHarness<ConfigResource>(futures, resources, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncAlterConfigsResult asyncResult = AsyncAlterConfigsResult.OfClient((futures, NoResultHandle()));
             return new VoidHarness<ConfigResource>(
-                futures, resources, true, null, null, () => asyncResult.Values, asyncResult.All);
+                futures, resources, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<TopicPartitionReplica> AlterReplicaLogDirs(
@@ -3038,12 +3038,12 @@ public sealed class AdminP14SyncCompositionTests
             {
                 AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient((futures, NoResultHandle()));
                 return new VoidHarness<TopicPartitionReplica>(
-                    futures, replicas, true, () => result.Values, result.All, null, null);
+                    futures, replicas, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncAlterReplicaLogDirsResult asyncResult = AsyncAlterReplicaLogDirsResult.OfClient((futures, NoResultHandle()));
             return new VoidHarness<TopicPartitionReplica>(
-                futures, replicas, true, null, null, () => asyncResult.Values, asyncResult.All);
+                futures, replicas, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<TopicPartition> AlterPartitionReassignments(
@@ -3063,13 +3063,13 @@ public sealed class AdminP14SyncCompositionTests
                 AlterPartitionReassignmentsResult result =
                     AlterPartitionReassignmentsResult.OfClient((futures, NoResultHandle()));
                 return new VoidHarness<TopicPartition>(
-                    succeed, fail, partitions, true, () => result.Values, result.All, null, null);
+                    succeed, fail, partitions, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncAlterPartitionReassignmentsResult asyncResult =
                 AsyncAlterPartitionReassignmentsResult.OfClient((futures, NoResultHandle()));
             return new VoidHarness<TopicPartition>(
-                succeed, fail, partitions, true, null, null, () => asyncResult.Values, asyncResult.All);
+                succeed, fail, partitions, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<string> DeleteConsumerGroups(string flavour, IReadOnlyList<string> groups)
@@ -3086,12 +3086,12 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DeleteConsumerGroupsResult result = DeleteConsumerGroupsResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<string>(succeed, fail, groups, true, () => result.DeletedGroups, result.All, null, null);
+                return new VoidHarness<string>(succeed, fail, groups, true, () => result.DeletedGroups(), result.All, null, null);
             }
 
             AsyncDeleteConsumerGroupsResult asyncResult = AsyncDeleteConsumerGroupsResult.OfClient((futures, NoResultHandle()));
             return new VoidHarness<string>(
-                succeed, fail, groups, true, null, null, () => asyncResult.DeletedGroups, asyncResult.All);
+                succeed, fail, groups, true, null, null, () => asyncResult.DeletedGroups(), asyncResult.All);
         }
 
         internal static VoidHarness<AclBinding> CreateAcls(
@@ -3109,12 +3109,12 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 CreateAclsResult result = CreateAclsResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<AclBinding>(succeed, fail, keys, true, () => result.Values, result.All, null, null);
+                return new VoidHarness<AclBinding>(succeed, fail, keys, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncCreateAclsResult asyncResult = AsyncCreateAclsResult.OfClient((futures, NoResultHandle()));
             return new VoidHarness<AclBinding>(
-                succeed, fail, keys, true, null, null, () => asyncResult.Values, asyncResult.All);
+                succeed, fail, keys, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<ClientQuotaEntity> AlterClientQuotas(
@@ -3132,12 +3132,12 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 AlterClientQuotasResult result = AlterClientQuotasResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<ClientQuotaEntity>(succeed, fail, keys, true, () => result.Values, result.All, null, null);
+                return new VoidHarness<ClientQuotaEntity>(succeed, fail, keys, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncAlterClientQuotasResult asyncResult = AsyncAlterClientQuotasResult.OfClient((futures, NoResultHandle()));
             return new VoidHarness<ClientQuotaEntity>(
-                succeed, fail, keys, true, null, null, () => asyncResult.Values, asyncResult.All);
+                succeed, fail, keys, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<string> AlterUserScramCredentials(string flavour, IReadOnlyList<string> users)
@@ -3154,11 +3154,11 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 AlterUserScramCredentialsResult result = AlterUserScramCredentialsResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<string>(succeed, fail, users, true, () => result.Values, result.All, null, null);
+                return new VoidHarness<string>(succeed, fail, users, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncAlterUserScramCredentialsResult asyncResult = AsyncAlterUserScramCredentialsResult.OfClient((futures, NoResultHandle()));
-            return new VoidHarness<string>(succeed, fail, users, true, null, null, () => asyncResult.Values, asyncResult.All);
+            return new VoidHarness<string>(succeed, fail, users, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal static VoidHarness<string> UpdateFeatures(string flavour, IReadOnlyList<string> features)
@@ -3175,11 +3175,11 @@ public sealed class AdminP14SyncCompositionTests
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 UpdateFeaturesResult result = UpdateFeaturesResult.OfClient((futures, NoResultHandle()));
-                return new VoidHarness<string>(succeed, fail, features, true, () => result.Values, result.All, null, null);
+                return new VoidHarness<string>(succeed, fail, features, true, () => result.Values(), result.All, null, null);
             }
 
             AsyncUpdateFeaturesResult asyncResult = AsyncUpdateFeaturesResult.OfClient((futures, NoResultHandle()));
-            return new VoidHarness<string>(succeed, fail, features, true, null, null, () => asyncResult.Values, asyncResult.All);
+            return new VoidHarness<string>(succeed, fail, features, true, null, null, () => asyncResult.Values(), asyncResult.All);
         }
 
         internal override void Succeed(TKey key) => _succeed(key);
@@ -3277,8 +3277,8 @@ public sealed class AdminP14SyncCompositionTests
                     futures,
                     topics,
                     Description,
-                    result.TopicIdValues is null && result.AllTopicIds() is null,
-                    () => result.TopicNameValues!,
+                    result.TopicIdValues() is null && result.AllTopicIds() is null,
+                    () => result.TopicNameValues()!,
                     null,
                     () => FutureProbe.Of(result.AllTopicNames()!.Value),
                     allGathers: true);
@@ -3289,9 +3289,9 @@ public sealed class AdminP14SyncCompositionTests
                 futures,
                 topics,
                 Description,
-                asyncResult.TopicIdValues is null && asyncResult.AllTopicIds() is null,
+                asyncResult.TopicIdValues() is null && asyncResult.AllTopicIds() is null,
                 null,
-                () => asyncResult.TopicNameValues!,
+                () => asyncResult.TopicNameValues()!,
                 () => FutureProbe.Of(asyncResult.AllTopicNames()!.Value),
                 allGathers: true);
         }
@@ -3308,8 +3308,8 @@ public sealed class AdminP14SyncCompositionTests
                     futures,
                     ids,
                     id => Description(id.ToString()),
-                    result.TopicNameValues is null && result.AllTopicNames() is null,
-                    () => result.TopicIdValues!,
+                    result.TopicNameValues() is null && result.AllTopicNames() is null,
+                    () => result.TopicIdValues()!,
                     null,
                     () => FutureProbe.Of(result.AllTopicIds()!.Value),
                     allGathers: true);
@@ -3320,9 +3320,9 @@ public sealed class AdminP14SyncCompositionTests
                 futures,
                 ids,
                 id => Description(id.ToString()),
-                asyncResult.TopicNameValues is null && asyncResult.AllTopicNames() is null,
+                asyncResult.TopicNameValues() is null && asyncResult.AllTopicNames() is null,
                 null,
-                () => asyncResult.TopicIdValues!,
+                () => asyncResult.TopicIdValues()!,
                 () => FutureProbe.Of(asyncResult.AllTopicIds()!.Value),
                 allGathers: true);
         }
@@ -3339,9 +3339,9 @@ public sealed class AdminP14SyncCompositionTests
                 return new ValuedHarness<TopicPartition, DeletedRecords>(
                     futures,
                     partitions,
-                    partition => new DeletedRecords(100L + partition.Partition),
+                    partition => new DeletedRecords(100L + partition.Partition()),
                     true,
-                    () => result.LowWatermarks,
+                    () => result.LowWatermarks(),
                     null,
                     () => FutureProbe.Of(result.All()),
                     allGathers: false);
@@ -3351,10 +3351,10 @@ public sealed class AdminP14SyncCompositionTests
             return new ValuedHarness<TopicPartition, DeletedRecords>(
                 futures,
                 partitions,
-                partition => new DeletedRecords(100L + partition.Partition),
+                partition => new DeletedRecords(100L + partition.Partition()),
                 true,
                 null,
-                () => asyncResult.LowWatermarks,
+                () => asyncResult.LowWatermarks(),
                 () => FutureProbe.Of(asyncResult.All()),
                 allGathers: false);
         }
@@ -3369,7 +3369,7 @@ public sealed class AdminP14SyncCompositionTests
             {
                 DescribeConfigsResult result = DescribeConfigsResult.OfClient((futures, NoResultHandle()));
                 return new ValuedHarness<ConfigResource, Config>(
-                    futures, resources, _ => Empty(), true, () => result.Values, null, () => FutureProbe.Of(result.All()), allGathers: true);
+                    futures, resources, _ => Empty(), true, () => result.Values(), null, () => FutureProbe.Of(result.All()), allGathers: true);
             }
 
             AsyncDescribeConfigsResult asyncResult = AsyncDescribeConfigsResult.OfClient((futures, NoResultHandle()));
@@ -3379,7 +3379,7 @@ public sealed class AdminP14SyncCompositionTests
                 _ => Empty(),
                 true,
                 null,
-                () => asyncResult.Values,
+                () => asyncResult.Values(),
                 () => FutureProbe.Of(asyncResult.All()),
                 allGathers: true);
         }
@@ -3398,7 +3398,7 @@ public sealed class AdminP14SyncCompositionTests
                     brokers,
                     LogDirs,
                     true,
-                    () => result.Descriptions,
+                    () => result.Descriptions(),
                     null,
                     () => FutureProbe.Of(result.AllDescriptions()),
                     allGathers: true);
@@ -3411,7 +3411,7 @@ public sealed class AdminP14SyncCompositionTests
                 LogDirs,
                 true,
                 null,
-                () => asyncResult.Descriptions,
+                () => asyncResult.Descriptions(),
                 () => FutureProbe.Of(asyncResult.AllDescriptions()),
                 allGathers: true);
         }
@@ -3431,7 +3431,7 @@ public sealed class AdminP14SyncCompositionTests
                     replicas,
                     ReplicaLogDir,
                     true,
-                    () => result.Values,
+                    () => result.Values(),
                     null,
                     () => FutureProbe.Of(result.All()),
                     allGathers: true);
@@ -3445,7 +3445,7 @@ public sealed class AdminP14SyncCompositionTests
                 ReplicaLogDir,
                 true,
                 null,
-                () => asyncResult.Values,
+                () => asyncResult.Values(),
                 () => FutureProbe.Of(asyncResult.All()),
                 allGathers: true);
         }
@@ -3471,7 +3471,7 @@ public sealed class AdminP14SyncCompositionTests
                     groups,
                     ConsumerGroup,
                     true,
-                    () => result.DescribedGroups,
+                    () => result.DescribedGroups(),
                     null,
                     () => FutureProbe.Of(result.All()),
                     allGathers: true);
@@ -3486,7 +3486,7 @@ public sealed class AdminP14SyncCompositionTests
                 ConsumerGroup,
                 true,
                 null,
-                () => asyncResult.DescribedGroups,
+                () => asyncResult.DescribedGroups(),
                 () => FutureProbe.Of(asyncResult.All()),
                 allGathers: true);
         }
@@ -3512,7 +3512,7 @@ public sealed class AdminP14SyncCompositionTests
                     groups,
                     ClassicGroup,
                     true,
-                    () => result.DescribedGroups,
+                    () => result.DescribedGroups(),
                     null,
                     () => FutureProbe.Of(result.All()),
                     allGathers: true);
@@ -3527,7 +3527,7 @@ public sealed class AdminP14SyncCompositionTests
                 ClassicGroup,
                 true,
                 null,
-                () => asyncResult.DescribedGroups,
+                () => asyncResult.DescribedGroups(),
                 () => FutureProbe.Of(asyncResult.All()),
                 allGathers: true);
         }
@@ -3582,7 +3582,7 @@ public sealed class AdminP14SyncCompositionTests
             };
 
         private static DescribeReplicaLogDirsResult.ReplicaLogDirInfo ReplicaLogDir(TopicPartitionReplica replica) =>
-            new DescribeReplicaLogDirsResult.ReplicaLogDirInfo("/data/broker-" + replica.BrokerId, 0L, null, -1L);
+            new DescribeReplicaLogDirsResult.ReplicaLogDirInfo("/data/broker-" + replica.BrokerId(), 0L, null, -1L);
 
         private static ConsumerGroupDescription ConsumerGroup(string groupId) =>
             new ConsumerGroupDescription(
@@ -3645,10 +3645,10 @@ public sealed class AdminP14SyncCompositionTests
         internal override object? Expected(string key) => BlockingCall.Returned;
 
         internal override IEnumerable<string> ValuesKeys() =>
-            _sync is not null ? _sync.FencedProducers.Keys.ToList() : _async!.FencedProducers.Keys.ToList();
+            _sync is not null ? _sync.FencedProducers().Keys.ToList() : _async!.FencedProducers().Keys.ToList();
 
         internal override FutureProbe Value(string key) =>
-            _sync is not null ? FutureProbe.Of(_sync.FencedProducers[key]) : FutureProbe.Of(_async!.FencedProducers[key]);
+            _sync is not null ? FutureProbe.Of(_sync.FencedProducers()[key]) : FutureProbe.Of(_async!.FencedProducers()[key]);
 
         internal override FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
 
@@ -3656,19 +3656,19 @@ public sealed class AdminP14SyncCompositionTests
 
         internal override bool ValueEqualAcrossReads(string key) =>
             _sync is not null
-                ? _sync.FencedProducers[key] == _sync.FencedProducers[key]
-                : _async!.FencedProducers[key] == _async.FencedProducers[key];
+                ? _sync.FencedProducers()[key] == _sync.FencedProducers()[key]
+                : _async!.FencedProducers()[key] == _async.FencedProducers()[key];
 
         internal bool MapSameAcrossReads() =>
             _sync is not null
-                ? ReferenceEquals(_sync.FencedProducers, _sync.FencedProducers)
-                : ReferenceEquals(_async!.FencedProducers, _async.FencedProducers);
+                ? ReferenceEquals(_sync.FencedProducers(), _sync.FencedProducers())
+                : ReferenceEquals(_async!.FencedProducers(), _async.FencedProducers());
 
         internal override bool TryGetValue(string key) =>
-            _sync is not null ? _sync.FencedProducers.TryGetValue(key, out _) : _async!.FencedProducers.TryGetValue(key, out _);
+            _sync is not null ? _sync.FencedProducers().TryGetValue(key, out _) : _async!.FencedProducers().TryGetValue(key, out _);
 
         internal override bool ContainsKey(string key) =>
-            _sync is not null ? _sync.FencedProducers.ContainsKey(key) : _async!.FencedProducers.ContainsKey(key);
+            _sync is not null ? _sync.FencedProducers().ContainsKey(key) : _async!.FencedProducers().ContainsKey(key);
 
         internal long ExpectedProducerId(string key) => _values[key].ProducerId;
 
@@ -3826,7 +3826,7 @@ public sealed class AdminP14SyncCompositionTests
 
         private static DescribeProducersResult.PartitionProducerState Producers(TopicPartition partition) =>
             new DescribeProducersResult.PartitionProducerState(
-                new[] { new ProducerState(2_000L + partition.Partition, 2, 7, 1_700_000_000_000L, null, null) });
+                new[] { new ProducerState(2_000L + partition.Partition(), 2, 7, 1_700_000_000_000L, null, null) });
 
         private bool Answers(TKey key) => CallIndexer(key) is null;
     }
@@ -4202,7 +4202,7 @@ public sealed class AdminP14SyncCompositionTests
             _futures = futures;
             _values = partitions.ToDictionary(
                 partition => partition,
-                partition => new ListOffsetsResult.ListOffsetsResultInfo(100L + partition.Partition, -1L, null));
+                partition => new ListOffsetsResult.ListOffsetsResultInfo(100L + partition.Partition(), -1L, null));
             _sync = sync;
             _async = async;
         }
@@ -4451,7 +4451,7 @@ public sealed class AdminP14SyncCompositionTests
                 : new DeleteAclsHarness(futures, keys, null, AsyncDeleteAclsResult.OfClient((futures, NoResultHandle())));
         }
 
-        internal AclBinding[] Bindings(AclBindingFilter key) => _values[key].Values.Select(result => result.Binding!).ToArray();
+        internal AclBinding[] Bindings(AclBindingFilter key) => _values[key].Values().Select(result => result.Binding()!).ToArray();
 
         internal void Succeed(AclBindingFilter key, DeleteAclsResult.FilterResults results) => _futures[key].Complete(results);
 
@@ -4462,10 +4462,10 @@ public sealed class AdminP14SyncCompositionTests
         internal override object? Expected(AclBindingFilter key) => _values[key];
 
         internal override IEnumerable<AclBindingFilter> ValuesKeys() =>
-            _sync is not null ? _sync.Values.Keys.ToList() : _async!.Values.Keys.ToList();
+            _sync is not null ? _sync.Values().Keys.ToList() : _async!.Values().Keys.ToList();
 
         internal override FutureProbe Value(AclBindingFilter key) =>
-            _sync is not null ? FutureProbe.Of(_sync.Values[key]) : FutureProbe.Of(_async!.Values[key]);
+            _sync is not null ? FutureProbe.Of(_sync.Values()[key]) : FutureProbe.Of(_async!.Values()[key]);
 
         internal override FutureProbe All() => _sync is not null ? FutureProbe.Of(_sync.All()) : FutureProbe.Of(_async!.All());
 
@@ -4482,13 +4482,13 @@ public sealed class AdminP14SyncCompositionTests
         }
 
         internal override bool ValueEqualAcrossReads(AclBindingFilter key) =>
-            _sync is not null ? _sync.Values[key] == _sync.Values[key] : _async!.Values[key] == _async.Values[key];
+            _sync is not null ? _sync.Values()[key] == _sync.Values()[key] : _async!.Values()[key] == _async.Values()[key];
 
         internal override bool TryGetValue(AclBindingFilter key) =>
-            _sync is not null ? _sync.Values.TryGetValue(key, out _) : _async!.Values.TryGetValue(key, out _);
+            _sync is not null ? _sync.Values().TryGetValue(key, out _) : _async!.Values().TryGetValue(key, out _);
 
         internal override bool ContainsKey(AclBindingFilter key) =>
-            _sync is not null ? _sync.Values.ContainsKey(key) : _async!.Values.ContainsKey(key);
+            _sync is not null ? _sync.Values().ContainsKey(key) : _async!.Values().ContainsKey(key);
     }
 
     /// <summary>

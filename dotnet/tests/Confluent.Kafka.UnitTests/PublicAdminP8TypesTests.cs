@@ -64,21 +64,21 @@ public sealed class PublicAdminP8TypesTests
     {
         ProducerState state = new ProducerState(11L, 22, 33, 44L, 55, 66L);
 
-        Assert.Equal(11L, state.ProducerId);
-        Assert.Equal(22, state.ProducerEpoch);
-        Assert.Equal(33, state.LastSequence);
-        Assert.Equal(44L, state.LastTimestamp);
-        Assert.Equal(55, state.CoordinatorEpoch);
-        Assert.Equal(66L, state.CurrentTransactionStartOffset);
+        Assert.Equal(11L, state.ProducerId());
+        Assert.Equal(22, state.ProducerEpoch());
+        Assert.Equal(33, state.LastSequence());
+        Assert.Equal(44L, state.LastTimestamp());
+        Assert.Equal(55, state.CoordinatorEpoch());
+        Assert.Equal(66L, state.CurrentTransactionStartOffset());
 
-        Assert.Equal(typeof(long), Property(typeof(ProducerState), nameof(ProducerState.ProducerId)));
-        Assert.Equal(typeof(int), Property(typeof(ProducerState), nameof(ProducerState.ProducerEpoch)));
-        Assert.Equal(typeof(int), Property(typeof(ProducerState), nameof(ProducerState.LastSequence)));
-        Assert.Equal(typeof(long), Property(typeof(ProducerState), nameof(ProducerState.LastTimestamp)));
-        Assert.Equal(typeof(int?), Property(typeof(ProducerState), nameof(ProducerState.CoordinatorEpoch)));
+        Assert.Equal(typeof(long), ReturnType(typeof(ProducerState), nameof(ProducerState.ProducerId)));
+        Assert.Equal(typeof(int), ReturnType(typeof(ProducerState), nameof(ProducerState.ProducerEpoch)));
+        Assert.Equal(typeof(int), ReturnType(typeof(ProducerState), nameof(ProducerState.LastSequence)));
+        Assert.Equal(typeof(long), ReturnType(typeof(ProducerState), nameof(ProducerState.LastTimestamp)));
+        Assert.Equal(typeof(int?), ReturnType(typeof(ProducerState), nameof(ProducerState.CoordinatorEpoch)));
         Assert.Equal(
             typeof(long?),
-            Property(typeof(ProducerState), nameof(ProducerState.CurrentTransactionStartOffset)));
+            ReturnType(typeof(ProducerState), nameof(ProducerState.CurrentTransactionStartOffset)));
     }
 
     [Fact]
@@ -86,10 +86,10 @@ public sealed class PublicAdminP8TypesTests
     {
         ProducerState state = new ProducerState(1L, 2, 3, 4L, null, null);
 
-        Assert.Null(state.CoordinatorEpoch);
-        Assert.Null(state.CurrentTransactionStartOffset);
-        Assert.False(state.CoordinatorEpoch.HasValue);
-        Assert.False(state.CurrentTransactionStartOffset.HasValue);
+        Assert.Null(state.CoordinatorEpoch());
+        Assert.Null(state.CurrentTransactionStartOffset());
+        Assert.False(state.CoordinatorEpoch().HasValue);
+        Assert.False(state.CurrentTransactionStartOffset().HasValue);
     }
 
     [Fact]
@@ -98,8 +98,8 @@ public sealed class PublicAdminP8TypesTests
         // The scalar siblings use -1 as their out-of-range sentinel; the optionals do not.
         ProducerState state = new ProducerState(-1L, -1, -1, -1L, -1, -1L);
 
-        Assert.Equal(-1, state.CoordinatorEpoch);
-        Assert.Equal(-1L, state.CurrentTransactionStartOffset);
+        Assert.Equal(-1, state.CoordinatorEpoch());
+        Assert.Equal(-1L, state.CurrentTransactionStartOffset());
         Assert.NotEqual(new ProducerState(-1L, -1, -1, -1L, null, null), state);
     }
 
@@ -141,13 +141,13 @@ public sealed class PublicAdminP8TypesTests
     {
         TransactionListing listing = new TransactionListing("txn-1", 77L, TransactionState.PREPARE_COMMIT);
 
-        Assert.Equal("txn-1", listing.TransactionalId);
-        Assert.Equal(77L, listing.ProducerId);
-        Assert.Equal(TransactionState.PREPARE_COMMIT, listing.State);
+        Assert.Equal("txn-1", listing.TransactionalId());
+        Assert.Equal(77L, listing.ProducerId());
+        Assert.Equal(TransactionState.PREPARE_COMMIT, listing.State());
 
         // Java names the accessor state() although the field is transactionState.
-        Assert.Contains("State", DeclaredPublicPropertyNames(typeof(TransactionListing)));
-        Assert.DoesNotContain("TransactionState", DeclaredPublicPropertyNames(typeof(TransactionListing)));
+        Assert.Contains("State", DeclaredPublicMethodNames(typeof(TransactionListing)));
+        Assert.DoesNotContain("TransactionState", DeclaredPublicMethodNames(typeof(TransactionListing)));
     }
 
     [Fact]
@@ -192,37 +192,37 @@ public sealed class PublicAdminP8TypesTests
             transactionStartTimeMs: 1_700_000_000_000L,
             topicPartitions: new[] { new TopicPartition("orders", 7) });
 
-        Assert.Equal(3, description.CoordinatorId);
-        Assert.Equal(TransactionState.COMPLETE_ABORT, description.State);
-        Assert.Equal(44L, description.ProducerId);
-        Assert.Equal(5, description.ProducerEpoch);
-        Assert.Equal(60_000L, description.TransactionTimeoutMs);
-        Assert.Equal(1_700_000_000_000L, description.TransactionStartTimeMs);
-        Assert.Equal(new[] { new TopicPartition("orders", 7) }, description.TopicPartitions);
+        Assert.Equal(3, description.CoordinatorId());
+        Assert.Equal(TransactionState.COMPLETE_ABORT, description.State());
+        Assert.Equal(44L, description.ProducerId());
+        Assert.Equal(5, description.ProducerEpoch());
+        Assert.Equal(60_000L, description.TransactionTimeoutMs());
+        Assert.Equal(1_700_000_000_000L, description.TransactionStartTimeMs());
+        Assert.Equal(new[] { new TopicPartition("orders", 7) }, description.TopicPartitions());
 
         // transactionTimeoutMs is a long in Java although the wire field is an int, and producerEpoch is an int here but a
         // short on AbortTransactionSpec.
         Assert.Equal(
             typeof(long),
-            Property(typeof(TransactionDescription), nameof(TransactionDescription.TransactionTimeoutMs)));
+            ReturnType(typeof(TransactionDescription), nameof(TransactionDescription.TransactionTimeoutMs)));
         Assert.Equal(
             typeof(int),
-            Property(typeof(TransactionDescription), nameof(TransactionDescription.ProducerEpoch)));
+            ReturnType(typeof(TransactionDescription), nameof(TransactionDescription.ProducerEpoch)));
         Assert.Equal(
             typeof(long?),
-            Property(typeof(TransactionDescription), nameof(TransactionDescription.TransactionStartTimeMs)));
+            ReturnType(typeof(TransactionDescription), nameof(TransactionDescription.TransactionStartTimeMs)));
     }
 
     [Fact]
     public void TransactionDescription_AbsentStartTimeIsNull() =>
         Assert.Null(
             new TransactionDescription(1, TransactionState.EMPTY, 2L, 3, 4L, null, null)
-                .TransactionStartTimeMs);
+                .TransactionStartTimeMs());
 
     [Fact]
     public void TransactionDescription_NullPartitionsBecomeAnEmptyCollection() =>
         Assert.Empty(
-            new TransactionDescription(1, TransactionState.EMPTY, 2L, 3, 4L, null, null).TopicPartitions);
+            new TransactionDescription(1, TransactionState.EMPTY, 2L, 3, 4L, null, null).TopicPartitions());
 
     [Fact]
     public void TransactionDescription_PartitionsAreDeduplicatedAndSetCompared()
@@ -236,7 +236,7 @@ public sealed class PublicAdminP8TypesTests
             5L,
             new[] { new TopicPartition("t", 0), new TopicPartition("t", 0), new TopicPartition("t", 1) });
 
-        Assert.Equal(2, duplicated.TopicPartitions.Count);
+        Assert.Equal(2, duplicated.TopicPartitions().Count);
 
         TransactionDescription reordered = new TransactionDescription(
             1,
@@ -309,11 +309,11 @@ public sealed class PublicAdminP8TypesTests
     {
         Assert.Equal(
             typeof(short),
-            Property(typeof(AbortTransactionSpec), nameof(AbortTransactionSpec.ProducerEpoch)));
-        Assert.Equal(typeof(int), Property(typeof(ProducerState), nameof(ProducerState.ProducerEpoch)));
+            ReturnType(typeof(AbortTransactionSpec), nameof(AbortTransactionSpec.ProducerEpoch)));
+        Assert.Equal(typeof(int), ReturnType(typeof(ProducerState), nameof(ProducerState.ProducerEpoch)));
         Assert.Equal(
             typeof(int),
-            Property(typeof(TransactionDescription), nameof(TransactionDescription.ProducerEpoch)));
+            ReturnType(typeof(TransactionDescription), nameof(TransactionDescription.ProducerEpoch)));
     }
 
     [Fact]
@@ -321,10 +321,10 @@ public sealed class PublicAdminP8TypesTests
     {
         AbortTransactionSpec spec = new AbortTransactionSpec(new TopicPartition("orders", 4), 11L, 22, 33);
 
-        Assert.Equal(new TopicPartition("orders", 4), spec.TopicPartition);
-        Assert.Equal(11L, spec.ProducerId);
-        Assert.Equal((short)22, spec.ProducerEpoch);
-        Assert.Equal(33, spec.CoordinatorEpoch);
+        Assert.Equal(new TopicPartition("orders", 4), spec.TopicPartition());
+        Assert.Equal(11L, spec.ProducerId());
+        Assert.Equal((short)22, spec.ProducerEpoch());
+        Assert.Equal(33, spec.CoordinatorEpoch());
     }
 
     [Fact]
@@ -351,33 +351,33 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void EveryP8OptionsTypeDefaultsItsTimeoutToNull()
     {
-        Assert.Null(new DescribeProducersOptions().TimeoutMs);
-        Assert.Null(new DescribeTransactionsOptions().TimeoutMs);
-        Assert.Null(new AbortTransactionOptions().TimeoutMs);
-        Assert.Null(new TerminateTransactionOptions().TimeoutMs);
-        Assert.Null(new FenceProducersOptions().TimeoutMs);
-        Assert.Null(new ListTransactionsOptions().TimeoutMs);
+        Assert.Null(new DescribeProducersOptions().TimeoutMs());
+        Assert.Null(new DescribeTransactionsOptions().TimeoutMs());
+        Assert.Null(new AbortTransactionOptions().TimeoutMs());
+        Assert.Null(new TerminateTransactionOptions().TimeoutMs());
+        Assert.Null(new FenceProducersOptions().TimeoutMs());
+        Assert.Null(new ListTransactionsOptions().TimeoutMs());
     }
 
     [Fact]
     public void DescribeProducersOptions_BrokerIdDefaultsToNullMeaningQueryTheLeader() =>
-        Assert.Null(new DescribeProducersOptions().BrokerId);
+        Assert.Null(new DescribeProducersOptions().BrokerId());
 
     [Fact]
     public void DescribeProducersOptions_EqualityIncludesTheTimeout()
     {
-        DescribeProducersOptions baseline = new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 };
+        DescribeProducersOptions baseline = new DescribeProducersOptions().BrokerId(3).TimeoutMs(500);
 
-        Assert.Equal(baseline, new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 });
+        Assert.Equal(baseline, new DescribeProducersOptions().BrokerId(3).TimeoutMs(500));
         Assert.Equal(
             baseline.GetHashCode(),
-            new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 }.GetHashCode());
+            new DescribeProducersOptions().BrokerId(3).TimeoutMs(500).GetHashCode());
 
-        Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 4, TimeoutMs = 500 });
+        Assert.NotEqual(baseline, new DescribeProducersOptions().BrokerId(4).TimeoutMs(500));
 
         // Java's equals includes timeoutMs, the opposite of ListTransactionsOptions.
-        Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 501 });
-        Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 3 });
+        Assert.NotEqual(baseline, new DescribeProducersOptions().BrokerId(3).TimeoutMs(501));
+        Assert.NotEqual(baseline, new DescribeProducersOptions().BrokerId(3));
     }
 
     [Fact]
@@ -385,7 +385,7 @@ public sealed class PublicAdminP8TypesTests
     {
         Assert.Equal(
             "DescribeProducersOptions(brokerId=OptionalInt[3], timeoutMs=500)",
-            new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 }.ToString());
+            new DescribeProducersOptions().BrokerId(3).TimeoutMs(500).ToString());
         Assert.Equal(
             "DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=null)",
             new DescribeProducersOptions().ToString());
@@ -397,36 +397,34 @@ public sealed class PublicAdminP8TypesTests
         // Java is not uniform: two of the four use parentheses and two use braces.
         Assert.Equal(
             "DescribeTransactionsOptions(timeoutMs=7)",
-            new DescribeTransactionsOptions { TimeoutMs = 7 }.ToString());
+            new DescribeTransactionsOptions().TimeoutMs(7).ToString());
         Assert.Equal(
             "AbortTransactionOptions(timeoutMs=7)",
-            new AbortTransactionOptions { TimeoutMs = 7 }.ToString());
+            new AbortTransactionOptions().TimeoutMs(7).ToString());
         Assert.Equal(
             "TerminateTransactionOptions{timeoutMs=7}",
-            new TerminateTransactionOptions { TimeoutMs = 7 }.ToString());
+            new TerminateTransactionOptions().TimeoutMs(7).ToString());
         Assert.Equal(
             "FenceProducersOptions{timeoutMs=7}",
-            new FenceProducersOptions { TimeoutMs = 7 }.ToString());
+            new FenceProducersOptions().TimeoutMs(7).ToString());
     }
 
     [Fact]
     public void ListTransactionsOptions_DurationDefaultsToMinusOneNotZero()
     {
         // A 0 would be a real "longer than 0 ms" filter; -1 is the neutral value.
-        Assert.Equal(-1L, new ListTransactionsOptions().FilteredDuration);
+        Assert.Equal(-1L, new ListTransactionsOptions().FilteredDuration());
     }
 
     [Fact]
     public void ListTransactionsOptions_PatternDefaultsToNullAndTheEmptyStringIsDistinct()
     {
-        Assert.Null(new ListTransactionsOptions().FilteredTransactionalIdPattern);
+        Assert.Null(new ListTransactionsOptions().FilteredTransactionalIdPattern());
 
-        ListTransactionsOptions empty = new ListTransactionsOptions
-        {
-            FilteredTransactionalIdPattern = string.Empty,
-        };
+        ListTransactionsOptions empty = new ListTransactionsOptions()
+            .FilterOnTransactionalIdPattern(string.Empty);
 
-        Assert.Equal(string.Empty, empty.FilteredTransactionalIdPattern);
+        Assert.Equal(string.Empty, empty.FilteredTransactionalIdPattern());
         Assert.NotEqual(new ListTransactionsOptions(), empty);
     }
 
@@ -435,12 +433,12 @@ public sealed class PublicAdminP8TypesTests
     {
         ListTransactionsOptions options = new ListTransactionsOptions();
 
-        Assert.Empty(options.FilteredStates);
-        Assert.Empty(options.FilteredProducerIds);
+        Assert.Empty(options.FilteredStates());
+        Assert.Empty(options.FilteredProducerIds());
 
         // Unlike ListConsumerGroupOffsetsSpec, empty and unset are genuinely identical here.
-        options.FilteredStates = Array.Empty<TransactionState>();
-        options.FilteredProducerIds = Array.Empty<long>();
+        options.FilterStates(Array.Empty<TransactionState>());
+        options.FilterProducerIds(Array.Empty<long>());
         Assert.Equal(new ListTransactionsOptions(), options);
     }
 
@@ -449,8 +447,8 @@ public sealed class PublicAdminP8TypesTests
     {
         ListTransactionsOptions options = new ListTransactionsOptions();
 
-        Assert.Throws<ArgumentNullException>(() => options.FilteredStates = null!);
-        Assert.Throws<ArgumentNullException>(() => options.FilteredProducerIds = null!);
+        Assert.Throws<ArgumentNullException>(() => options.FilterStates(null!));
+        Assert.Throws<ArgumentNullException>(() => options.FilterProducerIds(null!));
     }
 
     [Fact]
@@ -463,45 +461,41 @@ public sealed class PublicAdminP8TypesTests
             TransactionState.PREPARE_ABORT,
         };
 
-        ListTransactionsOptions options = new ListTransactionsOptions { FilteredStates = states };
+        ListTransactionsOptions options = new ListTransactionsOptions().FilterStates(states);
 
-        Assert.Equal(2, options.FilteredStates.Count);
+        Assert.Equal(2, options.FilteredStates().Count);
 
         states.Add(TransactionState.EMPTY);
-        Assert.Equal(2, options.FilteredStates.Count);
-        Assert.NotSame(states, options.FilteredStates);
+        Assert.Equal(2, options.FilteredStates().Count);
+        Assert.NotSame(states, options.FilteredStates());
     }
 
     [Fact]
     public void ListTransactionsOptions_EqualityExcludesTheTimeout()
     {
-        ListTransactionsOptions baseline = new ListTransactionsOptions
-        {
-            FilteredStates = new[] { TransactionState.ONGOING },
-            FilteredProducerIds = new[] { 7L },
-            FilteredDuration = 1_000L,
-            FilteredTransactionalIdPattern = "txn-.*",
-            TimeoutMs = 500,
-        };
+        ListTransactionsOptions baseline = new ListTransactionsOptions()
+            .FilterStates(new[] { TransactionState.ONGOING })
+            .FilterProducerIds(new[] { 7L })
+            .FilterOnDuration(1_000L)
+            .FilterOnTransactionalIdPattern("txn-.*")
+            .TimeoutMs(500);
 
-        ListTransactionsOptions differentTimeout = new ListTransactionsOptions
-        {
-            FilteredStates = new[] { TransactionState.ONGOING },
-            FilteredProducerIds = new[] { 7L },
-            FilteredDuration = 1_000L,
-            FilteredTransactionalIdPattern = "txn-.*",
-            TimeoutMs = 999,
-        };
+        ListTransactionsOptions differentTimeout = new ListTransactionsOptions()
+            .FilterStates(new[] { TransactionState.ONGOING })
+            .FilterProducerIds(new[] { 7L })
+            .FilterOnDuration(1_000L)
+            .FilterOnTransactionalIdPattern("txn-.*")
+            .TimeoutMs(999);
 
         // Java's equals deliberately omits timeoutMs.
         Assert.Equal(baseline, differentTimeout);
         Assert.Equal(baseline.GetHashCode(), differentTimeout.GetHashCode());
 
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredDuration = 1_001L));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredTransactionalIdPattern = "other"));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredTransactionalIdPattern = null));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredStates = new[] { TransactionState.EMPTY }));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredProducerIds = new[] { 8L }));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterOnDuration(1_001L)));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterOnTransactionalIdPattern("other")));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterOnTransactionalIdPattern(null)));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterStates(new[] { TransactionState.EMPTY })));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterProducerIds(new[] { 8L })));
     }
 
     [Fact]
@@ -509,14 +503,12 @@ public sealed class PublicAdminP8TypesTests
         Assert.Equal(
             "ListTransactionsOptions(filteredStates=[Ongoing], filteredProducerIds=[7]"
                 + ", filteredDuration=1000, filteredTransactionalIdPattern=txn-.*, timeoutMs=500)",
-            new ListTransactionsOptions
-            {
-                FilteredStates = new[] { TransactionState.ONGOING },
-                FilteredProducerIds = new[] { 7L },
-                FilteredDuration = 1_000L,
-                FilteredTransactionalIdPattern = "txn-.*",
-                TimeoutMs = 500,
-            }.ToString());
+            new ListTransactionsOptions()
+                .FilterStates(new[] { TransactionState.ONGOING })
+                .FilterProducerIds(new[] { 7L })
+                .FilterOnDuration(1_000L)
+                .FilterOnTransactionalIdPattern("txn-.*")
+                .TimeoutMs(500).ToString());
 
     [Fact]
     public void P8TypesPublishExactlyTheirJavaAccessors()
@@ -531,11 +523,11 @@ public sealed class PublicAdminP8TypesTests
                 "ProducerEpoch",
                 "ProducerId",
             },
-            DeclaredPublicPropertyNames(typeof(ProducerState)));
+            DeclaredPublicMethodNames(typeof(ProducerState)));
 
         Assert.Equal(
             new[] { "ProducerId", "State", "TransactionalId" },
-            DeclaredPublicPropertyNames(typeof(TransactionListing)));
+            DeclaredPublicMethodNames(typeof(TransactionListing)));
 
         Assert.Equal(
             new[]
@@ -548,16 +540,16 @@ public sealed class PublicAdminP8TypesTests
                 "TransactionStartTimeMs",
                 "TransactionTimeoutMs",
             },
-            DeclaredPublicPropertyNames(typeof(TransactionDescription)));
+            DeclaredPublicMethodNames(typeof(TransactionDescription)));
 
         Assert.Equal(
             new[] { "CoordinatorEpoch", "ProducerEpoch", "ProducerId", "TopicPartition" },
-            DeclaredPublicPropertyNames(typeof(AbortTransactionSpec)));
+            DeclaredPublicMethodNames(typeof(AbortTransactionSpec)));
 
-        Assert.Equal(
-            new[] { "BrokerId", "TimeoutMs" },
-            DeclaredPublicPropertyNames(typeof(DescribeProducersOptions)));
+        SetterMethods.AssertGettersAndSetters(typeof(DescribeProducersOptions), "BrokerId", "TimeoutMs");
 
+        Type listTransactions = typeof(ListTransactionsOptions);
+        Assert.Empty(listTransactions.GetProperties());
         Assert.Equal(
             new[]
             {
@@ -567,7 +559,17 @@ public sealed class PublicAdminP8TypesTests
                 "FilteredTransactionalIdPattern",
                 "TimeoutMs",
             },
-            DeclaredPublicPropertyNames(typeof(ListTransactionsOptions)));
+            Getters.NamesOf(listTransactions));
+        Assert.Equal(
+            new[]
+            {
+                "FilterOnDuration",
+                "FilterOnTransactionalIdPattern",
+                "FilterProducerIds",
+                "FilterStates",
+                "TimeoutMs",
+            },
+            SetterMethods.NamesOf(listTransactions));
 
         foreach (Type timeoutOnly in new[]
         {
@@ -577,42 +579,40 @@ public sealed class PublicAdminP8TypesTests
             typeof(FenceProducersOptions),
         })
         {
-            Assert.Equal(new[] { "TimeoutMs" }, DeclaredPublicPropertyNames(timeoutOnly));
+            SetterMethods.AssertGettersAndSetters(timeoutOnly, "TimeoutMs");
         }
     }
 
     [Fact]
-    public void P8ValueTypesDeclareNoMethodsBeyondTheObjectOverrides()
+    public void P8ValueTypesAndOptionsDeclareNoProperties()
     {
-        // Java's value classes declare only accessors and equals/hashCode/toString; the accessors are properties here, so the
-        // method set is empty.
-        Assert.Empty(DeclaredPublicMethodNames(typeof(ProducerState)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(TransactionListing)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(TransactionDescription)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(AbortTransactionSpec)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(ListTransactionsOptions)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(DescribeProducersOptions)));
+        // Java's value classes and options declare only accessors, setters and equals/hashCode/toString; all of them are
+        // methods here, so the property set is empty.
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(ProducerState)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(TransactionListing)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(TransactionDescription)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(AbortTransactionSpec)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(ListTransactionsOptions)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(DescribeProducersOptions)));
     }
 
     private static ListTransactionsOptions Mutate(
         ListTransactionsOptions source,
         Action<ListTransactionsOptions> change)
     {
-        ListTransactionsOptions copy = new ListTransactionsOptions
-        {
-            FilteredStates = source.FilteredStates,
-            FilteredProducerIds = source.FilteredProducerIds,
-            FilteredDuration = source.FilteredDuration,
-            FilteredTransactionalIdPattern = source.FilteredTransactionalIdPattern,
-            TimeoutMs = source.TimeoutMs,
-        };
+        ListTransactionsOptions copy = new ListTransactionsOptions()
+            .FilterStates(source.FilteredStates())
+            .FilterProducerIds(source.FilteredProducerIds())
+            .FilterOnDuration(source.FilteredDuration())
+            .FilterOnTransactionalIdPattern(source.FilteredTransactionalIdPattern())
+            .TimeoutMs(source.TimeoutMs());
 
         change(copy);
         return copy;
     }
 
-    private static Type Property(Type type, string name) =>
-        type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance)!.PropertyType;
+    private static Type ReturnType(Type type, string name) =>
+        type.GetMethod(name, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null)!.ReturnType;
 
     private static string[] DeclaredPublicMethodNames(Type type) =>
         type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)

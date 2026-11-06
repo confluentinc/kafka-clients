@@ -21,6 +21,12 @@ namespace Confluent.Kafka.Common;
 /// <remarks>Unlike Java's <c>Node</c>, it has no value equality.</remarks>
 public sealed class Node
 {
+    private readonly int _id;
+    private readonly string _host;
+    private readonly int _port;
+    private readonly string? _rack;
+    private readonly bool _isFenced;
+
     /// <summary>Creates a node without a rack, Java's <c>Node(int, String, int)</c>.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="host"/> is null.</exception>
     public Node(int id, string host, int port)
@@ -39,36 +45,41 @@ public sealed class Node
     /// <exception cref="ArgumentNullException"><paramref name="host"/> is null.</exception>
     public Node(int id, string host, int port, string? rack, bool isFenced)
     {
-        Id = id;
-        Host = host ?? throw new ArgumentNullException(nameof(host));
-        Port = port;
-        Rack = rack;
-        IsFenced = isFenced;
+        _id = id;
+        _host = host ?? throw new ArgumentNullException(nameof(host));
+        _port = port;
+        _rack = rack;
+        _isFenced = isFenced;
     }
 
     /// <summary>The node id.</summary>
-    public int Id { get; }
+    /// <returns>The node id.</returns>
+    public int Id() => _id;
 
     /// <summary>The node's host name.</summary>
-    public string Host { get; }
+    /// <returns>The node's host name.</returns>
+    public string Host() => _host;
 
     /// <summary>The node's port.</summary>
-    public int Port { get; }
+    /// <returns>The node's port.</returns>
+    public int Port() => _port;
 
     /// <summary>The node's rack, or <see langword="null"/> when it has none.</summary>
-    public string? Rack { get; }
+    /// <returns>The node's rack, or <see langword="null"/> when it has none.</returns>
+    public string? Rack() => _rack;
 
     /// <summary>Whether the node is fenced, Java's <c>isFenced()</c>.</summary>
-    public bool IsFenced { get; }
+    /// <returns>Whether the node is fenced.</returns>
+    public bool IsFenced() => _isFenced;
 
     /// <inheritdoc/>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "{0}:{1} (id: {2} rack: {3} isFenced: {4})",
-            Host,
-            Port,
-            Id,
-            Rack ?? "null",
-            IsFenced ? "true" : "false");
+            Host(),
+            Port(),
+            Id(),
+            Rack() ?? "null",
+            IsFenced() ? "true" : "false");
 }

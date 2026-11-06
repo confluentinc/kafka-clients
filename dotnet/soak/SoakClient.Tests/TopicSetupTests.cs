@@ -73,13 +73,13 @@ public sealed class TopicSetupTests
 
     private static IEnumerable<(string Name, int? Partitions, short? ReplicationFactor)> Created(object? newTopics) =>
         Assert.IsAssignableFrom<IEnumerable<NewTopic>>(newTopics)
-            .Select(topic => (topic.Name, topic.NumPartitions, topic.ReplicationFactor));
+            .Select(topic => (topic.Name(), topic.NumPartitions(), topic.ReplicationFactor()));
 
     private static async Task<int> PartitionCount(IAsyncAdmin admin, string topic)
     {
         IReadOnlyDictionary<string, TopicDescription> described =
             await admin.DescribeTopics(new[] { topic }).AllTopicNames()!.Value.Get();
-        return described[topic].Partitions.Count;
+        return described[topic].Partitions().Count;
     }
 
     [Fact]
@@ -130,7 +130,7 @@ public sealed class TopicSetupTests
         Assert.Equal(new[] { ("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
         IReadOnlyDictionary<string, TopicDescription> described =
             await mock.DescribeTopics(new[] { "t" }).AllTopicNames()!.Value.Get();
-        Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions).Replicas.Count);
+        Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions()).Replicas().Count);
     }
 
     [Fact]
@@ -204,7 +204,7 @@ public sealed class TopicSetupTests
         TopicCollection.TopicNameCollection deleted =
             Assert.IsType<TopicCollection.TopicNameCollection>(recorder.Arguments[0][0]);
         Assert.Equal(new[] { "t" }, deleted.TopicNames());
-        Assert.Equal(30000, Assert.IsType<DeleteTopicsOptions>(recorder.Arguments[0][1]).TimeoutMs);
+        Assert.Equal(30000, Assert.IsType<DeleteTopicsOptions>(recorder.Arguments[0][1]).TimeoutMs());
         Assert.Equal(new[] { ("t", sentPartitions, (short?)null) }, Created(recorder.Arguments[1][0]));
         Assert.Equal(createdPartitions, await PartitionCount(mock, "t"));
         Assert.Equal(new[] { TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10) }, delays);

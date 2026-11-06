@@ -61,13 +61,13 @@ public sealed class PublicAdminNegativePartitionTests
                 [zero] = new NewPartitionReassignment(new[] { 0, 1 }),
             });
 
-        Assert.Equal(2, result.Values.Count);
-        Assert.Contains(negative, result.Values.Keys);
+        Assert.Equal(2, result.Values().Count);
+        Assert.Contains(negative, result.Values().Keys);
 
-        await TestTimeout.Run(() => result.Values[zero].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[zero].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[negative].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values()[negative].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
         Assert.Equal(UnknownTopicOrPartitionMessage, failure.Message);
     }
@@ -100,10 +100,10 @@ public sealed class PublicAdminNegativePartitionTests
                 [negative] = new NewPartitionReassignment(new[] { 0 }),
             });
 
-        Assert.Contains(negative, result.Values.Keys);
+        Assert.Contains(negative, result.Values().Keys);
 
         InvalidTopicException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.Values[negative].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<InvalidTopicException>(() => result.Values()[negative].Get()), s_deadline);
         Assert.Equal(InvalidTopicCode, failure.Code);
         Assert.Equal(InvalidPartitionMessage, failure.Message);
 

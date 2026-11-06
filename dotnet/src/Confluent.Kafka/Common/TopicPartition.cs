@@ -19,22 +19,27 @@ namespace Confluent.Kafka.Common;
 /// <summary>A topic and a partition, Java's <c>TopicPartition</c>, with value equality.</summary>
 /// <remarks>
 /// The constructor, like Java's, stores a <see langword="null"/> topic and a negative partition as given, though
-/// <see cref="Topic"/> is annotated non-nullable.
+/// <see cref="Topic()"/> is annotated non-nullable.
 /// </remarks>
 public readonly struct TopicPartition : IEquatable<TopicPartition>
 {
+    private readonly string _topic;
+    private readonly int _partition;
+
     /// <summary>Initializes a pair, storing both arguments as given.</summary>
     public TopicPartition(string topic, int partition)
     {
-        Topic = topic;
-        Partition = partition;
+        _topic = topic;
+        _partition = partition;
     }
 
     /// <summary>The topic name.</summary>
-    public string Topic { get; }
+    /// <returns>The topic name.</returns>
+    public string Topic() => _topic;
 
     /// <summary>The partition index.</summary>
-    public int Partition { get; }
+    /// <returns>The partition index.</returns>
+    public int Partition() => _partition;
 
     /// <summary>
     /// Determines whether two <see cref="TopicPartition"/> values are equal.
@@ -48,7 +53,7 @@ public readonly struct TopicPartition : IEquatable<TopicPartition>
 
     /// <inheritdoc/>
     public bool Equals(TopicPartition other) =>
-        Partition == other.Partition && string.Equals(Topic, other.Topic, StringComparison.Ordinal);
+        Partition() == other.Partition() && string.Equals(Topic(), other.Topic(), StringComparison.Ordinal);
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is TopicPartition other && Equals(other);
@@ -56,11 +61,11 @@ public readonly struct TopicPartition : IEquatable<TopicPartition>
     /// <inheritdoc/>
     public override int GetHashCode()
     {
-        int topicHash = Topic is null ? 0 : StringComparer.Ordinal.GetHashCode(Topic);
-        return unchecked((topicHash * 397) ^ Partition);
+        int topicHash = Topic() is null ? 0 : StringComparer.Ordinal.GetHashCode(Topic());
+        return unchecked((topicHash * 397) ^ Partition());
     }
 
     /// <inheritdoc/>
     public override string ToString() =>
-        (Topic ?? "null") + "-" + Partition.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        (Topic() ?? "null") + "-" + Partition().ToString(System.Globalization.CultureInfo.InvariantCulture);
 }

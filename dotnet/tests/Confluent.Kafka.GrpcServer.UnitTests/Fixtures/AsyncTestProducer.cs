@@ -40,7 +40,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: behaviour.FailEach is null);
+        _inner = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: behaviour.FailEach is null);
     }
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<byte[], byte[]> record, CancellationToken cancellationToken = default)
@@ -55,7 +55,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Send), cancellationToken);
-        ulong index = ProducerProbe.IndexOf(record.Key);
+        ulong index = ProducerProbe.IndexOf(record.Key());
         _sends++;
 
         // Both scenario steps wait for the mock with a bounded spin: the disposal for the earlier

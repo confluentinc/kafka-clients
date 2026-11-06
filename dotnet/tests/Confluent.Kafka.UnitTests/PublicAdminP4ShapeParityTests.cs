@@ -110,22 +110,19 @@ public sealed class PublicAdminP4ShapeParityTests
     [Fact]
     public void AlterPartitionReassignmentsResult_PublishesOneFuturePerPartition()
     {
-        PropertyInfo values = typeof(AlterPartitionReassignmentsResult).GetProperty(
-            nameof(AlterPartitionReassignmentsResult.Values))!;
+        MethodInfo values = Getters.Get(
+            typeof(AlterPartitionReassignmentsResult), nameof(AlterPartitionReassignmentsResult.Values));
         MethodInfo all = typeof(AlterPartitionReassignmentsResult).GetMethod(
             nameof(AlterPartitionReassignmentsResult.All), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture>), values.ReturnType);
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(values));
-        Assert.Null(values.SetMethod);
 
         Assert.Equal(
-            new[] { nameof(AlterPartitionReassignmentsResult.All) },
+            new[] { nameof(AlterPartitionReassignmentsResult.All), nameof(AlterPartitionReassignmentsResult.Values) },
             DeclaredPublicMethodNames(typeof(AlterPartitionReassignmentsResult)));
-        Assert.Equal(
-            new[] { nameof(AlterPartitionReassignmentsResult.Values) },
-            DeclaredPublicPropertyNames(typeof(AlterPartitionReassignmentsResult)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(AlterPartitionReassignmentsResult)));
     }
 
     [Fact]
@@ -175,19 +172,19 @@ public sealed class PublicAdminP4ShapeParityTests
 
         Assert.Equal(
             new[] { nameof(NewPartitionReassignment.TargetReplicas) },
-            DeclaredPublicPropertyNames(typeof(NewPartitionReassignment)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(NewPartitionReassignment)));
+            DeclaredPublicMethodNames(typeof(NewPartitionReassignment)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(NewPartitionReassignment)));
         Assert.Equal(
             typeof(IReadOnlyList<int>),
-            typeof(NewPartitionReassignment).GetProperty(
-                nameof(NewPartitionReassignment.TargetReplicas))!.PropertyType);
+            typeof(NewPartitionReassignment).GetMethod(
+                nameof(NewPartitionReassignment.TargetReplicas), Type.EmptyTypes)!.ReturnType);
 
         List<int> replicas = new List<int> { 3, 1, 2 };
         NewPartitionReassignment reassignment = new NewPartitionReassignment(replicas);
-        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas());
 
         replicas.Add(9);
-        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas());
 
         IllegalArgumentException empty =
             Assert.Throws<IllegalArgumentException>(() => new NewPartitionReassignment(Array.Empty<int>()));
@@ -203,17 +200,17 @@ public sealed class PublicAdminP4ShapeParityTests
     {
         List<int> source = new List<int> { 4, 5 };
         NewPartitionReassignment reassignment = new NewPartitionReassignment(source);
-        IReadOnlyList<int> replicas = reassignment.TargetReplicas;
+        IReadOnlyList<int> replicas = reassignment.TargetReplicas();
 
         Assert.False(replicas is List<int>);
         ICollection<int> asCollection = Assert.IsAssignableFrom<ICollection<int>>(replicas);
         Assert.True(asCollection.IsReadOnly);
         Assert.Throws<NotSupportedException>(() => asCollection.Clear());
-        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas());
 
         source.Clear();
         source.Add(9);
-        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas());
     }
 
     [Fact]
@@ -221,26 +218,22 @@ public sealed class PublicAdminP4ShapeParityTests
     {
         // Java's ElectLeadersOptions declares no members of its own, so the inherited timeout is the whole surface.
         ElectLeadersOptions elect = new ElectLeadersOptions();
-        Assert.Null(elect.TimeoutMs);
-        Assert.Equal(new[] { nameof(ElectLeadersOptions.TimeoutMs) }, PropertyNames(typeof(ElectLeadersOptions)));
+        Assert.Null(elect.TimeoutMs());
+        SetterMethods.AssertGettersAndSetters(typeof(ElectLeadersOptions), nameof(ElectLeadersOptions.TimeoutMs));
 
         // allowReplicationFactorChange defaults to true, not the C# default for its type.
         AlterPartitionReassignmentsOptions reassign = new AlterPartitionReassignmentsOptions();
-        Assert.Null(reassign.TimeoutMs);
-        Assert.True(reassign.AllowReplicationFactorChange);
-        Assert.Equal(
-            new[]
-            {
-                nameof(AlterPartitionReassignmentsOptions.AllowReplicationFactorChange),
-                nameof(AlterPartitionReassignmentsOptions.TimeoutMs),
-            },
-            PropertyNames(typeof(AlterPartitionReassignmentsOptions)));
+        Assert.Null(reassign.TimeoutMs());
+        Assert.True(reassign.AllowReplicationFactorChange());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(AlterPartitionReassignmentsOptions),
+            nameof(AlterPartitionReassignmentsOptions.AllowReplicationFactorChange),
+            nameof(AlterPartitionReassignmentsOptions.TimeoutMs));
 
         foreach (Type type in new[] { typeof(ElectLeadersOptions), typeof(AlterPartitionReassignmentsOptions) })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
@@ -259,9 +252,5 @@ public sealed class PublicAdminP4ShapeParityTests
             .Where(property => !property.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
-            .ToArray();
-
-    private static string[] PropertyNames(Type type) =>
-        type.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 }

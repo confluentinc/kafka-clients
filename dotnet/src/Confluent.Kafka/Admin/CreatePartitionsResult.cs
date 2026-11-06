@@ -49,7 +49,8 @@ public sealed class CreatePartitionsResult
     /// <summary>
     /// One future per requested topic, keyed by topic name — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture> Values => _values;
+    /// <returns>One future per requested topic, keyed by topic name.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every topic's partitions have been created, and fails with the first

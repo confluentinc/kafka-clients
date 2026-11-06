@@ -4,7 +4,7 @@
     v3 perf executable (M13/P1, Slice 1) — the head-to-head benchmark run over OUR binding
     (Confluent.Kafka). References the shared client-agnostic PerformanceCommon engine + our binding,
     and adapts KafkaProducer/AsyncKafkaProducer and KafkaConsumer/AsyncKafkaConsumer (both
-    <byte[],byte[]> with Serdes.ByteArray) to the backend interfaces. MODE={producer,consumer} selects
+    <byte[],byte[]> with Serdes.ByteArray()) to the backend interfaces. MODE={producer,consumer} selects
     the benchmark (D8 — the client dimension is the exe boundary, so producer/consumer collapse to a
     MODE env inside one exe).
 

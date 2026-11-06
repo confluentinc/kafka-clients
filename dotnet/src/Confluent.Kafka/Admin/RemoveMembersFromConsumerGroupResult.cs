@@ -71,5 +71,5 @@ public sealed class RemoveMembersFromConsumerGroupResult
     }
 
     internal static RemoveMembersFromConsumerGroupResult OfClient(SafeAdminResultHandle native, RemoveMembersFromConsumerGroupOptions options) =>
-        new RemoveMembersFromConsumerGroupResult(native, options.RemoveAll);
+        new RemoveMembersFromConsumerGroupResult(native, options.RemoveAll());
 }

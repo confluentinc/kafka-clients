@@ -51,7 +51,8 @@ public sealed class AsyncAlterReplicaLogDirsResult
     /// <summary>
     /// One future per requested replica — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture> Values => _values;
+    /// <returns>One future per requested replica.</returns>
+    public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every replica move has been accepted, and faults with the first failure

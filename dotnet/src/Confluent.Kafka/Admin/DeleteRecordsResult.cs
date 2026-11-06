@@ -54,12 +54,14 @@ public sealed class DeleteRecordsResult
     /// One future per requested topic partition, each carrying that partition's own
     /// <see cref="DeletedRecords"/> or its own failure — Java's <c>lowWatermarks()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> LowWatermarks => _futures;
+    /// <returns>One future per requested topic partition, each carrying that partition's own
+    /// <see cref="DeletedRecords"/> or its own failure.</returns>
+    public IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> LowWatermarks() => _futures;
 
     /// <summary>
     /// Completes when every partition's deletion has succeeded, and fails with the first failure
     /// to complete if any partition failed — Java's <c>all()</c>, which carries no watermarks: read
-    /// them from <see cref="LowWatermarks"/>.
+    /// them from <see cref="LowWatermarks()"/>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
     public KafkaFuture All() =>

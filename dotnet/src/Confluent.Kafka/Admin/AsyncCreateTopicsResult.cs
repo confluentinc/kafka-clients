@@ -54,42 +54,40 @@ public sealed class AsyncCreateTopicsResult
     /// <summary>
     /// One future per requested topic, keyed by topic name — Java's <c>values()</c>.
     /// </summary>
+    /// <returns>One future per requested topic, keyed by topic name.</returns>
     /// <remarks>
     /// A topic's future completes when the topic was created and faults with that topic's error. It
     /// carries no metadata, as in Java: read that through <see cref="Config"/>, <see cref="TopicId"/>,
-    /// <see cref="NumPartitions"/> or <see cref="ReplicationFactor"/>. Each access returns a new
-    /// dictionary, as Java's <c>values()</c> collects a new map on every call.
+    /// <see cref="NumPartitions"/> or <see cref="ReplicationFactor"/>. Each call returns a new
+    /// dictionary, as Java's <c>values()</c> collects a new map.
     /// </remarks>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture> Values
+    public IReadOnlyDictionary<string, AsyncKafkaFuture> Values()
     {
-        get
+        // The client's result hands out a fresh dependant of each topic's future per call, as Java's
+        // `thenApply(v -> null)`, so cancelling one leaves the topic's future, which All() and the typed
+        // accessors read, alone.
+        if (_native is not null)
         {
-            // The client's result hands out a fresh dependant of each topic's future per access, as Java's
-            // `thenApply(v -> null)`, so cancelling one leaves the topic's future, which All() and the typed
-            // accessors read, alone.
-            if (_native is not null)
+            Dictionary<string, AsyncKafkaFuture> futures =
+                new Dictionary<string, AsyncKafkaFuture>(_native.Values.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in _native.Values)
             {
-                Dictionary<string, AsyncKafkaFuture> futures =
-                    new Dictionary<string, AsyncKafkaFuture>(_native.Values.Count, StringComparer.Ordinal);
-                foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in _native.Values)
-                {
-                    futures.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply(static _ => (object?)null)));
-                }
-
-                return futures;
+                futures.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply(static _ => (object?)null)));
             }
 
-            // Rebuilt from the caller's map on every access; `Add` throws on two ordinally equal keys,
-            // as Java's `Collectors.toMap` does.
-            Dictionary<string, AsyncKafkaFuture> erased =
-                new Dictionary<string, AsyncKafkaFuture>(_values!.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> entry in _values)
-            {
-                erased.Add(entry.Key, entry.Value.Erase());
-            }
-
-            return erased;
+            return futures;
         }
+
+        // Rebuilt from the caller's map on every access; `Add` throws on two ordinally equal keys,
+        // as Java's `Collectors.toMap` does.
+        Dictionary<string, AsyncKafkaFuture> erased =
+            new Dictionary<string, AsyncKafkaFuture>(_values!.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> entry in _values)
+        {
+            erased.Add(entry.Key, entry.Value.Erase());
+        }
+
+        return erased;
     }
 
     /// <summary>
@@ -105,7 +103,7 @@ public sealed class AsyncCreateTopicsResult
     /// <summary>
     /// The topic's configuration once it is created — Java's <c>config(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The topic's configuration.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -115,7 +113,7 @@ public sealed class AsyncCreateTopicsResult
     /// <summary>
     /// The topic's id once it is created — Java's <c>topicId(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The topic id the broker assigned.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -126,7 +124,7 @@ public sealed class AsyncCreateTopicsResult
     /// The topic's partition count once it is created — Java's
     /// <c>numPartitions(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The number of partitions the topic was created with.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
@@ -137,7 +135,7 @@ public sealed class AsyncCreateTopicsResult
     /// The topic's replication factor once it is created — Java's
     /// <c>replicationFactor(String)</c>.
     /// </summary>
-    /// <param name="topic">A topic name from <see cref="Values"/>.</param>
+    /// <param name="topic">A topic name from <see cref="Values()"/>.</param>
     /// <returns>The replication factor the topic was created with.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>

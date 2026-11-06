@@ -146,7 +146,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Type info = typeof(ListOffsetsResult.ListOffsetsResultInfo);
 
         Assert.Same(typeof(ListOffsetsResult), info.DeclaringType);
-        Assert.True(info.IsNested, "Java declares it nested (ListOffsetsResult.java:70)");
+        Assert.True(info.IsNested, "Java declares it nested");
         Assert.True(info.IsSealed);
 
         ConstructorInfo only = Assert.Single(info.GetConstructors());
@@ -154,17 +154,17 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             new[] { typeof(long), typeof(long), typeof(int?) },
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
-        Assert.Equal(typeof(long), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.Offset))!.PropertyType);
-        Assert.Equal(typeof(long), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.Timestamp))!.PropertyType);
+        Assert.Equal(typeof(long), Getters.Get(info, nameof(ListOffsetsResult.ListOffsetsResultInfo.Offset)).ReturnType);
+        Assert.Equal(typeof(long), Getters.Get(info, nameof(ListOffsetsResult.ListOffsetsResultInfo.Timestamp)).ReturnType);
 
         // int? is Java's Optional<Integer>, which a plain int cannot express.
         Assert.Equal(
-            typeof(int?), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.LeaderEpoch))!.PropertyType);
+            typeof(int?), Getters.Get(info, nameof(ListOffsetsResult.ListOffsetsResultInfo.LeaderEpoch)).ReturnType);
 
         Assert.Equal(
-            new[] { "LeaderEpoch", "Offset", "Timestamp" }, DeclaredPublicPropertyNames(info));
+            new[] { "LeaderEpoch", "Offset", "Timestamp" }, DeclaredPublicMethodNames(info));
 
-        Assert.Empty(DeclaredPublicMethodNames(info));
+        Assert.Empty(DeclaredPublicPropertyNames(info));
 
         // ToString is overridden, as Java declares one; the helper filters object's members, so it is pinned here.
         Assert.Same(info, info.GetMethod("ToString", Type.EmptyTypes)!.DeclaringType);
@@ -172,12 +172,12 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         // A present epoch of -1 is present.
         ListOffsetsResult.ListOffsetsResultInfo negative =
             new ListOffsetsResult.ListOffsetsResultInfo(5, 7, -1);
-        Assert.Equal(-1, negative.LeaderEpoch);
+        Assert.Equal(-1, negative.LeaderEpoch());
         Assert.Equal("ListOffsetsResultInfo(offset=5, timestamp=7, leaderEpoch=Optional[-1])", negative.ToString());
 
         ListOffsetsResult.ListOffsetsResultInfo absent =
             new ListOffsetsResult.ListOffsetsResultInfo(5, 7, null);
-        Assert.Null(absent.LeaderEpoch);
+        Assert.Null(absent.LeaderEpoch());
         Assert.Equal("ListOffsetsResultInfo(offset=5, timestamp=7, leaderEpoch=Optional.empty)", absent.ToString());
     }
 
@@ -262,8 +262,8 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
 
         Assert.Equal(
             new[] { "AddingReplicas", "RemovingReplicas", "Replicas" },
-            DeclaredPublicPropertyNames(typeof(PartitionReassignment)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(PartitionReassignment)));
+            DeclaredPublicMethodNames(typeof(PartitionReassignment)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(PartitionReassignment)));
 
         // Java declares a toString; pinned directly, since the helper filters object's members.
         Assert.Same(
@@ -273,12 +273,12 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         List<int> replicas = new List<int> { 1, 2, 3 };
         PartitionReassignment reassignment =
             new PartitionReassignment(replicas, new[] { 3 }, Array.Empty<int>());
-        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas);
-        Assert.Equal(new[] { 3 }, reassignment.AddingReplicas);
-        Assert.Empty(reassignment.RemovingReplicas);
+        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas());
+        Assert.Equal(new[] { 3 }, reassignment.AddingReplicas());
+        Assert.Empty(reassignment.RemovingReplicas());
 
         replicas.Add(9);
-        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas);
+        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas());
 
         Assert.Equal(
             "PartitionReassignment(replicas=[1, 2, 3], addingReplicas=[3], removingReplicas=[])",
@@ -298,24 +298,27 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     public void Options_MatchJavasFieldsAndDefaults()
     {
         ListPartitionReassignmentsOptions reassignments = new ListPartitionReassignmentsOptions();
-        Assert.Null(reassignments.TimeoutMs);
-        Assert.Equal(
-            new[] { nameof(ListPartitionReassignmentsOptions.TimeoutMs) },
-            PropertyNames(typeof(ListPartitionReassignmentsOptions)));
+        Assert.Null(reassignments.TimeoutMs());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(ListPartitionReassignmentsOptions),
+            nameof(ListPartitionReassignmentsOptions.TimeoutMs));
 
         // ListOffsetsOptions defaults to READ_UNCOMMITTED, which is Java's default.
         ListOffsetsOptions offsets = new ListOffsetsOptions();
-        Assert.Null(offsets.TimeoutMs);
-        Assert.Equal(IsolationLevel.READ_UNCOMMITTED, offsets.IsolationLevel);
+        Assert.Null(offsets.TimeoutMs());
+        Assert.Equal(IsolationLevel.READ_UNCOMMITTED, offsets.IsolationLevel());
+        // Java sets the isolation level only through the constructor, so it has a getter and no setter.
+        Assert.Empty(typeof(ListOffsetsOptions).GetProperties());
         Assert.Equal(
             new[] { nameof(ListOffsetsOptions.IsolationLevel), nameof(ListOffsetsOptions.TimeoutMs) },
-            PropertyNames(typeof(ListOffsetsOptions)));
+            Getters.NamesOf(typeof(ListOffsetsOptions)));
+        Assert.Equal(new[] { nameof(ListOffsetsOptions.TimeoutMs) }, SetterMethods.NamesOf(typeof(ListOffsetsOptions)));
+        Assert.NotNull(typeof(ListOffsetsOptions).GetConstructor(new[] { typeof(IsolationLevel) }));
 
         foreach (Type type in new[] { typeof(ListPartitionReassignmentsOptions), typeof(ListOffsetsOptions) })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
@@ -339,9 +342,5 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             .Where(property => !property.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
-            .ToArray();
-
-    private static string[] PropertyNames(Type type) =>
-        type.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 }

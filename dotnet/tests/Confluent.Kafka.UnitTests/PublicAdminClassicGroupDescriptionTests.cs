@@ -91,8 +91,8 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var forwarded = new ClassicGroupDescription(
             "g-1", "consumer", "range", new[] { s_memberOne }, ClassicGroupState.STABLE, s_coordinatorNode);
 
-        Assert.NotNull(forwarded.AuthorizedOperations);
-        Assert.Empty(forwarded.AuthorizedOperations!);
+        Assert.NotNull(forwarded.AuthorizedOperations());
+        Assert.Empty(forwarded.AuthorizedOperations()!);
 
         Assert.True(forwarded.Equals(WithOperations(Array.Empty<AclOperation>())));
         Assert.Equal(WithOperations(Array.Empty<AclOperation>()).GetHashCode(), forwarded.GetHashCode());
@@ -108,25 +108,25 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var forwarded = new ClassicGroupDescription(
             null, null, null, null, ClassicGroupState.DEAD, null);
 
-        Assert.Equal(string.Empty, forwarded.GroupId);
-        Assert.Null(forwarded.Protocol);
-        Assert.Equal(string.Empty, forwarded.ProtocolData);
-        Assert.Empty(forwarded.Members);
-        Assert.Equal(ClassicGroupState.DEAD, forwarded.State);
-        Assert.Null(forwarded.Coordinator);
+        Assert.Equal(string.Empty, forwarded.GroupId());
+        Assert.Null(forwarded.Protocol());
+        Assert.Equal(string.Empty, forwarded.ProtocolData());
+        Assert.Empty(forwarded.Members());
+        Assert.Equal(ClassicGroupState.DEAD, forwarded.State());
+        Assert.Null(forwarded.Coordinator());
     }
 
     [Fact]
-    public void Properties_AreJavasShapes()
+    public void Getters_AreJavasShapes()
     {
-        Assert.Equal(typeof(string), PropertyType("GroupId"));
-        Assert.Equal(typeof(string), PropertyType("Protocol"));
-        Assert.Equal(typeof(string), PropertyType("ProtocolData"));
-        Assert.Equal(typeof(bool), PropertyType("IsSimpleConsumerGroup"));
-        Assert.Equal(typeof(IReadOnlyCollection<MemberDescription>), PropertyType("Members"));
-        Assert.Equal(typeof(ClassicGroupState), PropertyType("State"));
-        Assert.Equal(typeof(Node), PropertyType("Coordinator"));
-        Assert.Equal(typeof(IReadOnlyCollection<AclOperation>), PropertyType("AuthorizedOperations"));
+        Assert.Equal(typeof(string), ReturnType("GroupId"));
+        Assert.Equal(typeof(string), ReturnType("Protocol"));
+        Assert.Equal(typeof(string), ReturnType("ProtocolData"));
+        Assert.Equal(typeof(bool), ReturnType("IsSimpleConsumerGroup"));
+        Assert.Equal(typeof(IReadOnlyCollection<MemberDescription>), ReturnType("Members"));
+        Assert.Equal(typeof(ClassicGroupState), ReturnType("State"));
+        Assert.Equal(typeof(Node), ReturnType("Coordinator"));
+        Assert.Equal(typeof(IReadOnlyCollection<AclOperation>), ReturnType("AuthorizedOperations"));
     }
 
     [Fact]
@@ -134,15 +134,15 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     {
         var description = Canonical();
 
-        Assert.Equal("g-1", description.GroupId);
-        Assert.Equal("consumer", description.Protocol);
-        Assert.Equal("range", description.ProtocolData);
-        Assert.False(description.IsSimpleConsumerGroup);
-        Assert.Equal(new[] { s_memberOne, s_memberTwo }, description.Members);
-        Assert.Equal(ClassicGroupState.STABLE, description.State);
-        Assert.Same(s_coordinatorNode, description.Coordinator);
-        Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
+        Assert.Equal("g-1", description.GroupId());
+        Assert.Equal("consumer", description.Protocol());
+        Assert.Equal("range", description.ProtocolData());
+        Assert.False(description.IsSimpleConsumerGroup());
+        Assert.Equal(new[] { s_memberOne, s_memberTwo }, description.Members());
+        Assert.Equal(ClassicGroupState.STABLE, description.State());
+        Assert.Same(s_coordinatorNode, description.Coordinator());
+        Assert.NotNull(description.AuthorizedOperations());
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations()!);
     }
 
     [Fact]
@@ -151,13 +151,13 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var description = new ClassicGroupDescription(
             null, null, null, null, ClassicGroupState.UNKNOWN, null, null);
 
-        Assert.Equal(string.Empty, description.GroupId);
-        Assert.Equal(string.Empty, description.ProtocolData);
-        Assert.Empty(description.Members);
+        Assert.Equal(string.Empty, description.GroupId());
+        Assert.Equal(string.Empty, description.ProtocolData());
+        Assert.Empty(description.Members());
 
-        Assert.Null(description.Protocol);
-        Assert.Null(description.Coordinator);
-        Assert.Null(description.AuthorizedOperations);
+        Assert.Null(description.Protocol());
+        Assert.Null(description.Coordinator());
+        Assert.Null(description.AuthorizedOperations());
     }
 
     [Fact]
@@ -166,8 +166,8 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var absent = WithProtocol(null);
         var empty = WithProtocol(string.Empty);
 
-        Assert.Null(absent.Protocol);
-        Assert.Equal(string.Empty, empty.Protocol);
+        Assert.Null(absent.Protocol());
+        Assert.Equal(string.Empty, empty.Protocol());
 
         Assert.False(absent.Equals(empty));
         Assert.False(empty.Equals(absent));
@@ -185,21 +185,22 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
         source.Add(s_memberTwo);
 
-        Assert.Equal(new[] { s_memberOne }, description.Members);
+        Assert.Equal(new[] { s_memberOne }, description.Members());
     }
 
     [Fact]
     public void IsSimpleConsumerGroup_IsAProjectionOfProtocol_NotAnIndependentMember()
     {
-        Assert.Null(typeof(ClassicGroupDescription).GetProperty("IsSimpleConsumerGroup")!.SetMethod);
+        Assert.Null(typeof(ClassicGroupDescription).GetProperty("IsSimpleConsumerGroup"));
+        Assert.NotNull(typeof(ClassicGroupDescription).GetMethod("IsSimpleConsumerGroup", Type.EmptyTypes));
 
-        Assert.True(WithProtocol(string.Empty).IsSimpleConsumerGroup);
-        Assert.False(WithProtocol("consumer").IsSimpleConsumerGroup);
-        Assert.False(WithProtocol("connect").IsSimpleConsumerGroup);
+        Assert.True(WithProtocol(string.Empty).IsSimpleConsumerGroup());
+        Assert.False(WithProtocol("consumer").IsSimpleConsumerGroup());
+        Assert.False(WithProtocol("connect").IsSimpleConsumerGroup());
 
         Assert.True(new ConsumerGroupDescription(
             "g-1", true, null, "range", GroupType.CLASSIC, GroupState.EMPTY, null, null, null, null)
-            .IsSimpleConsumerGroup);
+            .IsSimpleConsumerGroup());
     }
 
     [Fact]
@@ -207,19 +208,19 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     {
         var description = WithProtocol(null);
 
-        Assert.Throws<NullReferenceException>(() => _ = description.IsSimpleConsumerGroup);
+        Assert.Throws<NullReferenceException>(() => _ = description.IsSimpleConsumerGroup());
     }
 
     [Fact]
     public void State_IsStoredAndCurrent_NotAProjection()
     {
-        Assert.Null(typeof(ClassicGroupDescription).GetProperty("GroupState"));
-        Assert.NotNull(typeof(ConsumerGroupDescription).GetProperty("GroupState"));
+        Assert.Null(typeof(ClassicGroupDescription).GetMethod("GroupState", Type.EmptyTypes));
+        Assert.NotNull(typeof(ConsumerGroupDescription).GetMethod("GroupState", Type.EmptyTypes));
 
         Assert.Null(typeof(ClassicGroupDescription)
-            .GetProperty("State")!
+            .GetMethod("State", Type.EmptyTypes)!
             .GetCustomAttribute<ObsoleteAttribute>());
-        Assert.Null(typeof(ConsumerGroupDescription).GetProperty("State"));
+        Assert.Null(typeof(ConsumerGroupDescription).GetMethod("State", Type.EmptyTypes));
 
         ClassicGroupState[] states =
         {
@@ -233,12 +234,12 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
         foreach (ClassicGroupState state in states)
         {
-            Assert.Equal(state, WithState(state).State);
+            Assert.Equal(state, WithState(state).State());
         }
 
         var undefined = WithState((ClassicGroupState)int.MaxValue);
 
-        Assert.Equal((ClassicGroupState)int.MaxValue, undefined.State);
+        Assert.Equal((ClassicGroupState)int.MaxValue, undefined.State());
         Assert.False(undefined.Equals(WithState(ClassicGroupState.UNKNOWN)));
         Assert.Contains("state=Unknown,", undefined.ToString(), StringComparison.Ordinal);
     }
@@ -249,10 +250,10 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var absent = WithOperations(null);
         var empty = WithOperations(Array.Empty<AclOperation>());
 
-        Assert.Null(absent.AuthorizedOperations);
+        Assert.Null(absent.AuthorizedOperations());
 
-        Assert.NotNull(empty.AuthorizedOperations);
-        Assert.Empty(empty.AuthorizedOperations!);
+        Assert.NotNull(empty.AuthorizedOperations());
+        Assert.Empty(empty.AuthorizedOperations()!);
 
         Assert.False(absent.Equals(empty));
         Assert.False(empty.Equals(absent));
@@ -267,8 +268,8 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         var description = WithOperations(
             new[] { AclOperation.READ, AclOperation.WRITE, AclOperation.READ });
 
-        Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
+        Assert.NotNull(description.AuthorizedOperations());
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations()!);
     }
 
     [Fact]
@@ -276,7 +277,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
     {
         var absent = WithCoordinator(null);
 
-        Assert.Null(absent.Coordinator);
+        Assert.Null(absent.Coordinator());
         Assert.Contains("coordinator=null,", absent.ToString(), StringComparison.Ordinal);
         Assert.False(absent.Equals(Canonical()));
 
@@ -436,6 +437,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
             coordinator,
             authorizedOperations);
 
-    private static Type PropertyType(string name) =>
-        typeof(ClassicGroupDescription).GetProperty(name)!.PropertyType;
+    private static Type ReturnType(string name) =>
+        typeof(ClassicGroupDescription).GetMethod(name, Type.EmptyTypes)!.ReturnType;
 }

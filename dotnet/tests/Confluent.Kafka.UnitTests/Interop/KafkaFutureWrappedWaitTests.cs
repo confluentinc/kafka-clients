@@ -152,7 +152,7 @@ public sealed class KafkaFutureWrappedWaitTests
     [Fact]
     public void MockProducerErrorNext_WithACancellation_FailsGetWithAnExecutionException()
     {
-        var producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        var producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable disposal = TestTimeout.Disposal(producer);
         var cancellation = new OperationCanceledException("injected");
         var callback = new Recording();
@@ -162,14 +162,14 @@ public sealed class KafkaFutureWrappedWaitTests
 
         Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => future.Get(s_deadline)));
         Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => future.GetNow(null!)));
-        Assert.False(future.IsCancelled);
+        Assert.False(future.IsCancelled());
         Assert.Same(cancellation, callback.Exception);
     }
 
     [Fact]
     public async Task AsyncMockProducerErrorNext_WithACancellation_FaultsGetWithAnExecutionException_TakenBeforeOrAfter()
     {
-        var producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        var producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable disposal = TestTimeout.Disposal(producer);
         var cancellation = new OperationCanceledException("injected");
 
@@ -190,7 +190,7 @@ public sealed class KafkaFutureWrappedWaitTests
         Task<RecordMetadata> takenAfter = after.Get();
         Assert.True(takenAfter.IsFaulted);
         Assert.Same(cancellation, await FutureAssert.ThrowsAsync<OperationCanceledException>(() => takenAfter));
-        Assert.False(after.IsCancelled);
+        Assert.False(after.IsCancelled());
     }
 
     [Fact]
@@ -267,7 +267,7 @@ public sealed class KafkaFutureWrappedWaitTests
         }
 
         Assert.Same(failure, callback.Exception);
-        Assert.Equal(3, callback.Metadata!.Partition);
+        Assert.Equal(3, callback.Metadata!.Partition());
     }
 
     private static ProducerRecord<byte[], byte[]> Record() =>

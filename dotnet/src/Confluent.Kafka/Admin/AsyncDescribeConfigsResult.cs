@@ -59,7 +59,8 @@ public sealed class AsyncDescribeConfigsResult
     /// <summary>
     /// One future per requested resource, keyed by resource — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture<Config>> Values => _futures;
+    /// <returns>One future per requested resource, keyed by resource.</returns>
+    public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture<Config>> Values() => _futures;
 
     /// <summary>
     /// Every resource's configuration in one map, succeeding only if every resource

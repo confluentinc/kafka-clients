@@ -361,13 +361,13 @@ public sealed class PublicHeadersTests
             headers,
             header =>
             {
-                Assert.Equal("a", header.Key);
-                Assert.Equal(new byte[] { (byte)'1' }, header.Value);
+                Assert.Equal("a", header.Key());
+                Assert.Equal(new byte[] { (byte)'1' }, header.Value());
             },
             header =>
             {
-                Assert.Equal("b", header.Key);
-                Assert.Null(header.Value);
+                Assert.Equal("b", header.Key());
+                Assert.Null(header.Value());
             });
         Assert.Same(headers, headers.Remove("a"));
         Assert.Same(headers, headers.Remove("absent"));
@@ -384,8 +384,8 @@ public sealed class PublicHeadersTests
         headers.Add("k", new byte[] { 1 }).Add("other", null).Add("k", new byte[] { 2 });
         Assert.Collection(
             byKey,
-            header => Assert.Equal(new byte[] { 1 }, header.Value),
-            header => Assert.Equal(new byte[] { 2 }, header.Value));
+            header => Assert.Equal(new byte[] { 1 }, header.Value()),
+            header => Assert.Equal(new byte[] { 2 }, header.Value()));
 
         headers.Remove("k");
         Assert.Empty(byKey);
@@ -421,23 +421,23 @@ public sealed class PublicHeadersTests
     public void RecordHeaders_NeverNull()
     {
         ProducerRecord<string, string> plain = new ProducerRecord<string, string>(Topic, "v");
-        Assert.True(new Headers().Equals(plain.Headers));
+        Assert.True(new Headers().Equals(plain.Headers()));
         Assert.True(
-            new Headers().Equals(new ProducerRecord<string, string>(Topic, "v", key: null, partition: 0, headers: null).Headers));
-        Assert.NotSame(plain.Headers, new ProducerRecord<string, string>(Topic, "v").Headers);
+            new Headers().Equals(new ProducerRecord<string, string>(Topic, "v", key: null, partition: 0, headers: null).Headers()));
+        Assert.NotSame(plain.Headers(), new ProducerRecord<string, string>(Topic, "v").Headers());
 
         IReadOnlyList<ConsumerRecord<byte[], byte[]>> records = PollMockRecords(2);
-        Assert.NotNull(records[0].Headers);
-        Assert.Empty(records[0].Headers.ToArray());
-        Assert.NotSame(records[0].Headers, records[1].Headers);
+        Assert.NotNull(records[0].Headers());
+        Assert.Empty(records[0].Headers().ToArray());
+        Assert.NotSame(records[0].Headers(), records[1].Headers());
     }
 
     [Fact]
     public void Poll_BuildsAWritableHeadersPerRecord()
     {
         IReadOnlyList<ConsumerRecord<byte[], byte[]>> records = PollMockRecords(2);
-        Headers first = records[0].Headers;
-        Headers second = records[1].Headers;
+        Headers first = records[0].Headers();
+        Headers second = records[1].Headers();
         Assert.Empty(first.ToArray());
         Assert.False(first.IsReadOnly);
         Assert.NotSame(first, second);
@@ -452,15 +452,15 @@ public sealed class PublicHeadersTests
         // Java's CompletedFetch leaves a fetched record's headers writable: only KafkaProducer.doSend seals them.
         // The deserializer half does not apply: IDeserializer has no headers form.
         ConsumerRecord<byte[], byte[]> record = Assert.Single(PollMockRecords(1));
-        Assert.False(record.Headers.IsReadOnly);
-        record.Headers.Add("added", Bytes("after-poll")).Add("k", null);
-        AssertHeader("added", "after-poll", record.Headers.ToArray()[0]);
-        Assert.NotNull(record.Headers.LastHeader("k"));
+        Assert.False(record.Headers().IsReadOnly);
+        record.Headers().Add("added", Bytes("after-poll")).Add("k", null);
+        AssertHeader("added", "after-poll", record.Headers().ToArray()[0]);
+        Assert.NotNull(record.Headers().LastHeader("k"));
     }
 
     private static IReadOnlyList<ConsumerRecord<byte[], byte[]>> PollMockRecords(int count)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
@@ -487,8 +487,8 @@ public sealed class PublicHeadersTests
                 try
                 {
                     startLatch.Wait();
-                    _ = header.Key;
-                    _ = header.Value;
+                    _ = header.Key();
+                    _ = header.Value();
                 }
                 catch (Exception)
                 {
@@ -520,8 +520,8 @@ public sealed class PublicHeadersTests
     private static void AssertHeader(string key, string? value, Header? actual)
     {
         Assert.NotNull(actual);
-        Assert.Equal(key, actual.Key);
-        Assert.Equal(value is null ? null : Bytes(value), actual.Value);
+        Assert.Equal(key, actual.Key());
+        Assert.Equal(value is null ? null : Bytes(value), actual.Value());
     }
 
     private static void AssertNullArgument(string paramName, string message, ArgumentNullException exception)

@@ -81,9 +81,9 @@ public sealed class AdminP4ResultMarshalTests
         PartitionReassignment copied = WithReassignment(
             new[] { 3, 1, 2 }, new[] { 2 }, new[] { 4, 0 }, PartitionReassignmentMarshal.CopyOut);
 
-        Assert.Equal(new[] { 3, 1, 2 }, copied.Replicas);
-        Assert.Equal(new[] { 2 }, copied.AddingReplicas);
-        Assert.Equal(new[] { 4, 0 }, copied.RemovingReplicas);
+        Assert.Equal(new[] { 3, 1, 2 }, copied.Replicas());
+        Assert.Equal(new[] { 2 }, copied.AddingReplicas());
+        Assert.Equal(new[] { 4, 0 }, copied.RemovingReplicas());
     }
 
     [Fact]
@@ -92,9 +92,9 @@ public sealed class AdminP4ResultMarshalTests
         PartitionReassignment copied = WithReassignment(
             Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>(), PartitionReassignmentMarshal.CopyOut);
 
-        Assert.Empty(copied.Replicas);
-        Assert.Empty(copied.AddingReplicas);
-        Assert.Empty(copied.RemovingReplicas);
+        Assert.Empty(copied.Replicas());
+        Assert.Empty(copied.AddingReplicas());
+        Assert.Empty(copied.RemovingReplicas());
     }
 
     [Theory]
@@ -141,9 +141,9 @@ public sealed class AdminP4ResultMarshalTests
         KeyValuePair<TopicPartition, PartitionReassignment> entry = Assert.Single(copied);
         Assert.Equal(s_elected, entry.Key);
         PartitionReassignment reassignment = entry.Value;
-        Assert.Equal(new[] { 5 }, reassignment.Replicas);
-        Assert.Equal(new[] { 6 }, reassignment.AddingReplicas);
-        Assert.Empty(reassignment.RemovingReplicas);
+        Assert.Equal(new[] { 5 }, reassignment.Replicas());
+        Assert.Equal(new[] { 6 }, reassignment.AddingReplicas());
+        Assert.Empty(reassignment.RemovingReplicas());
     }
 
     private static IReadOnlyDictionary<TopicPartition, Exception?> CopyOutElection(
@@ -243,9 +243,9 @@ public sealed class AdminP4ResultMarshalTests
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic))
+        using (Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(partition.Topic()))
         {
-            native = NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition, ref outErr);
+            native = NativeMethods.TopicPartitionNew(topic.Pointer, partition.Partition(), ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);

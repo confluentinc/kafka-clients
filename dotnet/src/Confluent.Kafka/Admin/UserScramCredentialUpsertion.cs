@@ -24,12 +24,12 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A null <see cref="Salt"/> asks the core to generate a random salt, as Java's salt-generating
+/// A null <see cref="Salt()"/> asks the core to generate a random salt, as Java's salt-generating
 /// constructors do; any other salt, a zero-length one included, is used verbatim. The binding
 /// generates no salt itself.
 /// </para>
 /// <para>
-/// <see cref="Password"/> and <see cref="Salt"/> are secret material: neither is logged, traced or
+/// <see cref="Password()"/> and <see cref="Salt()"/> are secret material: neither is logged, traced or
 /// put in an exception message, and <c>ToString()</c> is not overridden, as in Java.
 /// </para>
 /// </remarks>
@@ -37,6 +37,7 @@ public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
 {
     private readonly byte[] _password;
     private readonly byte[]? _salt;
+    private readonly ScramCredentialInfo _credentialInfo;
 
     /// <summary>
     /// Creates an upsertion whose salt the core generates — Java's constructor taking the
@@ -83,20 +84,23 @@ public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
         string user, ScramCredentialInfo credentialInfo, byte[] password, byte[]? salt)
         : base(user)
     {
-        CredentialInfo = credentialInfo ?? throw new ArgumentNullException(nameof(credentialInfo));
+        _credentialInfo = credentialInfo ?? throw new ArgumentNullException(nameof(credentialInfo));
         _password = password ?? throw new ArgumentNullException(nameof(password));
         _salt = salt;
     }
 
     /// <summary>The mechanism and iteration count — Java's <c>credentialInfo()</c>.</summary>
-    public ScramCredentialInfo CredentialInfo { get; }
+    /// <returns>The mechanism and iteration count.</returns>
+    public ScramCredentialInfo CredentialInfo() => _credentialInfo;
 
     /// <summary>
     /// The explicit salt, or <see langword="null"/> to have the core generate one — Java's
     /// <c>salt()</c>. Secret material: never log it.
     /// </summary>
-    public byte[]? Salt => _salt;
+    /// <returns>The explicit salt, or <see langword="null"/> to have the core generate one.</returns>
+    public byte[]? Salt() => _salt;
 
     /// <summary>The password bytes — Java's <c>password()</c>. Secret material: never log it.</summary>
-    public byte[] Password => _password;
+    /// <returns>The password bytes.</returns>
+    public byte[] Password() => _password;
 }

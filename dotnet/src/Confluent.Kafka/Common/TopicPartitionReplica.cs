@@ -29,6 +29,10 @@ namespace Confluent.Kafka.Common;
 /// </remarks>
 public sealed class TopicPartitionReplica
 {
+    private readonly string _topic;
+    private readonly int _partition;
+    private readonly int _brokerId;
+
     /// <summary>Initializes a replica reference — Java's constructor.</summary>
     /// <param name="topic">The topic name.</param>
     /// <param name="partition">The partition number.</param>
@@ -36,28 +40,31 @@ public sealed class TopicPartitionReplica
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     public TopicPartitionReplica(string topic, int partition, int brokerId)
     {
-        Topic = topic ?? throw new ArgumentNullException(nameof(topic));
-        Partition = partition;
-        BrokerId = brokerId;
+        _topic = topic ?? throw new ArgumentNullException(nameof(topic));
+        _partition = partition;
+        _brokerId = brokerId;
     }
 
     /// <summary>The topic name — Java's <c>topic()</c>.</summary>
-    public string Topic { get; }
+    /// <returns>The topic name.</returns>
+    public string Topic() => _topic;
 
     /// <summary>The partition number — Java's <c>partition()</c>.</summary>
-    public int Partition { get; }
+    /// <returns>The partition number.</returns>
+    public int Partition() => _partition;
 
     /// <summary>The broker hosting the replica — Java's <c>brokerId()</c>.</summary>
-    public int BrokerId { get; }
+    /// <returns>The broker hosting the replica.</returns>
+    public int BrokerId() => _brokerId;
 
     /// <summary>Value equality over all three fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same replica.</returns>
     public override bool Equals(object? obj) =>
         obj is TopicPartitionReplica other
-        && Partition == other.Partition
-        && BrokerId == other.BrokerId
-        && string.Equals(Topic, other.Topic, StringComparison.Ordinal);
+        && Partition() == other.Partition()
+        && BrokerId() == other.BrokerId()
+        && string.Equals(Topic(), other.Topic(), StringComparison.Ordinal);
 
     /// <summary>
     /// The hash of all three fields — Java's <c>hashCode</c>, the same <c>31 *</c> chain.
@@ -68,9 +75,9 @@ public sealed class TopicPartitionReplica
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Topic);
-            hash = (hash * 31) + Partition;
-            hash = (hash * 31) + BrokerId;
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Topic());
+            hash = (hash * 31) + Partition();
+            hash = (hash * 31) + BrokerId();
             return hash;
         }
     }
@@ -78,5 +85,5 @@ public sealed class TopicPartitionReplica
     /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering, <c>topic-partition-brokerId</c>.</returns>
     public override string ToString() =>
-        string.Format(CultureInfo.InvariantCulture, "{0}-{1}-{2}", Topic, Partition, BrokerId);
+        string.Format(CultureInfo.InvariantCulture, "{0}-{1}-{2}", Topic(), Partition(), BrokerId());
 }

@@ -28,6 +28,9 @@ namespace Confluent.Kafka.Common.Acl;
 /// </remarks>
 public sealed class AclBinding
 {
+    private readonly ResourcePattern _pattern;
+    private readonly AccessControlEntry _entry;
+
     /// <summary>Creates a binding — Java's constructor.</summary>
     /// <param name="pattern">The resource pattern.</param>
     /// <param name="entry">The access control entry.</param>
@@ -36,32 +39,35 @@ public sealed class AclBinding
     /// </exception>
     public AclBinding(ResourcePattern pattern, AccessControlEntry entry)
     {
-        Pattern = pattern ?? throw new ArgumentNullException(nameof(pattern));
-        Entry = entry ?? throw new ArgumentNullException(nameof(entry));
+        _pattern = pattern ?? throw new ArgumentNullException(nameof(pattern));
+        _entry = entry ?? throw new ArgumentNullException(nameof(entry));
     }
 
     /// <summary>The resource pattern — Java's <c>pattern()</c>.</summary>
-    public ResourcePattern Pattern { get; }
+    /// <returns>The resource pattern.</returns>
+    public ResourcePattern Pattern() => _pattern;
 
     /// <summary>The access control entry — Java's <c>entry()</c>.</summary>
-    public AccessControlEntry Entry { get; }
+    /// <returns>The access control entry.</returns>
+    public AccessControlEntry Entry() => _entry;
 
     /// <summary>
     /// Whether either half has an <c>UNKNOWN</c> component — Java's <c>isUnknown()</c>.
     /// </summary>
-    public bool IsUnknown => Pattern.IsUnknown || Entry.IsUnknown;
+    /// <returns>Whether either half has an <c>UNKNOWN</c> component.</returns>
+    public bool IsUnknown() => Pattern().IsUnknown() || Entry().IsUnknown();
 
     /// <summary>A filter matching only this binding — Java's <c>toFilter()</c>.</summary>
     /// <returns>The filter.</returns>
-    public AclBindingFilter ToFilter() => new AclBindingFilter(Pattern.ToFilter(), Entry.ToFilter());
+    public AclBindingFilter ToFilter() => new AclBindingFilter(Pattern().ToFilter(), Entry().ToFilter());
 
     /// <summary>Value equality over both halves — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same binding.</returns>
     public override bool Equals(object? obj) =>
         obj is AclBinding other
-        && Pattern.Equals(other.Pattern)
-        && Entry.Equals(other.Entry);
+        && Pattern().Equals(other.Pattern())
+        && Entry().Equals(other.Entry());
 
     /// <summary>The hash of both halves — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -70,8 +76,8 @@ public sealed class AclBinding
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + Pattern.GetHashCode();
-            hash = (hash * 31) + Entry.GetHashCode();
+            hash = (hash * 31) + Pattern().GetHashCode();
+            hash = (hash * 31) + Entry().GetHashCode();
             return hash;
         }
     }
@@ -81,5 +87,5 @@ public sealed class AclBinding
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
-        string.Format(CultureInfo.InvariantCulture, "(pattern={0}, entry={1})", Pattern, Entry);
+        string.Format(CultureInfo.InvariantCulture, "(pattern={0}, entry={1})", Pattern(), Entry());
 }

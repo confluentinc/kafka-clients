@@ -61,7 +61,8 @@ public sealed class DescribeConsumerGroupsResult
     /// <summary>
     /// The future of each group's description, keyed by group id.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> DescribedGroups => _futures;
+    /// <returns>The future of each group's description, keyed by group id.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> DescribedGroups() => _futures;
 
     /// <summary>
     /// A future that yields every group's description once all of them succeeded; it fails with the

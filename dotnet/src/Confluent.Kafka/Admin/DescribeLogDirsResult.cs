@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// A broker whose query failed fails only its own future. A log directory that is offline fails
-/// nothing: the broker's future succeeds and that directory's <see cref="LogDirDescription.Error"/>
+/// nothing: the broker's future succeeds and that directory's <see cref="LogDirDescription.Error()"/>
 /// is non-null.
 /// </remarks>
 /// <seealso cref="AsyncDescribeLogDirsResult"/>
@@ -64,7 +64,9 @@ public sealed class DescribeLogDirsResult
     /// One future per requested broker, each yielding that broker's log directories
     /// keyed by path — Java's <c>descriptions()</c>.
     /// </summary>
-    public IReadOnlyDictionary<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions =>
+    /// <returns>One future per requested broker, each yielding that broker's log directories keyed by
+    /// path.</returns>
+    public IReadOnlyDictionary<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions() =>
         _descriptions;
 
     /// <summary>

@@ -22,33 +22,41 @@ namespace Confluent.Kafka.Common.Serialization;
 /// </summary>
 public static class Serdes
 {
+    private static readonly ISerde<string> s_string = new StringSerde();
+    private static readonly ISerde<byte[]> s_byteArray = new ByteArraySerde();
+    private static readonly ISerde<int> s_integer = new Int32Serde();
+    private static readonly ISerde<long> s_long = new Int64Serde();
+    private static readonly ISerde<double> s_double = new DoubleSerde();
+    private static readonly ISerde<System.Guid> s_uuid = new GuidSerde();
+    private static readonly ISerde<object?> s_void = new NullSerde();
+
     /// <summary>UTF-8 strings: Java's <c>StringSerializer</c> and <c>StringDeserializer</c>.</summary>
-    public static ISerde<string> String { get; } = new StringSerde();
+    public static ISerde<string> String() => s_string;
 
     /// <summary>
     /// Byte arrays, unchanged; deserializing copies the bytes: Java's <c>ByteArraySerializer</c> and
     /// <c>ByteArrayDeserializer</c>.
     /// </summary>
-    public static ISerde<byte[]> ByteArray { get; } = new ByteArraySerde();
+    public static ISerde<byte[]> ByteArray() => s_byteArray;
 
     /// <summary>4-byte big-endian integers: Java's <c>IntegerSerializer</c> and <c>IntegerDeserializer</c>.</summary>
-    public static ISerde<int> Int32 { get; } = new Int32Serde();
+    public static ISerde<int> Integer() => s_integer;
 
     /// <summary>8-byte big-endian integers: Java's <c>LongSerializer</c> and <c>LongDeserializer</c>.</summary>
-    public static ISerde<long> Int64 { get; } = new Int64Serde();
+    public static ISerde<long> Long() => s_long;
 
     /// <summary>8-byte big-endian IEEE-754 doubles: Java's <c>DoubleSerializer</c> and <c>DoubleDeserializer</c>.</summary>
-    public static ISerde<double> Double { get; } = new DoubleSerde();
+    public static ISerde<double> Double() => s_double;
 
     /// <summary>
     /// A UUID as the UTF-8 bytes of its hyphenated string form, not its 16 raw bytes: Java's
     /// <c>UUIDSerializer</c> and <c>UUIDDeserializer</c>.
     /// </summary>
-    public static ISerde<System.Guid> Guid { get; } = new GuidSerde();
+    public static ISerde<System.Guid> UUID() => s_uuid;
 
     /// <summary>
     /// Serializes to <see langword="null"/> and deserializes to <see langword="null"/>: Java's
     /// <c>VoidSerializer</c> and <c>VoidDeserializer</c>.
     /// </summary>
-    public static ISerde<object?> Null { get; } = new NullSerde();
+    public static ISerde<object?> Void() => s_void;
 }

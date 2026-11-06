@@ -156,7 +156,7 @@ public sealed class PublicAdminStringTests
             ["updateFeatures:featureName"] = ("featureUpdates", (admin, bad) =>
                 admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>
                 {
-                    [bad] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    [bad] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 })),
             ["fenceProducers:transactionalId"] = ("transactionalIds", (admin, bad) =>
                 admin.FenceProducers(new[] { bad })),
@@ -222,7 +222,7 @@ public sealed class PublicAdminStringTests
             ["abortTransaction:topic"] = ("spec", (admin, bad) =>
                 admin.AbortTransaction(new AbortTransactionSpec(new TopicPartition(bad, 0), 1, 0, 0))),
             ["listTransactions:transactionalIdPattern"] = ("options", (admin, bad) =>
-                admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = bad })),
+                admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern(bad))),
 
             ["alterConsumerGroupOffsets:groupId"] = ("groupId", (admin, bad) =>
                 admin.AlterConsumerGroupOffsets(bad, Offsets("t", "meta"))),
@@ -239,41 +239,41 @@ public sealed class PublicAdminStringTests
             ["removeMembersFromConsumerGroup:groupId"] = ("groupId", (admin, bad) =>
                 admin.RemoveMembersFromConsumerGroup(bad, new RemoveMembersFromConsumerGroupOptions())),
             ["removeMembersFromConsumerGroup:reason"] = ("options", (admin, bad) =>
-                admin.RemoveMembersFromConsumerGroup(
-                    "group", new RemoveMembersFromConsumerGroupOptions { Reason = bad })),
+            {
+                RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
+                options.Reason(bad);
+                admin.RemoveMembersFromConsumerGroup("group", options);
+            }
+            ),
             ["removeMembersFromConsumerGroup:groupInstanceId"] = ("options", (admin, bad) =>
                 admin.RemoveMembersFromConsumerGroup(
                     "group", new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove(bad) }))),
 
             ["createDelegationToken:ownerType"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions
-                {
-                    Owner = new KafkaPrincipal(bad, "alice"),
-                    Renewers = new[] { new KafkaPrincipal("User", "bob") },
-                })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions()
+                    .Owner(new KafkaPrincipal(bad, "alice"))
+                    .Renewers(new[] { new KafkaPrincipal("User", "bob") }))),
             ["createDelegationToken:ownerName"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions
-                {
-                    Owner = new KafkaPrincipal("User", bad),
-                    Renewers = new[] { new KafkaPrincipal("User", "bob") },
-                })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions()
+                    .Owner(new KafkaPrincipal("User", bad))
+                    .Renewers(new[] { new KafkaPrincipal("User", "bob") }))),
             ["createDelegationToken:renewerType"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Renewers = new[] { new KafkaPrincipal(bad, "bob") } })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions().Renewers(new[] { new KafkaPrincipal(bad, "bob") }))),
             ["createDelegationToken:renewerName"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Renewers = new[] { new KafkaPrincipal("User", bad) } })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions().Renewers(new[] { new KafkaPrincipal("User", bad) }))),
 
             ["describeDelegationToken:ownerType"] = ("options", (admin, bad) =>
-                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal(bad, "alice") } })),
+                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal(bad, "alice") }))),
             ["describeDelegationToken:ownerName"] = ("options", (admin, bad) =>
-                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", bad) } })),
+                admin.DescribeDelegationToken(new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", bad) }))),
 
             ["listGroups:protocolType"] = ("options", (admin, bad) =>
-                admin.ListGroups(new ListGroupsOptions { ProtocolTypes = new[] { bad } })),
+                admin.ListGroups(new ListGroupsOptions().WithProtocolTypes(new[] { bad }))),
 
             ["listConsumerGroupOffsets(map):topic"] = ("groupSpecs", (admin, bad) =>
                 admin.ListConsumerGroupOffsets(new Dictionary<string, ListConsumerGroupOffsetsSpec>
                 {
-                    ["group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { new TopicPartition(bad, 0) } },
+                    ["group"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { new TopicPartition(bad, 0) }),
                 })),
 
             ["featureLevels:featureName"] = ("featureLevels", (_, bad) =>
@@ -363,7 +363,7 @@ public sealed class PublicAdminStringTests
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
         UnknownTopicOrPartitionException absent = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
-            () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
+            () => TestTimeout.Run(() => described.TopicNameValues()!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic("after-rejection", 1, 1) });
@@ -381,7 +381,7 @@ public sealed class PublicAdminStringTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
-        Assert.Equal(new[] { name }, created.Values.Keys);
+        Assert.Equal(new[] { name }, created.Values().Keys);
         await TestTimeout.Run(() => created.All().Get(), s_deadline);
 
         AsyncListTopicsResult listed = admin.ListTopics();
@@ -427,7 +427,7 @@ public sealed class PublicAdminStringTests
             new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1024) });
 
     private static NewTopic WithConfig(string name, string configName, string configValue) =>
-        new NewTopic(name, 1, 1) { Configs = new Dictionary<string, string> { [configName] = configValue } };
+        new NewTopic(name, 1, 1).Configs(new Dictionary<string, string> { [configName] = configValue });
 
     private static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> ConfigOps(
         string topic, string configName, string configValue) =>

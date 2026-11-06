@@ -65,7 +65,8 @@ public sealed class DescribeReplicaLogDirsResult
     /// <summary>
     /// One future per requested replica — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> Values => _values;
+    /// <returns>One future per requested replica.</returns>
+    public IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> Values() => _values;
 
     /// <summary>
     /// Every replica's log-directory information in one map, succeeding only if every

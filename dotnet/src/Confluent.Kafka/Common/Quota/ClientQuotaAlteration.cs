@@ -25,6 +25,7 @@ namespace Confluent.Kafka.Common.Quota;
 public sealed class ClientQuotaAlteration
 {
     private readonly Op[] _ops;
+    private readonly ClientQuotaEntity _entity;
 
     /// <summary>Creates an alteration — Java's constructor.</summary>
     /// <param name="entity">The entity whose configuration will be modified.</param>
@@ -35,7 +36,7 @@ public sealed class ClientQuotaAlteration
     /// <exception cref="ArgumentException"><paramref name="ops"/> contains a null.</exception>
     public ClientQuotaAlteration(ClientQuotaEntity entity, IReadOnlyCollection<Op> ops)
     {
-        Entity = entity ?? throw new ArgumentNullException(nameof(entity));
+        _entity = entity ?? throw new ArgumentNullException(nameof(entity));
 
         if (ops is null)
         {
@@ -51,10 +52,12 @@ public sealed class ClientQuotaAlteration
     }
 
     /// <summary>The entity whose configuration will be modified — Java's <c>entity()</c>.</summary>
-    public ClientQuotaEntity Entity { get; }
+    /// <returns>The entity whose configuration will be modified.</returns>
+    public ClientQuotaEntity Entity() => _entity;
 
     /// <summary>The alterations to perform — Java's <c>ops()</c>.</summary>
-    public IReadOnlyCollection<Op> Ops => _ops;
+    /// <returns>The alterations to perform.</returns>
+    public IReadOnlyCollection<Op> Ops() => _ops;
 
 
     /// <summary>
@@ -72,7 +75,7 @@ public sealed class ClientQuotaAlteration
 
         return string.Concat(
             "ClientQuotaAlteration(entity=",
-            Entity.ToString(),
+            _entity.ToString(),
             ", ops=[",
             string.Join(", ", parts),
             "])");
@@ -81,6 +84,9 @@ public sealed class ClientQuotaAlteration
     /// <summary>A single quota alteration — Java's nested <c>ClientQuotaAlteration.Op</c>.</summary>
     public sealed class Op
     {
+        private readonly string _key;
+        private readonly double? _value;
+
         /// <summary>
         /// Creates an alteration op — Java's constructor. A null <paramref name="value"/> clears
         /// the quota; <c>0.0</c> is a legal quota value, so the two are distinct.
@@ -93,17 +99,19 @@ public sealed class ClientQuotaAlteration
         /// </exception>
         public Op(string key, double? value)
         {
-            Key = key ?? throw new ArgumentNullException(nameof(key));
-            Value = value;
+            _key = key ?? throw new ArgumentNullException(nameof(key));
+            _value = value;
         }
 
         /// <summary>The quota type to alter — Java's <c>key()</c>.</summary>
-        public string Key { get; }
+        /// <returns>The quota type to alter.</returns>
+        public string Key() => _key;
 
         /// <summary>
         /// The new value, or null to clear the quota — Java's boxed <c>Double value()</c>.
         /// </summary>
-        public double? Value { get; }
+        /// <returns>The new value, or null to clear the quota.</returns>
+        public double? Value() => _value;
 
         /// <summary>
         /// Value equality over the key and the value — Java's <c>equals</c>; a null value is not
@@ -113,8 +121,8 @@ public sealed class ClientQuotaAlteration
         /// <returns>Whether the two describe the same op.</returns>
         public override bool Equals(object? obj) =>
             obj is Op other
-            && string.Equals(Key, other.Key, StringComparison.Ordinal)
-            && Value.Equals(other.Value);
+            && string.Equals(Key(), other.Key(), StringComparison.Ordinal)
+            && Value().Equals(other.Value());
 
         /// <summary>
         /// The hash of the key and the value — Java's <c>hashCode</c>. A null value hashes as 0,
@@ -126,8 +134,8 @@ public sealed class ClientQuotaAlteration
             unchecked
             {
                 int hash = 1;
-                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Key);
-                hash = (hash * 31) + (Value.HasValue ? Value.Value.GetHashCode() : 0);
+                hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_key);
+                hash = (hash * 31) + (_value.HasValue ? _value.Value.GetHashCode() : 0);
                 return hash;
             }
         }
@@ -140,10 +148,10 @@ public sealed class ClientQuotaAlteration
         public override string ToString() =>
             string.Concat(
                 "ClientQuotaAlteration.Op(key=",
-                Key,
+                _key,
                 ", value=",
-                Value.HasValue
-                    ? Value.Value.ToString("R", CultureInfo.InvariantCulture)
+                _value.HasValue
+                    ? _value.Value.ToString("R", CultureInfo.InvariantCulture)
                     : "null",
                 ")");
     }

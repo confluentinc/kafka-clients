@@ -41,7 +41,7 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     [Fact]
     public void BeginningOffsets_PerOpAllocation_IsBounded()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(Topic, 0, 1);
         TopicPartition[] request = { new TopicPartition(Topic, 0) };
@@ -66,7 +66,7 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     [Fact]
     public void PartitionsFor_PerOpAllocation_IsBounded()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
 

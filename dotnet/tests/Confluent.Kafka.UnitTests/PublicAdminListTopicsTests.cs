@@ -124,8 +124,8 @@ public sealed class PublicAdminListTopicsTests
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
         try
         {
-            AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions { ListInternal = true });
-            Assert.False(result.NamesToListings().IsDone);
+            AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions().ListInternal(true));
+            Assert.False(result.NamesToListings().IsDone());
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
 
@@ -225,7 +225,7 @@ public sealed class PublicAdminListTopicsTests
                     listenedOn = Thread.CurrentThread.Name;
                 });
 
-                Assert.True(future.IsDone);
+                Assert.True(future.IsDone());
                 Assert.False(ImplOf(future).IsSettled);
                 Assert.Equal(0, Volatile.Read(ref listened));
 
@@ -321,7 +321,7 @@ public sealed class PublicAdminListTopicsTests
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
             await TestTimeout.DisposeAsync(admin);
 
-            Assert.True(result.NamesToListings().IsCompletedExceptionally);
+            Assert.True(result.NamesToListings().IsCompletedExceptionally());
             AssertThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => result.Names().Get(), BlockingCall.Deadline)));
         }
         else
@@ -335,7 +335,7 @@ public sealed class PublicAdminListTopicsTests
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
             TestTimeout.Dispose(admin);
 
-            Assert.True(result.NamesToListings().IsCompletedExceptionally);
+            Assert.True(result.NamesToListings().IsCompletedExceptionally());
             BlockingCall.AssertThrew(BlockingCall.RunGet(() => result.Names().Get()), 7, ThreadExited);
         }
 
@@ -394,17 +394,17 @@ public sealed class PublicAdminListTopicsTests
     [InlineData(-5, 0)]
     public void TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal((expected, (sbyte)0), ReadBack(new ListTopicsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal((expected, (sbyte)0), ReadBack(new ListTopicsOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void ListInternal_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((-1, (sbyte)1), ReadBack(new ListTopicsOptions { ListInternal = true }));
+        Assert.Equal((-1, (sbyte)1), ReadBack(new ListTopicsOptions().ListInternal(true)));
 
-        ListTopicsOptions options = new ListTopicsOptions { ListInternal = true, TimeoutMs = 10 };
-        options.ListInternal = false;
-        options.TimeoutMs = 20;
+        ListTopicsOptions options = new ListTopicsOptions().ListInternal(true).TimeoutMs(10);
+        options.ListInternal(false);
+        options.TimeoutMs(20);
         Assert.Equal((20, (sbyte)0), ReadBack(options));
     }
 
@@ -412,12 +412,12 @@ public sealed class PublicAdminListTopicsTests
     public void OnlyTheSettersThatRan_ReachTheCOptions_InTheOrderTheyLastRan()
     {
         ListTopicsOptions options = new ListTopicsOptions();
-        options.ListInternal = true;
-        options.TimeoutMs = 5;
-        options.ListInternal = false;
+        options.ListInternal(true);
+        options.TimeoutMs(5);
+        options.ListInternal(false);
         Assert.Equal(new[] { nameof(ListTopicsOptions.TimeoutMs), nameof(ListTopicsOptions.ListInternal) }, options.Setters.InOrder);
 
-        ListTopicsOptions timeoutOnly = new ListTopicsOptions { TimeoutMs = null };
+        ListTopicsOptions timeoutOnly = new ListTopicsOptions().TimeoutMs(null);
         Assert.Equal(new[] { nameof(ListTopicsOptions.TimeoutMs) }, Built(timeoutOnly));
         Assert.Equal(new[] { nameof(ListTopicsOptions.TimeoutMs), nameof(ListTopicsOptions.ListInternal) }, Built(options));
         Assert.Empty(Built(new ListTopicsOptions()));
@@ -428,7 +428,7 @@ public sealed class PublicAdminListTopicsTests
     {
         InvalidOperationException failure = new InvalidOperationException("setter");
         int destroyed = 0;
-        ListTopicsOptions options = new ListTopicsOptions { ListInternal = true };
+        ListTopicsOptions options = new ListTopicsOptions().ListInternal(true);
 
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => AdminOptionsMarshal.Build(
             NativeMethods.ListTopicsOptionsNew,
@@ -446,7 +446,7 @@ public sealed class PublicAdminListTopicsTests
     }
 
     private static ListTopicsOptions? OptionsFor(bool? listInternal) =>
-        listInternal is null ? null : new ListTopicsOptions { ListInternal = listInternal.Value };
+        listInternal is null ? null : new ListTopicsOptions().ListInternal(listInternal.Value);
 
     private static object Create(string kind) => kind switch
     {
@@ -477,20 +477,20 @@ public sealed class PublicAdminListTopicsTests
     private static void AssertSeeded(IReadOnlyDictionary<string, TopicListing> listings)
     {
         Assert.Equal(new[] { Offsets, Orders }, listings.Keys.OrderBy(name => name, StringComparer.Ordinal));
-        Assert.Equal(Orders, listings[Orders].Name);
-        Assert.False(listings[Orders].IsInternal);
-        Assert.Equal(Offsets, listings[Offsets].Name);
-        Assert.True(listings[Offsets].IsInternal);
-        Assert.NotEqual(Uuid.ZERO_UUID, listings[Orders].TopicId);
-        Assert.NotEqual(Uuid.ZERO_UUID, listings[Offsets].TopicId);
-        Assert.NotEqual(listings[Orders].TopicId, listings[Offsets].TopicId);
+        Assert.Equal(Orders, listings[Orders].Name());
+        Assert.False(listings[Orders].IsInternal());
+        Assert.Equal(Offsets, listings[Offsets].Name());
+        Assert.True(listings[Offsets].IsInternal());
+        Assert.NotEqual(Uuid.ZERO_UUID, listings[Orders].TopicId());
+        Assert.NotEqual(Uuid.ZERO_UUID, listings[Offsets].TopicId());
+        Assert.NotEqual(listings[Orders].TopicId(), listings[Offsets].TopicId());
     }
 
     private static void AssertListings(IReadOnlyCollection<TopicListing> listings)
     {
         Assert.Equal(2, listings.Count);
-        Assert.Equal(new[] { Offsets, Orders }, listings.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal));
-        Assert.True(listings.Single(listing => listing.Name == Offsets).IsInternal);
+        Assert.Equal(new[] { Offsets, Orders }, listings.Select(listing => listing.Name()).OrderBy(name => name, StringComparer.Ordinal));
+        Assert.True(listings.Single(listing => listing.Name() == Offsets).IsInternal());
     }
 
     private static void AssertNames(IReadOnlyCollection<string> names) =>
