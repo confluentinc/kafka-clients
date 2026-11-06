@@ -178,12 +178,12 @@ public sealed class PublicAdminP2bShapeParityTests
     [Fact]
     public void NewPartitions_AssignmentsIsNullable_AndTheFactoriesMirrorJava()
     {
-        PropertyInfo assignments = typeof(NewPartitions).GetProperty(nameof(NewPartitions.Assignments))!;
+        MethodInfo assignments = Getters.Get(typeof(NewPartitions), nameof(NewPartitions.Assignments));
 
-        Assert.Equal(typeof(IReadOnlyList<IReadOnlyList<int>>), assignments.PropertyType);
+        Assert.Equal(typeof(IReadOnlyList<IReadOnlyList<int>>), assignments.ReturnType);
         Assert.Equal(2, NullableFlag(assignments));
 
-        Assert.Equal(typeof(int), typeof(NewPartitions).GetProperty(nameof(NewPartitions.TotalCount))!.PropertyType);
+        Assert.Equal(typeof(int), Getters.Get(typeof(NewPartitions), nameof(NewPartitions.TotalCount)).ReturnType);
 
         Assert.Empty(typeof(NewPartitions).GetConstructors());
 
@@ -207,14 +207,14 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(1, NullableAnnotation.Flag(newAssignments, 1));
 
         NewPartitions viaNull = NewPartitions.IncreaseTo(3, null);
-        Assert.Equal(3, viaNull.TotalCount);
-        Assert.Null(viaNull.Assignments);
+        Assert.Equal(3, viaNull.TotalCount());
+        Assert.Null(viaNull.Assignments());
         Assert.Equal(NewPartitions.IncreaseTo(3).ToString(), viaNull.ToString());
         Assert.Equal("(totalCount=3, newAssignments=null)", viaNull.ToString());
 
         NewPartitions viaEmpty = NewPartitions.IncreaseTo(3, Array.Empty<IReadOnlyList<int>>());
-        Assert.NotNull(viaEmpty.Assignments);
-        Assert.Empty(viaEmpty.Assignments!);
+        Assert.NotNull(viaEmpty.Assignments());
+        Assert.Empty(viaEmpty.Assignments()!);
         Assert.Equal("(totalCount=3, newAssignments=[])", viaEmpty.ToString());
 
         // A null INNER list stays rejected: the ABI would drop it, shifting every later
@@ -280,16 +280,16 @@ public sealed class PublicAdminP2bShapeParityTests
     public void Options_MatchJavasFieldsAndDefaults()
     {
         ListTopicsOptions list = new ListTopicsOptions();
-        Assert.Null(list.TimeoutMs);
-        Assert.False(list.ListInternal);
+        Assert.Null(list.TimeoutMs());
+        Assert.False(list.ListInternal());
         AssertOptionNames(typeof(ListTopicsOptions), nameof(ListTopicsOptions.ListInternal), nameof(list.TimeoutMs));
 
         CreatePartitionsOptions create = new CreatePartitionsOptions();
-        Assert.Null(create.TimeoutMs);
-        Assert.False(create.ValidateOnly);
+        Assert.Null(create.TimeoutMs());
+        Assert.False(create.ValidateOnly());
 
         // The one option whose Java default is not the C# default for its type.
-        Assert.True(create.RetryOnQuotaViolation);
+        Assert.True(create.RetryOnQuotaViolation());
         AssertOptionNames(
             typeof(CreatePartitionsOptions),
             nameof(CreatePartitionsOptions.RetryOnQuotaViolation),
@@ -298,7 +298,7 @@ public sealed class PublicAdminP2bShapeParityTests
 
         // Java's DeleteRecordsOptions declares no members of its own, so the inherited timeout is the whole surface.
         DeleteRecordsOptions delete = new DeleteRecordsOptions();
-        Assert.Null(delete.TimeoutMs);
+        Assert.Null(delete.TimeoutMs());
         AssertOptionNames(typeof(DeleteRecordsOptions), nameof(delete.TimeoutMs));
 
         foreach (Type type in new[]
@@ -306,26 +306,25 @@ public sealed class PublicAdminP2bShapeParityTests
                      typeof(ListTopicsOptions), typeof(CreatePartitionsOptions), typeof(DeleteRecordsOptions),
                  })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
     [Fact]
     public void G1_13_ListTopicsOptions_EqualityIgnoresTheTimeout()
     {
-        ListTopicsOptions shortTimeout = new ListTopicsOptions { ListInternal = true, TimeoutMs = 10 };
-        ListTopicsOptions longTimeout = new ListTopicsOptions { ListInternal = true, TimeoutMs = 99_000 };
-        ListTopicsOptions noTimeout = new ListTopicsOptions { ListInternal = true };
+        ListTopicsOptions shortTimeout = new ListTopicsOptions().ListInternal(true).TimeoutMs(10);
+        ListTopicsOptions longTimeout = new ListTopicsOptions().ListInternal(true).TimeoutMs(99_000);
+        ListTopicsOptions noTimeout = new ListTopicsOptions().ListInternal(true);
 
         Assert.True(shortTimeout.Equals(longTimeout));
         Assert.True(shortTimeout.Equals(noTimeout));
         Assert.Equal(shortTimeout.GetHashCode(), longTimeout.GetHashCode());
         Assert.Equal(shortTimeout.GetHashCode(), noTimeout.GetHashCode());
-        Assert.True(new ListTopicsOptions().Equals(new ListTopicsOptions { TimeoutMs = 5 }));
+        Assert.True(new ListTopicsOptions().Equals(new ListTopicsOptions().TimeoutMs(5)));
 
-        Assert.False(shortTimeout.Equals(new ListTopicsOptions { ListInternal = false, TimeoutMs = 10 }));
+        Assert.False(shortTimeout.Equals(new ListTopicsOptions().ListInternal(false).TimeoutMs(10)));
         Assert.False(shortTimeout.Equals(null));
         Assert.False(shortTimeout.Equals(new DeleteRecordsOptions()));
 
@@ -340,13 +339,11 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal("ListTopicsOptions(listInternal=false)", new ListTopicsOptions().ToString());
         Assert.Equal(
             "ListTopicsOptions(listInternal=true)",
-            new ListTopicsOptions { ListInternal = true, TimeoutMs = 10 }.ToString());
+            new ListTopicsOptions().ListInternal(true).TimeoutMs(10).ToString());
     }
 
     private static void AssertOptionNames(Type optionsType, params string[] expected) =>
-        Assert.Equal(
-            expected.OrderBy(name => name, StringComparer.Ordinal),
-            optionsType.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
+        SetterMethods.AssertGettersAndSetters(optionsType, expected);
 
     private static byte NullableFlag(MemberInfo member) => NullableAnnotation.Flag(member);
 

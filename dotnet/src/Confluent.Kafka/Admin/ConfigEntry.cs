@@ -147,7 +147,7 @@ public sealed class ConfigEntry
     /// <summary>
     /// Every value that may be used for this config, with its source, in order of precedence —
     /// Java's <c>synonyms()</c>. Empty when synonyms were not requested through
-    /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/>.
+    /// <see cref="DescribeConfigsOptions.IncludeSynonyms()"/>.
     /// </summary>
     /// <returns>Every value that may be used for this config, with its source, in order of precedence.</returns>
     public IReadOnlyList<ConfigSynonym> Synonyms() => _synonyms;

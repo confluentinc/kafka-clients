@@ -116,7 +116,7 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
 
         AsyncDescribeConsumerGroupsResult result = admin.DescribeConsumerGroups(
             new[] { "p5-dcg-flag" },
-            new DescribeConsumerGroupsOptions { IncludeAuthorizedOperations = include });
+            new DescribeConsumerGroupsOptions().IncludeAuthorizedOperations(include));
 
         UnsupportedOperationException failure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
@@ -163,7 +163,7 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
             {
                 admin.DescribeConsumerGroups(
                     new[] { "p5-dcg-timeout" },
-                    new DescribeConsumerGroupsOptions { TimeoutMs = -1 });
+                    new DescribeConsumerGroupsOptions().TimeoutMs(-1));
             }));
     }
 

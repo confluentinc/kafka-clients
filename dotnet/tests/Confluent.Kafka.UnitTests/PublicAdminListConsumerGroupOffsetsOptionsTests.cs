@@ -36,19 +36,16 @@ public sealed class PublicAdminListConsumerGroupOffsetsOptionsTests
     {
         ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.RequireStable);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.RequireStable());
     }
 
     [Fact]
     public void PublicShape_IsTheTimeoutPlusJavasOneAccessor()
     {
-        Assert.Equal(
-            new[] { "RequireStable", "TimeoutMs" },
-            typeof(ListConsumerGroupOffsetsOptions)
-                .GetProperties()
-                .Select(property => property.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(typeof(ListConsumerGroupOffsetsOptions).GetProperties());
+        Assert.Equal(new[] { "RequireStable", "TimeoutMs" }, Getters.NamesOf(typeof(ListConsumerGroupOffsetsOptions)));
+        Assert.Equal(new[] { "RequireStable", "TimeoutMs" }, SetterMethods.NamesOf(typeof(ListConsumerGroupOffsetsOptions)));
 
         Assert.Empty(
             typeof(ListConsumerGroupOffsetsOptions)
@@ -57,15 +54,11 @@ public sealed class PublicAdminListConsumerGroupOffsetsOptionsTests
         ConstructorInfo constructor = Assert.Single(typeof(ListConsumerGroupOffsetsOptions).GetConstructors());
         Assert.Empty(constructor.GetParameters());
 
-        PropertyInfo timeout = typeof(ListConsumerGroupOffsetsOptions).GetProperty(
-            nameof(ListConsumerGroupOffsetsOptions.TimeoutMs))!;
-        Assert.Equal(typeof(int?), timeout.PropertyType);
-        Assert.NotNull(timeout.SetMethod);
+        Assert.Equal(typeof(int?), Getters.Get(typeof(ListConsumerGroupOffsetsOptions), nameof(ListConsumerGroupOffsetsOptions.TimeoutMs)).ReturnType);
+        Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(typeof(ListConsumerGroupOffsetsOptions), nameof(ListConsumerGroupOffsetsOptions.TimeoutMs)));
 
-        PropertyInfo requireStable = typeof(ListConsumerGroupOffsetsOptions).GetProperty(
-            nameof(ListConsumerGroupOffsetsOptions.RequireStable))!;
-        Assert.Equal(typeof(bool), requireStable.PropertyType);
-        Assert.NotNull(requireStable.SetMethod);
+        Assert.Equal(typeof(bool), Getters.Get(typeof(ListConsumerGroupOffsetsOptions), nameof(ListConsumerGroupOffsetsOptions.RequireStable)).ReturnType);
+        Assert.Equal(typeof(bool), SetterMethods.ParameterTypeOf(typeof(ListConsumerGroupOffsetsOptions), nameof(ListConsumerGroupOffsetsOptions.RequireStable)));
     }
 
     [Theory]
@@ -73,28 +66,26 @@ public sealed class PublicAdminListConsumerGroupOffsetsOptionsTests
     [InlineData(false)]
     public void RequireStable_RoundTrips(bool value)
     {
-        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions
-        {
-            RequireStable = value,
-        };
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions()
+            .RequireStable(value);
 
-        Assert.Equal(value, options.RequireStable);
+        Assert.Equal(value, options.RequireStable());
 
-        options.RequireStable = !value;
-        Assert.Equal(!value, options.RequireStable);
+        options.RequireStable(!value);
+        Assert.Equal(!value, options.RequireStable());
     }
 
     [Fact]
     public void TimeoutMs_RoundTripsIncludingBackToNull()
     {
-        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = 0 };
-        Assert.Equal(0, options.TimeoutMs);
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions().TimeoutMs(0);
+        Assert.Equal(0, options.TimeoutMs());
 
-        options.TimeoutMs = 30_000;
-        Assert.Equal(30_000, options.TimeoutMs);
+        options.TimeoutMs(30_000);
+        Assert.Equal(30_000, options.TimeoutMs());
 
-        options.TimeoutMs = null;
-        Assert.Null(options.TimeoutMs);
+        options.TimeoutMs(null);
+        Assert.Null(options.TimeoutMs());
     }
 
     [Fact]
@@ -114,9 +105,10 @@ public sealed class PublicAdminListConsumerGroupOffsetsOptionsTests
     {
         Assert.Null(typeof(ListConsumerGroupOffsetsOptions).GetCustomAttribute<ObsoleteAttribute>());
 
-        foreach (PropertyInfo property in typeof(ListConsumerGroupOffsetsOptions).GetProperties())
+        foreach (MemberInfo member in typeof(ListConsumerGroupOffsetsOptions).GetMembers(
+                     BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
         {
-            Assert.Null(property.GetCustomAttribute<ObsoleteAttribute>());
+            Assert.Null(member.GetCustomAttribute<ObsoleteAttribute>());
         }
     }
 }

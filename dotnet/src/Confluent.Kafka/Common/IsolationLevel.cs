@@ -16,7 +16,7 @@ namespace Confluent.Kafka.Common;
 
 /// <summary>
 /// The isolation of a read, Java's <c>IsolationLevel</c>, used by
-/// <see cref="Admin.ListOffsetsOptions.IsolationLevel"/>.
+/// <see cref="Admin.ListOffsetsOptions.IsolationLevel()"/>.
 /// </summary>
 /// <remarks>
 /// Each value is Java's <c>IsolationLevel.id()</c>, which the C ABI takes unchanged.

@@ -181,7 +181,7 @@ public sealed class AdminConstructedNullTopicTests
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
-                ["g1"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { NullTopic(constructed) } },
+                ["g1"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { NullTopic(constructed) }),
             },
             null));
 

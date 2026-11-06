@@ -43,9 +43,7 @@ public sealed class PublicAdminTfmSmokeTests
             AsyncCreateTopicsResult result = admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
-                {
-                    Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-                },
+                    .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" }),
             });
 
             await TestTimeout.Run(() => result.All().Get(), s_deadline);

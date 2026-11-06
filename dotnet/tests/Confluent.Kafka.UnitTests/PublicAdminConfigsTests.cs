@@ -46,9 +46,7 @@ public sealed class PublicAdminConfigsTests
             () => admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
-                {
-                    Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-                },
+                    .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" }),
             }).All().Get(),
             s_deadline);
 
@@ -99,9 +97,7 @@ public sealed class PublicAdminConfigsTests
             () => admin.CreateTopics(new[]
             {
                 new NewTopic(Topic, 1, 1)
-                {
-                    Configs = new Dictionary<string, string> { ["retention.ms"] = "1000" },
-                },
+                    .Configs(new Dictionary<string, string> { ["retention.ms"] = "1000" }),
             }).All().Get(),
             s_deadline);
 
@@ -289,11 +285,11 @@ public sealed class PublicAdminConfigsTests
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         Assert.Null(Record.Exception(
-            () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions { TimeoutMs = -1 })));
+            () => admin.DescribeConfigs(new[] { resource }, new DescribeConfigsOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(),
-                new AlterConfigsOptions { TimeoutMs = -2 })));
+                new AlterConfigsOptions().TimeoutMs(-2))));
     }
 
     [Fact]

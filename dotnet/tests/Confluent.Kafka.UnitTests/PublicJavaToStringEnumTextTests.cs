@@ -130,7 +130,7 @@ public sealed class PublicJavaToStringEnumTextTests
                 StringComparison.Ordinal);
             Assert.StartsWith(
                 "ListTransactionsOptions(filteredStates=[" + java + "], ",
-                new ListTransactionsOptions { FilteredStates = new[] { member } }.ToString(),
+                new ListTransactionsOptions().FilterStates(new[] { member }).ToString(),
                 StringComparison.Ordinal);
         }
 

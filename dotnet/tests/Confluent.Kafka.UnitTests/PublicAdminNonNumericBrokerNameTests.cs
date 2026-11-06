@@ -62,7 +62,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(
-            new[] { broker, topic }, new DescribeConfigsOptions { TimeoutMs = CallTimeoutMs });
+            new[] { broker, topic }, new DescribeConfigsOptions().TimeoutMs(CallTimeoutMs));
 
         Assert.Equal(2, result.Values.Count);
         await AssertTimedOut(result.Values[broker].Get(), "describeConfigs");
@@ -80,7 +80,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, Topic);
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
-            Alterations(broker, topic), new AlterConfigsOptions { TimeoutMs = CallTimeoutMs });
+            Alterations(broker, topic), new AlterConfigsOptions().TimeoutMs(CallTimeoutMs));
 
         Assert.Equal(2, result.Values.Count);
         await AssertTimedOut(result.Values[broker].Get(), "incrementalAlterConfigs");

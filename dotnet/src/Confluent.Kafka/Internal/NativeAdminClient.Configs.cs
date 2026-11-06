@@ -141,15 +141,15 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeConfigsOptions.TimeoutMs):
-                NativeMethods.DescribeConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeConfigsOptions.IncludeSynonyms):
                 NativeMethods.DescribeConfigsOptionsSetIncludeSynonyms(
-                    native, options.IncludeSynonyms ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeSynonyms() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(DescribeConfigsOptions.IncludeDocumentation):
                 NativeMethods.DescribeConfigsOptionsSetIncludeDocumentation(
-                    native, options.IncludeDocumentation ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeDocumentation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeConfigsOptions has no C setter for " + setter + ".");
@@ -285,10 +285,10 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AlterConfigsOptions.TimeoutMs):
-                NativeMethods.AlterConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AlterConfigsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterConfigsOptions.ValidateOnly):
-                NativeMethods.AlterConfigsOptionsSetValidateOnly(native, options.ValidateOnly ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.AlterConfigsOptionsSetValidateOnly(native, options.ValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterConfigsOptions has no C setter for " + setter + ".");
@@ -351,7 +351,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListConfigResourcesOptions.TimeoutMs):
-                NativeMethods.ListConfigResourcesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListConfigResourcesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListConfigResourcesOptions has no C setter for " + setter + ".");

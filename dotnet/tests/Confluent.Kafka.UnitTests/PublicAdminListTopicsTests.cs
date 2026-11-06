@@ -124,7 +124,7 @@ public sealed class PublicAdminListTopicsTests
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
         try
         {
-            AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions { ListInternal = true });
+            AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions().ListInternal(true));
             Assert.False(result.NamesToListings().IsDone);
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
@@ -394,17 +394,17 @@ public sealed class PublicAdminListTopicsTests
     [InlineData(-5, 0)]
     public void TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal((expected, (sbyte)0), ReadBack(new ListTopicsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal((expected, (sbyte)0), ReadBack(new ListTopicsOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void ListInternal_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((-1, (sbyte)1), ReadBack(new ListTopicsOptions { ListInternal = true }));
+        Assert.Equal((-1, (sbyte)1), ReadBack(new ListTopicsOptions().ListInternal(true)));
 
-        ListTopicsOptions options = new ListTopicsOptions { ListInternal = true, TimeoutMs = 10 };
-        options.ListInternal = false;
-        options.TimeoutMs = 20;
+        ListTopicsOptions options = new ListTopicsOptions().ListInternal(true).TimeoutMs(10);
+        options.ListInternal(false);
+        options.TimeoutMs(20);
         Assert.Equal((20, (sbyte)0), ReadBack(options));
     }
 
@@ -412,12 +412,12 @@ public sealed class PublicAdminListTopicsTests
     public void OnlyTheSettersThatRan_ReachTheCOptions_InTheOrderTheyLastRan()
     {
         ListTopicsOptions options = new ListTopicsOptions();
-        options.ListInternal = true;
-        options.TimeoutMs = 5;
-        options.ListInternal = false;
+        options.ListInternal(true);
+        options.TimeoutMs(5);
+        options.ListInternal(false);
         Assert.Equal(new[] { nameof(ListTopicsOptions.TimeoutMs), nameof(ListTopicsOptions.ListInternal) }, options.Setters.InOrder);
 
-        ListTopicsOptions timeoutOnly = new ListTopicsOptions { TimeoutMs = null };
+        ListTopicsOptions timeoutOnly = new ListTopicsOptions().TimeoutMs(null);
         Assert.Equal(new[] { nameof(ListTopicsOptions.TimeoutMs) }, Built(timeoutOnly));
         Assert.Equal(new[] { nameof(ListTopicsOptions.TimeoutMs), nameof(ListTopicsOptions.ListInternal) }, Built(options));
         Assert.Empty(Built(new ListTopicsOptions()));
@@ -428,7 +428,7 @@ public sealed class PublicAdminListTopicsTests
     {
         InvalidOperationException failure = new InvalidOperationException("setter");
         int destroyed = 0;
-        ListTopicsOptions options = new ListTopicsOptions { ListInternal = true };
+        ListTopicsOptions options = new ListTopicsOptions().ListInternal(true);
 
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => AdminOptionsMarshal.Build(
             NativeMethods.ListTopicsOptionsNew,
@@ -446,7 +446,7 @@ public sealed class PublicAdminListTopicsTests
     }
 
     private static ListTopicsOptions? OptionsFor(bool? listInternal) =>
-        listInternal is null ? null : new ListTopicsOptions { ListInternal = listInternal.Value };
+        listInternal is null ? null : new ListTopicsOptions().ListInternal(listInternal.Value);
 
     private static object Create(string kind) => kind switch
     {

@@ -131,7 +131,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(CreateAclsOptions.TimeoutMs):
-                NativeMethods.CreateAclsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.CreateAclsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("CreateAclsOptions has no C setter for " + setter + ".");
@@ -190,7 +190,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeAclsOptions.TimeoutMs):
-                NativeMethods.DescribeAclsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeAclsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeAclsOptions has no C setter for " + setter + ".");
@@ -264,7 +264,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteAclsOptions.TimeoutMs):
-                NativeMethods.DeleteAclsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteAclsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteAclsOptions has no C setter for " + setter + ".");

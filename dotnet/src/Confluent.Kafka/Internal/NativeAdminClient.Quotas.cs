@@ -121,7 +121,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeClientQuotasOptions.TimeoutMs):
                 NativeMethods.DescribeClientQuotasOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeClientQuotasOptions has no C setter for " + setter + ".");
@@ -200,11 +200,11 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(AlterClientQuotasOptions.TimeoutMs):
                 NativeMethods.AlterClientQuotasOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterClientQuotasOptions.ValidateOnly):
                 NativeMethods.AlterClientQuotasOptionsSetValidateOnly(
-                    native, (sbyte)(options.ValidateOnly ? 1 : 0), ref outErr);
+                    native, (sbyte)(options.ValidateOnly() ? 1 : 0), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterClientQuotasOptions has no C setter for " + setter + ".");

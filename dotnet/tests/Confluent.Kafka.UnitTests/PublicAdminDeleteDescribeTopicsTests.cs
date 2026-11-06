@@ -184,7 +184,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
         AsyncDescribeTopicsResult result = admin.DescribeTopics(
             TopicCollection.OfTopicNames(new[] { Topic }),
-            new DescribeTopicsOptions { IncludeAuthorizedOperations = true });
+            new DescribeTopicsOptions().IncludeAuthorizedOperations(true));
 
         TopicDescription description = await TestTimeout.Run(() => result.TopicNameValues![Topic].Get(), s_deadline);
 
@@ -247,20 +247,20 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Null(Record.Exception(
             () => admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DeleteTopicsOptions { TimeoutMs = -1 })));
+                new DeleteTopicsOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { TimeoutMs = -5 })));
+                new DescribeTopicsOptions().TimeoutMs(-5))));
 
         Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 })));
+                new DescribeTopicsOptions().PartitionSizeLimitPerResponse(-1))));
         Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = 0 })));
+                new DescribeTopicsOptions().PartitionSizeLimitPerResponse(0))));
     }
 
     [Fact]
@@ -278,26 +278,24 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
     [Fact]
     public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((0, (sbyte)1), ReadBack(new DeleteTopicsOptions { TimeoutMs = -5 }));
-        Assert.Equal((-1, (sbyte)0), ReadBack(new DeleteTopicsOptions { RetryOnQuotaViolation = false }));
+        Assert.Equal((0, (sbyte)1), ReadBack(new DeleteTopicsOptions().TimeoutMs(-5)));
+        Assert.Equal((-1, (sbyte)0), ReadBack(new DeleteTopicsOptions().RetryOnQuotaViolation(false)));
 
-        DeleteTopicsOptions delete = new DeleteTopicsOptions { TimeoutMs = 10, RetryOnQuotaViolation = false };
-        delete.TimeoutMs = 20;
-        delete.RetryOnQuotaViolation = true;
+        DeleteTopicsOptions delete = new DeleteTopicsOptions().TimeoutMs(10).RetryOnQuotaViolation(false);
+        delete.TimeoutMs(20);
+        delete.RetryOnQuotaViolation(true);
         Assert.Equal((20, (sbyte)1), ReadBack(delete));
 
-        Assert.Equal((-1, (sbyte)1, 2000), ReadBack(new DescribeTopicsOptions { IncludeAuthorizedOperations = true }));
-        Assert.Equal((-1, (sbyte)0, -7), ReadBack(new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -7 }));
+        Assert.Equal((-1, (sbyte)1, 2000), ReadBack(new DescribeTopicsOptions().IncludeAuthorizedOperations(true)));
+        Assert.Equal((-1, (sbyte)0, -7), ReadBack(new DescribeTopicsOptions().PartitionSizeLimitPerResponse(-7)));
 
-        DescribeTopicsOptions describe = new DescribeTopicsOptions
-        {
-            TimeoutMs = 10,
-            IncludeAuthorizedOperations = true,
-            PartitionSizeLimitPerResponse = 5,
-        };
-        describe.TimeoutMs = null;
-        describe.IncludeAuthorizedOperations = false;
-        describe.PartitionSizeLimitPerResponse = 6;
+        DescribeTopicsOptions describe = new DescribeTopicsOptions()
+            .TimeoutMs(10)
+            .IncludeAuthorizedOperations(true)
+            .PartitionSizeLimitPerResponse(5);
+        describe.TimeoutMs(null);
+        describe.IncludeAuthorizedOperations(false);
+        describe.PartitionSizeLimitPerResponse(6);
         Assert.Equal((-1, (sbyte)0, 6), ReadBack(describe));
     }
 
@@ -437,12 +435,12 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         try
         {
             string[] names = { "alpha" };
-            DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
+            DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions().TimeoutMs(-1);
             AssertSameTimeout(
                 await Failure(() => real.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout).All().Get()),
                 await Failure(() => real.DeleteTopics(names, deleteTimeout).All().Get()));
 
-            DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions { TimeoutMs = -1 };
+            DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions().TimeoutMs(-1);
             AssertSameTimeout(
                 await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!.Value.Get()),
                 await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!.Value.Get()));

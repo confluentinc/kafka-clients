@@ -26,33 +26,38 @@ public sealed class DescribeFeaturesOptions
     private int? _timeoutMs;
     private int? _nodeId;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DescribeFeaturesOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// The broker to query, or <see langword="null"/> while unset, when the client chooses — Java's
     /// <c>nodeId()</c>, an <c>OptionalInt</c>, and <c>nodeId(int)</c>.
     /// </summary>
+    /// <returns>The broker to query, or <see langword="null"/> while unset, when the client chooses — Java's
+    /// <c>nodeId()</c>, an <c>OptionalInt</c>, and <c>nodeId(int)</c>.</returns>
+    public int? NodeId() => _nodeId;
+
+    /// <summary>Sets <see cref="NodeId()"/>.</summary>
+    /// <param name="nodeId">The broker to query, or <see langword="null"/> while unset, when the client chooses —
+    /// Java's <c>nodeId()</c>, an <c>OptionalInt</c>, and <c>nodeId(int)</c>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set node id cannot be
     /// unset again.
     /// </exception>
-    public int? NodeId
+    public DescribeFeaturesOptions NodeId(int? nodeId)
     {
-        get => _nodeId;
-        set
-        {
-            _nodeId = value ?? throw new ArgumentNullException(nameof(value));
-            Setters.Ran(nameof(NodeId));
-        }
+        _nodeId = nodeId ?? throw new ArgumentNullException(nameof(nodeId));
+        Setters.Ran(nameof(NodeId));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

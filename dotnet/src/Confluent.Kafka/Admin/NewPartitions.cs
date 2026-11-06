@@ -37,11 +37,12 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class NewPartitions
 {
+    private readonly int _totalCount;
     private readonly List<IReadOnlyList<int>>? _newAssignments;
 
     private NewPartitions(int totalCount, List<IReadOnlyList<int>>? newAssignments)
     {
-        TotalCount = totalCount;
+        _totalCount = totalCount;
         _newAssignments = newAssignments;
     }
 
@@ -49,16 +50,21 @@ public sealed class NewPartitions
     /// The total number of partitions after the operation succeeds — Java's
     /// <c>totalCount()</c>. This is the total, not the number added.
     /// </summary>
-    public int TotalCount { get; }
+    /// <returns>The total number of partitions after the operation succeeds.</returns>
+    public int TotalCount() => _totalCount;
 
     /// <summary>
     /// The replica assignments for the new partitions, or <see langword="null"/> if the
     /// controller will decide — Java's <c>assignments()</c>.
     /// </summary>
+    /// <returns>
+    /// The replica assignments for the new partitions, or <see langword="null"/> if the
+    /// controller will decide.
+    /// </returns>
     /// <remarks>
     /// An empty list is a request of its own: see the type remarks.
     /// </remarks>
-    public IReadOnlyList<IReadOnlyList<int>>? Assignments => _newAssignments;
+    public IReadOnlyList<IReadOnlyList<int>>? Assignments() => _newAssignments;
 
     /// <summary>
     /// Increases the topic's partition count to <paramref name="totalCount"/>, letting
@@ -66,7 +72,7 @@ public sealed class NewPartitions
     /// <c>increaseTo(int totalCount)</c>.
     /// </summary>
     /// <param name="totalCount">The total number of partitions after the operation.</param>
-    /// <returns>The request entry, with <see cref="Assignments"/> <see langword="null"/>.</returns>
+    /// <returns>The request entry, with <see cref="Assignments()"/> <see langword="null"/>.</returns>
     public static NewPartitions IncreaseTo(int totalCount) => new NewPartitions(totalCount, null);
 
     /// <summary>
@@ -85,7 +91,7 @@ public sealed class NewPartitions
     /// does.
     /// </param>
     /// <returns>
-    /// The request entry; its <see cref="Assignments"/> is <see langword="null"/> when
+    /// The request entry; its <see cref="Assignments()"/> is <see langword="null"/> when
     /// <paramref name="newAssignments"/> is.
     /// </returns>
     /// <exception cref="ArgumentNullException">
@@ -119,7 +125,7 @@ public sealed class NewPartitions
         string.Format(
             CultureInfo.InvariantCulture,
             "(totalCount={0}, newAssignments={1})",
-            TotalCount,
+            _totalCount,
             Render(_newAssignments));
 
     private static string Render(List<IReadOnlyList<int>>? assignments)

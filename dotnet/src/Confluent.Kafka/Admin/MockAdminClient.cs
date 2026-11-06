@@ -339,7 +339,7 @@ public sealed class MockAdminClient : IAdmin
         CreateDelegationTokenOptions? options = null)
     {
         // Java's mock reads renewers().get(0) as the token's owner, out of bounds for its default LinkedList.
-        if (options is null || options.Renewers is { Count: 0 })
+        if (options is null || options.Renewers() is { Count: 0 })
         {
             throw new IndexOutOfBoundsException("Index: 0, Size: 0");
         }

@@ -31,15 +31,15 @@ public sealed class DescribeClusterOptions
 
     private bool _includeFencedBrokers;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DescribeClusterOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -47,18 +47,25 @@ public sealed class DescribeClusterOptions
     /// <c>includeAuthorizedOperations(boolean)</c> / <c>includeAuthorizedOperations()</c>.
     /// Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
+    /// <returns>Ask the broker to report the cluster's authorized operations — Java's
+    /// <c>includeAuthorizedOperations(boolean)</c> / <c>includeAuthorizedOperations()</c>. Defaults to
+    /// <see langword="false"/>, as Java's does.</returns>
     /// <remarks>
     /// Even when this is set, an older broker may not supply the information; then
     /// <see cref="DescribeClusterResult.AuthorizedOperations"/> yields <see langword="null"/>.
     /// </remarks>
-    public bool IncludeAuthorizedOperations
+    public bool IncludeAuthorizedOperations() => _includeAuthorizedOperations;
+
+    /// <summary>Sets <see cref="IncludeAuthorizedOperations()"/>.</summary>
+    /// <param name="includeAuthorizedOperations">Ask the broker to report the cluster's authorized operations —
+    /// Java's <c>includeAuthorizedOperations(boolean)</c> / <c>includeAuthorizedOperations()</c>. Defaults to
+    /// <see langword="false"/>, as Java's does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DescribeClusterOptions IncludeAuthorizedOperations(bool includeAuthorizedOperations)
     {
-        get => _includeAuthorizedOperations;
-        set
-        {
-            _includeAuthorizedOperations = value;
-            Setters.Ran(nameof(IncludeAuthorizedOperations));
-        }
+        _includeAuthorizedOperations = includeAuthorizedOperations;
+        Setters.Ran(nameof(IncludeAuthorizedOperations));
+        return this;
     }
 
     /// <summary>
@@ -66,14 +73,20 @@ public sealed class DescribeClusterOptions
     /// <c>includeFencedBrokers(boolean)</c> / <c>includeFencedBrokers()</c>. Defaults to
     /// <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool IncludeFencedBrokers
+    /// <returns>Include fenced brokers in the reported node set — Java's <c>includeFencedBrokers(boolean)</c> /
+    /// <c>includeFencedBrokers()</c>. Defaults to <see langword="false"/>, as Java's does.</returns>
+    public bool IncludeFencedBrokers() => _includeFencedBrokers;
+
+    /// <summary>Sets <see cref="IncludeFencedBrokers()"/>.</summary>
+    /// <param name="includeFencedBrokers">Include fenced brokers in the reported node set — Java's
+    /// <c>includeFencedBrokers(boolean)</c> / <c>includeFencedBrokers()</c>. Defaults to <see langword="false"/>,
+    /// as Java's does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DescribeClusterOptions IncludeFencedBrokers(bool includeFencedBrokers)
     {
-        get => _includeFencedBrokers;
-        set
-        {
-            _includeFencedBrokers = value;
-            Setters.Ran(nameof(IncludeFencedBrokers));
-        }
+        _includeFencedBrokers = includeFencedBrokers;
+        Setters.Ran(nameof(IncludeFencedBrokers));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

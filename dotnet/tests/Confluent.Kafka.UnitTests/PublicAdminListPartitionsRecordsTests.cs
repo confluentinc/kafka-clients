@@ -141,10 +141,10 @@ public sealed class PublicAdminListPartitionsRecordsTests
         NewPartitions empty = NewPartitions.IncreaseTo(3, Array.Empty<IReadOnlyList<int>>());
         NewPartitions explicitAssignment = NewPartitions.IncreaseTo(3, new[] { new[] { 0 } });
 
-        Assert.Null(broker.Assignments);
-        Assert.NotNull(empty.Assignments);
-        Assert.Empty(empty.Assignments!);
-        Assert.Single(explicitAssignment.Assignments!);
+        Assert.Null(broker.Assignments());
+        Assert.NotNull(empty.Assignments());
+        Assert.Empty(empty.Assignments()!);
+        Assert.Single(explicitAssignment.Assignments()!);
 
         Assert.False(NewPartitionsMarshal.HasAssignments(broker));
         Assert.True(NewPartitionsMarshal.HasAssignments(empty));
@@ -152,10 +152,10 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         // Java's increaseTo(n, null) is increaseTo(n): a null list asks the broker to choose, not for no assignments.
         NewPartitions viaNull = NewPartitions.IncreaseTo(3, null);
-        Assert.Null(viaNull.Assignments);
+        Assert.Null(viaNull.Assignments());
         Assert.False(NewPartitionsMarshal.HasAssignments(viaNull));
 
-        Assert.Empty(empty.Assignments!);
+        Assert.Empty(empty.Assignments()!);
 
         Assert.Equal((3, (IReadOnlyList<IReadOnlyList<int>>?)null), ReadBack(broker));
         Assert.Equal((3, (IReadOnlyList<IReadOnlyList<int>>?)null), ReadBack(viaNull));
@@ -176,7 +176,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         List<IReadOnlyList<int>> mutable = new List<IReadOnlyList<int>> { new[] { 1, 2 } };
         NewPartitions copied = NewPartitions.IncreaseTo(4, mutable);
         mutable.Clear();
-        Assert.Equal(new[] { 1, 2 }, Assert.Single(copied.Assignments!));
+        Assert.Equal(new[] { 1, 2 }, Assert.Single(copied.Assignments()!));
     }
 
     [Fact]
@@ -231,28 +231,26 @@ public sealed class PublicAdminListPartitionsRecordsTests
     [Fact]
     public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((0, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions { TimeoutMs = -5 }));
-        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreatePartitionsOptions { ValidateOnly = true }));
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreatePartitionsOptions { RetryOnQuotaViolation = false }));
+        Assert.Equal((0, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions().TimeoutMs(-5)));
+        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreatePartitionsOptions().ValidateOnly(true)));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreatePartitionsOptions().RetryOnQuotaViolation(false)));
 
-        CreatePartitionsOptions create = new CreatePartitionsOptions
-        {
-            TimeoutMs = 10,
-            ValidateOnly = true,
-            RetryOnQuotaViolation = false,
-        };
-        create.TimeoutMs = 20;
-        create.ValidateOnly = false;
-        create.RetryOnQuotaViolation = true;
+        CreatePartitionsOptions create = new CreatePartitionsOptions()
+            .TimeoutMs(10)
+            .ValidateOnly(true)
+            .RetryOnQuotaViolation(false);
+        create.TimeoutMs(20);
+        create.ValidateOnly(false);
+        create.RetryOnQuotaViolation(true);
         Assert.Equal((20, (sbyte)0, (sbyte)1), ReadBack(create));
-        create.TimeoutMs = null;
+        create.TimeoutMs(null);
         Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(create));
 
-        Assert.Equal(0, ReadBack(new DeleteRecordsOptions { TimeoutMs = -5 }));
-        DeleteRecordsOptions delete = new DeleteRecordsOptions { TimeoutMs = 10 };
-        delete.TimeoutMs = 30;
+        Assert.Equal(0, ReadBack(new DeleteRecordsOptions().TimeoutMs(-5)));
+        DeleteRecordsOptions delete = new DeleteRecordsOptions().TimeoutMs(10);
+        delete.TimeoutMs(30);
         Assert.Equal(30, ReadBack(delete));
-        delete.TimeoutMs = null;
+        delete.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(delete));
     }
 
@@ -287,13 +285,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
         // A negative timeout is not a precondition: it is sent as 0, as Java clamps the deadline.
         foreach (Action negative in new Action[]
                  {
-                     () => admin.ListTopics(new ListTopicsOptions { TimeoutMs = -1 }),
+                     () => admin.ListTopics(new ListTopicsOptions().TimeoutMs(-1)),
                      () => admin.CreatePartitions(
                          new Dictionary<string, NewPartitions>(),
-                         new CreatePartitionsOptions { TimeoutMs = -1 }),
+                         new CreatePartitionsOptions().TimeoutMs(-1)),
                      () => admin.DeleteRecords(
                          new Dictionary<TopicPartition, RecordsToDelete>(),
-                         new DeleteRecordsOptions { TimeoutMs = -1 }),
+                         new DeleteRecordsOptions().TimeoutMs(-1)),
                  })
         {
             Assert.Null(Record.Exception(negative));

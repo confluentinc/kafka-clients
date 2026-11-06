@@ -224,11 +224,12 @@ public sealed class PublicAdminRemoveMembersFromConsumerGroupTests
         Assert.Null(typeof(AsyncRemoveMembersFromConsumerGroupResult).GetProperty(
             "RemoveAll", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
 
-        PropertyInfo? onOptions = typeof(RemoveMembersFromConsumerGroupOptions).GetProperty(
-            nameof(RemoveMembersFromConsumerGroupOptions.RemoveAll), BindingFlags.Public | BindingFlags.Instance);
-        Assert.NotNull(onOptions);
-        Assert.Equal(typeof(bool), onOptions!.PropertyType);
-        Assert.True(new RemoveMembersFromConsumerGroupOptions().RemoveAll);
-        Assert.False(new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove("instance-1") }).RemoveAll);
+        Assert.Equal(
+            typeof(bool),
+            Getters.Get(
+                typeof(RemoveMembersFromConsumerGroupOptions),
+                nameof(RemoveMembersFromConsumerGroupOptions.RemoveAll)).ReturnType);
+        Assert.True(new RemoveMembersFromConsumerGroupOptions().RemoveAll());
+        Assert.False(new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove("instance-1") }).RemoveAll());
     }
 }

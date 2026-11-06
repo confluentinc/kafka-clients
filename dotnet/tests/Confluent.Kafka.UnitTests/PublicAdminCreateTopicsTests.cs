@@ -133,13 +133,11 @@ public sealed class PublicAdminCreateTopicsTests
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 4, 2)
-            {
-                Configs = new Dictionary<string, string>
+                .Configs(new Dictionary<string, string>
                 {
                     ["cleanup.policy"] = "compact",
                     ["custom.marker"] = ConfigValue,
-                },
-            },
+                }),
         });
 
         int numPartitions = 0;
@@ -429,12 +427,12 @@ public sealed class PublicAdminCreateTopicsTests
             "assigned-topic",
             new Dictionary<int, IReadOnlyList<int>> { [0] = new[] { 0 } });
 
-        Assert.Null(assigned.NumPartitions);
-        Assert.Null(assigned.ReplicationFactor);
-        Assert.NotNull(assigned.ReplicasAssignments);
+        Assert.Null(assigned.NumPartitions());
+        Assert.Null(assigned.ReplicationFactor());
+        Assert.NotNull(assigned.ReplicasAssignments());
 
         NewTopic counted = new NewTopic("counted-topic", 1, 1);
-        Assert.Null(counted.ReplicasAssignments);
+        Assert.Null(counted.ReplicasAssignments());
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { assigned });
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -445,9 +443,9 @@ public sealed class PublicAdminCreateTopicsTests
     {
         CreateTopicsOptions options = new CreateTopicsOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.ValidateOnly);
-        Assert.True(options.RetryOnQuotaViolation);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.ValidateOnly());
+        Assert.True(options.RetryOnQuotaViolation());
     }
 
     [Theory]
@@ -462,11 +460,9 @@ public sealed class PublicAdminCreateTopicsTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic($"bools-{validateOnly}-{retryOnQuotaViolation}", 1, 1) },
-            new CreateTopicsOptions
-            {
-                ValidateOnly = validateOnly,
-                RetryOnQuotaViolation = retryOnQuotaViolation,
-            });
+            new CreateTopicsOptions()
+                .ValidateOnly(validateOnly)
+                .RetryOnQuotaViolation(retryOnQuotaViolation));
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
@@ -479,7 +475,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic("timeout-topic", 1, 1) },
-            new CreateTopicsOptions { TimeoutMs = 5_000 });
+            new CreateTopicsOptions().TimeoutMs(5_000));
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
@@ -495,9 +491,7 @@ public sealed class PublicAdminCreateTopicsTests
         AsyncCreateTopicsResult created = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 1, 1)
-            {
-                Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-            },
+                .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" }),
         });
 
         Config config = default!;
@@ -524,9 +518,7 @@ public sealed class PublicAdminCreateTopicsTests
         {
             new NewTopic("fine", 1, 1),
             new NewTopic("null-config", 1, 1)
-            {
-                Configs = new Dictionary<string, string> { ["retention.ms"] = null!, ["cleanup.policy"] = "compact" },
-            },
+                .Configs(new Dictionary<string, string> { ["retention.ms"] = null!, ["cleanup.policy"] = "compact" }),
         }));
         Assert.Equal("newTopics", failure.ParamName);
         Assert.StartsWith(
@@ -559,7 +551,7 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Null(Record.Exception(
             () => admin.CreateTopics(
                 new[] { new NewTopic("neg", 1, 1) },
-                new CreateTopicsOptions { TimeoutMs = -1 })));
+                new CreateTopicsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -568,19 +560,19 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal("name", Assert.Throws<ArgumentNullException>(() => new NewTopic(null!, 1, 1)).ParamName);
 
         NewTopic viaNonNullable = new NewTopic("t", -1, (short)-1);
-        Assert.Equal(-1, viaNonNullable.NumPartitions);
-        Assert.Equal((short)-1, viaNonNullable.ReplicationFactor);
+        Assert.Equal(-1, viaNonNullable.NumPartitions());
+        Assert.Equal((short)-1, viaNonNullable.ReplicationFactor());
 
         NewTopic viaNullable = new NewTopic("t", (int?)-1, (short?)-1);
-        Assert.Equal(-1, viaNullable.NumPartitions);
-        Assert.Equal((short)-1, viaNullable.ReplicationFactor);
+        Assert.Equal(-1, viaNullable.NumPartitions());
+        Assert.Equal((short)-1, viaNullable.ReplicationFactor());
 
-        Assert.Equal(-1, new NewTopic("t", (int?)-1, (short?)3).NumPartitions);
-        Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor);
+        Assert.Equal(-1, new NewTopic("t", (int?)-1, (short?)3).NumPartitions());
+        Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor());
 
         NewTopic unset = new NewTopic("t", (int?)null, (short?)null);
-        Assert.Null(unset.NumPartitions);
-        Assert.Null(unset.ReplicationFactor);
+        Assert.Null(unset.NumPartitions());
+        Assert.Null(unset.ReplicationFactor());
 
         foreach (Func<NewTopic> belowMinusOne in new Func<NewTopic>[]
         {
@@ -687,19 +679,19 @@ public sealed class PublicAdminCreateTopicsTests
     [InlineData(-5, 0)]
     public void TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal((expected, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal((expected, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreateTopicsOptions { ValidateOnly = true }));
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreateTopicsOptions { RetryOnQuotaViolation = false }));
+        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreateTopicsOptions().ValidateOnly(true)));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreateTopicsOptions().RetryOnQuotaViolation(false)));
 
-        CreateTopicsOptions options = new CreateTopicsOptions { ValidateOnly = true, RetryOnQuotaViolation = false, TimeoutMs = 10 };
-        options.ValidateOnly = false;
-        options.RetryOnQuotaViolation = true;
-        options.TimeoutMs = 20;
+        CreateTopicsOptions options = new CreateTopicsOptions().ValidateOnly(true).RetryOnQuotaViolation(false).TimeoutMs(10);
+        options.ValidateOnly(false);
+        options.RetryOnQuotaViolation(true);
+        options.TimeoutMs(20);
         Assert.Equal((20, (sbyte)0, (sbyte)1), ReadBack(options));
     }
 
@@ -707,16 +699,16 @@ public sealed class PublicAdminCreateTopicsTests
     public void OnlyTheSettersThatRan_ReachTheCOptions_InTheOrderTheyLastRan()
     {
         CreateTopicsOptions options = new CreateTopicsOptions();
-        options.RetryOnQuotaViolation = false;
-        options.TimeoutMs = 5;
-        options.RetryOnQuotaViolation = true;
+        options.RetryOnQuotaViolation(false);
+        options.TimeoutMs(5);
+        options.RetryOnQuotaViolation(true);
         Assert.Equal(
             new[] { nameof(CreateTopicsOptions.TimeoutMs), nameof(CreateTopicsOptions.RetryOnQuotaViolation) },
             options.Setters.InOrder);
         Assert.Equal(
             new[] { nameof(CreateTopicsOptions.TimeoutMs), nameof(CreateTopicsOptions.RetryOnQuotaViolation) },
             Built(options));
-        Assert.Equal(new[] { nameof(CreateTopicsOptions.ValidateOnly) }, Built(new CreateTopicsOptions { ValidateOnly = false }));
+        Assert.Equal(new[] { nameof(CreateTopicsOptions.ValidateOnly) }, Built(new CreateTopicsOptions().ValidateOnly(false)));
         Assert.Empty(Built(new CreateTopicsOptions()));
     }
 
@@ -724,9 +716,7 @@ public sealed class PublicAdminCreateTopicsTests
     public void TheNativeTopic_CarriesTheCountsAndTheConfigs()
     {
         NewTopic counted = new NewTopic("counted-é", 3, (short)2)
-        {
-            Configs = new Dictionary<string, string> { ["segment.ms"] = "2", ["cleanup.policy"] = "compact" },
-        };
+            .Configs(new Dictionary<string, string> { ["segment.ms"] = "2", ["cleanup.policy"] = "compact" });
         WithNativeTopic(counted, native =>
         {
             Assert.Equal("counted-é", Utf8Marshal.PtrToString(Read(native, Native.NewTopicName)));

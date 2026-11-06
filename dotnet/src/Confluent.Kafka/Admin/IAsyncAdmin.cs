@@ -64,7 +64,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// <paramref name="newTopics"/> contains a null element, or a topic name, a configuration
     /// name or a configuration value containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks), or a null configuration value, which the native
-    /// client cannot send (see <see cref="NewTopic.Configs"/>). A null topic name is rejected
+    /// client cannot send (see <see cref="NewTopic.Configs()"/>). A null topic name is rejected
     /// by the <see cref="NewTopic"/> constructor.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -188,7 +188,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListTopicsOptions.ListInternal"/> <see langword="false"/>, so internal
+    /// <see cref="ListTopicsOptions.ListInternal()"/> <see langword="false"/>, so internal
     /// topics such as <c>__consumer_offsets</c> are excluded.
     /// </param>
     /// <returns>
@@ -264,7 +264,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="DescribeClusterOptions.IncludeAuthorizedOperations"/>
+    /// <see cref="DescribeClusterOptions.IncludeAuthorizedOperations()"/>
     /// <see langword="false"/>, so <see cref="AsyncDescribeClusterResult.AuthorizedOperations"/>
     /// yields <see langword="null"/>.
     /// </param>
@@ -316,8 +316,8 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/> and
-    /// <see cref="DescribeConfigsOptions.IncludeDocumentation"/> both
+    /// <see cref="DescribeConfigsOptions.IncludeSynonyms()"/> and
+    /// <see cref="DescribeConfigsOptions.IncludeDocumentation()"/> both
     /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms()"/> comes back empty and
     /// <see cref="ConfigEntry.Documentation()"/> <see langword="null"/>.
     /// </param>
@@ -490,7 +490,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange"/>
+    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange()"/>
     /// <see langword="true"/>.
     /// </param>
     /// <returns>
@@ -649,7 +649,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListOffsetsOptions.IsolationLevel"/>
+    /// <see cref="ListOffsetsOptions.IsolationLevel()"/>
     /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>.
     /// </param>
     /// <returns>
@@ -722,7 +722,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. Note
-    /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations"/> defaults to
+    /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations()"/> defaults to
     /// <see langword="false"/>, which leaves
     /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
     /// </param>
@@ -754,7 +754,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. Note
-    /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations"/> defaults to
+    /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations()"/> defaults to
     /// <see langword="false"/>, which leaves
     /// <see cref="ClassicGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
     /// </param>
@@ -811,7 +811,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// </remarks>
     /// <param name="groupSpecs">
     /// The groups to query, each with the partitions to restrict its result to. A spec
-    /// whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> is
+    /// whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions()"/> is
     /// <see langword="null"/> returns every committed partition of that group; an
     /// <b>empty</b> collection returns nothing for it. The two are distinct.
     /// </param>

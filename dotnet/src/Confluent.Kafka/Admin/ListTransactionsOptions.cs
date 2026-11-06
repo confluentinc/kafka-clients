@@ -38,15 +38,15 @@ public sealed class ListTransactionsOptions
     private long _filteredDuration = -1L;
     private string? _filteredTransactionalIdPattern;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public ListTransactionsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -54,19 +54,22 @@ public sealed class ListTransactionsOptions
     /// transactions in every state. Java's <c>filterStates</c> and
     /// <c>filteredStates()</c>.
     /// </summary>
-    /// <value>Never <see langword="null"/>; a de-duplicated read-only copy.</value>
+    /// <returns>Never <see langword="null"/>; a de-duplicated read-only copy.</returns>
+    public IReadOnlyCollection<TransactionState> FilteredStates() => _filteredStates;
+
+    /// <summary>Sets <see cref="FilteredStates()"/>.</summary>
+    /// <param name="states">The transaction states to filter on, or an empty collection — the default — to return
+    /// transactions in every state.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value is <see langword="null"/>, which Java's <c>new HashSet&lt;&gt;(states)</c>
     /// rejects. An empty collection means every state.
     /// </exception>
-    public IReadOnlyCollection<TransactionState> FilteredStates
+    public ListTransactionsOptions FilterStates(IReadOnlyCollection<TransactionState> states)
     {
-        get => _filteredStates;
-        set
-        {
-            _filteredStates = CopyOf(value, nameof(value));
-            Setters.Ran(nameof(FilteredStates));
-        }
+        _filteredStates = CopyOf(states, nameof(states));
+        Setters.Ran(nameof(FilterStates));
+        return this;
     }
 
     /// <summary>
@@ -74,19 +77,22 @@ public sealed class ListTransactionsOptions
     /// transactions from every producer. Java's <c>filterProducerIds</c> and
     /// <c>filteredProducerIds()</c>.
     /// </summary>
-    /// <value>Never <see langword="null"/>; a de-duplicated read-only copy.</value>
+    /// <returns>Never <see langword="null"/>; a de-duplicated read-only copy.</returns>
+    public IReadOnlyCollection<long> FilteredProducerIds() => _filteredProducerIds;
+
+    /// <summary>Sets <see cref="FilteredProducerIds()"/>.</summary>
+    /// <param name="producerIdFilters">The producer ids to filter on, or an empty collection — the default — to
+    /// return transactions from every producer.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value is <see langword="null"/>, which Java's
     /// <c>new HashSet&lt;&gt;(producerIdFilters)</c> rejects.
     /// </exception>
-    public IReadOnlyCollection<long> FilteredProducerIds
+    public ListTransactionsOptions FilterProducerIds(IReadOnlyCollection<long> producerIdFilters)
     {
-        get => _filteredProducerIds;
-        set
-        {
-            _filteredProducerIds = CopyOf(value, nameof(value));
-            Setters.Ran(nameof(FilteredProducerIds));
-        }
+        _filteredProducerIds = CopyOf(producerIdFilters, nameof(producerIdFilters));
+        Setters.Ran(nameof(FilterProducerIds));
+        return this;
     }
 
     /// <summary>
@@ -94,15 +100,20 @@ public sealed class ListTransactionsOptions
     /// default <c>-1</c> — applies no duration filter. Java's
     /// <c>filterOnDuration</c> and <c>filteredDuration()</c>.
     /// </summary>
+    /// <returns>Return only transactions running longer than this many milliseconds; negative — the default
+    /// <c>-1</c> — applies no duration filter.</returns>
     /// <remarks><c>0</c> is a filter ("longer than 0 ms"), not the neutral value.</remarks>
-    public long FilteredDuration
+    public long FilteredDuration() => _filteredDuration;
+
+    /// <summary>Sets <see cref="FilteredDuration()"/>.</summary>
+    /// <param name="durationMs">Return only transactions running longer than this many milliseconds; negative — the
+    /// default <c>-1</c> — applies no duration filter.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public ListTransactionsOptions FilterOnDuration(long durationMs)
     {
-        get => _filteredDuration;
-        set
-        {
-            _filteredDuration = value;
-            Setters.Ran(nameof(FilteredDuration));
-        }
+        _filteredDuration = durationMs;
+        Setters.Ran(nameof(FilterOnDuration));
+        return this;
     }
 
     /// <summary>
@@ -110,18 +121,23 @@ public sealed class ListTransactionsOptions
     /// the default — for no filter. Java's <c>filterOnTransactionalIdPattern</c> and
     /// <c>filteredTransactionalIdPattern()</c>.
     /// </summary>
+    /// <returns>A transactional-id regular-expression pattern to filter on, or <see langword="null"/> — the default
+    /// — for no filter.</returns>
     /// <remarks>
     /// <see langword="null"/> and <c>""</c> are unequal values, as in Java's <c>equals</c>, but
     /// both mean "no pattern filter", as Java's javadoc says.
     /// </remarks>
-    public string? FilteredTransactionalIdPattern
+    public string? FilteredTransactionalIdPattern() => _filteredTransactionalIdPattern;
+
+    /// <summary>Sets <see cref="FilteredTransactionalIdPattern()"/>.</summary>
+    /// <param name="pattern">A transactional-id regular-expression pattern to filter on, or <see langword="null"/>
+    /// — the default — for no filter.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public ListTransactionsOptions FilterOnTransactionalIdPattern(string? pattern)
     {
-        get => _filteredTransactionalIdPattern;
-        set
-        {
-            _filteredTransactionalIdPattern = value;
-            Setters.Ran(nameof(FilteredTransactionalIdPattern));
-        }
+        _filteredTransactionalIdPattern = pattern;
+        Setters.Ran(nameof(FilterOnTransactionalIdPattern));
+        return this;
     }
 
     /// <summary>
@@ -131,10 +147,10 @@ public sealed class ListTransactionsOptions
     /// <returns>Whether the two options carry the same filters.</returns>
     public override bool Equals(object? obj) =>
         obj is ListTransactionsOptions other
-        && FilteredDuration == other.FilteredDuration
+        && _filteredDuration == other._filteredDuration
         && string.Equals(
-            FilteredTransactionalIdPattern,
-            other.FilteredTransactionalIdPattern,
+            _filteredTransactionalIdPattern,
+            other._filteredTransactionalIdPattern,
             StringComparison.Ordinal)
         && SetEquals(_filteredStates, other._filteredStates)
         && SetEquals(_filteredProducerIds, other._filteredProducerIds);
@@ -156,11 +172,11 @@ public sealed class ListTransactionsOptions
                 hash += producerId.GetHashCode();
             }
 
-            hash = (hash * 31) + FilteredDuration.GetHashCode();
+            hash = (hash * 31) + _filteredDuration.GetHashCode();
             return (hash * 31)
-                + (FilteredTransactionalIdPattern is null
+                + (_filteredTransactionalIdPattern is null
                     ? 0
-                    : StringComparer.Ordinal.GetHashCode(FilteredTransactionalIdPattern));
+                    : StringComparer.Ordinal.GetHashCode(_filteredTransactionalIdPattern));
         }
     }
 
@@ -177,9 +193,9 @@ public sealed class ListTransactionsOptions
                 ", ",
                 _filteredStates.Select(static state => TransactionMarshal.NameFromState(state) ?? state.ToString())),
             string.Join(", ", _filteredProducerIds),
-            FilteredDuration,
-            FilteredTransactionalIdPattern ?? "null",
-            TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
+            _filteredDuration,
+            _filteredTransactionalIdPattern ?? "null",
+            _timeoutMs.HasValue ? _timeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
 
     private static IReadOnlyCollection<T> CopyOf<T>(IReadOnlyCollection<T> value, string parameterName)
         where T : struct

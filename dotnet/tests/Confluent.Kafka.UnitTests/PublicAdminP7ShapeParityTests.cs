@@ -183,27 +183,26 @@ public sealed class PublicAdminP7ShapeParityTests
     }
 
     [Fact]
-    public void OptionBorneDiscriminants_AreNullableProperties()
+    public void OptionBorneDiscriminants_AreNullableGetters()
     {
         Assert.Equal(
             typeof(IReadOnlyList<KafkaPrincipal>),
-            typeof(DescribeDelegationTokenOptions).GetProperty(
-                nameof(DescribeDelegationTokenOptions.Owners))!.PropertyType);
+            Getters.Get(
+                typeof(DescribeDelegationTokenOptions), nameof(DescribeDelegationTokenOptions.Owners)).ReturnType);
 
         Assert.Equal(
             typeof(int?),
-            typeof(DescribeFeaturesOptions).GetProperty(nameof(DescribeFeaturesOptions.NodeId))!.PropertyType);
+            Getters.Get(typeof(DescribeFeaturesOptions), nameof(DescribeFeaturesOptions.NodeId)).ReturnType);
 
         // The owner is optional too — absent means "the caller's own principal".
         Assert.Equal(
             typeof(KafkaPrincipal),
-            typeof(CreateDelegationTokenOptions).GetProperty(
-                nameof(CreateDelegationTokenOptions.Owner))!.PropertyType);
+            Getters.Get(typeof(CreateDelegationTokenOptions), nameof(CreateDelegationTokenOptions.Owner)).ReturnType);
 
         // But the renewer list is not nullable: Java defaults it to an empty list.
         Assert.Equal(
             Array.Empty<KafkaPrincipal>(),
-            new CreateDelegationTokenOptions().Renewers);
+            new CreateDelegationTokenOptions().Renewers());
     }
 
     [Fact]

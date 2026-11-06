@@ -29,43 +29,53 @@ public sealed class CreatePartitionsOptions
 
     private bool _retryOnQuotaViolation = true;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public CreatePartitionsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// Validate the request without actually creating the partitions — Java's
     /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool ValidateOnly
+    /// <returns>Validate the request without actually creating the partitions — Java's <c>validateOnly()</c>.
+    /// Defaults to <see langword="false"/>, as Java's does.</returns>
+    public bool ValidateOnly() => _validateOnly;
+
+    /// <summary>Sets <see cref="ValidateOnly()"/>.</summary>
+    /// <param name="validateOnly">Validate the request without actually creating the partitions — Java's
+    /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public CreatePartitionsOptions ValidateOnly(bool validateOnly)
     {
-        get => _validateOnly;
-        set
-        {
-            _validateOnly = value;
-            Setters.Ran(nameof(ValidateOnly));
-        }
+        _validateOnly = validateOnly;
+        Setters.Ran(nameof(ValidateOnly));
+        return this;
     }
 
     /// <summary>
     /// Retry automatically when the broker reports a quota violation — Java's
     /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
     /// </summary>
-    public bool RetryOnQuotaViolation
+    /// <returns>Retry automatically when the broker reports a quota violation — Java's
+    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
+    public bool RetryOnQuotaViolation() => _retryOnQuotaViolation;
+
+    /// <summary>Sets <see cref="RetryOnQuotaViolation()"/>.</summary>
+    /// <param name="retryOnQuotaViolation">Retry automatically when the broker reports a quota violation — Java's
+    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public CreatePartitionsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {
-        get => _retryOnQuotaViolation;
-        set
-        {
-            _retryOnQuotaViolation = value;
-            Setters.Ran(nameof(RetryOnQuotaViolation));
-        }
+        _retryOnQuotaViolation = retryOnQuotaViolation;
+        Setters.Ran(nameof(RetryOnQuotaViolation));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

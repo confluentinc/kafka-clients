@@ -339,14 +339,13 @@ public sealed class PublicAdminLogDirsShapeParityTests
                      typeof(DescribeReplicaLogDirsOptions),
                  })
         {
-            Assert.Equal(new[] { "TimeoutMs" }, PropertyNames(type));
+            SetterMethods.AssertGettersAndSetters(type, "TimeoutMs");
 
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
 
             // Java's default is the client default, which is null here, not 0.
-            Assert.Null((int?)timeout.GetValue(Activator.CreateInstance(type)));
+            Assert.Null((int?)Getters.Get(type, "TimeoutMs").Invoke(Activator.CreateInstance(type), null));
         }
     }
 

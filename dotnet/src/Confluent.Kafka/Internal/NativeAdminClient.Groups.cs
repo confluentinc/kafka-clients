@@ -100,13 +100,13 @@ internal sealed partial class NativeAdminClient
         {
             if (options is not null)
             {
-                foreach (string protocolType in options.ProtocolTypes)
+                foreach (string protocolType in options.ProtocolTypes())
                 {
                     AdminStrings.Validate(protocolType, nameof(options));
                 }
 
-                RequireDefinedFilter(options.GroupStates, GroupMarshal.NameFromState, nameof(ListGroupsOptions.GroupStates));
-                RequireDefinedFilter(options.Types, GroupMarshal.NameFromType, nameof(ListGroupsOptions.Types));
+                RequireDefinedFilter(options.GroupStates(), GroupMarshal.NameFromState, nameof(ListGroupsOptions.GroupStates));
+                RequireDefinedFilter(options.Types(), GroupMarshal.NameFromType, nameof(ListGroupsOptions.Types));
             }
 
             SafeAdminResultHandle result = CallWithOptions(
@@ -141,16 +141,16 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListGroupsOptions.TimeoutMs):
-                NativeMethods.ListGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
-            case nameof(ListGroupsOptions.GroupStates):
-                SetSingletonList(native, options.GroupStates, GroupMarshal.StateSingleton, s_listGroupsOptionsInGroupStates, ref outErr);
+            case nameof(ListGroupsOptions.InGroupStates):
+                SetSingletonList(native, options.GroupStates(), GroupMarshal.StateSingleton, s_listGroupsOptionsInGroupStates, ref outErr);
                 break;
-            case nameof(ListGroupsOptions.Types):
-                SetSingletonList(native, options.Types, GroupMarshal.TypeSingleton, s_listGroupsOptionsWithTypes, ref outErr);
+            case nameof(ListGroupsOptions.WithTypes):
+                SetSingletonList(native, options.Types(), GroupMarshal.TypeSingleton, s_listGroupsOptionsWithTypes, ref outErr);
                 break;
-            case nameof(ListGroupsOptions.ProtocolTypes):
-                SetProtocolTypes(native, options.ProtocolTypes, ref outErr);
+            case nameof(ListGroupsOptions.WithProtocolTypes):
+                SetProtocolTypes(native, options.ProtocolTypes(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListGroupsOptions has no C setter for " + setter + ".");
@@ -271,11 +271,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeConsumerGroupsOptions.TimeoutMs):
-                NativeMethods.DescribeConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeConsumerGroupsOptions.IncludeAuthorizedOperations):
                 NativeMethods.DescribeConsumerGroupsOptionsSetIncludeAuthorizedOperations(
-                    native, options.IncludeAuthorizedOperations ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeAuthorizedOperations() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeConsumerGroupsOptions has no C setter for " + setter + ".");
@@ -332,11 +332,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeClassicGroupsOptions.TimeoutMs):
-                NativeMethods.DescribeClassicGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeClassicGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeClassicGroupsOptions.IncludeAuthorizedOperations):
                 NativeMethods.DescribeClassicGroupsOptionsSetIncludeAuthorizedOperations(
-                    native, options.IncludeAuthorizedOperations ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeAuthorizedOperations() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeClassicGroupsOptions has no C setter for " + setter + ".");

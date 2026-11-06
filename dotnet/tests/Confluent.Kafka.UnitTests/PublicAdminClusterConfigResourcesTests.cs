@@ -69,7 +69,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
-            new DescribeClusterOptions { IncludeFencedBrokers = includeFencedBrokers });
+            new DescribeClusterOptions().IncludeFencedBrokers(includeFencedBrokers));
 
         IReadOnlyCollection<Node> nodes = await TestTimeout.Run(() => result.Nodes().Get(), s_deadline);
         Assert.Equal(3, nodes.Count);
@@ -88,7 +88,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
-            new DescribeClusterOptions { IncludeAuthorizedOperations = true });
+            new DescribeClusterOptions().IncludeAuthorizedOperations(true));
 
         IReadOnlyCollection<AclOperation>? operations =
             await TestTimeout.Run(() => result.AuthorizedOperations().Get(), s_deadline);
@@ -238,9 +238,9 @@ public sealed class PublicAdminClusterConfigResourcesTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
-            () => admin.DescribeCluster(new DescribeClusterOptions { TimeoutMs = -1 })));
+            () => admin.DescribeCluster(new DescribeClusterOptions().TimeoutMs(-1))));
         Assert.Null(Record.Exception(
-            () => admin.ListConfigResources(null, new ListConfigResourcesOptions { TimeoutMs = -5 })));
+            () => admin.ListConfigResources(null, new ListConfigResourcesOptions().TimeoutMs(-5))));
     }
 
     [Fact]

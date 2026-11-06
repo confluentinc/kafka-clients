@@ -198,7 +198,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
             {
                 [new TopicPartition("p4-apr-rf", 0)] = new NewPartitionReassignment(new[] { 0, 1 }),
             },
-            new AlterPartitionReassignmentsOptions { AllowReplicationFactorChange = allow });
+            new AlterPartitionReassignmentsOptions().AllowReplicationFactorChange(allow));
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }

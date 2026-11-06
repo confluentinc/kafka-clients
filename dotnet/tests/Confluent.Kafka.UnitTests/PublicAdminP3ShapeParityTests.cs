@@ -250,9 +250,9 @@ public sealed class PublicAdminP3ShapeParityTests
     public void Options_MatchJavasFieldsAndDefaults()
     {
         DescribeClusterOptions cluster = new DescribeClusterOptions();
-        Assert.Null(cluster.TimeoutMs);
-        Assert.False(cluster.IncludeAuthorizedOperations);
-        Assert.False(cluster.IncludeFencedBrokers);
+        Assert.Null(cluster.TimeoutMs());
+        Assert.False(cluster.IncludeAuthorizedOperations());
+        Assert.False(cluster.IncludeFencedBrokers());
         AssertOptionNames(
             typeof(DescribeClusterOptions),
             nameof(DescribeClusterOptions.IncludeAuthorizedOperations),
@@ -261,7 +261,7 @@ public sealed class PublicAdminP3ShapeParityTests
 
         // Java's ListConfigResourcesOptions declares no members of its own, so the inherited timeout is the whole surface.
         ListConfigResourcesOptions configResources = new ListConfigResourcesOptions();
-        Assert.Null(configResources.TimeoutMs);
+        Assert.Null(configResources.TimeoutMs());
         AssertOptionNames(typeof(ListConfigResourcesOptions), nameof(configResources.TimeoutMs));
 
         foreach (Type type in new[]
@@ -270,9 +270,8 @@ public sealed class PublicAdminP3ShapeParityTests
                      typeof(ListConfigResourcesOptions),
                  })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
@@ -280,9 +279,7 @@ public sealed class PublicAdminP3ShapeParityTests
         type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
 
     private static void AssertOptionNames(Type optionsType, params string[] expected) =>
-        Assert.Equal(
-            expected.OrderBy(name => name, StringComparer.Ordinal),
-            optionsType.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
+        SetterMethods.AssertGettersAndSetters(optionsType, expected);
 
     private static byte NullableFlag(MemberInfo member) => NullableAnnotation.Flag(member);
 

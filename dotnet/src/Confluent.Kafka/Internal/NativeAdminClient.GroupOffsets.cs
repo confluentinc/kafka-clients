@@ -213,11 +213,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListConsumerGroupOffsetsOptions.TimeoutMs):
-                NativeMethods.ListConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(ListConsumerGroupOffsetsOptions.RequireStable):
                 NativeMethods.ListConsumerGroupOffsetsOptionsSetRequireStable(
-                    native, options.RequireStable ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.RequireStable() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListConsumerGroupOffsetsOptions has no C setter for " + setter + ".");
@@ -254,7 +254,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentException($"The spec for group id '{entry.Key}' must not be null.", nameof(groupSpecs));
             }
 
-            IReadOnlyCollection<TopicPartition>? selected = entry.Value.TopicPartitions;
+            IReadOnlyCollection<TopicPartition>? selected = entry.Value.TopicPartitions();
             if (selected is not null)
             {
                 foreach (TopicPartition partition in selected)
@@ -281,7 +281,7 @@ internal sealed partial class NativeAdminClient
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.ListConsumerGroupOffsetsSpecNew(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        IReadOnlyCollection<TopicPartition>? selected = spec.TopicPartitions;
+        IReadOnlyCollection<TopicPartition>? selected = spec.TopicPartitions();
         if (selected is null)
         {
             return native;
@@ -494,7 +494,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AlterConsumerGroupOffsetsOptions.TimeoutMs):
-                NativeMethods.AlterConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AlterConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterConsumerGroupOffsetsOptions has no C setter for " + setter + ".");
@@ -654,7 +654,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteConsumerGroupOffsetsOptions.TimeoutMs):
-                NativeMethods.DeleteConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteConsumerGroupOffsetsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteConsumerGroupOffsetsOptions has no C setter for " + setter + ".");
@@ -711,7 +711,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteConsumerGroupsOptions.TimeoutMs):
-                NativeMethods.DeleteConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteConsumerGroupsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteConsumerGroupsOptions has no C setter for " + setter + ".");
@@ -735,8 +735,8 @@ internal sealed partial class NativeAdminClient
             }
 
             AdminStrings.Validate(groupId, nameof(groupId));
-            AdminStrings.Validate(options.Reason, nameof(options));
-            foreach (MemberToRemove member in options.Members)
+            AdminStrings.Validate(options.Reason(), nameof(options));
+            foreach (MemberToRemove member in options.Members())
             {
                 AdminStrings.Validate(member.GroupInstanceId(), nameof(options));
             }
@@ -808,16 +808,16 @@ internal sealed partial class NativeAdminClient
     // The no-argument constructor is Java's "remove every member"; otherwise the members cross at creation.
     private static IntPtr NewRemoveMembersOptionsWithMembers(RemoveMembersFromConsumerGroupOptions options, ref IntPtr outErr)
     {
-        if (options.RemoveAll)
+        if (options.RemoveAll())
         {
             return NativeMethods.RemoveMembersFromConsumerGroupOptionsNew(ref outErr);
         }
 
-        List<IntPtr> members = new List<IntPtr>(options.Members.Count);
+        List<IntPtr> members = new List<IntPtr>(options.Members().Count);
         IntPtr list = IntPtr.Zero;
         try
         {
-            foreach (MemberToRemove member in options.Members)
+            foreach (MemberToRemove member in options.Members())
             {
                 members.Add(NewNativeMemberToRemove(member));
             }
@@ -841,19 +841,19 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(RemoveMembersFromConsumerGroupOptions.Reason):
-                if (options.Reason is null)
+                if (options.Reason() is not { } reasonText)
                 {
                     NativeMethods.RemoveMembersFromConsumerGroupOptionsSetReason(native, IntPtr.Zero, ref outErr);
                 }
                 else
                 {
-                    using Utf8Marshal.PinnedUtf8String reason = Utf8Marshal.Pin(options.Reason);
+                    using Utf8Marshal.PinnedUtf8String reason = Utf8Marshal.Pin(reasonText);
                     NativeMethods.RemoveMembersFromConsumerGroupOptionsSetReason(native, reason.Pointer, ref outErr);
                 }
 
                 break;
             case nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs):
-                NativeMethods.RemoveMembersFromConsumerGroupOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.RemoveMembersFromConsumerGroupOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("RemoveMembersFromConsumerGroupOptions has no C setter for " + setter + ".");

@@ -185,7 +185,7 @@ public sealed class PublicAdminDeleteAclsTests
         // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DeleteAcls(
-                new[] { Filter("t") }, new DeleteAclsOptions { TimeoutMs = -1 })));
+                new[] { Filter("t") }, new DeleteAclsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -198,7 +198,7 @@ public sealed class PublicAdminDeleteAclsTests
     }
 
     [Fact]
-    public void Options_DefaultToJavasDefaults() => Assert.Null(new DeleteAclsOptions().TimeoutMs);
+    public void Options_DefaultToJavasDefaults() => Assert.Null(new DeleteAclsOptions().TimeoutMs());
 
     [Fact]
     public void G4_5_FilterResult_ExposesException_NotError()

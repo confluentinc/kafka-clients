@@ -417,7 +417,7 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        DescribeClusterOptions options = new DescribeClusterOptions { IncludeAuthorizedOperations = true };
+        DescribeClusterOptions options = new DescribeClusterOptions().IncludeAuthorizedOperations(true);
 
         DescribeClusterResult syncResult = sync.DescribeCluster(options);
         AsyncDescribeClusterResult asyncResult = async.DescribeCluster(options);
@@ -481,9 +481,7 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         NewTopic topic = new NewTopic("diff-k", 1, 1)
-        {
-            Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-        };
+            .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" });
         await Seed(sync, async, topic);
 
         ConfigResource present = new ConfigResource(ConfigResourceType.TOPIC, "diff-k");
@@ -1132,7 +1130,7 @@ public sealed class PublicAdminP14DifferentialTests
 
         Dictionary<string, ListConsumerGroupOffsetsSpec> one = new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
         {
-            ["diff-z-one"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { selected } },
+            ["diff-z-one"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { selected }),
         };
         ListConsumerGroupOffsetsResult syncOne = sync.ListConsumerGroupOffsets(one);
         AsyncListConsumerGroupOffsetsResult asyncOne = async.ListConsumerGroupOffsets(one);
@@ -1326,8 +1324,8 @@ public sealed class PublicAdminP14DifferentialTests
         };
 
         AssertThrowAlike<ArgumentOutOfRangeException>(
-            () => sync.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }),
-            () => async.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }));
+            () => sync.ListGroups(new ListGroupsOptions().InGroupStates(new[] { (GroupState)(-1) })),
+            () => async.ListGroups(new ListGroupsOptions().InGroupStates(new[] { (GroupState)(-1) })));
 
         AssertThrowAlike(() => sync.DescribeConsumerGroups(null!), () => async.DescribeConsumerGroups(null!));
         AssertThrowAlike<ArgumentException>(
@@ -1353,12 +1351,12 @@ public sealed class PublicAdminP14DifferentialTests
             () => sync.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
-                    ["diff-ae-group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { nullTopic } },
+                    ["diff-ae-group"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { nullTopic }),
                 }),
             () => async.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
-                    ["diff-ae-group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { nullTopic } },
+                    ["diff-ae-group"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { nullTopic }),
                 }));
 
         AssertThrowAlike(
@@ -1651,7 +1649,7 @@ public sealed class PublicAdminP14DifferentialTests
         byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac();
         byte[] asyncMac =
             (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac();
-        RenewDelegationTokenOptions options = new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L };
+        RenewDelegationTokenOptions options = new RenewDelegationTokenOptions().RenewTimePeriodMs(3_600_000L);
 
         object? renewed = await Agree(
             FutureProbe.Of(sync.RenewDelegationToken(syncMac, options).ExpiryTimestamp()),
@@ -1683,7 +1681,7 @@ public sealed class PublicAdminP14DifferentialTests
         byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac();
         byte[] asyncMac =
             (await Minted(FutureProbe.Of(async.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac();
-        ExpireDelegationTokenOptions options = new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L };
+        ExpireDelegationTokenOptions options = new ExpireDelegationTokenOptions().ExpiryTimePeriodMs(0L);
 
         object? expired = await Agree(
             FutureProbe.Of(sync.ExpireDelegationToken(syncMac, options).ExpiryTimestamp()),
@@ -1831,9 +1829,9 @@ public sealed class PublicAdminP14DifferentialTests
         {
             ["metadata\0version"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
         };
-        CreateDelegationTokenOptions noRenewers = new CreateDelegationTokenOptions { Renewers = null! };
-        CreateDelegationTokenOptions nullRenewer = new CreateDelegationTokenOptions { Renewers = new KafkaPrincipal[] { null! } };
-        DescribeDelegationTokenOptions nullOwner = new DescribeDelegationTokenOptions { Owners = new KafkaPrincipal[] { null! } };
+        CreateDelegationTokenOptions noRenewers = new CreateDelegationTokenOptions().Renewers(null!);
+        CreateDelegationTokenOptions nullRenewer = new CreateDelegationTokenOptions().Renewers(new KafkaPrincipal[] { null! });
+        DescribeDelegationTokenOptions nullOwner = new DescribeDelegationTokenOptions().Owners(new KafkaPrincipal[] { null! });
 
         AssertThrowAlike<ArgumentException>(
             () => sync.DescribeUserScramCredentials(nulUser), () => async.DescribeUserScramCredentials(nulUser));
@@ -1995,13 +1993,11 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        ListTransactionsOptions filtered = new ListTransactionsOptions
-        {
-            FilteredStates = new[] { TransactionState.ONGOING },
-            FilteredProducerIds = new[] { 7L },
-            FilteredDuration = 1_000L,
-            FilteredTransactionalIdPattern = "diff-lt-.*",
-        };
+        ListTransactionsOptions filtered = new ListTransactionsOptions()
+            .FilterStates(new[] { TransactionState.ONGOING })
+            .FilterProducerIds(new[] { 7L })
+            .FilterOnDuration(1_000L)
+            .FilterOnTransactionalIdPattern("diff-lt-.*");
 
         foreach (ListTransactionsOptions? options in new[] { null, filtered })
         {
@@ -2061,7 +2057,7 @@ public sealed class PublicAdminP14DifferentialTests
         TopicPartition[] nulTopic = { new TopicPartition("diff\0pg", 0) };
         AbortTransactionSpec nullTopicSpec = new AbortTransactionSpec(default, 1L, 1, 1);
         AbortTransactionSpec nulTopicSpec = new AbortTransactionSpec(new TopicPartition("diff\0pg", 0), 1L, 1, 1);
-        ListTransactionsOptions nulPattern = new ListTransactionsOptions { FilteredTransactionalIdPattern = "diff\0pg" };
+        ListTransactionsOptions nulPattern = new ListTransactionsOptions().FilterOnTransactionalIdPattern("diff\0pg");
 
         AssertThrowAlike(() => sync.FenceProducers(null!), () => async.FenceProducers(null!));
         AssertThrowAlike<ArgumentException>(() => sync.FenceProducers(nullId), () => async.FenceProducers(nullId));
@@ -2320,8 +2316,8 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncCreateTopicsResult asyncCreated = async.CreateTopics(topics);
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncCreated.All()), FutureProbe.Of(asyncCreated.All())));
 
-        Uuid syncId = Assert.IsType<Uuid>(await FutureProbe.Of(syncCreated.TopicId(topics[0].Name)).Outcome());
-        Uuid asyncId = Assert.IsType<Uuid>(await FutureProbe.Of(asyncCreated.TopicId(topics[0].Name)).Outcome());
+        Uuid syncId = Assert.IsType<Uuid>(await FutureProbe.Of(syncCreated.TopicId(topics[0].Name())).Outcome());
+        Uuid asyncId = Assert.IsType<Uuid>(await FutureProbe.Of(asyncCreated.TopicId(topics[0].Name())).Outcome());
         Assert.NotEqual(Uuid.ZERO_UUID, syncId);
         Assert.NotEqual(Uuid.ZERO_UUID, asyncId);
         return (syncId, asyncId);
@@ -2351,11 +2347,9 @@ public sealed class PublicAdminP14DifferentialTests
         new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.USER] = user });
 
     private static CreateDelegationTokenOptions Renewers(params string[] names) =>
-        new CreateDelegationTokenOptions
-        {
-            Renewers = names.Select(name => new KafkaPrincipal("User", name)).ToArray(),
-            MaxLifetimeMs = 86_400_000L,
-        };
+        new CreateDelegationTokenOptions()
+            .Renewers(names.Select(name => new KafkaPrincipal("User", name)).ToArray())
+            .MaxLifetimeMs(86_400_000L);
 
     private static async Task<DelegationToken> Minted(FutureProbe minted) =>
         Assert.IsType<DelegationToken>(await minted.Outcome());
