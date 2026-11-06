@@ -33,6 +33,8 @@ use std::path::{Path, PathBuf};
 use crate::config_consts;
 use crate::java_parse::{parse_expr, strip_comments, Expr};
 
+pub(crate) mod js;
+
 type Res<T> = anyhow::Result<T>;
 
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";

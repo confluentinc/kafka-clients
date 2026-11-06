@@ -13,7 +13,8 @@
 
 .PHONY: build build-all devel-build build-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
-	select-tests pre-push-test-selection clean-test-selection clean
+	select-tests pre-push-test-selection clean-test-selection clean \
+	build-javascript test-javascript verify-javascript
 
 build: init-hooks build-all
 
@@ -100,6 +101,22 @@ verify-commit-checks: submodules
 	$(MAKE) -C c devel-build
 	$(MAKE) -C rust format-check check-generated lint test-integration
 	$(MAKE) -C c test
+
+# ── The Node.js client ───────────────────────────────────────────────────
+#
+# The Node.js client (javascript/): standalone for now, not part of `build`,
+# `test` or `verify`, so those need no Node.js. javascript/Makefile expects the
+# Rust library already built, so these targets build it first.
+build-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript build
+
+# The Node.js client's unit tests, then its broker-backed test against a
+# scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS when set).
+test-javascript: build-javascript
+	$(MAKE) -C javascript test
+
+verify-javascript: test-javascript
 
 # `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`
 # bumps the versions of the Rust crate, the Python wheels and the .NET package:

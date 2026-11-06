@@ -1,0 +1,143 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+'use strict';
+
+// What every generated error class shares (private): Java's Throwable
+// constructors in JavaScript's `(message?, {cause}?)` form, and the fields a
+// client error carries (python/confluent_kafka/_throwable.py's counterpart).
+//
+// A class's FFI id is registered with `setFfiId` by its generated module (the
+// Python classes' `_ffi_id`); a class without one has its nearest ancestor's,
+// or none.
+
+const { FFI_NAMES } = require('./_error_registry');
+
+/** @type {WeakMap<Function, number>} */
+const ids = new WeakMap();
+
+/**
+ * Registers the `kafka_common_Error_e` value of a generated class.
+ *
+ * @param {Function} cls
+ * @param {number} id
+ */
+function setFfiId(cls, id) {
+  ids.set(cls, id);
+}
+
+/**
+ * The FFI id `cls` itself registered, or `undefined`.
+ *
+ * @param {Function} cls
+ * @returns {number | undefined}
+ */
+function ownFfiId(cls) {
+  return ids.get(cls);
+}
+
+/**
+ * The FFI id of `cls`: its own or its nearest ancestor's, `undefined` when
+ * none has one.
+ *
+ * @param {Function} cls
+ * @returns {number | undefined}
+ */
+function ffiIdOf(cls) {
+  for (let c = cls; typeof c === 'function' && c !== Error; c = Object.getPrototypeOf(c)) {
+    if (ids.has(c)) return ids.get(c);
+  }
+  return undefined;
+}
+
+/**
+ * Java's message for `(message?, {cause}?)`: the message when one is given
+ * (`null` reads as `''`), else the cause's `String()` (Java's
+ * `(Throwable cause)` takes `cause.toString()`), else `''`.
+ *
+ * @param {unknown} message
+ * @param {unknown} options
+ * @returns {string}
+ */
+function messageOf(message, options) {
+  if (message !== undefined) {
+    if (message === null) return '';
+    if (typeof message !== 'string') throw new TypeError(`message must be a string, not ${typeof message}`);
+    return message;
+  }
+  const cause = causeOf(options);
+  return cause === undefined || cause === null ? '' : String(cause);
+}
+
+/**
+ * The `cause` of an options argument, `undefined` when it has none.
+ *
+ * @param {unknown} options
+ * @returns {unknown}
+ */
+function causeOf(options) {
+  if (options === undefined || options === null) return undefined;
+  if (typeof options !== 'object') throw new TypeError(`options must be an object, not ${typeof options}`);
+  return /** @type {{cause?: unknown}} */ (options).cause;
+}
+
+/**
+ * The `Error` options for `options`: `{cause}` when it gives one.
+ *
+ * @param {unknown} options
+ * @returns {{cause: unknown} | undefined}
+ */
+function optionsOf(options) {
+  const cause = causeOf(options);
+  return cause === undefined ? undefined : { cause };
+}
+
+/**
+ * Sets the fields of a newly constructed error of class `cls` (`new.target`):
+ * `name` (the class name, JavaScript's convention), `code` and `errorName`
+ * (its class's FFI id), `retriable` and `apiError` (Java's `instanceof`).
+ *
+ * @param {any} self
+ * @param {Function} cls
+ */
+function init(self, cls) {
+  Object.defineProperty(self, 'name', { value: cls.name, enumerable: false, configurable: true, writable: true });
+  const id = ffiIdOf(cls);
+  self.code = id === undefined ? -1 : id;
+  self.errorName = id === undefined ? null : FFI_NAMES.get(id) ?? null;
+  const [RetriableError, ApiError] = bases();
+  self.retriable = self instanceof RetriableError;
+  self.apiError = self instanceof ApiError;
+}
+
+/** @type {[Function, Function] | null} */
+let cachedBases = null;
+
+/**
+ * `[RetriableError, ApiError]`: required on first use, not at load (they
+ * extend the classes this module serves), and kept once both are loaded, so a
+ * conversion costs no `require()`.
+ *
+ * @returns {[Function, Function]}
+ */
+function bases() {
+  if (cachedBases !== null) return cachedBases;
+  const { RetriableError } = require('./common/errors/retriable_error');
+  const { ApiError } = require('./common/errors/api_error');
+  const found = /** @type {[Function, Function]} */ ([RetriableError, ApiError]);
+  if (typeof RetriableError === 'function' && typeof ApiError === 'function') cachedBases = found;
+  return found;
+}
+
+module.exports = { causeOf, ffiIdOf, init, messageOf, optionsOf, ownFfiId, setFfiId };

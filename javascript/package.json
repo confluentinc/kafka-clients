@@ -1,0 +1,127 @@
+{
+  "name": "@confluentinc/kafka-javascript",
+  "version": "4.4.0-beta.1",
+  "private": true,
+  "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
+  "license": "Apache-2.0",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./common": {
+      "types": "./lib/common/index.d.ts",
+      "default": "./lib/common/index.js"
+    },
+    "./common/config": {
+      "types": "./lib/common/config/index.d.ts",
+      "default": "./lib/common/config/index.js"
+    },
+    "./common/errors": {
+      "types": "./lib/common/errors/index.d.ts",
+      "default": "./lib/common/errors/index.js"
+    },
+    "./common/metrics": {
+      "types": "./lib/common/metrics/index.d.ts",
+      "default": "./lib/common/metrics/index.js"
+    },
+    "./common/network": {
+      "types": "./lib/common/network/index.d.ts",
+      "default": "./lib/common/network/index.js"
+    },
+    "./common/protocol": {
+      "types": "./lib/common/protocol/index.d.ts",
+      "default": "./lib/common/protocol/index.js"
+    },
+    "./common/protocol/types": {
+      "types": "./lib/common/protocol/types/index.d.ts",
+      "default": "./lib/common/protocol/types/index.js"
+    },
+    "./common/requests": {
+      "types": "./lib/common/requests/index.d.ts",
+      "default": "./lib/common/requests/index.js"
+    },
+    "./common/security": {
+      "types": "./lib/common/security/index.d.ts",
+      "default": "./lib/common/security/index.js"
+    },
+    "./common/security/auth": {
+      "types": "./lib/common/security/auth/index.d.ts",
+      "default": "./lib/common/security/auth/index.js"
+    },
+    "./consumer": {
+      "types": "./lib/consumer/index.d.ts",
+      "default": "./lib/consumer/index.js"
+    },
+    "./producer": {
+      "types": "./lib/producer/index.d.ts",
+      "default": "./lib/producer/index.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "common": [
+        "lib/common/index.d.ts"
+      ],
+      "common/config": [
+        "lib/common/config/index.d.ts"
+      ],
+      "common/errors": [
+        "lib/common/errors/index.d.ts"
+      ],
+      "common/metrics": [
+        "lib/common/metrics/index.d.ts"
+      ],
+      "common/network": [
+        "lib/common/network/index.d.ts"
+      ],
+      "common/protocol": [
+        "lib/common/protocol/index.d.ts"
+      ],
+      "common/protocol/types": [
+        "lib/common/protocol/types/index.d.ts"
+      ],
+      "common/requests": [
+        "lib/common/requests/index.d.ts"
+      ],
+      "common/security": [
+        "lib/common/security/index.d.ts"
+      ],
+      "common/security/auth": [
+        "lib/common/security/auth/index.d.ts"
+      ],
+      "consumer": [
+        "lib/consumer/index.d.ts"
+      ],
+      "producer": [
+        "lib/producer/index.d.ts"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "gypfile": false,
+  "scripts": {
+    "build": "make build",
+    "types": "make types",
+    "test": "make test",
+    "test:static": "make test-static",
+    "test:unit": "make test-unit",
+    "test:typing": "make test-typing",
+    "test:integration": "make test-integration"
+  },
+  "files": [
+    "lib/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "devDependencies": {
+    "@grpc/grpc-js": "1.14.4",
+    "@grpc/proto-loader": "0.8.1",
+    "@types/node": "20.19.41",
+    "typescript": "5.9.3"
+  }
+}
