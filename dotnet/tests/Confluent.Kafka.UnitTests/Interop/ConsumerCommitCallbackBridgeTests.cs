@@ -484,7 +484,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         try
         {
             using NativeCallArguments arguments = new NativeCallArguments();
-            IntPtr map = arguments.OffsetMap(NativeConsumer.SnapshotCommitOffsets(offsets));
+            IntPtr map = arguments.OffsetMap(OffsetsSnapshot.Of(offsets));
             IntPtr handle = registration.NewHandle();
             IntPtr outErr = IntPtr.Zero;
             try

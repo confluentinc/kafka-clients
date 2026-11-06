@@ -199,7 +199,7 @@ public sealed class ConsumerHandle : IDisposable
     public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
         ThrowIfDisposed();
-        _native.CommitSync(NativeConsumer.SnapshotCommitOffsets(offsets), timeoutMs: null);
+        _native.CommitSync(OffsetsSnapshot.Of(offsets), timeoutMs: null);
     }
 
     /// <summary>Starts a commit of the consumed offsets and returns without waiting for it.</summary>
@@ -235,7 +235,7 @@ public sealed class ConsumerHandle : IDisposable
     public void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IOffsetCommitCallback? callback)
     {
         ThrowIfDisposed();
-        _native.CommitAsync(NativeConsumer.SnapshotCommitOffsets(offsets), callback);
+        _native.CommitAsync(OffsetsSnapshot.Of(offsets), callback);
     }
 
     /// <summary>Destroys the handle. The consumer is unaffected; a second call does nothing.</summary>

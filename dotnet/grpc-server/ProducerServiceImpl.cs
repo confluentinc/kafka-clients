@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 using Grpc.Core;
 
@@ -42,7 +43,14 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
     private readonly TimeSpan _sendTimeout = TimeSpan.FromSeconds(120);
 
+    private readonly GroupMetadataStore _groupMetadata;
+
     private long _nextId;
+
+    public ProducerServiceImpl(GroupMetadataStore groupMetadata)
+    {
+        _groupMetadata = groupMetadata;
+    }
 
     public void Dispose()
     {
@@ -191,6 +199,44 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         }
     }
 
+    public override Task<Proto.StatusResponse> InitTransactions(Proto.TransactionRequest request, ServerCallContext context) =>
+        Task.FromResult(Transaction(request.ProducerId, producer => producer.InitTransactions()));
+
+    public override Task<Proto.StatusResponse> BeginTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
+        Task.FromResult(Transaction(request.ProducerId, producer => producer.BeginTransaction()));
+
+    public override Task<Proto.StatusResponse> SendOffsetsToTransaction(
+        Proto.SendOffsetsToTransactionRequest request, ServerCallContext context)
+    {
+        IProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        ConsumerGroupMetadata? groupMetadata = _groupMetadata.Get(request.GroupMetadataId);
+        if (groupMetadata is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownGroupMetadata(request.GroupMetadataId) });
+        }
+
+        try
+        {
+            producer.SendOffsetsToTransaction(Translate.OffsetEntriesToDictionary(request.Offsets), groupMetadata);
+            return Task.FromResult(new Proto.StatusResponse());
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    public override Task<Proto.StatusResponse> CommitTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
+        Task.FromResult(Transaction(request.ProducerId, producer => producer.CommitTransaction()));
+
+    public override Task<Proto.StatusResponse> AbortTransaction(Proto.TransactionRequest request, ServerCallContext context) =>
+        Task.FromResult(Transaction(request.ProducerId, producer => producer.AbortTransaction()));
+
     public override Task<Proto.StatusResponse> Close(Proto.CloseRequest request, ServerCallContext context) =>
         Task.FromResult(CloseProducer(request.ProducerId, null));
 
@@ -216,6 +262,25 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         }
 
         return true;
+    }
+
+    private Proto.StatusResponse Transaction(ulong producerId, Action<IProducer<byte[], byte[]>> operation)
+    {
+        IProducer<byte[], byte[]>? producer = Get(producerId);
+        if (producer is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownProducer(producerId) };
+        }
+
+        try
+        {
+            operation(producer);
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
     }
 
     private Proto.StatusResponse CloseProducer(ulong producerId, TimeSpan? timeout)

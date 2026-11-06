@@ -37,7 +37,8 @@ namespace Confluent.Kafka.IntegrationTests;
 /// cached, a record taken at once while another waits for a partition the topic does not have yet, the
 /// serialized sizes and timestamp a delivery reports, and the record headers the broker receives.
 /// </summary>
-public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
+[Collection(BrokerCollection.Name)]
+public sealed class KafkaProducerBrokerTests
 {
     private static readonly TimeSpan s_get = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_partitionWait = TimeSpan.FromSeconds(60);
