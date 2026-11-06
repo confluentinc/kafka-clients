@@ -16,7 +16,7 @@
 //! integration tests.
 //!
 //! Mirrors the existing [`cluster_pool`](super::cluster_pool) pattern:
-//! the first test that needs the python or c backend starts it; subsequent
+//! the first test that needs the python, c, dotnet or javascript backend starts it; subsequent
 //! tests share it via a `OnceCell`. An `atexit` hook forcibly stops the
 //! backends on process exit because Rust does not run destructors for
 //! `LazyLock` statics.
@@ -27,9 +27,9 @@
 //!
 //! - **`container`** (default on Linux) — a Docker container attached to the
 //!   broker's network, exposing a fixed internal port (50051 python / 50052 c /
-//!   50053 dotnet and dotnet_async — separate containers) that testcontainers
-//!   maps to a **random** host port. The server reaches the broker through its
-//!   CONTAINER-family listener.
+//!   50053 dotnet and dotnet_async — separate containers / 50054 javascript)
+//!   that testcontainers maps to a **random** host port. The server reaches
+//!   the broker through its CONTAINER-family listener.
 //! - **`native`** (default on all other platforms, e.g. macOS) — the same gRPC
 //!   server run as a child process on the host, bound to an ephemeral port on
 //!   `127.0.0.1` that it reports on startup. The server connects to the broker
@@ -100,8 +100,8 @@ pub fn uses_containers() -> bool {
     backend_mode() == BackendMode::Container
 }
 
-/// The two non-native backends. The native Rust backend doesn't need a
-/// container; tests instantiate it directly.
+/// The non-Rust backends. The native Rust backend doesn't need a gRPC
+/// server; tests instantiate it directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     Python,
@@ -119,6 +119,9 @@ pub enum BackendKind {
     /// (since the producer M12/P1 work) and `AdminService` (since M15/P14, over the
     /// binding's `IAsyncAdmin`).
     DotnetAsync,
+    /// The Node.js producer (`javascript/grpc_server.js`). Serves only
+    /// `ProducerService`; see that file for the RPCs it leaves unimplemented.
+    Javascript,
 }
 
 impl BackendKind {
@@ -129,13 +132,15 @@ impl BackendKind {
             BackendKind::C => "confluent-kafka-rust/c-grpc-server",
             BackendKind::Dotnet => "confluent-kafka-rust/dotnet-grpc-server",
             BackendKind::DotnetAsync => "confluent-kafka-rust/dotnet-async-grpc-server",
+            BackendKind::Javascript => "confluent-kafka-rust/javascript-grpc-server",
         }
     }
 
     /// The fixed internal port the gRPC server binds inside the container.
     /// Testcontainers maps this to a random host port at start time. The async
     /// python server binds the same 50051 as the sync one — they run in separate
-    /// containers, so the internal ports don't collide.
+    /// containers, so the internal ports don't collide. 50053 is taken by the
+    /// .NET servers, so javascript takes 50054.
     fn internal_port(self) -> u16 {
         match self {
             BackendKind::Python => 50051,
@@ -145,6 +150,22 @@ impl BackendKind {
             // Mirror Python: the async .NET server binds the same 50053 as the sync one —
             // they run in separate containers, so the internal ports don't collide.
             BackendKind::DotnetAsync => 50053,
+            BackendKind::Javascript => 50054,
+        }
+    }
+
+    /// The make target (run from the repository root) that builds this
+    /// backend's container image. `build-grpc-images` builds the Python,
+    /// Python-async, C, .NET and .NET-async images; the JavaScript image is left
+    /// out of it on purpose (see the root `Makefile`), so it names its own target.
+    fn image_make_target(self) -> &'static str {
+        match self {
+            BackendKind::Python
+            | BackendKind::PythonAsync
+            | BackendKind::C
+            | BackendKind::Dotnet
+            | BackendKind::DotnetAsync => "build-grpc-images",
+            BackendKind::Javascript => "build-grpc-images-javascript",
         }
     }
 
@@ -155,6 +176,7 @@ impl BackendKind {
             BackendKind::C => "c",
             BackendKind::Dotnet => "dotnet",
             BackendKind::DotnetAsync => "dotnet_async",
+            BackendKind::Javascript => "javascript",
         }
     }
 
@@ -172,6 +194,14 @@ impl BackendKind {
     /// same assembly, and `CONSUMER_FLAVOR` is set explicitly to pick the sync
     /// or async servicers, so a value inherited from the test process cannot
     /// change the flavor.
+    /// JavaScript runs the checked-in `javascript/grpc_server.js` with `node`
+    /// (`MULTILANG_NODE` overrides it) against the addon built in
+    /// `javascript/build/Release` and the library compiled into
+    /// `javascript/dist` (both `make -C javascript build`); the gRPC packages (`@grpc/grpc-js`,
+    /// `@grpc/proto-loader`) are resolved through `NODE_PATH`, from
+    /// `target/grpc-native/javascript/node_modules` unless
+    /// `MULTILANG_JS_NODE_PATH` names another `node_modules` directory. The
+    /// server loads the `.proto` files at runtime from `GRPC_PROTO_DIR`.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         match self {
@@ -218,6 +248,37 @@ impl BackendKind {
                 let mut command = Command::new(dotnet);
                 command.arg(server).env("CONSUMER_FLAVOR", flavor);
                 (command, "build-grpc-native-dotnet")
+            },
+            BackendKind::Javascript => {
+                const TARGET: &str = "build-grpc-native-javascript";
+                let node = std::env::var_os("MULTILANG_NODE")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("node"));
+                let javascript = root.join("../javascript");
+                let node_modules = std::env::var_os("MULTILANG_JS_NODE_PATH")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("target/grpc-native/javascript/node_modules"));
+                require_native_artifact(self, &node, TARGET);
+                require_native_artifact(
+                    self,
+                    &javascript.join("build/Release/confluent-kafka-javascript.node"),
+                    TARGET,
+                );
+                require_native_artifact(self, &javascript.join("dist/producer/index.js"), TARGET);
+                require_native_artifact(self, &node_modules.join("@grpc/grpc-js"), TARGET);
+                require_native_artifact(self, &node_modules.join("@grpc/proto-loader"), TARGET);
+
+                let mut node_path = std::ffi::OsString::from(node_modules);
+                if let Some(existing) = std::env::var_os("NODE_PATH") {
+                    node_path.push(":");
+                    node_path.push(existing);
+                }
+                let mut command = Command::new(node);
+                command
+                    .arg(javascript.join("grpc_server.js"))
+                    .env("NODE_PATH", node_path)
+                    .env("GRPC_PROTO_DIR", root.join("multilanguage-test-server/proto"));
+                (command, TARGET)
             },
         }
     }
@@ -461,10 +522,11 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
     let container = image.start().await.unwrap_or_else(|e| {
         panic!(
             "failed to start {} gRPC backend container (image {}:dev) on network {}: {e}\n\
-             Build it with `make build-grpc-images`.",
+             Build it with `make {}`.",
             kind.label(),
             kind.image_repository(),
             broker_network,
+            kind.image_make_target(),
         )
     });
 
