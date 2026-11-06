@@ -28,6 +28,10 @@ import { RefreshRetriableError } from './refresh_retriable_error';
 export class InvalidMetadataError extends RefreshRetriableError {
   /**
    * A catch-only base: constructing it directly throws `TypeError`.
+   *
+   * @param message - the message a subclass passes on, Java's message
+   * @param options - `cause`: the cause a subclass passes on, Java's cause
+   * @throws `TypeError` when constructed directly
    */
   constructor(message?: string | null, options?: { cause?: unknown }) {
     if (new.target === InvalidMetadataError) {
