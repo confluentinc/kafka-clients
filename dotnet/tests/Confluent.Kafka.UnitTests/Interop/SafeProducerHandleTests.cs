@@ -192,8 +192,19 @@ public sealed class SafeProducerHandleTests
         NativeProducer producer = NativeProducer.Create(Config());
         SafeProducerHandle handle = producer.Handle;
         bool added = false;
-        IntPtr classPointer = handle.DangerousAddRefClass(ref added);
-        handle.DangerousRelease();
+        IntPtr classPointer;
+        try
+        {
+            classPointer = handle.DangerousAddRefClass(ref added);
+        }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
+
         string marker = nameof(SafeKafkaProducerHandle) + " 0x" + classPointer.ToInt64().ToString("X");
         return (new WeakReference(handle), CompletionOf(producer), marker);
     }
