@@ -567,8 +567,9 @@ Answered 2026-11-05, for P3:
     means", "null for", "or null" or "nullable" (any case) and says none of "not null",
     "non-null", "may not be null", "must not be null", "cannot be null", "not be null".
 11. **Gaps kept in the baseline:** the serializer constructor overloads
-    (`not-options KafkaProducer.constructor`) and `KafkaFuture.get(timeout)`
-    (`not-options KafkaFuture.get`).
+    (`overload-missing KafkaProducer.constructor/KafkaProducer(Map,Serializer,Serializer)`
+    and `.../KafkaProducer(Properties,Serializer,Serializer)`) and
+    `KafkaFuture.get(timeout)` (`overload-missing KafkaFuture.get/get(long,TimeUnit)`).
 12. **`probe`** is an A2 allowlist entry: a test-only registration, called by
     `test/unit/_native.test.js`. An entry that is not an unused registration any more is
     an `unused-allowance` finding.
@@ -588,6 +589,14 @@ one, named after the earliest-declared form (`KafkaProducer(Map configs)` /
 Python rule (`ProducerRecord[K, V]`): `K key` and `V value` never merge, although both
 are `Data` in JavaScript. Decision 10's phrases are read in the Javadoc as rendered
 (`{@code null}` as `null`), and "null indicates" counts as one.
+
+J6 keys an untranslated form by the form itself: when a function's positional parameters
+translate some of a Java overload set's forms (their names in place, a shorter form's
+missing parameters optional), each other form is an `overload-missing` finding with the
+subject `<member>/<form>`, the form's types erased (`KafkaFuture.get/get(long,TimeUnit)`).
+A positional parameter no translated form takes, or a form whose parameters the function
+takes but leaves required, is still `not-options`, so a baselined missing form never
+waives a wrong shape of the forms that are translated.
 
 15. **Doc depth** (P5): D1 and D2 only. D3 is not built: no size limit for JavaScript
     docs, and no `WARNING` / `doc-contract-changes.md` flow. The linter writes no prose:
