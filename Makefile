@@ -14,7 +14,11 @@
 .PHONY: build build-all devel-build build-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
 	select-tests pre-push-test-selection clean-test-selection clean \
-	build-javascript test-javascript verify-javascript
+	build-javascript test-javascript verify-javascript \
+	test-javascript-macos-docker verify-javascript-macos-docker \
+	build-grpc-images-javascript test-integration-javascript \
+	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
+	build-grpc-native-javascript test-integration-javascript-native
 
 build: init-hooks build-all
 
@@ -105,18 +109,73 @@ verify-commit-checks: submodules
 # ── The Node.js client ───────────────────────────────────────────────────
 #
 # The Node.js client (javascript/): standalone for now, not part of `build`,
-# `test` or `verify`, so those need no Node.js. javascript/Makefile expects the
-# Rust library already built, so these targets build it first.
+# `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
+# (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
+# javascript/Makefile expects the Rust library already built, so these targets
+# build it first.
 build-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript build
 
-# The Node.js client's unit tests, then its broker-backed test against a
-# scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS when set).
+# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
+# against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
+# as the JavaScript client is not yet part of `build` either.
+build-grpc-images-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript grpc-image
+
+# The Node.js client's static, unit and typing tests, its broker-backed test
+# against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
+# when set), then the container gRPC multilanguage arm (Linux only; see
+# test-integration-javascript), as python/'s and c/'s `test` end with theirs. The
+# typing tests need the devDependencies (`npm ci` in javascript/) and skip, with
+# a message, without them.
 test-javascript: build-javascript
 	$(MAKE) -C javascript test
 
+# macOS variant of test-javascript: the unit tests only, as python/'s
+# `verify-macos` runs pytest test/unit only. On macOS the gRPC multilanguage arm
+# runs natively instead (see verify-javascript-macos-docker).
+test-javascript-macos-docker: build-javascript
+	$(MAKE) -C javascript test-unit
+
 verify-javascript: test-javascript
+
+# macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
+# the gRPC server as a native host process, as python/'s `verify-macos` does.
+verify-javascript-macos-docker: test-javascript-macos-docker
+	$(MAKE) test-integration-javascript-native
+
+# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# arms (the image copies the host-built Linux libconfluent_kafka.so); use
+# `test-integration-javascript-native` there. Part of `verify-javascript`
+# (through javascript/'s `test`), not of `verify`.
+test-integration-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript test-integration-grpc
+
+# The same arm over the SSL / SASL_SSL CONTAINER listeners (CTLSONLY :9100 /
+# CSASLTLS :9101), which INTEGRATION_TEST_PROTOCOL selects
+# (rust/tests/common/test_context.rs), as python/'s and c/'s
+# `test-integration-ssl` and `test-integration-sasl-ssl` do. They inherit the
+# non-Linux skip.
+test-integration-javascript-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+test-integration-javascript-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
+
+# The `__grpc_js` arm with the gRPC server as a host process instead of a
+# container (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs):
+# only the broker runs in Docker. Used on macOS, where a container runs Linux
+# and could only test the Linux build of the binding. It needs
+# javascript/node_modules' @grpc/grpc-js + @grpc/proto-loader, put on NODE_PATH
+# by the harness (MULTILANG_JS_NODE_PATH overrides it).
+build-grpc-native-javascript: build-javascript
+	$(MAKE) -C javascript grpc-native
+
+test-integration-javascript-native: build-grpc-native-javascript
+	$(MAKE) -C rust test-integration-grpc-js-native
 
 # `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`
 # bumps the versions of the Rust crate, the Python wheels and the .NET package:
