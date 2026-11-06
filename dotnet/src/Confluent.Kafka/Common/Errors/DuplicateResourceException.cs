@@ -70,6 +70,7 @@ public class DuplicateResourceException : global::Confluent.Kafka.Common.Errors.
     }
 
     /// <summary>Java's <c>resource()</c>.</summary>
+    /// <returns>The resource.</returns>
     public string? Resource() => _resource;
 
     internal override int FfiId => 92;

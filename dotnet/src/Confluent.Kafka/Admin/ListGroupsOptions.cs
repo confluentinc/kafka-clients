@@ -59,9 +59,11 @@ public sealed class ListGroupsOptions
     /// <remarks>Brokers support this filter from version 2.6.0.</remarks>
     public IReadOnlyCollection<GroupState> GroupStates() => _groupStates;
 
-    /// <summary>Sets <see cref="GroupStates()"/>.</summary>
-    /// <param name="groupStates">The group states to filter on, or <see langword="null"/> or an empty collection — the default — to return
-    /// groups in every state.</param>
+    /// <summary>
+    /// If groupStates is set, only groups in these states will be returned by <c>ListGroups()</c>. Otherwise, all
+    /// groups are returned. This operation is supported by brokers with version 2.6.0 or later.
+    /// </summary>
+    /// <param name="groupStates">The group states, or <see langword="null"/> or empty for all.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public ListGroupsOptions InGroupStates(IReadOnlyCollection<GroupState>? groupStates)
     {
@@ -85,9 +87,11 @@ public sealed class ListGroupsOptions
     /// </remarks>
     public IReadOnlyCollection<string> ProtocolTypes() => _protocolTypes;
 
-    /// <summary>Sets <see cref="ProtocolTypes()"/>.</summary>
-    /// <param name="protocolTypes">The group protocol types to filter on, or <see langword="null"/> or an empty collection — the default — to
-    /// return groups of every protocol type.</param>
+    /// <summary>
+    /// If protocol types is set, only groups of these protocol types will be returned by <c>ListGroups()</c>.
+    /// Otherwise, all groups are returned.
+    /// </summary>
+    /// <param name="protocolTypes">The protocol types, or <see langword="null"/> or empty for all.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentException">
     /// The collection contains a <see langword="null"/> element, which Java's
@@ -110,9 +114,11 @@ public sealed class ListGroupsOptions
     /// </returns>
     public IReadOnlyCollection<GroupType> Types() => _types;
 
-    /// <summary>Sets <see cref="Types()"/>.</summary>
-    /// <param name="types">The group types to filter on, or <see langword="null"/> or an empty collection — the default — to return groups of
-    /// every type.</param>
+    /// <summary>
+    /// If types is set, only groups of these types will be returned by <c>ListGroups()</c>. Otherwise, all groups are
+    /// returned.
+    /// </summary>
+    /// <param name="types">The group types, or <see langword="null"/> or empty for all.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public ListGroupsOptions WithTypes(IReadOnlyCollection<GroupType>? types)
     {

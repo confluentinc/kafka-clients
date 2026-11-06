@@ -72,6 +72,7 @@ public class RecordTooLargeException : global::Confluent.Kafka.Common.Errors.Api
     }
 
     /// <summary>Java's <c>recordTooLargePartitions()</c>.</summary>
+    /// <returns>The record too large partitions.</returns>
     public IReadOnlyDictionary<TopicPartition, long>? RecordTooLargePartitions() => _recordTooLargePartitions;
 
     internal override int FfiId => 10;

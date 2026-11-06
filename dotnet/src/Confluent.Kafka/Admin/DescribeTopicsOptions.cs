@@ -57,9 +57,8 @@ public sealed class DescribeTopicsOptions
     /// </remarks>
     public bool IncludeAuthorizedOperations() => _includeAuthorizedOperations;
 
-    /// <summary>Sets <see cref="IncludeAuthorizedOperations()"/>.</summary>
-    /// <param name="includeAuthorizedOperations">Ask the broker to report each topic's authorized operations —
-    /// Java's <c>includeAuthorizedOperations()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
+    /// <summary>Sets whether each topic's authorized operations are included in the response.</summary>
+    /// <param name="includeAuthorizedOperations">Whether to include them. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeTopicsOptions IncludeAuthorizedOperations(bool includeAuthorizedOperations)
     {
@@ -82,9 +81,13 @@ public sealed class DescribeTopicsOptions
     /// </remarks>
     public int PartitionSizeLimitPerResponse() => _partitionSizeLimitPerResponse;
 
-    /// <summary>Sets <see cref="PartitionSizeLimitPerResponse()"/>.</summary>
-    /// <param name="partitionSizeLimitPerResponse">The maximum number of partitions the broker may return in a
-    /// single response — Java's <c>partitionSizeLimitPerResponse()</c>. Defaults to 2000, as Java's does.</param>
+    /// <summary>
+    /// Sets the maximum number of partitions to be returned in a single response. It is only effective when
+    /// using topic names (not topic IDs), and not if it is larger than the server-side configuration
+    /// <c>max.request.partition.size.limit</c>.
+    /// </summary>
+    /// <param name="partitionSizeLimitPerResponse">The maximum number of partitions per response. Defaults to
+    /// 2000.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeTopicsOptions PartitionSizeLimitPerResponse(int partitionSizeLimitPerResponse)
     {

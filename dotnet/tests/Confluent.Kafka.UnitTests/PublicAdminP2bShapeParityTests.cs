@@ -237,7 +237,7 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(typeof(long), accessor.ReturnType);
         Assert.Empty(accessor.GetParameters());
 
-        // A method, not a property: C# forbids a property and a method sharing a name, and the static factory owns it.
+        // A method, as Java's, beside the static factory of the same name; the type declares no property.
         Assert.Empty(typeof(RecordsToDelete).GetProperties());
         Assert.Empty(typeof(RecordsToDelete).GetConstructors());
 

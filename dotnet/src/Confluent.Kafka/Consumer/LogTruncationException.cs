@@ -59,6 +59,7 @@ public class LogTruncationException : global::Confluent.Kafka.Consumer.OffsetOut
     }
 
     /// <summary>Java's <c>divergentOffsets()</c>.</summary>
+    /// <returns>The divergent offsets.</returns>
     public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> DivergentOffsets() => _divergentOffsets;
 
     internal override int FfiId => -20;

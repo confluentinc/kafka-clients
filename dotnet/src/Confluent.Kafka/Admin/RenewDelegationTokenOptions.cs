@@ -44,9 +44,9 @@ public sealed class RenewDelegationTokenOptions
     /// default.</returns>
     public long RenewTimePeriodMs() => _renewTimePeriodMs;
 
-    /// <summary>Sets <see cref="RenewTimePeriodMs()"/>.</summary>
-    /// <param name="renewTimePeriodMs">How much longer the token should live, in milliseconds, or <c>-1</c>, the
-    /// default, for the server default.</param>
+    /// <summary>Sets how long the renewal extends the token's life.</summary>
+    /// <param name="renewTimePeriodMs">The renew time period in milliseconds, or <c>-1</c>, the default, for the
+    /// server's.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public RenewDelegationTokenOptions RenewTimePeriodMs(long renewTimePeriodMs)
     {

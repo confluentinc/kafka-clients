@@ -56,10 +56,8 @@ public sealed class DescribeClassicGroupsOptions
     /// </remarks>
     public bool IncludeAuthorizedOperations() => _includeAuthorizedOperations;
 
-    /// <summary>Sets <see cref="IncludeAuthorizedOperations()"/>.</summary>
-    /// <param name="includeAuthorizedOperations">Ask the broker to report each group's authorized operations —
-    /// Java's <c>includeAuthorizedOperations()</c>. Defaults to <see langword="false"/>, as Java's uninitialized
-    /// <c>boolean</c> field does.</param>
+    /// <summary>Sets whether each group's authorized operations are included in the response.</summary>
+    /// <param name="includeAuthorizedOperations">Whether to include them. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public DescribeClassicGroupsOptions IncludeAuthorizedOperations(bool includeAuthorizedOperations)
     {

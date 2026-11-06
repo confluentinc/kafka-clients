@@ -48,8 +48,8 @@ public sealed class RecordsToDelete : IEquatable<RecordsToDelete>
     /// </summary>
     /// <returns>The offset.</returns>
     /// <remarks>
-    /// A method, as Java's: C# forbids a property named like the
-    /// <see cref="BeforeOffset(long)"/> factory.
+    /// A method, as Java's, beside the static <see cref="BeforeOffset(long)"/> factory of the same
+    /// name.
     /// </remarks>
     public long BeforeOffset() => _offset;
 

@@ -48,9 +48,10 @@ public sealed class AlterConfigsOptions
     /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</returns>
     public bool ShouldValidateOnly() => _validateOnly;
 
-    /// <summary>Sets <see cref="ShouldValidateOnly()"/>.</summary>
-    /// <param name="validateOnly">Validate the request without applying it — Java's <c>validateOnly(boolean)</c> /
-    /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.</param>
+    /// <summary>
+    /// Set to <see langword="true"/> if the request should be validated without altering the configs.
+    /// </summary>
+    /// <param name="validateOnly">Whether to validate without altering. Defaults to <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public AlterConfigsOptions ValidateOnly(bool validateOnly)
     {

@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Consumer;
 /// <see cref="IAsyncConsumer{TKey, TValue}"/>, so both flavors carry them with the same signatures.
 /// </summary>
 /// <remarks>
-/// The state reads are methods, not properties, as in Java: each crosses into the core, can throw, and returns a
+/// The state reads are methods, as in Java: each crosses into the core, can throw, and returns a
 /// new copy. A Java <c>Set</c> is returned as an <see cref="IReadOnlyCollection{T}"/>, since
 /// <c>IReadOnlySet</c> is not on netstandard2.0.
 /// </remarks>

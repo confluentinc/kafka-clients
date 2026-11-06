@@ -65,9 +65,9 @@ const CSHARP_JDK_BASES: &[(&str, &str)] = &[
 /// with a property or an event, and would hide a parameterless method, of any class it can inherit
 /// from: `object`, `System.Exception`, `KafkaException` (whose members are internal, but visible to
 /// the generated classes in its assembly), and the .NET built-ins of `CSHARP_JDK_BASES`. Of those,
-/// `System.ArgumentException` adds `ParamName`, and `System.ArgumentOutOfRangeException` adds
-/// `ParamName` and `ActualValue`; those are reserved under every root, as no Java 4.4 getter has
-/// either name.
+/// `System.ArgumentException` adds `ParamName`, and `System.ArgumentOutOfRangeException` inherits it
+/// and adds `ActualValue`; both are reserved under every root, as no Java 4.4 getter has either
+/// name.
 const RESERVED_MEMBERS: &[&str] = &[
     "Message",
     "Data",
@@ -308,6 +308,23 @@ fn doc_text(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// A getter's `<returns>` text, naming what it returns from Java's getter name: `groupId` is "The
+/// group id.", `throttleTimeMs` "The throttle time, in milliseconds.".
+fn getter_returns(java_getter: &str) -> String {
+    let (stem, unit) = match java_getter.strip_suffix("Ms") {
+        Some(stem) if !stem.is_empty() => (stem, ", in milliseconds"),
+        _ => (java_getter, ""),
+    };
+    let mut words = String::new();
+    for c in stem.chars() {
+        if c.is_ascii_uppercase() {
+            words.push(' ');
+        }
+        words.push(c.to_ascii_lowercase());
+    }
+    format!("The {words}{unit}.")
 }
 
 /// `/// <summary>…</summary>` lines, wrapped under 120 columns.
@@ -1315,7 +1332,9 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
         let doc = if p.modifier == "override" {
             vec!["    /// <inheritdoc/>".to_string()]
         } else {
-            summary(&format!("Java's <c>{}()</c>.", p.java_getter), "    ")
+            let mut doc = summary(&format!("Java's <c>{}()</c>.", p.java_getter), "    ");
+            doc.push(format!("    /// <returns>{}</returns>", getter_returns(&p.java_getter)));
+            doc
         };
         lines.extend(doc);
         let m = if p.modifier.is_empty() {
@@ -1553,7 +1572,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::super::{build_graph, ClassInfo, Graph};
-    use super::{cs_namespace, render_class};
+    use super::{cs_namespace, getter_returns, render_class};
     use crate::java_parse::{Ctor, Param, Visibility};
 
     fn repo_root() -> PathBuf {
@@ -1622,9 +1641,20 @@ mod tests {
         assert!(cs.contains("    public GroupAuthorizationException(string? message)\n        : this(message, null)"));
         assert!(cs.contains("    internal GroupAuthorizationException(CoreError _, string? message, Exception? innerException, string? groupId)"));
         assert!(cs.contains(
-            "    /// <summary>Java's <c>groupId()</c>.</summary>\n    public string? GroupId() => _groupId;"
+            "    /// <summary>Java's <c>groupId()</c>.</summary>\n    /// <returns>The group id.</returns>\n    public string? GroupId() => _groupId;"
         ));
         assert!(!cs.contains("{ get; }"));
+    }
+
+    #[test]
+    fn a_getters_returns_names_what_it_returns() {
+        assert_eq!(getter_returns("groupId"), "The group id.");
+        assert_eq!(getter_returns("throttleTimeMs"), "The throttle time, in milliseconds.");
+        assert_eq!(getter_returns("partitions"), "The partitions.");
+        assert_eq!(
+            getter_returns("offsetOutOfRangePartitions"),
+            "The offset out of range partitions."
+        );
     }
 
     #[test]

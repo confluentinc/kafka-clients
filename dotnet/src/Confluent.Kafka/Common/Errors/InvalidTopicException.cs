@@ -86,6 +86,7 @@ public class InvalidTopicException : global::Confluent.Kafka.Common.Errors.Inval
     }
 
     /// <summary>Java's <c>invalidTopics()</c>.</summary>
+    /// <returns>The invalid topics.</returns>
     public IReadOnlyCollection<string> InvalidTopics() => _invalidTopics;
 
     internal override int FfiId => 17;

@@ -55,10 +55,12 @@ public sealed class AlterPartitionReassignmentsOptions
     /// </remarks>
     public bool AllowReplicationFactorChange() => _allowReplicationFactorChange;
 
-    /// <summary>Sets <see cref="AllowReplicationFactorChange()"/>.</summary>
-    /// <param name="allow">Allow the call to change a partition's replication factor — Java's
-    /// <c>allowReplicationFactorChange(boolean)</c> / <c>allowReplicationFactorChange()</c>. Defaults to
-    /// <b><see langword="true"/></b>, as Java's field does.</param>
+    /// <summary>
+    /// Set the option indicating if the alter partition reassignments call should be allowed to alter the replication
+    /// factor of a partition. In cases where it is not allowed, any replication factor change will result in an
+    /// exception thrown by the API.
+    /// </summary>
+    /// <param name="allow">Whether a replication factor change is allowed. Defaults to <see langword="true"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public AlterPartitionReassignmentsOptions AllowReplicationFactorChange(bool allow)
     {

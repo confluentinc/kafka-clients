@@ -53,10 +53,9 @@ public sealed class ListConsumerGroupOffsetsOptions
     /// </remarks>
     public bool RequireStable() => _requireStable;
 
-    /// <summary>Sets <see cref="RequireStable()"/>.</summary>
-    /// <param name="requireStable">Wait for any in-progress transaction on a partition to resolve before reporting
-    /// its committed offset — Java's <c>requireStable()</c>. Defaults to <see langword="false"/>, as Java's
-    /// explicitly initialized field does.</param>
+    /// <summary>Sets an optional requireStable flag.</summary>
+    /// <param name="requireStable">Whether to wait for pending transactions to resolve. Defaults to
+    /// <see langword="false"/>.</param>
     /// <returns>This instance, so calls can be chained.</returns>
     public ListConsumerGroupOffsetsOptions RequireStable(bool requireStable)
     {
