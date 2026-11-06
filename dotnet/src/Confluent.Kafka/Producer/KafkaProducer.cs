@@ -57,6 +57,14 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <c>null</c>, or the client refuses a value.
     /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+    /// <remarks>
+    /// Each serializer that is <see cref="IDisposable"/> is disposed once, key then value, when the producer is closed
+    /// or disposed, or when the core cannot build it, but not when this constructor throws
+    /// <see cref="ArgumentNullException"/> or refuses a value's type or <c>null</c>. So a serializer shared with
+    /// another client, or used after the close, sees it disposed. A <c>Dispose</c> that throws is written to
+    /// <see cref="System.Diagnostics.Trace"/> and not rethrown. A serializer that is only
+    /// <see cref="IAsyncDisposable"/> is not disposed.
+    /// </remarks>
     public KafkaProducer(
         IReadOnlyDictionary<string, object?> configs,
         ISerializer<TKey> keySerializer,
@@ -64,7 +72,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
-        _native = NativeProducer.Create(configs);
+        _native = NativeProducer.Create(configs, serdes: new SerdeDisposal(keySerializer, valueSerializer));
     }
 
     /// <inheritdoc/>

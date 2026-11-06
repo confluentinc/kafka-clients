@@ -75,12 +75,18 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly long _maxBlockMs;
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
+    private readonly SerdeDisposal? _serdes;
     private int _closed;
 
-    private NativeProducer(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
+    private NativeProducer(
+        SafeProducerHandle handle,
+        string completionThreadName,
+        long maxBlockMs,
+        SerdeDisposal? serdes)
     {
         _handle = handle;
         _maxBlockMs = maxBlockMs;
+        _serdes = serdes;
         _completion = new CompletionThread(completionThreadName, DrainOf(handle, _uses));
         _reporter = new DeliveryReporter(handle, _completion);
         handle.ReleaseAfterDestroy(AfterDestroy);
@@ -97,21 +103,33 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     internal static NativeProducer Create(
         IReadOnlyDictionary<string, object?> configs,
-        string completionThreadName = CompletionThreadName)
+        string completionThreadName = CompletionThreadName,
+        SerdeDisposal? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
-        IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
-        if (outErr != IntPtr.Zero)
+        try
         {
-            IntPtr destroyErr = IntPtr.Zero;
-            NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
-            FreeError(ref destroyErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        }
+            IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
+            if (outErr != IntPtr.Zero)
+            {
+                IntPtr destroyErr = IntPtr.Zero;
+                NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
+                FreeError(ref destroyErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
 
-        return Start(new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared));
+            return Start(
+                new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared), serdes);
+        }
+        catch
+        {
+            // A producer the core could not build disposes the serializers it was given; the binding's own
+            // configuration check above disposes nothing.
+            serdes?.DisposeOnce();
+            throw;
+        }
     }
 
     internal static NativeProducer CreateMock(
@@ -130,7 +148,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeMockProducerHandle(view, classPointer), completionThreadName, DefaultMaxBlockMs);
+        return Start(
+            new SafeMockProducerHandle(view, classPointer), completionThreadName, DefaultMaxBlockMs, serdes: null);
     }
 
     // The async callbacks of serializer failures, which run in managed code only, that Flush and Close wait for.
@@ -514,9 +533,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             ? maxBlockMs
             : DefaultMaxBlockMs;
 
-    private static NativeProducer Start(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
+    private static NativeProducer Start(
+        SafeProducerHandle handle,
+        string completionThreadName,
+        long maxBlockMs,
+        SerdeDisposal? serdes)
     {
-        NativeProducer producer = new NativeProducer(handle, completionThreadName, maxBlockMs);
+        NativeProducer producer = new NativeProducer(handle, completionThreadName, maxBlockMs, serdes);
         try
         {
             IntPtr outErr = IntPtr.Zero;
@@ -1033,10 +1056,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         _handle.CloseExplicitly();
     }
 
+    // The serializers the producer was given are disposed after the destroy, on the thread that destroyed.
     private void AfterDestroy()
     {
         _completion.ReleaseNotifyOpaque();
         _reporter.ReleaseKept();
+        _serdes?.DisposeOnce();
     }
 
     private void EnterUse()

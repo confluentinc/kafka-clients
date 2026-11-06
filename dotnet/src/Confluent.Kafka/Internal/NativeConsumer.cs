@@ -78,6 +78,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly HandleUses _uses = new HandleUses();
     private readonly SemaphoreSlim _closeGate = new SemaphoreSlim(1, 1);
     private readonly bool _groupIdDefined;
+    private readonly SerdeDisposal? _serdes;
+
+    private int _serdeDisposalThread;
     private readonly List<IntPtr> _recordBytes = new List<IntPtr>();
     private int _recordsHeld;
     private bool _recordBytesReleasable;
@@ -135,10 +138,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool _closeEnded;
 
-    private NativeConsumer(SafeConsumerHandle handle, bool groupIdDefined, bool withPump)
+    private NativeConsumer(SafeConsumerHandle handle, bool groupIdDefined, bool withPump, SerdeDisposal? serdes)
     {
         _handle = handle;
         _groupIdDefined = groupIdDefined;
+        _serdes = serdes;
         _reporter = new ConsumerCallbackReporter(handle.DangerousGetHandle(), PulseOwnerWaiters);
         if (withPump)
         {
@@ -172,24 +176,38 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         deserializer ?? throw new ConfigException(
             "Missing required configuration \"" + key + "\" which has no default value.");
 
-    internal static NativeConsumer Create(IReadOnlyDictionary<string, object?> configs, bool withPump = true)
+    internal static NativeConsumer Create(
+        IReadOnlyDictionary<string, object?> configs,
+        bool withPump = true,
+        SerdeDisposal? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
-        IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
-        if (outErr != IntPtr.Zero)
+        try
         {
-            IntPtr destroyErr = IntPtr.Zero;
-            NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
-            FreeError(ref destroyErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        }
+            IntPtr classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
+            if (outErr != IntPtr.Zero)
+            {
+                IntPtr destroyErr = IntPtr.Zero;
+                NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
+                FreeError(ref destroyErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
 
-        return Start(
-            new SafeKafkaConsumerHandle(view, classPointer),
-            groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
-            withPump);
+            return Start(
+                new SafeKafkaConsumerHandle(view, classPointer),
+                groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+                withPump,
+                serdes);
+        }
+        catch
+        {
+            // A consumer the core could not build disposes the deserializers it was given; the binding's own
+            // configuration check above disposes nothing.
+            serdes?.DisposeOnce();
+            throw;
+        }
     }
 
     internal static NativeConsumer CreateMock(string? autoOffsetReset = null, bool withPump = true)
@@ -211,7 +229,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump);
+        return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump, serdes: null);
     }
 
     internal void Seek(string topic, int partition, long offset)
@@ -1410,6 +1428,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void CloseSync(IntPtr options)
     {
+        if (DisposingTheDeserializersOnThisThread)
+        {
+            return;
+        }
+
         if (_reporter.InCallback)
         {
             ThrowUnlessClosing();
@@ -1631,6 +1654,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return block;
     }
 
+    // The deserializers the consumer was given are disposed after the destroy, on the thread that destroyed.
     private void AfterDestroy()
     {
         _reporter.MarkDestroyed();
@@ -1660,7 +1684,25 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 FreeRecordBytes();
             }
         }
+
+        if (_serdes is not null)
+        {
+            Volatile.Write(ref _serdeDisposalThread, Environment.CurrentManagedThreadId);
+            try
+            {
+                _serdes.DisposeOnce();
+            }
+            finally
+            {
+                Volatile.Write(ref _serdeDisposalThread, 0);
+            }
+        }
     }
+
+    // A deserializer whose Dispose closes or disposes its consumer finds it torn down: the call returns at once
+    // instead of waiting for the teardown that runs it.
+    private bool DisposingTheDeserializersOnThisThread =>
+        Volatile.Read(ref _serdeDisposalThread) == Environment.CurrentManagedThreadId;
 
     private void HoldRecords()
     {
@@ -1961,6 +2003,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
+        if (DisposingTheDeserializersOnThisThread)
+        {
+            return;
+        }
+
         if (_reporter.InCallback)
         {
             DisposeInsideACallback();
