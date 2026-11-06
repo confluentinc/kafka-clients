@@ -157,12 +157,16 @@ export function configEntries(configs: unknown): Array<[string, string]> {
   if (configs === null || typeof configs !== 'object' || Array.isArray(configs)) {
     throw new TypeError(`configs must be an object or a Map, not ${typeName(configs)}`);
   }
-  const source: Iterable<[unknown, unknown]> = configs instanceof Map ? configs.entries() : Object.entries(configs);
-  const out: Array<[string, string]> = [];
-  for (const [key, value] of source) {
-    // Java's Utils.castToStringObjectMap (Python's prepare): String(key), as a
-    // template literal throws on a Symbol.
+  const entries: Array<[unknown, unknown]> = configs instanceof Map ? [...configs.entries()] : Object.entries(configs);
+  // Every key first, before any value is parsed, as Java's
+  // Utils.castToStringObjectMap runs before ConfigDef.parse (and Python's
+  // prepare checks the keys first): String(key), as a template literal throws
+  // on a Symbol.
+  for (const [key, value] of entries) {
     if (typeof key !== 'string') throw invalidValue(String(key), value, 'Key must be a string.', undefined);
+  }
+  const out: Array<[string, string]> = [];
+  for (const [key, value] of entries as Array<[string, unknown]>) {
     if (value === undefined) continue;
     if (value === null) {
       checkNull(key);

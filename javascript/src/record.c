@@ -19,6 +19,7 @@
 // (javascript/CLAUDE.md, rule 8). The producer was built with NULL
 // serializers, so the record's `void *` key and value are `kafka_Bytes_t *`.
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,6 +83,16 @@ char* js_string_dup(napi_env env, napi_value value, const char* what) {
     if (napi_get_value_string_utf8(env, value, s, len + 1, &len) != napi_ok) {
         free(s);
         js_throw_last_napi_error(env, "napi_get_value_string_utf8");
+        return NULL;
+    }
+    // Every C reader stops at the first NUL, so a string holding one would be
+    // silently truncated at the ABI (javascript/CLAUDE.md, rule 1): refuse it,
+    // in Node's own words for the same limit (ERR_INVALID_ARG_VALUE).
+    if (memchr(s, 0, len) != NULL) {
+        free(s);
+        char message[256];
+        snprintf(message, sizeof(message), "%s without null bytes", what);
+        napi_throw_type_error(env, NULL, message);
         return NULL;
     }
     return s;

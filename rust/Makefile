@@ -273,9 +273,8 @@ test-integration-grpc-dotnet-native:
 # The same pair for the Node.js binding: the container arm, run by javascript/'s
 # `test-integration-grpc` after it builds the javascript gRPC image, and the
 # native arm, run by the root `test-integration-javascript-native` after the root
-# `build-grpc-native-javascript` installs the gRPC packages under
-# target/grpc-native/javascript (MULTILANG_JS_NODE_PATH may point at another
-# node_modules instead).
+# `build-grpc-native-javascript` builds the addon and checks the gRPC packages
+# `npm ci` installs in javascript/node_modules, where the server loads them.
 #
 # The binding is producer-only, so only `multilanguage_test!` has a `__grpc_js`
 # arm (the consumer and admin macros do not), and javascript/grpc_server.js

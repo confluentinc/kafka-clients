@@ -74,7 +74,14 @@ test('values of the wrong type are TypeErrors', () => {
     name: 'TypeError',
     message: 'partition must be an integer or null',
   });
-  assert.throws(() => new ProducerRecord({ topic: 't', partition: 2 ** 31 }), { name: 'RangeError' });
+  assert.throws(() => new ProducerRecord({ topic: 't', partition: 2 ** 31 }), {
+    name: 'RangeError',
+    message: 'partition must be at most 2147483647',
+  });
+  assert.throws(() => new ProducerRecord({ topic: 't', timestamp: 2 ** 53 }), {
+    name: 'RangeError',
+    message: 'timestamp must be at most 9007199254740991',
+  });
   assert.throws(() => new ProducerRecord({ topic: 't', headers: 'x' }), { name: 'TypeError' });
 });
 
@@ -107,5 +114,23 @@ test('toString follows Java', () => {
     r.toString(),
     'ProducerRecord(topic=t, partition=null, headers=RecordHeaders(headers = [RecordHeader(key = h, value = null)], ' +
       'isReadOnly = false), key=k, value=[1, -1], timestamp=null)',
+  );
+  // A header value is bytes in Java: a string one prints as its UTF-8 bytes,
+  // as Arrays.toString(value()) does; a string key or value prints as text.
+  const s = new ProducerRecord({
+    topic: 't',
+    partition: 2,
+    timestamp: 5,
+    key: 'k',
+    value: 'v',
+    headers: [
+      { key: 'a', value: 'vé' },
+      { key: 'b', value: new Uint8Array([118]) },
+    ],
+  });
+  assert.equal(
+    s.toString(),
+    'ProducerRecord(topic=t, partition=2, headers=RecordHeaders(headers = [RecordHeader(key = a, value = [118, -61, -87]), ' +
+      'RecordHeader(key = b, value = [118])], isReadOnly = false), key=k, value=v, timestamp=5)',
   );
 });

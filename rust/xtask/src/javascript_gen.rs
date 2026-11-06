@@ -120,7 +120,7 @@ pub(crate) fn rel_import(from_dir: &str, to: &str) -> String {
 }
 
 /// `text` as the lines of a TSDoc block at `indent`, wrapped at 80 columns.
-/// Python's reStructuredText ``code`` becomes Markdown `code`.
+/// Python's reStructuredText ``code`` becomes Markdown `code`, outside a code fence.
 ///
 /// Plain lines are re-flowed within their paragraph. A list item (a line
 /// starting, after its indentation, with `- ` or `N. `) starts a block of its
@@ -129,7 +129,27 @@ pub(crate) fn rel_import(from_dir: &str, to: &str) -> String {
 /// with a lone `-`, `+`, `*` or `N.`, which Markdown would read as a list
 /// marker.
 pub(crate) fn tsdoc(text: &str, indent: &str) -> String {
-    let text = text.replace("``", "`").replace("*/", "*\\/");
+    // Python's reStructuredText code spans (` ``x`` `) become Markdown's, but
+    // not on a Markdown fence line or inside a fence (the `javadoc` translator
+    // writes a `<pre>` block as ```` ```java ````), which stays as it is.
+    let mut in_fence = false;
+    let text = text
+        .lines()
+        .map(|line| {
+            let is_fence = line.trim_start().starts_with("```");
+            let kept = is_fence || in_fence;
+            if is_fence {
+                in_fence = !in_fence;
+            }
+            let line = if kept {
+                line.to_string()
+            } else {
+                line.replace("``", "`")
+            };
+            line.replace("*/", "*\\/")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let width = 80usize.saturating_sub(indent.len() + 3);
     let mut out = vec![format!("{indent}/**")];
     // The block being filled: its first-line prefix, continuation prefix and words.
@@ -514,6 +534,18 @@ mod tests {
             let t = l.trim_start_matches(" *").trim_start();
             assert!(!(t == "-" || t.starts_with("- x")), "{doc}");
         }
+    }
+
+    #[test]
+    fn test_tsdoc_keeps_a_fence_as_it_is() {
+        let doc = tsdoc(
+            "Let:\n\n```java\nx = the current timestamp in seconds, on client\ny = the value of this configuration\nexp = x + y\n```\n\nA ``code`` span.",
+            "",
+        );
+        assert_eq!(
+            doc,
+            "/**\n * Let:\n *\n * ```java\n * x = the current timestamp in seconds, on client\n * y = the value of this configuration\n * exp = x + y\n * ```\n *\n * A `code` span.\n */"
+        );
     }
 
     #[test]
