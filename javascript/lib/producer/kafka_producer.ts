@@ -15,6 +15,7 @@
 // Java's KafkaProducer over the C FFI's KafkaProducer with NULL serializers:
 // keys and values cross as bytes (javascript/CLAUDE.md).
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- lib/_native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../_native');
 import { configEntries } from '../_config';
 import { illegalArgument, illegalState } from '../_errors';
@@ -27,6 +28,9 @@ import type { RecordMetadata } from './record_metadata';
  * A producer's configuration: Java's ProducerConfig keys, as a plain object
  * or a `Map`. Values are stringified (`true` -> `"true"`, numbers and bigints
  * by `String`, arrays joined with `,`); `null` / `undefined` drop the key.
+ *
+ * @jsOnly The type of the configuration the constructor takes, Java's
+ *   `Map<String, Object>` or `Properties`.
  */
 export type ProducerConfigs =
   | Record<string, string | number | boolean | bigint | ReadonlyArray<string | number> | null | undefined>
@@ -34,6 +38,9 @@ export type ProducerConfigs =
 
 /**
  * Options of {@link KafkaProducer.close}.
+ *
+ * @jsOnly The options object of one Java overload set, `close()` and
+ *   `close(Duration)` (javascript/CLAUDE.md "Java shape, JS idiom").
  */
 export type CloseOptions = {
   /**
@@ -173,6 +180,14 @@ export class KafkaProducer {
    * @throws `IllegalStateError` when the producer is closed
    * @throws `TypeError` when `record` is not a ProducerRecord or `callback` not
    *   a function
+   * @throws `InterruptError` rejects with it if the thread is interrupted while
+   *   blocked
+   * @throws `SerializationError` rejects with it if the key or value are not
+   *   valid objects given the configured serializers
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of the
+   *   bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   * @throws `KafkaError` rejects with it if a Kafka related error occurs that
+   *   does not belong to the public API errors
    */
   send(record: ProducerRecord, callback?: Callback | null): Promise<KafkaFuture<RecordMetadata>> {
     if (!(record instanceof ProducerRecord)) throw new TypeError('record must be a ProducerRecord');
@@ -275,6 +290,11 @@ export class KafkaProducer {
    * it resolves.
    *
    * Calling it from inside a callback rejects, as Java's flush() throws there.
+   *
+   * @throws `InterruptError` rejects with it if the thread is interrupted while
+   *   blocked
+   * @throws `KafkaError` rejects with it if the method is invoked inside a
+   *   `send` callback
    */
   flush(): Promise<void> {
     if (this.#destroyed) {
@@ -283,6 +303,7 @@ export class KafkaProducer {
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error lib/_errors.ts built (typed unknown at the native boundary)
       native.producerFlush(this.#handle, (error) => (error !== null ? reject(error) : resolve()));
     });
   }
@@ -307,6 +328,13 @@ export class KafkaProducer {
    * @returns rejecting with an `IllegalArgumentError` for a negative
    *   `timeoutMs`
    * @throws `TypeError` when `timeoutMs` is not an integer
+   * @throws `InterruptError` rejects with it if the thread is interrupted while
+   *   blocked
+   * @throws `KafkaError` rejects with it if an unexpected error occurs while
+   *   trying to close the client; this error should be treated as fatal and
+   *   indicate the client is no longer usable
+   * @throws `IllegalArgumentError` rejects with it if the `timeoutMs` is
+   *   negative
    */
   close(options?: CloseOptions): Promise<void> {
     let timeoutMs: number | null = null;
@@ -338,6 +366,7 @@ export class KafkaProducer {
           // IllegalArgumentException): the producer stays open.
           this.#closed = false;
         }
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error lib/_errors.ts built (typed unknown at the native boundary)
         if (error !== null) reject(error);
         else resolve();
       });

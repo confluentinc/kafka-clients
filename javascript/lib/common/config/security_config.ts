@@ -25,6 +25,14 @@
  * Java: `org.apache.kafka.common.config.SecurityConfig`.
  */
 export class SecurityConfig {
+  /**
+   * A list of configurable creator classes each returning a provider
+   * implementing security algorithms. These classes should implement the
+   * `org.apache.kafka.common.security.auth.SecurityProviderCreator` interface.
+   */
   static readonly SECURITY_PROVIDERS_CONFIG: string = 'security.providers';
+  /**
+   * The documentation of `SecurityConfig.SECURITY_PROVIDERS_CONFIG`.
+   */
   static readonly SECURITY_PROVIDERS_DOC: string = 'A list of configurable creator classes each returning a provider implementing security algorithms. These classes should implement the <code>org.apache.kafka.common.security.auth.SecurityProviderCreator</code> interface.';
 }

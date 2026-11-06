@@ -60,6 +60,7 @@ function javaString(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   if (Array.isArray(value)) return `[${value.map(javaString).join(', ')}]`;
   try {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's String.valueOf writes any object by its toString(), as ConfigException's message does (javascript/CLAUDE.md "Configuration")
     return String(value);
   } catch {
     return typeName(value);

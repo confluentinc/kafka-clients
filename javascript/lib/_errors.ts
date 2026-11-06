@@ -62,7 +62,10 @@ let byId: Map<number, ErrorClass> | null = null;
 
 /** Every generated error class, in registry order. */
 export function errorClasses(): ErrorClass[] {
-  if (classes === null) classes = ERRORS.map(([module, name]) => require(module)[name] as ErrorClass);
+  if (classes === null) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- the generated classes are loaded on first use, by the registry's module names: they import this module, so a static import would be a cycle
+    classes = ERRORS.map(([module, name]) => (require(module) as Record<string, ErrorClass>)[name]);
+  }
   return classes;
 }
 

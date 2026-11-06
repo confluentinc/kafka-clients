@@ -53,12 +53,13 @@ const TYPES_CS: &[&str] = &[
     "BOOLEAN", "STRING", "PASSWORD", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS",
 ];
 
-/// One key of a `ConfigDef`: its type, the class whose source defines it and
-/// its validator's source, if any.
+/// One key of a `ConfigDef`: its type, the class whose source defines it,
+/// its validator's source, if any, and its documentation argument's source.
 struct KeyDef {
     ty: String,
     class: String,
     validator: Option<String>,
+    doc: Option<String>,
 }
 
 /// A Java source file: its package, imports, superclass and `String`
@@ -159,7 +160,12 @@ impl Reader {
                         4 => Some(parts[3].split_whitespace().collect::<Vec<_>>().join(" ")),
                         _ => anyhow::bail!("config types: `{name}` in `{fqn}` has an unknown `{method}` form"),
                     };
-                    out.insert(name, KeyDef { ty, class: fqn.to_string(), validator });
+                    // The documentation follows the importance.
+                    let doc = parts
+                        .get(importance + 1)
+                        .map(|d| d.trim().to_string())
+                        .filter(|d| !d.is_empty());
+                    out.insert(name, KeyDef { ty, class: fqn.to_string(), validator, doc });
                 },
                 // ConfigDef.withClientSslSupport() / withClientSaslSupport() call
                 // SslConfigs.addClientSslSupport(this) / SaslConfigs.addClientSaslSupport(this).
@@ -346,6 +352,18 @@ fn first_args(args: &str, n: usize) -> Vec<&str> {
         parts.push(&args[start..]);
     }
     parts
+}
+
+/// The documentation argument of each key the `ConfigDef` of client config
+/// class `fqn` defines (its own `define` calls and the SSL / SASL support it
+/// adds): key -> (the class whose source has the `define`, the argument's
+/// source).
+pub(crate) fn define_docs(repo_root: &Path, fqn: &str) -> Res<BTreeMap<String, (String, String)>> {
+    let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
+    Ok(client_types(&mut reader, fqn)?
+        .into_iter()
+        .filter_map(|(key, def)| def.doc.map(|doc| (key, (def.class, doc))))
+        .collect())
 }
 
 /// Every key of a client's `ConfigDef`, with its type.

@@ -61,6 +61,9 @@ export class KafkaError extends Error {
    * message (`null` reads as `''`), `options.cause` its cause. Given a cause
    * and no message, the message is the cause's `String()`, as Java's
    * `(Throwable cause)` constructor takes `cause.toString()`.
+   *
+   * @param message - Java's message; `null` reads as `''`
+   * @param options - `cause`: Java's cause
    */
   constructor(message?: string | null, options?: { cause?: unknown }) {
     super(messageOf(message, options), optionsOf(options));

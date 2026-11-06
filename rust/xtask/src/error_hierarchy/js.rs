@@ -113,6 +113,9 @@ fn root_body(info: &ClassInfo) -> String {
    * message (`null` reads as `''`), `options.cause` its cause. Given a cause
    * and no message, the message is the cause's `String()`, as Java's
    * `(Throwable cause)` constructor takes `cause.toString()`.
+   *
+   * @param message - Java's message; `null` reads as `''`
+   * @param options - `cause`: Java's cause
    */
   constructor(message?: string | null, options?: {{ cause?: unknown }}) {{
     super(messageOf(message, options), optionsOf(options));
@@ -128,6 +131,10 @@ fn abstract_body(info: &ClassInfo, parent: &str) -> String {
         r#"export class {name} extends {parent} {{
   /**
    * A catch-only base: constructing it directly throws `TypeError`.
+   *
+   * @param message - the message a subclass passes on, Java's message
+   * @param options - `cause`: the cause a subclass passes on, Java's cause
+   * @throws `TypeError` when constructed directly
    */
   constructor(message?: string | null, options?: {{ cause?: unknown }}) {{
     if (new.target === {name}) {{

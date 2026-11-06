@@ -121,31 +121,109 @@ pub(crate) fn rel_import(from_dir: &str, to: &str) -> String {
 
 /// `text` as the lines of a TSDoc block at `indent`, wrapped at 80 columns.
 /// Python's reStructuredText ``code`` becomes Markdown `code`.
+///
+/// Plain lines are re-flowed within their paragraph. A list item (a line
+/// starting, after its indentation, with `- ` or `N. `) starts a block of its
+/// own, wrapped with its continuation lines indented under its text; a code
+/// fence and a table row are kept as they are. A wrap never starts a line
+/// with a lone `-`, `+`, `*` or `N.`, which Markdown would read as a list
+/// marker.
 pub(crate) fn tsdoc(text: &str, indent: &str) -> String {
     let text = text.replace("``", "`").replace("*/", "*\\/");
-    let mut out = vec![format!("{indent}/**")];
     let width = 80usize.saturating_sub(indent.len() + 3);
-    for (i, para) in text.split("\n\n").enumerate() {
-        if i > 0 {
+    let mut out = vec![format!("{indent}/**")];
+    // The block being filled: its first-line prefix, continuation prefix and words.
+    let mut block: Option<(String, String, Vec<String>)> = None;
+    let mut blank = false;
+    let mut fence = false;
+    let emit = |out: &mut Vec<String>, line: &str| {
+        if line.is_empty() {
             out.push(format!("{indent} *"));
-        }
-        let mut line = String::new();
-        for word in para.split_whitespace() {
-            if !line.is_empty() && line.len() + 1 + word.len() > width {
-                out.push(format!("{indent} * {line}"));
-                line.clear();
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        if !line.is_empty() {
+        } else {
             out.push(format!("{indent} * {line}"));
         }
+    };
+    let flush = |out: &mut Vec<String>, block: &mut Option<(String, String, Vec<String>)>| {
+        let Some((first, cont, words)) = block.take() else {
+            return;
+        };
+        let mut line = first.clone();
+        let mut fresh = true;
+        for w in words {
+            let marker_like = w == "-" || w == "+" || w == "*" || is_ordinal(&w);
+            if !fresh && line.len() + 1 + w.len() > width && !marker_like {
+                emit(out, line.trim_end());
+                line = cont.clone();
+                fresh = true;
+            }
+            if !fresh {
+                line.push(' ');
+            }
+            line.push_str(&w);
+            fresh = false;
+        }
+        if !fresh {
+            emit(out, line.trim_end());
+        }
+    };
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if fence || trimmed.starts_with("```") || trimmed.starts_with('|') {
+            flush(&mut out, &mut block);
+            if blank {
+                emit(&mut out, "");
+                blank = false;
+            }
+            if trimmed.starts_with("```") {
+                fence = !fence;
+            }
+            emit(&mut out, raw.trim_end());
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush(&mut out, &mut block);
+            blank = out.len() > 1;
+            continue;
+        }
+        let lead = &raw[..raw.len() - trimmed.len()];
+        let marker = list_marker(trimmed);
+        if blank {
+            flush(&mut out, &mut block);
+            emit(&mut out, "");
+            blank = false;
+        }
+        if let Some(m) = marker {
+            flush(&mut out, &mut block);
+            let first = format!("{lead}{m}");
+            let cont = " ".repeat(first.len());
+            let words = trimmed[m.len()..].split_whitespace().map(String::from).collect();
+            block = Some((first, cont, words));
+        } else {
+            let words = trimmed.split_whitespace().map(String::from);
+            match block.as_mut() {
+                Some((_, _, w)) => w.extend(words),
+                None => block = Some((String::new(), String::new(), words.collect())),
+            }
+        }
     }
+    flush(&mut out, &mut block);
     out.push(format!("{indent} */"));
     out.join("\n")
+}
+
+/// The list marker `line` starts with: `- ` or `N. `.
+fn list_marker(line: &str) -> Option<&str> {
+    if line.starts_with("- ") {
+        return Some(&line[..2]);
+    }
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    (digits > 0 && line[digits..].starts_with(". ")).then(|| &line[..digits + 2])
+}
+
+/// Whether `word` reads as an ordered-list marker (`3.`).
+fn is_ordinal(word: &str) -> bool {
+    word.strip_suffix('.')
+        .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// A TypeScript (JavaScript) single-quoted string literal.
@@ -415,6 +493,27 @@ mod tests {
         assert_eq!(rel_import("producer", "common/kafka_error"), "../common/kafka_error");
         assert_eq!(rel_import("common/errors", "common/kafka_error"), "../kafka_error");
         assert_eq!(rel_import("common/errors", "common/errors/api_error"), "./api_error");
+    }
+
+    #[test]
+    fn test_tsdoc_keeps_list_items_and_never_starts_a_line_with_a_marker() {
+        let long = "word ".repeat(20);
+        let doc = tsdoc(
+            &format!("Intro:\n\n- a {long}\n- b\n   1. nested\n   2. second\n\nAfter {long}- x."),
+            "",
+        );
+        let lines: Vec<&str> = doc.lines().collect();
+        assert_eq!(lines[1], " * Intro:");
+        assert!(lines[3].starts_with(" * - a word"));
+        // The item's continuation is indented under its text.
+        assert!(lines[4].starts_with(" *   word"), "{doc}");
+        assert!(lines.contains(&" * - b"));
+        assert!(lines.contains(&" *    1. nested"));
+        assert!(lines.contains(&" *    2. second"));
+        for l in &lines {
+            let t = l.trim_start_matches(" *").trim_start();
+            assert!(!(t == "-" || t.starts_with("- x")), "{doc}");
+        }
     }
 
     #[test]

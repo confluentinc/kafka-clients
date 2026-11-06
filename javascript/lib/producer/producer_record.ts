@@ -26,11 +26,16 @@ import { illegalArgument } from '../_errors';
 
 /**
  * A key, value or header value: bytes, or a string encoded as UTF-8.
+ *
+ * @jsOnly The JavaScript types a key, value or header value takes; Java's are
+ *   the serializers' generic types.
  */
 export type Data = Buffer | Uint8Array | string;
 
 /**
  * A record header, Java's Header.
+ *
+ * @java org.apache.kafka.common.header.Header
  */
 export type Header = {
   /** The header's key */
@@ -42,6 +47,9 @@ export type Header = {
 /**
  * Options of {@link ProducerRecord}'s constructor: Java's overloaded
  * constructors in one.
+ *
+ * @jsOnly The options object of one Java overload set, the constructors
+ *   (javascript/CLAUDE.md "Java shape, JS idiom").
  */
 export type ProducerRecordOptions = {
   /** The topic the record will be appended to */
