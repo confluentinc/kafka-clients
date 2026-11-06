@@ -167,7 +167,7 @@ public sealed class PublicAdminCreateAclsTests
 
         Assert.Null(Record.Exception(
             () => admin.CreateAcls(
-                new[] { Binding("ok") }, new CreateAclsOptions { TimeoutMs = -1 })));
+                new[] { Binding("ok") }, new CreateAclsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -180,7 +180,7 @@ public sealed class PublicAdminCreateAclsTests
     }
 
     [Fact]
-    public void Options_DefaultToJavasDefaults() => Assert.Null(new CreateAclsOptions().TimeoutMs);
+    public void Options_DefaultToJavasDefaults() => Assert.Null(new CreateAclsOptions().TimeoutMs());
 
     private static AclBinding Binding(string name) =>
         new AclBinding(

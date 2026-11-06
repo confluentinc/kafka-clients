@@ -76,7 +76,7 @@ public sealed class PublicAdminShapeParityTests
         // The request side is not widened: Java's NewTopic carries a short.
         Assert.Equal(
             typeof(short?),
-            typeof(NewTopic).GetProperty(nameof(NewTopic.ReplicationFactor))!.PropertyType);
+            Getters.Get(typeof(NewTopic), nameof(NewTopic.ReplicationFactor)).ReturnType);
     }
 
     [Fact]

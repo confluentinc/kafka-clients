@@ -208,10 +208,10 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeFeaturesOptions.TimeoutMs):
-                NativeMethods.DescribeFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeFeaturesOptions.NodeId):
-                NativeMethods.DescribeFeaturesOptionsSetNodeId(native, options.NodeId.GetValueOrDefault(), ref outErr);
+                NativeMethods.DescribeFeaturesOptionsSetNodeId(native, options.NodeId().GetValueOrDefault(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeFeaturesOptions has no C setter for " + setter + ".");
@@ -224,11 +224,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(UpdateFeaturesOptions.TimeoutMs):
-                NativeMethods.UpdateFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.UpdateFeaturesOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(UpdateFeaturesOptions.ValidateOnly):
                 NativeMethods.UpdateFeaturesOptionsSetValidateOnly(
-                    native, options.ValidateOnly ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("UpdateFeaturesOptions has no C setter for " + setter + ".");

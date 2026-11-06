@@ -158,7 +158,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeLogDirsOptions.TimeoutMs):
-                NativeMethods.DescribeLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeLogDirsOptions has no C setter for " + setter + ".");
@@ -268,7 +268,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AlterReplicaLogDirsOptions.TimeoutMs):
-                NativeMethods.AlterReplicaLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AlterReplicaLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterReplicaLogDirsOptions has no C setter for " + setter + ".");
@@ -364,7 +364,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeReplicaLogDirsOptions.TimeoutMs):
                 NativeMethods.DescribeReplicaLogDirsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeReplicaLogDirsOptions has no C setter for " + setter + ".");

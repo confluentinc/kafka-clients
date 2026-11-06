@@ -589,29 +589,21 @@ public sealed class PublicAdminConfigsShapeParityTests
     public void Options_MatchJavasFieldsAndDefaults()
     {
         DescribeConfigsOptions describe = new DescribeConfigsOptions();
-        Assert.Null(describe.TimeoutMs);
-        Assert.False(describe.IncludeSynonyms);
-        Assert.False(describe.IncludeDocumentation);
-        Assert.Equal(
-            new[] { "IncludeDocumentation", "IncludeSynonyms", "TimeoutMs" },
-            typeof(DescribeConfigsOptions).GetProperties()
-                .Select(p => p.Name)
-                .OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Null(describe.TimeoutMs());
+        Assert.False(describe.IncludeSynonyms());
+        Assert.False(describe.IncludeDocumentation());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(DescribeConfigsOptions), "IncludeDocumentation", "IncludeSynonyms", "TimeoutMs");
 
         AlterConfigsOptions alter = new AlterConfigsOptions();
-        Assert.Null(alter.TimeoutMs);
-        Assert.False(alter.ValidateOnly);
-        Assert.Equal(
-            new[] { "TimeoutMs", "ValidateOnly" },
-            typeof(AlterConfigsOptions).GetProperties()
-                .Select(p => p.Name)
-                .OrderBy(n => n, StringComparer.Ordinal));
+        Assert.Null(alter.TimeoutMs());
+        Assert.False(alter.ValidateOnly());
+        SetterMethods.AssertGettersAndSetters(typeof(AlterConfigsOptions), "TimeoutMs", "ValidateOnly");
 
         foreach (Type type in new[] { typeof(DescribeConfigsOptions), typeof(AlterConfigsOptions) })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 

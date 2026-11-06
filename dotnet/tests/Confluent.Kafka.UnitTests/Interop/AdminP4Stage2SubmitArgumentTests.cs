@@ -97,20 +97,16 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     [Fact]
     public void ListOffsetsOptions_EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((4_242, ReadUncommitted()), ReadBack(new ListOffsetsOptions { TimeoutMs = 4_242 }));
-        Assert.Equal((0, ReadUncommitted()), ReadBack(new ListOffsetsOptions { TimeoutMs = 0 }));
-        Assert.Equal((0, ReadUncommitted()), ReadBack(new ListOffsetsOptions { TimeoutMs = -5 }));
-        Assert.Equal((-1, ReadCommitted()), ReadBack(new ListOffsetsOptions { IsolationLevel = IsolationLevel.READ_COMMITTED }));
+        Assert.Equal((4_242, ReadUncommitted()), ReadBack(new ListOffsetsOptions().TimeoutMs(4_242)));
+        Assert.Equal((0, ReadUncommitted()), ReadBack(new ListOffsetsOptions().TimeoutMs(0)));
+        Assert.Equal((0, ReadUncommitted()), ReadBack(new ListOffsetsOptions().TimeoutMs(-5)));
+        Assert.Equal((-1, ReadCommitted()), ReadBack(new ListOffsetsOptions(IsolationLevel.READ_COMMITTED)));
         Assert.Equal(
-            (-1, ReadUncommitted()), ReadBack(new ListOffsetsOptions { IsolationLevel = IsolationLevel.READ_UNCOMMITTED }));
+            (-1, ReadUncommitted()), ReadBack(new ListOffsetsOptions(IsolationLevel.READ_UNCOMMITTED)));
 
-        ListOffsetsOptions options = new ListOffsetsOptions
-        {
-            TimeoutMs = 10,
-            IsolationLevel = IsolationLevel.READ_UNCOMMITTED,
-        };
-        options.TimeoutMs = null;
-        options.IsolationLevel = IsolationLevel.READ_COMMITTED;
+        ListOffsetsOptions options = new ListOffsetsOptions(IsolationLevel.READ_COMMITTED)
+            .TimeoutMs(10);
+        options.TimeoutMs(null);
         Assert.Equal((-1, ReadCommitted()), ReadBack(options));
     }
 
@@ -125,7 +121,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         };
 
         ArgumentOutOfRangeException isolation = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            admin.ListOffsets(request, new ListOffsetsOptions { IsolationLevel = (IsolationLevel)7 }));
+            admin.ListOffsets(request, new ListOffsetsOptions((IsolationLevel)7)));
         Assert.Equal("options", isolation.ParamName);
 
         ArgumentException nullTopic = Assert.Throws<ArgumentException>(() =>

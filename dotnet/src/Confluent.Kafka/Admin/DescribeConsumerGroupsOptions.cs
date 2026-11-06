@@ -28,15 +28,15 @@ public sealed class DescribeConsumerGroupsOptions
     private int? _timeoutMs;
     private bool _includeAuthorizedOperations;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DescribeConsumerGroupsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -44,19 +44,26 @@ public sealed class DescribeConsumerGroupsOptions
     /// <c>includeAuthorizedOperations()</c>. Defaults to
     /// <see langword="false"/>, as Java's uninitialized <c>boolean</c> field does.
     /// </summary>
+    /// <returns>Ask the broker to report each group's authorized operations — Java's
+    /// <c>includeAuthorizedOperations()</c>. Defaults to <see langword="false"/>, as Java's uninitialized
+    /// <c>boolean</c> field does.</returns>
     /// <remarks>
     /// While this is <see langword="false"/>,
     /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> is <see langword="null"/>,
     /// not an empty collection.
     /// </remarks>
-    public bool IncludeAuthorizedOperations
+    public bool IncludeAuthorizedOperations() => _includeAuthorizedOperations;
+
+    /// <summary>Sets <see cref="IncludeAuthorizedOperations()"/>.</summary>
+    /// <param name="includeAuthorizedOperations">Ask the broker to report each group's authorized operations —
+    /// Java's <c>includeAuthorizedOperations()</c>. Defaults to <see langword="false"/>, as Java's uninitialized
+    /// <c>boolean</c> field does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DescribeConsumerGroupsOptions IncludeAuthorizedOperations(bool includeAuthorizedOperations)
     {
-        get => _includeAuthorizedOperations;
-        set
-        {
-            _includeAuthorizedOperations = value;
-            Setters.Ran(nameof(IncludeAuthorizedOperations));
-        }
+        _includeAuthorizedOperations = includeAuthorizedOperations;
+        Setters.Ran(nameof(IncludeAuthorizedOperations));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

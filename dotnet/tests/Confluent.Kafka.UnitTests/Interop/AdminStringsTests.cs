@@ -212,13 +212,13 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
-                () => admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-\0" }));
+                () => admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern("txn-\0")));
 
             Assert.Equal("options", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
-                admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
+                admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern("txn-.*")));
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.All().Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
@@ -260,14 +260,14 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DescribeDelegationToken(
-                new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice\0") } }));
+                new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", "alice\0") })));
 
             Assert.Equal("options", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncDescribeDelegationTokenResult result = AsyncDescribeDelegationTokenResult.OfClient(
                 admin.DescribeDelegationToken(
-                    new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice") } }));
+                    new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", "alice") })));
             IReadOnlyList<DelegationToken> tokens = Array.Empty<DelegationToken>();
             await TestTimeout.Run(async () => tokens = await result.DelegationTokens().Get(), s_deadline);
             Assert.Empty(tokens);

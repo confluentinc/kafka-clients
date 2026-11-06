@@ -267,7 +267,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         // A negative timeout is not a precondition: it is sent as 0, as Java clamps the deadline.
         Assert.Null(Record.Exception(
             () => admin.AlterClientQuotas(
-                new[] { Alteration("ok", 1d) }, new AlterClientQuotasOptions { TimeoutMs = -1 })));
+                new[] { Alteration("ok", 1d) }, new AlterClientQuotasOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -320,8 +320,8 @@ public sealed class PublicAdminAlterClientQuotasTests
     {
         AlterClientQuotasOptions options = new AlterClientQuotasOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.ValidateOnly);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.ValidateOnly());
     }
 
     private static ClientQuotaEntity Entity(string? user) =>

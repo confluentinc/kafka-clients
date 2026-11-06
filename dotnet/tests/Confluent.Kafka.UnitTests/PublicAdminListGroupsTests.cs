@@ -139,13 +139,11 @@ public sealed class PublicAdminListGroupsTests
 
         await SeedGroups(admin, "public-lg-filtered");
 
-        AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions
-        {
-            GroupStates = new[] { GroupState.STABLE, GroupState.EMPTY },
-            ProtocolTypes = new[] { ConsumerProtocol },
-            Types = new[] { GroupType.CONSUMER },
-            TimeoutMs = 30_000,
-        });
+        AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions()
+            .InGroupStates(new[] { GroupState.STABLE, GroupState.EMPTY })
+            .WithProtocolTypes(new[] { ConsumerProtocol })
+            .WithTypes(new[] { GroupType.CONSUMER })
+            .TimeoutMs(30_000));
 
         Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId());
     }
@@ -175,7 +173,7 @@ public sealed class PublicAdminListGroupsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions { TimeoutMs = -1 })));
+        Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -185,12 +183,12 @@ public sealed class PublicAdminListGroupsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentOutOfRangeException state = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }));
+            () => admin.ListGroups(new ListGroupsOptions().InGroupStates(new[] { (GroupState)(-1) })));
         Assert.Equal("options", state.ParamName);
         Assert.Contains("ListGroupsOptions.GroupStates", state.Message, StringComparison.Ordinal);
 
         ArgumentOutOfRangeException type = Assert.Throws<ArgumentOutOfRangeException>(
-            () => admin.ListGroups(new ListGroupsOptions { Types = new[] { (GroupType)99 } }));
+            () => admin.ListGroups(new ListGroupsOptions().WithTypes(new[] { (GroupType)99 })));
         Assert.Equal("options", type.ParamName);
         Assert.Contains("ListGroupsOptions.Types", type.Message, StringComparison.Ordinal);
     }

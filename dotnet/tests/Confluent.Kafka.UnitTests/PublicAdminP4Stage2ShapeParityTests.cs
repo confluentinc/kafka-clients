@@ -298,24 +298,27 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
     public void Options_MatchJavasFieldsAndDefaults()
     {
         ListPartitionReassignmentsOptions reassignments = new ListPartitionReassignmentsOptions();
-        Assert.Null(reassignments.TimeoutMs);
-        Assert.Equal(
-            new[] { nameof(ListPartitionReassignmentsOptions.TimeoutMs) },
-            PropertyNames(typeof(ListPartitionReassignmentsOptions)));
+        Assert.Null(reassignments.TimeoutMs());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(ListPartitionReassignmentsOptions),
+            nameof(ListPartitionReassignmentsOptions.TimeoutMs));
 
         // ListOffsetsOptions defaults to READ_UNCOMMITTED, which is Java's default.
         ListOffsetsOptions offsets = new ListOffsetsOptions();
-        Assert.Null(offsets.TimeoutMs);
-        Assert.Equal(IsolationLevel.READ_UNCOMMITTED, offsets.IsolationLevel);
+        Assert.Null(offsets.TimeoutMs());
+        Assert.Equal(IsolationLevel.READ_UNCOMMITTED, offsets.IsolationLevel());
+        // Java sets the isolation level only through the constructor, so it has a getter and no setter.
+        Assert.Empty(typeof(ListOffsetsOptions).GetProperties());
         Assert.Equal(
             new[] { nameof(ListOffsetsOptions.IsolationLevel), nameof(ListOffsetsOptions.TimeoutMs) },
-            PropertyNames(typeof(ListOffsetsOptions)));
+            Getters.NamesOf(typeof(ListOffsetsOptions)));
+        Assert.Equal(new[] { nameof(ListOffsetsOptions.TimeoutMs) }, SetterMethods.NamesOf(typeof(ListOffsetsOptions)));
+        Assert.NotNull(typeof(ListOffsetsOptions).GetConstructor(new[] { typeof(IsolationLevel) }));
 
         foreach (Type type in new[] { typeof(ListPartitionReassignmentsOptions), typeof(ListOffsetsOptions) })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
@@ -339,9 +342,5 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             .Where(property => !property.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
-            .ToArray();
-
-    private static string[] PropertyNames(Type type) =>
-        type.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 }

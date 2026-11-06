@@ -143,20 +143,20 @@ public sealed class PublicAdminP2aShapeParityTests
     {
         DescribeTopicsOptions options = new DescribeTopicsOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.IncludeAuthorizedOperations);
-        Assert.Equal(2000, options.PartitionSizeLimitPerResponse);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.IncludeAuthorizedOperations());
+        Assert.Equal(2000, options.PartitionSizeLimitPerResponse());
 
         Assert.Equal(
             typeof(int),
-            typeof(DescribeTopicsOptions)
-                .GetProperty(nameof(DescribeTopicsOptions.PartitionSizeLimitPerResponse))!.PropertyType);
+            Getters.Get(typeof(DescribeTopicsOptions), nameof(DescribeTopicsOptions.PartitionSizeLimitPerResponse))
+                .ReturnType);
 
         DeleteTopicsOptions deleteOptions = new DeleteTopicsOptions();
-        Assert.Null(deleteOptions.TimeoutMs);
+        Assert.Null(deleteOptions.TimeoutMs());
 
         // The one option whose Java default is not the C# default for its type.
-        Assert.True(deleteOptions.RetryOnQuotaViolation);
+        Assert.True(deleteOptions.RetryOnQuotaViolation());
     }
 
     [Fact]

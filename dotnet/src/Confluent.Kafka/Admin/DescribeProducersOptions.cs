@@ -31,15 +31,15 @@ public sealed class DescribeProducersOptions
     private int? _timeoutMs;
     private int? _brokerId;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DescribeProducersOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -47,18 +47,25 @@ public sealed class DescribeProducersOptions
     /// partition's leader. Java's <c>brokerId(int)</c> and <c>brokerId()</c>
     /// (an <c>OptionalInt</c> defaulting to <c>empty()</c>).
     /// </summary>
+    /// <returns>The broker to query, or <see langword="null"/> — the default — to query each partition's leader.
+    /// Java's <c>brokerId(int)</c> and <c>brokerId()</c> (an <c>OptionalInt</c> defaulting to
+    /// <c>empty()</c>).</returns>
+    public int? BrokerId() => _brokerId;
+
+    /// <summary>Sets <see cref="BrokerId()"/>.</summary>
+    /// <param name="brokerId">The broker to query, or <see langword="null"/> — the default — to query each
+    /// partition's leader. Java's <c>brokerId(int)</c> and <c>brokerId()</c> (an <c>OptionalInt</c> defaulting to
+    /// <c>empty()</c>).</param>
+    /// <returns>This instance, so calls can be chained.</returns>
     /// <exception cref="ArgumentNullException">
     /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set broker id cannot be
     /// unset again.
     /// </exception>
-    public int? BrokerId
+    public DescribeProducersOptions BrokerId(int? brokerId)
     {
-        get => _brokerId;
-        set
-        {
-            _brokerId = value ?? throw new ArgumentNullException(nameof(value));
-            Setters.Ran(nameof(BrokerId));
-        }
+        _brokerId = brokerId ?? throw new ArgumentNullException(nameof(brokerId));
+        Setters.Ran(nameof(BrokerId));
+        return this;
     }
 
     /// <summary>
@@ -70,8 +77,8 @@ public sealed class DescribeProducersOptions
     /// <returns>Whether the two options are equal.</returns>
     public override bool Equals(object? obj) =>
         obj is DescribeProducersOptions other
-        && BrokerId == other.BrokerId
-        && TimeoutMs == other.TimeoutMs;
+        && _brokerId == other._brokerId
+        && _timeoutMs == other._timeoutMs;
 
     /// <summary>The hash of the broker id and the timeout — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -79,7 +86,7 @@ public sealed class DescribeProducersOptions
     {
         unchecked
         {
-            return ((BrokerId?.GetHashCode() ?? 0) * 31) + (TimeoutMs?.GetHashCode() ?? 0);
+            return ((_brokerId?.GetHashCode() ?? 0) * 31) + (_timeoutMs?.GetHashCode() ?? 0);
         }
     }
 
@@ -93,10 +100,10 @@ public sealed class DescribeProducersOptions
         string.Format(
             CultureInfo.InvariantCulture,
             "DescribeProducersOptions(brokerId={0}, timeoutMs={1})",
-            BrokerId.HasValue
-                ? "OptionalInt[" + BrokerId.Value.ToString(CultureInfo.InvariantCulture) + "]"
+            _brokerId.HasValue
+                ? "OptionalInt[" + _brokerId.Value.ToString(CultureInfo.InvariantCulture) + "]"
                 : "OptionalInt.empty",
-            TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
+            _timeoutMs.HasValue ? _timeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
 
     internal OptionSetters Setters { get; } = new OptionSetters();
 }

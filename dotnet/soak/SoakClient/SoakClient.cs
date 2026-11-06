@@ -1250,7 +1250,7 @@ internal sealed class SoakClient : IDisposable
         {
             deleted = admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { topic }),
-                new DeleteTopicsOptions { TimeoutMs = 30000 }).TopicNameValues;
+                new DeleteTopicsOptions().TimeoutMs(30000)).TopicNameValues;
         }
         catch (Exception ex)
         {

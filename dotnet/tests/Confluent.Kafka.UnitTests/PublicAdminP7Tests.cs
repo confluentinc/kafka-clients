@@ -52,11 +52,9 @@ public sealed class PublicAdminP7Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await admin.CreateDelegationToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[] { new KafkaPrincipal("User", "alice") },
-                MaxLifetimeMs = 86_400_000L,
-            }).DelegationToken().Get();
+            new CreateDelegationTokenOptions()
+                .Renewers(new[] { new KafkaPrincipal("User", "alice") })
+                .MaxLifetimeMs(86_400_000L)).DelegationToken().Get();
 
         Assert.NotEmpty(token.Hmac());
         Assert.NotEmpty(token.TokenInfo().TokenId());
@@ -95,11 +93,11 @@ public sealed class PublicAdminP7Tests
         DelegationToken token = await Create(admin, "alice");
 
         long renewed = await admin.RenewDelegationToken(
-            token.Hmac(), new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L }).ExpiryTimestamp().Get();
+            token.Hmac(), new RenewDelegationTokenOptions().RenewTimePeriodMs(3_600_000L)).ExpiryTimestamp().Get();
         Assert.Equal(3_600_000L, renewed);
 
         long expired = await admin.ExpireDelegationToken(
-            token.Hmac(), new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L }).ExpiryTimestamp().Get();
+            token.Hmac(), new ExpireDelegationTokenOptions().ExpiryTimePeriodMs(0L)).ExpiryTimestamp().Get();
         Assert.Equal(0L, expired);
 
         Assert.Empty(await admin.DescribeDelegationToken().DelegationTokens().Get());
@@ -175,7 +173,7 @@ public sealed class PublicAdminP7Tests
     public async Task DescribeFeatures_AcceptsANodeId() =>
         Assert.NotNull(
             await AsyncMockAdminClient.Create().Build()
-                .DescribeFeatures(new DescribeFeaturesOptions { NodeId = 0 })
+                .DescribeFeatures(new DescribeFeaturesOptions().NodeId(0))
                 .FeatureMetadata().Get());
 
     [Fact]
@@ -572,10 +570,8 @@ public sealed class PublicAdminP7Tests
 
     private static Task<DelegationToken> Create(AsyncMockAdminClient admin, string renewer) =>
         admin.CreateDelegationToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[] { new KafkaPrincipal("User", renewer) },
-            }).DelegationToken().Get();
+            new CreateDelegationTokenOptions()
+                .Renewers(new[] { new KafkaPrincipal("User", renewer) })).DelegationToken().Get();
 
     /// <summary>
     /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary cannot, a null key, so the

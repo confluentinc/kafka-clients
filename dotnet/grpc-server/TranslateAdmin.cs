@@ -227,7 +227,7 @@ internal static class TranslateAdmin
                     proto.ReplicationFactor < 0 ? (short?)null : (short)proto.ReplicationFactor);
             }
 
-            topic.Configs = new Dictionary<string, string>(proto.Configs);
+            topic.Configs(new Dictionary<string, string>(proto.Configs));
             topics.Add(topic);
         }
 
@@ -913,10 +913,8 @@ internal static class TranslateAdmin
                 return null;
             }
 
-            map[proto.GroupId] = new ListConsumerGroupOffsetsSpec
-            {
-                TopicPartitions = OptionalPartitions(proto.TopicPartitions),
-            };
+            map[proto.GroupId] = new ListConsumerGroupOffsetsSpec()
+                .TopicPartitions(OptionalPartitions(proto.TopicPartitions));
         }
 
         invalid = null;

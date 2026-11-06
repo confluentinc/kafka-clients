@@ -172,7 +172,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ElectLeadersOptions.TimeoutMs):
-                NativeMethods.ElectLeadersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ElectLeadersOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ElectLeadersOptions has no C setter for " + setter + ".");
@@ -287,11 +287,11 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(AlterPartitionReassignmentsOptions.TimeoutMs):
                 NativeMethods.AlterPartitionReassignmentsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(AlterPartitionReassignmentsOptions.AllowReplicationFactorChange):
                 NativeMethods.AlterPartitionReassignmentsOptionsSetAllowReplicationFactorChange(
-                    native, (sbyte)(options.AllowReplicationFactorChange ? 1 : 0), ref outErr);
+                    native, (sbyte)(options.AllowReplicationFactorChange() ? 1 : 0), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterPartitionReassignmentsOptions has no C setter for " + setter + ".");
@@ -420,7 +420,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(ListPartitionReassignmentsOptions.TimeoutMs):
                 NativeMethods.ListPartitionReassignmentsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListPartitionReassignmentsOptions has no C setter for " + setter + ".");

@@ -255,7 +255,7 @@ public sealed class AdminConfigsMarshalTests
     private static Task CreateTopic(NativeAdminClient admin, Dictionary<string, string>? configs) =>
         TestTimeout.Run(
             () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(
-                new[] { new NewTopic(Topic, 1, 1) { Configs = configs } }, null)).All().Get(),
+                new[] { new NewTopic(Topic, 1, 1).Configs(configs) }, null)).All().Get(),
             s_deadline);
 
     private static IntPtr Singleton(SingletonAccessor accessor)

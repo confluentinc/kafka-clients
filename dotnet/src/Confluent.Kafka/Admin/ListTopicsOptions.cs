@@ -27,15 +27,15 @@ public sealed class ListTopicsOptions
 
     private bool _listInternal;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public ListTopicsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -43,37 +43,43 @@ public sealed class ListTopicsOptions
     /// <c>listInternal(boolean)</c> / <c>shouldListInternal()</c>. Defaults to
     /// <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool ListInternal
+    /// <returns>Include internal topics such as <c>__consumer_offsets</c> — Java's <c>listInternal(boolean)</c> /
+    /// <c>shouldListInternal()</c>. Defaults to <see langword="false"/>, as Java's does.</returns>
+    public bool ListInternal() => _listInternal;
+
+    /// <summary>Sets <see cref="ListInternal()"/>.</summary>
+    /// <param name="listInternal">Include internal topics such as <c>__consumer_offsets</c> — Java's
+    /// <c>listInternal(boolean)</c> / <c>shouldListInternal()</c>. Defaults to <see langword="false"/>, as Java's
+    /// does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public ListTopicsOptions ListInternal(bool listInternal)
     {
-        get => _listInternal;
-        set
-        {
-            _listInternal = value;
-            Setters.Ran(nameof(ListInternal));
-        }
+        _listInternal = listInternal;
+        Setters.Ran(nameof(ListInternal));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();
 
     /// <summary>
-    /// Value equality over <see cref="ListInternal"/> only, as Java's <c>equals</c>: two
+    /// Value equality over <see cref="ListInternal()"/> only, as Java's <c>equals</c>: two
     /// options that differ only in their timeout are equal.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two options ask for the same listing.</returns>
     public override bool Equals(object? obj) =>
-        obj is ListTopicsOptions other && ListInternal == other.ListInternal;
+        obj is ListTopicsOptions other && _listInternal == other._listInternal;
 
     /// <summary>
-    /// The hash of <see cref="ListInternal"/> alone — Java's <c>hashCode</c>.
+    /// The hash of <see cref="ListInternal()"/> alone — Java's <c>hashCode</c>.
     /// </summary>
     /// <returns>The hash code.</returns>
-    public override int GetHashCode() => ListInternal.GetHashCode();
+    public override int GetHashCode() => _listInternal.GetHashCode();
 
     /// <summary>
     /// A diagnostic rendering matching Java's <c>toString()</c>, which leaves out the timeout.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
-        "ListTopicsOptions(listInternal=" + (ListInternal ? "true" : "false") + ")";
+        "ListTopicsOptions(listInternal=" + (_listInternal ? "true" : "false") + ")";
 }

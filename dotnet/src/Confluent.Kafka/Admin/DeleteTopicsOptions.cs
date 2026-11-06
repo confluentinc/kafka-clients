@@ -31,29 +31,34 @@ public sealed class DeleteTopicsOptions
 
     private bool _retryOnQuotaViolation = true;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DeleteTopicsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// Retry automatically when the broker reports a quota violation — Java's
     /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
     /// </summary>
-    public bool RetryOnQuotaViolation
+    /// <returns>Retry automatically when the broker reports a quota violation — Java's
+    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</returns>
+    public bool RetryOnQuotaViolation() => _retryOnQuotaViolation;
+
+    /// <summary>Sets <see cref="RetryOnQuotaViolation()"/>.</summary>
+    /// <param name="retryOnQuotaViolation">Retry automatically when the broker reports a quota violation — Java's
+    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DeleteTopicsOptions RetryOnQuotaViolation(bool retryOnQuotaViolation)
     {
-        get => _retryOnQuotaViolation;
-        set
-        {
-            _retryOnQuotaViolation = value;
-            Setters.Ran(nameof(RetryOnQuotaViolation));
-        }
+        _retryOnQuotaViolation = retryOnQuotaViolation;
+        Setters.Ran(nameof(RetryOnQuotaViolation));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

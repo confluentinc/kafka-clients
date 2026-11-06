@@ -172,25 +172,25 @@ public sealed class AdminP6SubmitArgumentTests
     [InlineData(-5, 0)]
     public void AclOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal(expected, CreateAclsTimeoutMs(new CreateAclsOptions { TimeoutMs = timeoutMs }));
-        Assert.Equal(expected, DescribeAclsTimeoutMs(new DescribeAclsOptions { TimeoutMs = timeoutMs }));
-        Assert.Equal(expected, DeleteAclsTimeoutMs(new DeleteAclsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, CreateAclsTimeoutMs(new CreateAclsOptions().TimeoutMs(timeoutMs)));
+        Assert.Equal(expected, DescribeAclsTimeoutMs(new DescribeAclsOptions().TimeoutMs(timeoutMs)));
+        Assert.Equal(expected, DeleteAclsTimeoutMs(new DeleteAclsOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void AclOptions_ASetterRunTwice_SendsItsLastValue()
     {
-        CreateAclsOptions create = new CreateAclsOptions { TimeoutMs = 10 };
-        create.TimeoutMs = 20;
+        CreateAclsOptions create = new CreateAclsOptions().TimeoutMs(10);
+        create.TimeoutMs(20);
         Assert.Equal(20, CreateAclsTimeoutMs(create));
         Assert.Equal(new[] { nameof(CreateAclsOptions.TimeoutMs) }, create.Setters.InOrder);
 
-        DescribeAclsOptions describe = new DescribeAclsOptions { TimeoutMs = 10 };
-        describe.TimeoutMs = null;
+        DescribeAclsOptions describe = new DescribeAclsOptions().TimeoutMs(10);
+        describe.TimeoutMs(null);
         Assert.Equal(-1, DescribeAclsTimeoutMs(describe));
 
-        DeleteAclsOptions delete = new DeleteAclsOptions { TimeoutMs = 10 };
-        delete.TimeoutMs = 30;
+        DeleteAclsOptions delete = new DeleteAclsOptions().TimeoutMs(10);
+        delete.TimeoutMs(30);
         Assert.Equal(30, DeleteAclsTimeoutMs(delete));
     }
 
@@ -401,17 +401,17 @@ public sealed class AdminP6SubmitArgumentTests
     [InlineData(-5, 0)]
     public void QuotaOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal(expected, DescribeClientQuotasTimeoutMs(new DescribeClientQuotasOptions { TimeoutMs = timeoutMs }));
-        Assert.Equal(expected, AlterClientQuotasTimeoutMs(new AlterClientQuotasOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, DescribeClientQuotasTimeoutMs(new DescribeClientQuotasOptions().TimeoutMs(timeoutMs)));
+        Assert.Equal(expected, AlterClientQuotasTimeoutMs(new AlterClientQuotasOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void AlterClientQuotasOptions_ValidateOnly_ReachesTheCOptionsBothWays()
     {
-        Assert.Equal(1, AlterClientQuotasValidateOnly(new AlterClientQuotasOptions { ValidateOnly = true }));
+        Assert.Equal(1, AlterClientQuotasValidateOnly(new AlterClientQuotasOptions().ValidateOnly(true)));
 
-        AlterClientQuotasOptions cleared = new AlterClientQuotasOptions { ValidateOnly = true };
-        cleared.ValidateOnly = false;
+        AlterClientQuotasOptions cleared = new AlterClientQuotasOptions().ValidateOnly(true);
+        cleared.ValidateOnly(false);
         Assert.Equal(0, AlterClientQuotasValidateOnly(cleared));
         Assert.Equal(new[] { nameof(AlterClientQuotasOptions.ValidateOnly) }, cleared.Setters.InOrder);
     }
@@ -419,13 +419,13 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public void QuotaOptions_ASetterRunTwice_SendsItsLastValue()
     {
-        DescribeClientQuotasOptions describe = new DescribeClientQuotasOptions { TimeoutMs = 10 };
-        describe.TimeoutMs = 20;
+        DescribeClientQuotasOptions describe = new DescribeClientQuotasOptions().TimeoutMs(10);
+        describe.TimeoutMs(20);
         Assert.Equal(20, DescribeClientQuotasTimeoutMs(describe));
         Assert.Equal(new[] { nameof(DescribeClientQuotasOptions.TimeoutMs) }, describe.Setters.InOrder);
 
-        AlterClientQuotasOptions alter = new AlterClientQuotasOptions { TimeoutMs = 10, ValidateOnly = true };
-        alter.TimeoutMs = null;
+        AlterClientQuotasOptions alter = new AlterClientQuotasOptions().TimeoutMs(10).ValidateOnly(true);
+        alter.TimeoutMs(null);
         Assert.Equal(-1, AlterClientQuotasTimeoutMs(alter));
         Assert.Equal(1, AlterClientQuotasValidateOnly(alter));
         Assert.Equal(

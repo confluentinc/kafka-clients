@@ -30,19 +30,19 @@ internal static class NewPartitionsMarshal
 {
     // Presence of the list, never its count: the broker rejects Java's increaseTo(n, emptyList()) with
     // INVALID_REPLICA_ASSIGNMENT, where it accepts increaseTo(n).
-    internal static bool HasAssignments(NewPartitions partitions) => partitions.Assignments is not null;
+    internal static bool HasAssignments(NewPartitions partitions) => partitions.Assignments() is not null;
 
     internal static IntPtr Build(NewPartitions partitions)
     {
         IntPtr outErr = IntPtr.Zero;
         if (!HasAssignments(partitions))
         {
-            IntPtr increased = NativeMethods.NewPartitionsIncreaseTo(partitions.TotalCount, ref outErr);
+            IntPtr increased = NativeMethods.NewPartitionsIncreaseTo(partitions.TotalCount(), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return increased;
         }
 
-        IReadOnlyList<IReadOnlyList<int>> assignments = partitions.Assignments!;
+        IReadOnlyList<IReadOnlyList<int>> assignments = partitions.Assignments()!;
         int count = 0;
         foreach (IReadOnlyList<int> assignment in assignments)
         {
@@ -76,7 +76,7 @@ internal static class NewPartitionsMarshal
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 
-            IntPtr native = NativeMethods.NewPartitionsIncreaseToWithNewAssignments(partitions.TotalCount, outer, ref outErr);
+            IntPtr native = NativeMethods.NewPartitionsIncreaseToWithNewAssignments(partitions.TotalCount(), outer, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return native;
         }

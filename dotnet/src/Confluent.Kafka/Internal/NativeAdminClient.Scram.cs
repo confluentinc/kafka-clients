@@ -169,7 +169,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeUserScramCredentialsOptions.TimeoutMs):
                 NativeMethods.DescribeUserScramCredentialsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException(
@@ -250,7 +250,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(AlterUserScramCredentialsOptions.TimeoutMs):
                 NativeMethods.AlterUserScramCredentialsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException(

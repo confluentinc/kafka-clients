@@ -29,15 +29,15 @@ public sealed class TerminateTransactionOptions
 {
     private int? _timeoutMs;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public TerminateTransactionOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
@@ -46,7 +46,7 @@ public sealed class TerminateTransactionOptions
         string.Format(
             CultureInfo.InvariantCulture,
             "TerminateTransactionOptions{{timeoutMs={0}}}",
-            TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
+            _timeoutMs.HasValue ? _timeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
 
     internal OptionSetters Setters { get; } = new OptionSetters();
 }

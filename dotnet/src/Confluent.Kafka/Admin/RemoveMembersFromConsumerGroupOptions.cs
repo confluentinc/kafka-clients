@@ -69,39 +69,44 @@ public sealed class RemoveMembersFromConsumerGroupOptions
     }
 
     /// <summary>
-    /// An optional reason recorded with the removal — Java's <c>reason(String)</c> /
-    /// <c>reason()</c>.
+    /// Sets an optional reason recorded with the removal — Java's <c>reason(String)</c>, which
+    /// returns <c>void</c>.
     /// </summary>
-    public string? Reason
+    /// <param name="reason">The reason, or <see langword="null"/> for none.</param>
+    public void Reason(string? reason)
     {
-        get => _reason;
-        set
-        {
-            _reason = value;
-            Setters.Ran(nameof(Reason));
-        }
+        _reason = reason;
+        Setters.Ran(nameof(Reason));
     }
 
     /// <summary>
     /// The members to remove — Java's <c>members()</c>.
     /// </summary>
-    public IReadOnlyCollection<MemberToRemove> Members => _members;
+    /// <returns>The members to remove.</returns>
+    public IReadOnlyCollection<MemberToRemove> Members() => _members;
+
+    /// <summary>
+    /// The optional reason recorded with the removal — Java's <c>reason()</c>.
+    /// </summary>
+    /// <returns>The reason, or <see langword="null"/> for none.</returns>
+    public string? Reason() => _reason;
 
     /// <summary>
     /// <see langword="true"/> when every member of the group should be removed, that is when
-    /// <see cref="Members"/> is empty — Java's <c>removeAll()</c>.
+    /// <see cref="Members()"/> is empty — Java's <c>removeAll()</c>.
     /// </summary>
-    public bool RemoveAll => _members.Count == 0;
+    /// <returns><see langword="true"/> when every member of the group should be removed.</returns>
+    public bool RemoveAll() => _members.Count == 0;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public RemoveMembersFromConsumerGroupOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

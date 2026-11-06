@@ -351,33 +351,33 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void EveryP8OptionsTypeDefaultsItsTimeoutToNull()
     {
-        Assert.Null(new DescribeProducersOptions().TimeoutMs);
-        Assert.Null(new DescribeTransactionsOptions().TimeoutMs);
-        Assert.Null(new AbortTransactionOptions().TimeoutMs);
-        Assert.Null(new TerminateTransactionOptions().TimeoutMs);
-        Assert.Null(new FenceProducersOptions().TimeoutMs);
-        Assert.Null(new ListTransactionsOptions().TimeoutMs);
+        Assert.Null(new DescribeProducersOptions().TimeoutMs());
+        Assert.Null(new DescribeTransactionsOptions().TimeoutMs());
+        Assert.Null(new AbortTransactionOptions().TimeoutMs());
+        Assert.Null(new TerminateTransactionOptions().TimeoutMs());
+        Assert.Null(new FenceProducersOptions().TimeoutMs());
+        Assert.Null(new ListTransactionsOptions().TimeoutMs());
     }
 
     [Fact]
     public void DescribeProducersOptions_BrokerIdDefaultsToNullMeaningQueryTheLeader() =>
-        Assert.Null(new DescribeProducersOptions().BrokerId);
+        Assert.Null(new DescribeProducersOptions().BrokerId());
 
     [Fact]
     public void DescribeProducersOptions_EqualityIncludesTheTimeout()
     {
-        DescribeProducersOptions baseline = new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 };
+        DescribeProducersOptions baseline = new DescribeProducersOptions().BrokerId(3).TimeoutMs(500);
 
-        Assert.Equal(baseline, new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 });
+        Assert.Equal(baseline, new DescribeProducersOptions().BrokerId(3).TimeoutMs(500));
         Assert.Equal(
             baseline.GetHashCode(),
-            new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 }.GetHashCode());
+            new DescribeProducersOptions().BrokerId(3).TimeoutMs(500).GetHashCode());
 
-        Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 4, TimeoutMs = 500 });
+        Assert.NotEqual(baseline, new DescribeProducersOptions().BrokerId(4).TimeoutMs(500));
 
         // Java's equals includes timeoutMs, the opposite of ListTransactionsOptions.
-        Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 501 });
-        Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 3 });
+        Assert.NotEqual(baseline, new DescribeProducersOptions().BrokerId(3).TimeoutMs(501));
+        Assert.NotEqual(baseline, new DescribeProducersOptions().BrokerId(3));
     }
 
     [Fact]
@@ -385,7 +385,7 @@ public sealed class PublicAdminP8TypesTests
     {
         Assert.Equal(
             "DescribeProducersOptions(brokerId=OptionalInt[3], timeoutMs=500)",
-            new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 500 }.ToString());
+            new DescribeProducersOptions().BrokerId(3).TimeoutMs(500).ToString());
         Assert.Equal(
             "DescribeProducersOptions(brokerId=OptionalInt.empty, timeoutMs=null)",
             new DescribeProducersOptions().ToString());
@@ -397,36 +397,34 @@ public sealed class PublicAdminP8TypesTests
         // Java is not uniform: two of the four use parentheses and two use braces.
         Assert.Equal(
             "DescribeTransactionsOptions(timeoutMs=7)",
-            new DescribeTransactionsOptions { TimeoutMs = 7 }.ToString());
+            new DescribeTransactionsOptions().TimeoutMs(7).ToString());
         Assert.Equal(
             "AbortTransactionOptions(timeoutMs=7)",
-            new AbortTransactionOptions { TimeoutMs = 7 }.ToString());
+            new AbortTransactionOptions().TimeoutMs(7).ToString());
         Assert.Equal(
             "TerminateTransactionOptions{timeoutMs=7}",
-            new TerminateTransactionOptions { TimeoutMs = 7 }.ToString());
+            new TerminateTransactionOptions().TimeoutMs(7).ToString());
         Assert.Equal(
             "FenceProducersOptions{timeoutMs=7}",
-            new FenceProducersOptions { TimeoutMs = 7 }.ToString());
+            new FenceProducersOptions().TimeoutMs(7).ToString());
     }
 
     [Fact]
     public void ListTransactionsOptions_DurationDefaultsToMinusOneNotZero()
     {
         // A 0 would be a real "longer than 0 ms" filter; -1 is the neutral value.
-        Assert.Equal(-1L, new ListTransactionsOptions().FilteredDuration);
+        Assert.Equal(-1L, new ListTransactionsOptions().FilteredDuration());
     }
 
     [Fact]
     public void ListTransactionsOptions_PatternDefaultsToNullAndTheEmptyStringIsDistinct()
     {
-        Assert.Null(new ListTransactionsOptions().FilteredTransactionalIdPattern);
+        Assert.Null(new ListTransactionsOptions().FilteredTransactionalIdPattern());
 
-        ListTransactionsOptions empty = new ListTransactionsOptions
-        {
-            FilteredTransactionalIdPattern = string.Empty,
-        };
+        ListTransactionsOptions empty = new ListTransactionsOptions()
+            .FilterOnTransactionalIdPattern(string.Empty);
 
-        Assert.Equal(string.Empty, empty.FilteredTransactionalIdPattern);
+        Assert.Equal(string.Empty, empty.FilteredTransactionalIdPattern());
         Assert.NotEqual(new ListTransactionsOptions(), empty);
     }
 
@@ -435,12 +433,12 @@ public sealed class PublicAdminP8TypesTests
     {
         ListTransactionsOptions options = new ListTransactionsOptions();
 
-        Assert.Empty(options.FilteredStates);
-        Assert.Empty(options.FilteredProducerIds);
+        Assert.Empty(options.FilteredStates());
+        Assert.Empty(options.FilteredProducerIds());
 
         // Unlike ListConsumerGroupOffsetsSpec, empty and unset are genuinely identical here.
-        options.FilteredStates = Array.Empty<TransactionState>();
-        options.FilteredProducerIds = Array.Empty<long>();
+        options.FilterStates(Array.Empty<TransactionState>());
+        options.FilterProducerIds(Array.Empty<long>());
         Assert.Equal(new ListTransactionsOptions(), options);
     }
 
@@ -449,8 +447,8 @@ public sealed class PublicAdminP8TypesTests
     {
         ListTransactionsOptions options = new ListTransactionsOptions();
 
-        Assert.Throws<ArgumentNullException>(() => options.FilteredStates = null!);
-        Assert.Throws<ArgumentNullException>(() => options.FilteredProducerIds = null!);
+        Assert.Throws<ArgumentNullException>(() => options.FilterStates(null!));
+        Assert.Throws<ArgumentNullException>(() => options.FilterProducerIds(null!));
     }
 
     [Fact]
@@ -463,45 +461,41 @@ public sealed class PublicAdminP8TypesTests
             TransactionState.PREPARE_ABORT,
         };
 
-        ListTransactionsOptions options = new ListTransactionsOptions { FilteredStates = states };
+        ListTransactionsOptions options = new ListTransactionsOptions().FilterStates(states);
 
-        Assert.Equal(2, options.FilteredStates.Count);
+        Assert.Equal(2, options.FilteredStates().Count);
 
         states.Add(TransactionState.EMPTY);
-        Assert.Equal(2, options.FilteredStates.Count);
-        Assert.NotSame(states, options.FilteredStates);
+        Assert.Equal(2, options.FilteredStates().Count);
+        Assert.NotSame(states, options.FilteredStates());
     }
 
     [Fact]
     public void ListTransactionsOptions_EqualityExcludesTheTimeout()
     {
-        ListTransactionsOptions baseline = new ListTransactionsOptions
-        {
-            FilteredStates = new[] { TransactionState.ONGOING },
-            FilteredProducerIds = new[] { 7L },
-            FilteredDuration = 1_000L,
-            FilteredTransactionalIdPattern = "txn-.*",
-            TimeoutMs = 500,
-        };
+        ListTransactionsOptions baseline = new ListTransactionsOptions()
+            .FilterStates(new[] { TransactionState.ONGOING })
+            .FilterProducerIds(new[] { 7L })
+            .FilterOnDuration(1_000L)
+            .FilterOnTransactionalIdPattern("txn-.*")
+            .TimeoutMs(500);
 
-        ListTransactionsOptions differentTimeout = new ListTransactionsOptions
-        {
-            FilteredStates = new[] { TransactionState.ONGOING },
-            FilteredProducerIds = new[] { 7L },
-            FilteredDuration = 1_000L,
-            FilteredTransactionalIdPattern = "txn-.*",
-            TimeoutMs = 999,
-        };
+        ListTransactionsOptions differentTimeout = new ListTransactionsOptions()
+            .FilterStates(new[] { TransactionState.ONGOING })
+            .FilterProducerIds(new[] { 7L })
+            .FilterOnDuration(1_000L)
+            .FilterOnTransactionalIdPattern("txn-.*")
+            .TimeoutMs(999);
 
         // Java's equals deliberately omits timeoutMs.
         Assert.Equal(baseline, differentTimeout);
         Assert.Equal(baseline.GetHashCode(), differentTimeout.GetHashCode());
 
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredDuration = 1_001L));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredTransactionalIdPattern = "other"));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredTransactionalIdPattern = null));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredStates = new[] { TransactionState.EMPTY }));
-        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilteredProducerIds = new[] { 8L }));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterOnDuration(1_001L)));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterOnTransactionalIdPattern("other")));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterOnTransactionalIdPattern(null)));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterStates(new[] { TransactionState.EMPTY })));
+        Assert.NotEqual(baseline, Mutate(baseline, o => o.FilterProducerIds(new[] { 8L })));
     }
 
     [Fact]
@@ -509,14 +503,12 @@ public sealed class PublicAdminP8TypesTests
         Assert.Equal(
             "ListTransactionsOptions(filteredStates=[Ongoing], filteredProducerIds=[7]"
                 + ", filteredDuration=1000, filteredTransactionalIdPattern=txn-.*, timeoutMs=500)",
-            new ListTransactionsOptions
-            {
-                FilteredStates = new[] { TransactionState.ONGOING },
-                FilteredProducerIds = new[] { 7L },
-                FilteredDuration = 1_000L,
-                FilteredTransactionalIdPattern = "txn-.*",
-                TimeoutMs = 500,
-            }.ToString());
+            new ListTransactionsOptions()
+                .FilterStates(new[] { TransactionState.ONGOING })
+                .FilterProducerIds(new[] { 7L })
+                .FilterOnDuration(1_000L)
+                .FilterOnTransactionalIdPattern("txn-.*")
+                .TimeoutMs(500).ToString());
 
     [Fact]
     public void P8TypesPublishExactlyTheirJavaAccessors()
@@ -554,10 +546,10 @@ public sealed class PublicAdminP8TypesTests
             new[] { "CoordinatorEpoch", "ProducerEpoch", "ProducerId", "TopicPartition" },
             DeclaredPublicMethodNames(typeof(AbortTransactionSpec)));
 
-        Assert.Equal(
-            new[] { "BrokerId", "TimeoutMs" },
-            DeclaredPublicPropertyNames(typeof(DescribeProducersOptions)));
+        SetterMethods.AssertGettersAndSetters(typeof(DescribeProducersOptions), "BrokerId", "TimeoutMs");
 
+        Type listTransactions = typeof(ListTransactionsOptions);
+        Assert.Empty(listTransactions.GetProperties());
         Assert.Equal(
             new[]
             {
@@ -567,7 +559,17 @@ public sealed class PublicAdminP8TypesTests
                 "FilteredTransactionalIdPattern",
                 "TimeoutMs",
             },
-            DeclaredPublicPropertyNames(typeof(ListTransactionsOptions)));
+            Getters.NamesOf(listTransactions));
+        Assert.Equal(
+            new[]
+            {
+                "FilterOnDuration",
+                "FilterOnTransactionalIdPattern",
+                "FilterProducerIds",
+                "FilterStates",
+                "TimeoutMs",
+            },
+            SetterMethods.NamesOf(listTransactions));
 
         foreach (Type timeoutOnly in new[]
         {
@@ -577,35 +579,33 @@ public sealed class PublicAdminP8TypesTests
             typeof(FenceProducersOptions),
         })
         {
-            Assert.Equal(new[] { "TimeoutMs" }, DeclaredPublicPropertyNames(timeoutOnly));
+            SetterMethods.AssertGettersAndSetters(timeoutOnly, "TimeoutMs");
         }
     }
 
     [Fact]
-    public void P8ValueTypesDeclareNoProperties_AndTheOptionsNoMethods()
+    public void P8ValueTypesAndOptionsDeclareNoProperties()
     {
-        // Java's value classes declare only accessors and equals/hashCode/toString; the accessors are methods here, so the
-        // property set is empty.
+        // Java's value classes and options declare only accessors, setters and equals/hashCode/toString; all of them are
+        // methods here, so the property set is empty.
         Assert.Empty(DeclaredPublicPropertyNames(typeof(ProducerState)));
         Assert.Empty(DeclaredPublicPropertyNames(typeof(TransactionListing)));
         Assert.Empty(DeclaredPublicPropertyNames(typeof(TransactionDescription)));
         Assert.Empty(DeclaredPublicPropertyNames(typeof(AbortTransactionSpec)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(ListTransactionsOptions)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(DescribeProducersOptions)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(ListTransactionsOptions)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(DescribeProducersOptions)));
     }
 
     private static ListTransactionsOptions Mutate(
         ListTransactionsOptions source,
         Action<ListTransactionsOptions> change)
     {
-        ListTransactionsOptions copy = new ListTransactionsOptions
-        {
-            FilteredStates = source.FilteredStates,
-            FilteredProducerIds = source.FilteredProducerIds,
-            FilteredDuration = source.FilteredDuration,
-            FilteredTransactionalIdPattern = source.FilteredTransactionalIdPattern,
-            TimeoutMs = source.TimeoutMs,
-        };
+        ListTransactionsOptions copy = new ListTransactionsOptions()
+            .FilterStates(source.FilteredStates())
+            .FilterProducerIds(source.FilteredProducerIds())
+            .FilterOnDuration(source.FilteredDuration())
+            .FilterOnTransactionalIdPattern(source.FilteredTransactionalIdPattern())
+            .TimeoutMs(source.TimeoutMs());
 
         change(copy);
         return copy;

@@ -323,7 +323,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
-        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
+        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions().TimeoutMs(-1);
 
         KafkaTimeoutException explicitNull = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),

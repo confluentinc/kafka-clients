@@ -116,7 +116,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
 
         AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(
             new[] { "p5-dclg-flag" },
-            new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include });
+            new DescribeClassicGroupsOptions().IncludeAuthorizedOperations(include));
 
         UnsupportedOperationException failure = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
@@ -163,7 +163,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
             {
                 admin.DescribeClassicGroups(
                     new[] { "p5-dclg-timeout" },
-                    new DescribeClassicGroupsOptions { TimeoutMs = -1 });
+                    new DescribeClassicGroupsOptions().TimeoutMs(-1));
             }));
     }
 

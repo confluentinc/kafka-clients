@@ -47,7 +47,7 @@ internal static class TopicProvisioning
         Console.WriteLine($">>> CREATE_TOPIC: deleting topic '{topic}' (ignored if absent) ...");
         DeleteTopicsResult deleteResult = admin.DeleteTopics(
             TopicCollection.OfTopicNames(new[] { topic }),
-            new DeleteTopicsOptions { TimeoutMs = OperationTimeoutMs });
+            new DeleteTopicsOptions().TimeoutMs(OperationTimeoutMs));
         try
         {
             deleteResult.TopicNameValues![topic].Get();
@@ -66,7 +66,7 @@ internal static class TopicProvisioning
         var newTopic = new NewTopic(topic, partitions < 0 ? (int?)null : partitions, (short?)null);
         CreateTopicsResult createResult = admin.CreateTopics(
             new[] { newTopic },
-            new CreateTopicsOptions { TimeoutMs = OperationTimeoutMs });
+            new CreateTopicsOptions().TimeoutMs(OperationTimeoutMs));
         try
         {
             createResult.Values[topic].Get();

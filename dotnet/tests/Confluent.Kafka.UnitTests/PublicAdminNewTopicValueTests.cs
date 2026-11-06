@@ -39,8 +39,8 @@ public sealed class PublicAdminNewTopicValueTests
             () => new NewTopic("t", (int?)null, (short?)null),
             () => new NewTopic("t", -1, (short)-1),
             () => new NewTopic("t", Assignments((0, new[] { 1, 2 }), (1, new[] { 2, 3 }))),
-            () => new NewTopic("t", 3, (short)1) { Configs = Configs(("k", "v"), ("k2", "v2")) },
-            () => new NewTopic("t", Assignments((0, new[] { 1 }))) { Configs = Configs() },
+            () => new NewTopic("t", 3, (short)1).Configs(Configs(("k", "v"), ("k2", "v2"))),
+            () => new NewTopic("t", Assignments((0, new[] { 1 }))).Configs(Configs()),
         })
         {
             NewTopic left = build();
@@ -65,22 +65,22 @@ public sealed class PublicAdminNewTopicValueTests
     [Fact]
     public void Unequal_WhenAnyFieldDiffers()
     {
-        NewTopic baseline = new NewTopic("t", 3, (short)1) { Configs = Configs(("k", "v")) };
+        NewTopic baseline = new NewTopic("t", 3, (short)1).Configs(Configs(("k", "v")));
 
         foreach (NewTopic different in new[]
         {
-            new NewTopic("T", 3, (short)1) { Configs = Configs(("k", "v")) },
-            new NewTopic("u", 3, (short)1) { Configs = Configs(("k", "v")) },
-            new NewTopic("t", 4, (short)1) { Configs = Configs(("k", "v")) },
-            new NewTopic("t", 3, (short)2) { Configs = Configs(("k", "v")) },
-            new NewTopic("t", (int?)null, (short?)1) { Configs = Configs(("k", "v")) },
-            new NewTopic("t", (int?)3, (short?)null) { Configs = Configs(("k", "v")) },
+            new NewTopic("T", 3, (short)1).Configs(Configs(("k", "v"))),
+            new NewTopic("u", 3, (short)1).Configs(Configs(("k", "v"))),
+            new NewTopic("t", 4, (short)1).Configs(Configs(("k", "v"))),
+            new NewTopic("t", 3, (short)2).Configs(Configs(("k", "v"))),
+            new NewTopic("t", (int?)null, (short?)1).Configs(Configs(("k", "v"))),
+            new NewTopic("t", (int?)3, (short?)null).Configs(Configs(("k", "v"))),
             new NewTopic("t", 3, (short)1),
-            new NewTopic("t", 3, (short)1) { Configs = Configs() },
-            new NewTopic("t", 3, (short)1) { Configs = Configs(("k", "V")) },
-            new NewTopic("t", 3, (short)1) { Configs = Configs(("K", "v")) },
-            new NewTopic("t", 3, (short)1) { Configs = Configs(("k", "v"), ("k2", "v2")) },
-            new NewTopic("t", Assignments((0, new[] { 1 }))) { Configs = Configs(("k", "v")) },
+            new NewTopic("t", 3, (short)1).Configs(Configs()),
+            new NewTopic("t", 3, (short)1).Configs(Configs(("k", "V"))),
+            new NewTopic("t", 3, (short)1).Configs(Configs(("K", "v"))),
+            new NewTopic("t", 3, (short)1).Configs(Configs(("k", "v"), ("k2", "v2"))),
+            new NewTopic("t", Assignments((0, new[] { 1 }))).Configs(Configs(("k", "v"))),
         })
         {
             Assert.False(baseline.Equals(different), different.ToString());
@@ -92,7 +92,7 @@ public sealed class PublicAdminNewTopicValueTests
         Assert.NotEqual(new NewTopic("t", -1, (short)-1), new NewTopic("t", (int?)null, (short?)null));
 
         // A null configuration is not an empty one, as Java's Objects.equals has it.
-        Assert.NotEqual(new NewTopic("t", 1, (short)1), new NewTopic("t", 1, (short)1) { Configs = Configs() });
+        Assert.NotEqual(new NewTopic("t", 1, (short)1), new NewTopic("t", 1, (short)1).Configs(Configs()));
 
         NewTopic assigned = new NewTopic("t", Assignments((0, new[] { 1, 2 })));
         foreach (NewTopic different in new[]
@@ -115,14 +115,10 @@ public sealed class PublicAdminNewTopicValueTests
     {
         NewTopic forward = new NewTopic(
             "t", Assignments((0, new[] { 1, 2 }), (1, new[] { 2, 3 }), (2, new[] { 3, 1 })))
-        {
-            Configs = Configs(("a", "1"), ("b", "2"), ("c", "3")),
-        };
+            .Configs(Configs(("a", "1"), ("b", "2"), ("c", "3")));
         NewTopic backward = new NewTopic(
             "t", Assignments((2, new[] { 3, 1 }), (1, new[] { 2, 3 }), (0, new[] { 1, 2 })))
-        {
-            Configs = Configs(("c", "3"), ("b", "2"), ("a", "1")),
-        };
+            .Configs(Configs(("c", "3"), ("b", "2"), ("a", "1")));
 
         Assert.Equal(forward, backward);
         Assert.Equal(forward.GetHashCode(), backward.GetHashCode());
@@ -135,9 +131,7 @@ public sealed class PublicAdminNewTopicValueTests
                 [0] = new[] { 1, 2 },
                 [2] = new[] { 3, 1 },
             })
-        {
-            Configs = new SortedDictionary<string, string> { ["b"] = "2", ["c"] = "3", ["a"] = "1" },
-        };
+            .Configs(new SortedDictionary<string, string> { ["b"] = "2", ["c"] = "3", ["a"] = "1" });
 
         Assert.Equal(forward, sorted);
         Assert.Equal(forward.GetHashCode(), sorted.GetHashCode());
@@ -147,17 +141,11 @@ public sealed class PublicAdminNewTopicValueTests
     public void ConfigsEquality_IsOrdinal_WhateverTheDictionaryComparer()
     {
         NewTopic ordinal = new NewTopic("t", 1, (short)1)
-        {
-            Configs = new Dictionary<string, string>(StringComparer.Ordinal) { ["cleanup.policy"] = "compact" },
-        };
+            .Configs(new Dictionary<string, string>(StringComparer.Ordinal) { ["cleanup.policy"] = "compact" });
         NewTopic ignoreCase = new NewTopic("t", 1, (short)1)
-        {
-            Configs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["cleanup.policy"] = "compact" },
-        };
+            .Configs(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["cleanup.policy"] = "compact" });
         NewTopic ignoreCaseUpper = new NewTopic("t", 1, (short)1)
-        {
-            Configs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["CLEANUP.POLICY"] = "compact" },
-        };
+            .Configs(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["CLEANUP.POLICY"] = "compact" });
 
         Assert.True(ordinal.Equals(ignoreCase));
         Assert.True(ignoreCase.Equals(ordinal));
@@ -176,16 +164,16 @@ public sealed class PublicAdminNewTopicValueTests
         NewTopic right = new NewTopic("t", 1, (short)1);
         Assert.Equal(left, right);
 
-        right.Configs = Configs(("k", "v"));
+        right.Configs(Configs(("k", "v")));
         Assert.NotEqual(left, right);
 
-        left.Configs = Configs(("k", "v"));
+        left.Configs(Configs(("k", "v")));
         Assert.Equal(left, right);
         Assert.Equal(left.GetHashCode(), right.GetHashCode());
 
         // A mutation behind the reference is seen too: the dictionary is held, not copied.
         Dictionary<string, string> mutable = new Dictionary<string, string> { ["k"] = "v" };
-        left.Configs = mutable;
+        left.Configs(mutable);
         Assert.Equal(left, right);
         mutable["k"] = "w";
         Assert.NotEqual(left, right);
@@ -195,20 +183,16 @@ public sealed class PublicAdminNewTopicValueTests
     public void NullConfigValue_IsHandledByEqualityHashAndToString()
     {
         NewTopic left = new NewTopic("t", 1, (short)1)
-        {
-            Configs = new Dictionary<string, string> { ["retention.ms"] = null! },
-        };
+            .Configs(new Dictionary<string, string> { ["retention.ms"] = null! });
         NewTopic right = new NewTopic("t", 1, (short)1)
-        {
-            Configs = new Dictionary<string, string> { ["retention.ms"] = null! },
-        };
+            .Configs(new Dictionary<string, string> { ["retention.ms"] = null! });
 
         Assert.True(left.Equals(right));
         Assert.True(right.Equals(left));
         Assert.Equal(left.GetHashCode(), right.GetHashCode());
 
-        NewTopic empty = new NewTopic("t", 1, (short)1) { Configs = Configs(("retention.ms", "")) };
-        NewTopic absent = new NewTopic("t", 1, (short)1) { Configs = new Dictionary<string, string>() };
+        NewTopic empty = new NewTopic("t", 1, (short)1).Configs(Configs(("retention.ms", "")));
+        NewTopic absent = new NewTopic("t", 1, (short)1).Configs(new Dictionary<string, string>());
         Assert.False(left.Equals(empty));
         Assert.False(empty.Equals(left));
         Assert.False(left.Equals(absent));
@@ -237,11 +221,11 @@ public sealed class PublicAdminNewTopicValueTests
 
         Assert.Equal(
             "(name=t, numPartitions=default, replicationFactor=default, replicasAssignments={0=[1, 2]}, configs={k=v})",
-            new NewTopic("t", Assignments((0, new[] { 1, 2 }))) { Configs = Configs(("k", "v")) }.ToString());
+            new NewTopic("t", Assignments((0, new[] { 1, 2 }))).Configs(Configs(("k", "v"))).ToString());
 
         Assert.Equal(
             "(name=t, numPartitions=default, replicationFactor=default, replicasAssignments={}, configs={})",
-            new NewTopic("t", Assignments()) { Configs = Configs() }.ToString());
+            new NewTopic("t", Assignments()).Configs(Configs()).ToString());
     }
 
     [Fact]

@@ -125,7 +125,7 @@ public sealed class AdminP3ResultMarshalTests
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
-            AsyncDescribeClusterResult result = real.DescribeCluster(new DescribeClusterOptions { TimeoutMs = 0 });
+            AsyncDescribeClusterResult result = real.DescribeCluster(new DescribeClusterOptions().TimeoutMs(0));
 
             Assert.Equal(7, (await Failure(() => result.Nodes().Get())).Code);
             Assert.Equal(7, (await Failure(() => result.Controller().Get())).Code);

@@ -221,26 +221,22 @@ public sealed class PublicAdminP4ShapeParityTests
     {
         // Java's ElectLeadersOptions declares no members of its own, so the inherited timeout is the whole surface.
         ElectLeadersOptions elect = new ElectLeadersOptions();
-        Assert.Null(elect.TimeoutMs);
-        Assert.Equal(new[] { nameof(ElectLeadersOptions.TimeoutMs) }, PropertyNames(typeof(ElectLeadersOptions)));
+        Assert.Null(elect.TimeoutMs());
+        SetterMethods.AssertGettersAndSetters(typeof(ElectLeadersOptions), nameof(ElectLeadersOptions.TimeoutMs));
 
         // allowReplicationFactorChange defaults to true, not the C# default for its type.
         AlterPartitionReassignmentsOptions reassign = new AlterPartitionReassignmentsOptions();
-        Assert.Null(reassign.TimeoutMs);
-        Assert.True(reassign.AllowReplicationFactorChange);
-        Assert.Equal(
-            new[]
-            {
-                nameof(AlterPartitionReassignmentsOptions.AllowReplicationFactorChange),
-                nameof(AlterPartitionReassignmentsOptions.TimeoutMs),
-            },
-            PropertyNames(typeof(AlterPartitionReassignmentsOptions)));
+        Assert.Null(reassign.TimeoutMs());
+        Assert.True(reassign.AllowReplicationFactorChange());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(AlterPartitionReassignmentsOptions),
+            nameof(AlterPartitionReassignmentsOptions.AllowReplicationFactorChange),
+            nameof(AlterPartitionReassignmentsOptions.TimeoutMs));
 
         foreach (Type type in new[] { typeof(ElectLeadersOptions), typeof(AlterPartitionReassignmentsOptions) })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
@@ -259,9 +255,5 @@ public sealed class PublicAdminP4ShapeParityTests
             .Where(property => !property.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
-            .ToArray();
-
-    private static string[] PropertyNames(Type type) =>
-        type.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 }

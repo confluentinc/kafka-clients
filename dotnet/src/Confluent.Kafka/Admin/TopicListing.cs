@@ -51,7 +51,7 @@ public sealed class TopicListing
     /// <summary>
     /// Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>) —
     /// Java's <c>isInternal()</c>. Internal topics are listed only when
-    /// <see cref="ListTopicsOptions.ListInternal"/> is set.
+    /// <see cref="ListTopicsOptions.ListInternal()"/> is set.
     /// </summary>
     /// <returns>Whether the topic is internal to Kafka (for example <c>__consumer_offsets</c>).</returns>
     public bool IsInternal() => _isInternal;
