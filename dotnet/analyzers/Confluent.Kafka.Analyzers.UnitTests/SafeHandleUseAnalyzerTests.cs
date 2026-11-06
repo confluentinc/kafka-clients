@@ -450,6 +450,34 @@ public sealed class SafeHandleUseAnalyzerTests
             Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle.DangerousAddRef", "handle", "added"),
             Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(1).WithArguments("handle.DangerousAddRef", "handle", "added"));
 
+    [Theory]
+    [InlineData("if (added)\n{\n    handle.DangerousRelease();\n    handle.DangerousRelease();\n}")]
+    [InlineData("if (added)\n{\n    handle.DangerousRelease();\n}\n\nif (added)\n{\n    handle.DangerousRelease();\n}")]
+    [InlineData("if (added)\n{\n    handle.DangerousRelease();\n}\n\nhandle.DangerousRelease();")]
+    public Task AHandleReleasedTwice_IsReported(string releases) =>
+        Verifier.VerifyAsync(
+            Handles + $$"""
+                namespace Confluent.Kafka.Internal.Interop
+                {
+                    internal static class C
+                    {
+                        internal static void Run(SafeProducerHandle handle)
+                        {
+                            bool added = false;
+                            try
+                            {
+                                {|#0:handle.DangerousAddRef(ref added)|};
+                            }
+                            finally
+                            {
+                                {{releases}}
+                            }
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle.DangerousAddRef", "handle", "added"));
+
     [Fact]
     public Task AnAddRefInALoopInsideTheTry_IsReported() =>
         Verifier.VerifyAsync(

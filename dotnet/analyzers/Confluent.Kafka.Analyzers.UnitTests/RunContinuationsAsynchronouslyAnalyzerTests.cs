@@ -131,6 +131,21 @@ public sealed class RunContinuationsAsynchronouslyAnalyzerTests
     public Task ADerivedSourceWhoseBaseCallsPassTheOption_IsNotReported(string constructors) =>
         VerifyAsync(Derived(constructors) + "\nclass User\n{\n    object M() => new Source();\n}\n");
 
+    [Theory]
+    [InlineData("class {|#0:Source|}(int value) : TaskCompletionSource<int>")]
+    [InlineData("class Source(int value) : {|#0:TaskCompletionSource<int>(TaskCreationOptions.None)|}")]
+    [InlineData("class Source(int value) : {|#0:TaskCompletionSource<int>()|}")]
+    public Task APrimaryConstructorThatCallsBaseWithoutTheOption_IsReported(string declaration) =>
+        VerifyAsync(
+            Primary(declaration),
+            CSharpAnalyzerVerifier<RunContinuationsAsynchronouslyAnalyzer, DefaultVerifier>.Diagnostic()
+                .WithLocation(0)
+                .WithArguments("TaskCompletionSource<int>"));
+
+    [Fact]
+    public Task APrimaryConstructorThatPassesTheOption_IsNotReported() =>
+        VerifyAsync(Primary("class Source(int value) : TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)"));
+
     [Fact]
     public Task ATypeOfTheSameNameInAnotherNamespace_IsNotReported() =>
         VerifyAsync(
@@ -145,6 +160,16 @@ public sealed class RunContinuationsAsynchronouslyAnalyzerTests
                 }
             }
             """);
+
+    private static string Primary(string declaration) =>
+        $$"""
+        using System.Threading.Tasks;
+
+        {{declaration}}
+        {
+            internal int Value => value;
+        }
+        """;
 
     private static string Derived(string constructors) =>
         $$"""

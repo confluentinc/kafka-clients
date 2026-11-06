@@ -43,7 +43,8 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
         description: "The binding completes its TaskCompletionSources on a client's drain thread. Without "
             + "RunContinuationsAsynchronously an awaiter's continuation runs on that thread and stalls every later "
             + "completion. The option must be a compile-time constant argument, so the rule can see it. A class derived "
-            + "from one passes it in each constructor's base call; a constructor without one calls base() without it.");
+            + "from one passes it in each constructor's base call; a constructor without one, a primary constructor "
+            + "included, calls base() without it.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(s_rule);
@@ -134,7 +135,8 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
     }
 
     // A class derived from a TaskCompletionSource whose constructor calls base() without the option: one with no base
-    // or this call, or the default constructor of a class that declares none.
+    // or this call, a primary constructor whose base type is written without arguments, or the default constructor of
+    // a class that declares none. A primary constructor's written base arguments are AnalyzeBaseCall's.
     private static void AnalyzeDerivedSource(SymbolAnalysisContext context, ImmutableArray<INamedTypeSymbol> sources)
     {
         INamedTypeSymbol type = (INamedTypeSymbol)context.Symbol;
@@ -154,9 +156,16 @@ public sealed class RunContinuationsAsynchronouslyAnalyzer : DiagnosticAnalyzer
 
             foreach (SyntaxReference reference in constructor.DeclaringSyntaxReferences)
             {
-                if (reference.GetSyntax(context.CancellationToken) is ConstructorDeclarationSyntax { Initializer: null } declaration)
+                SyntaxToken? implicitBaseCall = reference.GetSyntax(context.CancellationToken) switch
                 {
-                    context.ReportDiagnostic(Diagnostic.Create(s_rule, declaration.Identifier.GetLocation(), display));
+                    ConstructorDeclarationSyntax { Initializer: null } declaration => declaration.Identifier,
+                    TypeDeclarationSyntax { ParameterList: not null } primary
+                        when primary.BaseList?.Types.FirstOrDefault() is not PrimaryConstructorBaseTypeSyntax => primary.Identifier,
+                    _ => null,
+                };
+                if (implicitBaseCall is { } identifier)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(s_rule, identifier.GetLocation(), display));
                 }
             }
         }

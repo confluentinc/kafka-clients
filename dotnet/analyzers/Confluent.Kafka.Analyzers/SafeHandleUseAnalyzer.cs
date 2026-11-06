@@ -59,12 +59,13 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         description: "A reference is call-scoped: it is taken inside a try statement, or one of its catch blocks, and "
             + "released in that try's finally block under 'if' on the flag the AddRef sets, on the same thread, with "
             + "nothing but releases of plain variables running before it. One flag and one release answer one AddRef, "
-            + "outside any loop in the try. So no exception can leak it, and a failed AddRef is not released. A wrapper "
+            + "outside any loop in the try, and the finally block releases that handle once. So no exception can leak "
+            + "it, a failed AddRef is not released, and nothing is released twice. A wrapper "
             + "(a method named like AddRef that takes a ref bool) hands the reference it takes with that flag to its "
             + "caller, whose release of the same handle, or of the argument passed for it, this rule checks. Does not "
             + "cover: a wrapper whose body is not in source, after which any release in the finally block counts. It "
             + "reports, although they are safe: a flag tested other than as 'if (flag)', a balanced AddRef in a loop, "
-            + "and a release on another thread.");
+            + "one handle acquired twice in one try with two flags and two releases, and a release on another thread.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
@@ -244,12 +245,20 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
                         && (receiver is null || Receiver(release.Expression) == receiver)
                         && IsGuardedBy(release, @finally.Block, flag, model)))
             {
-                return IsTheOnlyAcquisition(addRef, tryStatement, flag);
+                return IsTheOnlyAcquisition(addRef, tryStatement, flag) && IsReleasedOnce(@finally.Block, receiver);
             }
         }
 
         return false;
     }
+
+    // The finally block releases the handle once: a second release gives back a reference this code never took, and
+    // can destroy a handle another caller still uses. A wrapper whose handle is unknown is not counted.
+    private static bool IsReleasedOnce(BlockSyntax finallyBlock, string? receiver) =>
+        receiver is null
+        || finallyBlock.DescendantNodes(node => !IsFunction(node))
+            .OfType<InvocationExpressionSyntax>()
+            .Count(release => Name(release.Expression) == "DangerousRelease" && Receiver(release.Expression) == receiver) == 1;
 
     // One guarded release answers one acquisition: the AddRef is not in a loop inside the try, and no other AddRef in
     // the try sets the same flag.
