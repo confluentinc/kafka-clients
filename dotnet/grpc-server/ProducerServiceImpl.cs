@@ -110,7 +110,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             RecordMetadata metadata = future.Value.Get(_sendTimeout);
             return Task.FromResult(new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) });
         }
-        catch (System.TimeoutException) when (future is { IsDone: false })
+        catch (System.TimeoutException) when (future is { } pending && !pending.IsDone())
         {
             // Only the server's own bound is code 7: a future that failed with a TimeoutException
             // (the core's -5) is done, and goes out through ToProto.

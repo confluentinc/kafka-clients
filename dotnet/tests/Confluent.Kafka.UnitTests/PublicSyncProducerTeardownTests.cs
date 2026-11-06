@@ -143,7 +143,7 @@ public sealed class PublicSyncProducerTeardownTests
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Assert.True(future.IsDone, "the uncompleted send was still pending when Dispose returned");
+        Assert.True(future.IsDone(), "the uncompleted send was still pending when Dispose returned");
         Assert.Equal(1, callback.Count);
         RecordMetadata metadata = future.Get(s_deadline);
         Assert.Equal(Topic, metadata.Topic());
@@ -165,7 +165,7 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(producer.Dispose, s_deadline);
 
         Thread.Sleep(200);
-        Assert.False(future.IsDone, "Dispose after Close completed the send");
+        Assert.False(future.IsDone(), "Dispose after Close completed the send");
         Assert.Equal(0, callback.Count);
     }
 
@@ -195,7 +195,7 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(producer.Close, s_deadline);
 
         Assert.True(await TestTimeout.Run(() => timedOut, s_deadline), "the blocked Get returned a result");
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
     }
 
     // Spins until the mock's history holds a record, i.e. the worker's send has landed and it is blocked in

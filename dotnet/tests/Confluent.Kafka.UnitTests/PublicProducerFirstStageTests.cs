@@ -122,18 +122,18 @@ public sealed class PublicProducerFirstStageTests
         ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(
             new ProducerRecord<byte[], byte[]>(topic, Encoding.UTF8.GetBytes("v")), callback, cts.Token);
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
-        Assert.False(future.IsDone, "the record's future was done before the token fired");
+        Assert.False(future.IsDone(), "the record's future was done before the token fired");
 
         cts.Cancel();
         await Task.Delay(s_settle);
-        Assert.False(future.IsDone, "the token ended the record's future");
+        Assert.False(future.IsDone(), "the token ended the record's future");
         Assert.Empty(callback.Calls());
 
         Assert.True(producer.CompleteNext());
         RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), s_deadline);
         Assert.Equal(topic, metadata.Topic());
         Assert.Equal(0L, metadata.Offset());
-        Assert.False(future.IsCancelled);
+        Assert.False(future.IsCancelled());
 
         await callback.WaitForFirst(s_deadline);
         await Task.Delay(s_settle);
@@ -219,7 +219,7 @@ public sealed class PublicProducerFirstStageTests
 
             Assert.True(stage.IsCompletedSuccessfully, "the hand-over did not run inside the call while the pump was held");
             AsyncKafkaFuture<RecordMetadata> future = await stage;
-            Assert.False(future.IsDone);
+            Assert.False(future.IsDone());
         }
         finally
         {

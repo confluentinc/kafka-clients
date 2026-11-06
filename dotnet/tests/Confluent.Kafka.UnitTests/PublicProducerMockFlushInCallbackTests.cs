@@ -124,7 +124,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Assert.True(producer.CompleteNext());
         Assert.True(flushing.WaitEnded(Deadline), "the flushing callback did not end");
         _ = pendingFuture.Get(Deadline);
-        seen.PendingCompleted = pendingFuture.IsDone;
+        seen.PendingCompleted = pendingFuture.IsDone();
         return seen;
     }
 
@@ -199,7 +199,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
 
             await TestTimeout.Run(() => flushingEnded, disposes ? s_quickly : Deadline);
             _ = await Within(pendingFuture.Get());
-            seen.PendingCompleted = pendingFuture.IsDone;
+            seen.PendingCompleted = pendingFuture.IsDone();
             if (disposes)
             {
                 seen.AfterClose = FailureOf(() => _ = producer.Flush());

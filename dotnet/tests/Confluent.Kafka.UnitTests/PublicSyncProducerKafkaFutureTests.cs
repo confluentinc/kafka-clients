@@ -247,7 +247,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Assert.True(future.IsDone);
+        Assert.True(future.IsDone());
         Assert.Equal(0L, future.Get(s_deadline).Offset());
         Assert.Equal(1, callback.Count);
     }
@@ -265,7 +265,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         FutureTimeoutException timedOut = Assert.Throws<FutureTimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(200)));
         Assert.Equal("Timeout after waiting for 200 ms.", timedOut.Message);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.Equal(0, callback.Count);
     }
 
@@ -409,7 +409,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     private static ProducerRecord<byte[], byte[]> Record() =>
         new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0);
 
-    private static bool IsDone(KafkaFuture<RecordMetadata> future) => future.IsDone;
+    private static bool IsDone(KafkaFuture<RecordMetadata> future) => future.IsDone();
 
     private static void WaitAtStart(Barrier start)
     {

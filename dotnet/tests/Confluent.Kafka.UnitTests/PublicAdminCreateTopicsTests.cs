@@ -191,7 +191,7 @@ public sealed class PublicAdminCreateTopicsTests
         CreateTopicsResult syncResult = syncAdmin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
         KafkaFuture<int> unknown = syncResult.NumPartitions("unknown");
         Assert.Equal(Unrequested, FutureAssert.Throws<IllegalArgumentException>(() => unknown.Get()).Message);
-        Assert.True(unknown.IsCompletedExceptionally);
+        Assert.True(unknown.IsCompletedExceptionally());
 
         ArgumentNullException nullTopic =
             Assert.Throws<ArgumentNullException>(() => { _ = result.TopicId(null!); });
@@ -212,14 +212,14 @@ public sealed class PublicAdminCreateTopicsTests
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             KafkaFuture allAfter = result.All();
             KafkaFuture fresh = result.Values()["linked"];
-            Assert.False(numPartitions.IsDone);
-            Assert.False(config.IsDone);
-            Assert.False(allBefore.IsDone);
-            Assert.False(allAfter.IsDone);
-            Assert.False(fresh.IsDone);
+            Assert.False(numPartitions.IsDone());
+            Assert.False(config.IsDone());
+            Assert.False(allBefore.IsDone());
+            Assert.False(allAfter.IsDone());
+            Assert.False(fresh.IsDone());
 
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
 
@@ -251,14 +251,14 @@ public sealed class PublicAdminCreateTopicsTests
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             AsyncKafkaFuture allAfter = result.All();
             AsyncKafkaFuture fresh = result.Values()["linked"];
-            Assert.False(numPartitions.IsDone);
-            Assert.False(config.IsDone);
-            Assert.False(allBefore.IsDone);
-            Assert.False(allAfter.IsDone);
-            Assert.False(fresh.IsDone);
+            Assert.False(numPartitions.IsDone());
+            Assert.False(config.IsDone());
+            Assert.False(allBefore.IsDone());
+            Assert.False(allAfter.IsDone());
+            Assert.False(fresh.IsDone());
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
 
@@ -296,10 +296,10 @@ public sealed class PublicAdminCreateTopicsTests
 
             Assert.NotEqual(first, fresh);
             Assert.NotEqual(asyncFirst, asyncFresh);
-            Assert.False(fresh.IsCancelled);
-            Assert.False(asyncFresh.IsCancelled);
-            Assert.False(fresh.IsDone);
-            Assert.False(asyncFresh.IsDone);
+            Assert.False(fresh.IsCancelled());
+            Assert.False(asyncFresh.IsCancelled());
+            Assert.False(fresh.IsDone());
+            Assert.False(asyncFresh.IsDone());
         }
         finally
         {
