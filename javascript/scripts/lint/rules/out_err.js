@@ -75,7 +75,7 @@ module.exports = {
           m.args.some((a) => a.replace(/^(\(\s*[\w\s*]+\)\s*)+/, '').startsWith(`${c.name}(`)),
       );
       if (wrapped) continue;
-      const fn = c.function ? bodies.get(c.function) : null;
+      const fn = c.function ? bodies.get(`${c.file}:${c.function}`) : null;
       const own = fn && fn.params.some((p) => p.name === slot && /kafka_common_Error_t\s*\*\*/.test(p.type));
       if (own) continue;
       const after = ctx.once(`noComments:${c.file}`, () => scan(ctx.read(c.file)).noComments).slice(c.end, c.end + 400);

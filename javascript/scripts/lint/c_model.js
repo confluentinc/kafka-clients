@@ -23,9 +23,14 @@
 const { functionBodies, callSites, prototypes, signatureParams } = require('./c_source');
 
 /**
- * `{bodies, calls, header}`: bodies by name (`{file, params, ...}`), every
- * call (`{file, nth, ...}`), the prototypes. A call site's key is
- * `file:function:callee#nth` (`siteKey`).
+ * `{bodies, calls, header, resolve}`: the definitions by `file:name` (`{name,
+ * file, params, isStatic, ...}`), every call (`{file, nth, ...}`), the
+ * prototypes, and `resolve(name, file)`, the definition a call of `name`
+ * made in `file` reaches (C's linkage: the definition in `file` itself
+ * first, then a non-`static` one in another file; with no `file`, the
+ * non-`static` one, or the only one). Two files may each define a `static`
+ * function of one name: each call reaches its own file's. A call site's key
+ * is `file:function:callee#nth` (`siteKey`).
  */
 function cModel(ctx) {
   return ctx.once('cModel', () => {
@@ -33,7 +38,9 @@ function cModel(ctx) {
     const calls = [];
     for (const file of ctx.files(['src'], ['.c', '.h'])) {
       const text = ctx.read(file);
-      for (const [name, b] of functionBodies(text)) bodies.set(name, { ...b, file, params: signatureParams(b.signature) });
+      for (const [name, b] of functionBodies(text)) {
+        bodies.set(`${file}:${name}`, { ...b, file, params: signatureParams(b.signature), isStatic: /^static\b/.test(b.signature) });
+      }
       // `nth`: the call's rank among the calls of its callee in its function,
       // from 1, which names a call site stably across edits elsewhere.
       const seen = new Map();
@@ -43,8 +50,26 @@ function cModel(ctx) {
         calls.push({ ...c, file, nth: seen.get(k) });
       }
     }
-    return { bodies, calls, header: prototypes(ctx.header()) };
+    const byName = new Map();
+    for (const b of bodies.values()) {
+      if (!byName.has(b.name)) byName.set(b.name, []);
+      byName.get(b.name).push(b);
+    }
+    const resolve = (name, file) => {
+      const defs = byName.get(name) || [];
+      if (file !== undefined) {
+        const own = defs.find((b) => b.file === file);
+        if (own) return own;
+      }
+      return defs.find((b) => !b.isStatic) || (file === undefined && defs.length === 1 ? defs[0] : undefined);
+    };
+    return { bodies, calls, header: prototypes(ctx.header()), resolve };
   });
+}
+
+/** The key of definition `b` in `cModel(ctx).bodies`: `file:name`. */
+function bodyKey(b) {
+  return `${b.file}:${b.name}`;
 }
 
 /** The 1-based line of a body's offset `at` in its file. */
@@ -83,4 +108,4 @@ function siteKey(c) {
   return `${c.file}:${c.function || '(top level)'}:${c.name}#${c.nth}`;
 }
 
-module.exports = { cModel, lineIn, applyAllowlist, siteKey };
+module.exports = { cModel, bodyKey, lineIn, applyAllowlist, siteKey };

@@ -32,7 +32,7 @@
 // The completion functions are listed with what they run; an entry that
 // matches nothing is a finding.
 
-const { cModel, applyAllowlist } = require('../c_model');
+const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { nativeUses } = require('../native_uses');
 const { scan } = require('../c_source');
 
@@ -51,7 +51,7 @@ module.exports = {
     '(javascript/CLAUDE.md boundary rule 6).',
   check(ctx) {
     const { ts, checker } = ctx.program();
-    const { bodies, calls, header } = cModel(ctx);
+    const { calls, header, resolve } = cModel(ctx);
     const findings = [];
     let checked = 0;
     // The C completion functions: src functions passed for an `_fn_t` parameter.
@@ -61,18 +61,19 @@ module.exports = {
       // An interface's constructor (`..._new` / `..._new_err`) takes its methods as `_fn_t`s.
       if (!proto || !/_new(_err)?$/.test(c.name)) continue;
       proto.params.forEach((p, i) => {
-        if (/_fn_t$/.test(p.type) && bodies.has(c.args[i])) completions.set(c.args[i], c);
+        const body = /_fn_t$/.test(p.type) ? resolve(c.args[i], c.file) : undefined;
+        if (body) completions.set(bodyKey(body), body);
       });
     }
     const raw = [];
-    for (const [name] of completions) {
+    for (const { name } of completions.values()) {
       raw.push({ kind: 'completion-unlisted', subject: name, message: 'is a delivery completion the rule does not list', allow: name });
     }
     const listed = applyAllowlist(raw, this.COMPLETIONS, 'order-unused-allowance');
     findings.push(...listed.kept, ...listed.unused);
-    for (const [name] of completions) {
+    for (const body of completions.values()) {
+      const { name } = body;
       checked += 1;
-      const body = bodies.get(name);
       const own = calls.filter((c) => c.file === body.file && c.function === name);
       const js = own.filter((c) => c.name === 'call_ref');
       const report = own.filter((c) => c.name.endsWith('__set_callback_result_err'));

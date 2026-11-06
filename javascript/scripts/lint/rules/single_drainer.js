@@ -30,7 +30,7 @@
 // The executors and drain callers are listed with their reasons; an entry
 // that matches nothing is a finding.
 
-const { cModel, applyAllowlist } = require('../c_model');
+const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { scan, matching } = require('../c_source');
 
 /** The functions allowed to call `__execute_callbacks_err`: the queue's executors. */
@@ -62,10 +62,10 @@ module.exports = {
     "Run a client's __execute_callbacks only through cbq_drain, from call_js or the pump, and destroy after " +
     'the drain loop (javascript/CLAUDE.md boundary rules 3 and 10).',
   check(ctx) {
-    const { bodies, calls, header } = cModel(ctx);
+    const { calls, header, resolve } = cModel(ctx);
     const raw = [];
     let checked = 0;
-    const drain = bodies.get('cbq_drain');
+    const drain = resolve('cbq_drain');
     if (!drain) {
       return { findings: [{ kind: 'drain-missing', subject: 'cbq_drain', message: 'is defined in no src/*.c' }], checked: 1 };
     }
@@ -136,38 +136,42 @@ module.exports = {
       const executes = (iface) => header.has(`${prefix}_${iface}__execute_callbacks_err`) || header.has(`${prefix}_${iface}__execute_callbacks`);
       if (executes(cls) || views.some(executes)) clientDestroys.add(name);
     }
+    // The call graph, by definition (`file:name`): a call reaches the
+    // definition C's linkage gives it (`resolve`).
     const graph = new Map();
     for (const c of calls) {
       if (!c.function) continue;
-      if (!graph.has(c.function)) graph.set(c.function, []);
-      graph.get(c.function).push(c);
+      const k = `${c.file}:${c.function}`;
+      if (!graph.has(k)) graph.set(k, []);
+      graph.get(k).push(c);
     }
     const roots = new Map();
     for (const c of calls) {
       const proto = header.get(c.name);
       if (!proto) continue;
       proto.params.forEach((p, i) => {
-        const arg = c.args[i];
-        if (!bodies.has(arg)) return;
-        if (c.name.endsWith('_cb') || (/_new(_err)?$/.test(c.name) && /_fn_t$/.test(p.type))) roots.set(arg, c.name);
+        const body = resolve(c.args[i], c.file);
+        if (!body) return;
+        if (c.name.endsWith('_cb') || (/_new(_err)?$/.test(c.name) && /_fn_t$/.test(p.type))) roots.set(bodyKey(body), { body, via: c.name });
       });
     }
-    for (const [root, via] of [...roots].sort()) {
+    for (const [rootKey, { body: root, via }] of [...roots].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       checked += 1;
-      const seen = new Map([[root, [root]]]);
-      const work = [root];
+      const seen = new Map([[rootKey, [root.name]]]);
+      const work = [rootKey];
       while (work.length > 0) {
         const fn = work.shift();
         for (const c of graph.get(fn) || []) {
+          const callee = resolve(c.name, c.file);
           if (clientDestroys.has(c.name)) {
             raw.push({
               kind: 'destroy-in-completion',
-              subject: root,
+              subject: root.name,
               message: `runs inside the drain (a completion given to ${via}) and reaches ${c.name} through ${[...seen.get(fn), c.name].join(' -> ')} (${c.file}:${c.line}): mark the client and destroy after the drain`,
             });
-          } else if (bodies.has(c.name) && !seen.has(c.name)) {
-            seen.set(c.name, [...seen.get(fn), c.name]);
-            work.push(c.name);
+          } else if (callee && !seen.has(bodyKey(callee))) {
+            seen.set(bodyKey(callee), [...seen.get(fn), c.name]);
+            work.push(bodyKey(callee));
           }
         }
       }

@@ -72,3 +72,19 @@ test('cannot run without the C sources', () => {
   const r = runN(RULE, { 'src/producer.c': undefined, 'src/callback_queue.c': undefined, 'src/record.c': undefined });
   assert.equal(r.err[1], '❌ check-notify-hook: cannot run, no C sources under src/');
 });
+
+test("two files' static hooks of one name are each checked, as their own file's", () => {
+  const noop = 'static void noop_notify(void* opaque) {\n    (void)opaque;\n}\n\n';
+  const install = (name) =>
+    `void ${name}(void* p) {\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_x_P__set_callbacks_notify_err(p, noop_notify, NULL, &ffi_err));\n}\n`;
+  const r = runN(RULE, {
+    'src/producer.c': PRODUCER_C.replace('void js_setup(void* p) {', `${noop}${install('js_teardown')}\nvoid js_setup(void* p) {`),
+    // A second client file with its own static noop_notify, which blocks; read before producer.c's.
+    'src/consumer.c': `#include "util.h"\n\nstatic void noop_notify(void* opaque) {\n    CallbackQueue* q = (CallbackQueue*)opaque;\n    napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_blocking);\n}\n\n${install('js_consumer_teardown')}`,
+  });
+  assert.deepEqual(findings(r), [
+    'src/consumer.c:5: noop_notify calls the threadsafe function napi_tsfn_blocking, not napi_tsfn_nonblocking',
+    'noop_notify: calls the threadsafe function other than once, under if (…notify_open)',
+    'noop_notify: calls the threadsafe function outside a notify_mtx lock / unlock',
+  ]);
+});

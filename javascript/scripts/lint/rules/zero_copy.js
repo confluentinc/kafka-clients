@@ -60,7 +60,7 @@ module.exports = {
     let checked = 0;
     const onPath = calls.filter((c) => SEND_PATH.includes(c.file) && !c.directive);
     const borrows = onPath.filter((c) => BORROWS.has(c.name));
-    const into = borrows.filter((c) => c.function && /(\.|->)data\s*=/.test(bodies.get(c.function).body));
+    const into = borrows.filter((c) => c.function && /(\.|->)data\s*=/.test(bodies.get(`${c.file}:${c.function}`).body));
     checked += 1;
     if (into.length === 0) {
       raw.push({

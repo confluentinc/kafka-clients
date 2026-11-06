@@ -23,7 +23,7 @@
 // the flag tested as it is (a negated or compared guard is a finding). A hook that calls nothing
 // (the finalizer's no-op) passes.
 
-const { cModel } = require('../c_model');
+const { cModel, bodyKey } = require('../c_model');
 const { scan } = require('../c_source');
 
 const ALLOWED_CALLS = new Set(['pthread_mutex_lock', 'pthread_mutex_unlock', 'napi_call_threadsafe_function']);
@@ -36,13 +36,17 @@ module.exports = {
     'Keep the notify hook to its signal: lock notify_mtx, call the threadsafe function nonblocking while ' +
     'notify_open, unlock (javascript/CLAUDE.md boundary rule 2).',
   check(ctx) {
-    const { bodies, calls } = cModel(ctx);
-    const hooks = new Set(calls.filter((c) => c.name.endsWith('__set_callbacks_notify_err')).map((c) => c.args[1]));
+    const { calls, resolve } = cModel(ctx);
+    // Each hook as the definition its installing call reaches (a `static` one is its own file's).
+    const hooks = new Map();
+    for (const c of calls.filter((x) => x.name.endsWith('__set_callbacks_notify_err'))) {
+      const body = resolve(c.args[1], c.file);
+      hooks.set(body ? bodyKey(body) : c.args[1], { hook: c.args[1], body });
+    }
     const findings = [];
     let checked = 0;
-    for (const hook of [...hooks].sort()) {
+    for (const [, { hook, body }] of [...hooks].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
       checked += 1;
-      const body = bodies.get(hook);
       if (!body) {
         findings.push({ kind: 'notify-hook-missing', subject: hook, message: 'is installed as a notify hook but defined in no src/*.c' });
         continue;

@@ -63,7 +63,7 @@ function enclosingStruct(code, at) {
 /** The function of src file `file` whose body holds offset `at`, or `(top level)`. */
 function functionAt(ctx, file, at) {
   const { bodies } = cModel(ctx);
-  for (const [name, b] of bodies) if (b.file === file && at >= b.bodyStart && at < b.bodyEnd) return name;
+  for (const b of bodies.values()) if (b.file === file && at >= b.bodyStart && at < b.bodyEnd) return b.name;
   return '(top level)';
 }
 

@@ -29,7 +29,7 @@
 //     `_fn_t`) never passes a `const` (borrowed) parameter to a destroy: a
 //     header `_destroy`, or a src/ function that destroys its parameter.
 
-const { cModel } = require('../c_model');
+const { cModel, bodyKey } = require('../c_model');
 
 const HANDLE = /^(const\s+)?(kafka_\w+_t)\s*\*$/;
 
@@ -47,7 +47,7 @@ module.exports = {
     'Destroy every handle src/ receives owned, or hand it to a call that consumes it; never destroy a ' +
     'borrowed (const) one (javascript/CLAUDE.md boundary rule 9).',
   check(ctx) {
-    const { bodies, calls, header } = cModel(ctx);
+    const { bodies, calls, header, resolve } = cModel(ctx);
     const findings = [];
     let checked = 0;
     const owned = new Map(); // type -> where first received
@@ -64,7 +64,7 @@ module.exports = {
       // A completion of a _cb twin: its non-const handle parameters are owned.
       if (c.name.endsWith('_cb')) {
         for (const a of c.args) {
-          const fn = bodies.get(a);
+          const fn = resolve(a, c.file);
           if (!fn) continue;
           for (const p of fn.params) {
             const m = HANDLE.exec(p.type.replace(/\s*\*$/, ' *'));
@@ -98,15 +98,20 @@ module.exports = {
     }
     // The src functions that destroy a parameter (`error_discard(e)`), to a fixed point:
     // `<function>#<parameter index>`.
+    // `<file>:<function>#<parameter index>`.
     const destroyers = new Set();
-    const destroysArg = (c, k) => (header.has(c.name) && /_destroy(_err)?$/.test(c.name)) || destroyers.has(`${c.name}#${k}`);
+    const destroysArg = (c, k) => {
+      if (header.has(c.name) && /_destroy(_err)?$/.test(c.name)) return true;
+      const callee = resolve(c.name, c.file);
+      return callee !== undefined && destroyers.has(`${bodyKey(callee)}#${k}`);
+    };
     for (let grew = true; grew; ) {
       grew = false;
-      for (const [name, fn] of bodies) {
+      for (const [key0, fn] of bodies) {
         fn.params.forEach((p, i) => {
-          const key = `${name}#${i}`;
+          const key = `${key0}#${i}`;
           if (!p.name || destroyers.has(key)) return;
-          const own = calls.filter((c) => c.function === name && c.file === fn.file);
+          const own = calls.filter((c) => c.function === fn.name && c.file === fn.file);
           if (own.some((c) => c.args.some((a, k) => a === p.name && destroysArg(c, k)))) {
             destroyers.add(key);
             grew = true;
@@ -115,16 +120,17 @@ module.exports = {
       }
     }
     // The interface methods src implements: functions passed to an interface's constructor as an _fn_t.
-    const methods = new Set();
+    const methods = new Map();
     for (const c of calls) {
       const proto = header.get(c.name);
       if (!proto || !/_new(_err)?$/.test(c.name)) continue;
       proto.params.forEach((p, i) => {
-        if (/_fn_t$/.test(p.type) && bodies.has(c.args[i])) methods.add(c.args[i]);
+        const fn = /_fn_t$/.test(p.type) ? resolve(c.args[i], c.file) : undefined;
+        if (fn) methods.set(bodyKey(fn), fn);
       });
     }
-    for (const name of [...methods].sort()) {
-      const fn = bodies.get(name);
+    for (const [, fn] of [...methods].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const { name } = fn;
       for (const p of fn.params) {
         const m = HANDLE.exec(p.type.replace(/\s*\*$/, ' *'));
         if (!m || !m[1]) continue;
