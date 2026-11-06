@@ -14,10 +14,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Metrics;
+using Confluent.Kafka.Common.Requests;
 using Confluent.Kafka.Internal;
 using Xunit;
 
@@ -35,7 +39,7 @@ public sealed class GeneratedErrorClassesTests
         GroupAuthorizationException error = GroupAuthorizationException.ForGroupId(null);
 
         Assert.Equal("Not authorized to access group: null", error.Message);
-        Assert.Null(error.GroupId);
+        Assert.Null(error.GroupId());
     }
 
     [Fact]
@@ -62,7 +66,47 @@ public sealed class GeneratedErrorClassesTests
         var error = new InvalidTopicException(topics);
 
         Assert.Equal("Invalid topics: [a, null]", error.Message);
-        Assert.Same(topics, error.InvalidTopics);
+        Assert.Same(topics, error.InvalidTopics());
+    }
+
+    [Theory]
+    [InlineData(typeof(DuplicateResourceException), "Resource")]
+    [InlineData(typeof(GroupAuthorizationException), "GroupId")]
+    [InlineData(typeof(InvalidTopicException), "InvalidTopics")]
+    [InlineData(
+        typeof(RecordDeserializationException),
+        "Headers,KeyBuffer,Offset,Origin,Timestamp,TimestampType,TopicPartition,ValueBuffer")]
+    [InlineData(typeof(RecordTooLargeException), "RecordTooLargePartitions")]
+    [InlineData(typeof(ResourceNotFoundException), "Resource")]
+    [InlineData(typeof(ThrottlingQuotaExceededException), "ThrottleTimeMs")]
+    [InlineData(typeof(TopicAuthorizationException), "UnauthorizedTopics")]
+    [InlineData(typeof(QuotaViolationException), "Bound,Metric,Value")]
+    [InlineData(typeof(CorrelationIdMismatchException), "RequestCorrelationId,ResponseCorrelationId")]
+    [InlineData(typeof(Consumer.InvalidOffsetException), "Partitions")]
+    [InlineData(typeof(Consumer.LogTruncationException), "DivergentOffsets")]
+    [InlineData(typeof(Consumer.NoOffsetForPartitionException), "Partitions")]
+    [InlineData(typeof(Consumer.OffsetOutOfRangeException), "OffsetOutOfRangePartitions,Partitions")]
+    public void PayloadGetters_AreJavasMethods_AndNotProperties(Type type, string getters)
+    {
+        foreach (string name in getters.Split(','))
+        {
+            MethodInfo? getter = type.GetMethod(name, Type.EmptyTypes);
+            Assert.True(getter is { IsSpecialName: false, IsPublic: true }, $"{type.Name}.{name}() is not a method.");
+        }
+
+        Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+    }
+
+    [Fact]
+    public void NoPublicErrorClass_DeclaresAPublicProperty()
+    {
+        IEnumerable<string> withProperties = typeof(KafkaException).Assembly.GetExportedTypes()
+            .Where(type => typeof(Exception).IsAssignableFrom(type))
+            .Where(type => type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static
+                | BindingFlags.DeclaredOnly).Length > 0)
+            .Select(type => type.FullName!);
+
+        Assert.Empty(withProperties);
     }
 
     [Fact]

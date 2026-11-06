@@ -29,13 +29,15 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 public class NoOffsetForPartitionException : global::Confluent.Kafka.Consumer.InvalidOffsetException
 {
+    private readonly IReadOnlyCollection<TopicPartition> _partitions;
+
     /// <summary>
     /// Initializes the exception, as Java's <c>NoOffsetForPartitionException(TopicPartition partition)</c>.
     /// </summary>
     public NoOffsetForPartitionException(TopicPartition partition)
         : base("Undefined offset with no reset policy for partition: " + JavaText.ValueOf(partition))
     {
-        Partitions = new[] { partition };
+        _partitions = new[] { partition };
     }
 
     /// <summary>
@@ -45,17 +47,17 @@ public class NoOffsetForPartitionException : global::Confluent.Kafka.Consumer.In
     public NoOffsetForPartitionException(IReadOnlyCollection<TopicPartition> partitions)
         : base("Undefined offset with no reset policy for partitions: " + JavaText.ValueOf(partitions))
     {
-        Partitions = new HashSet<TopicPartition>(partitions ?? throw new ArgumentNullException(nameof(partitions)));
+        _partitions = new HashSet<TopicPartition>(partitions ?? throw new ArgumentNullException(nameof(partitions)));
     }
 
     internal NoOffsetForPartitionException(CoreError _, string? message, Exception? innerException, IReadOnlyCollection<TopicPartition> partitions)
         : base(_, message, innerException)
     {
-        Partitions = partitions;
+        _partitions = partitions;
     }
 
     /// <inheritdoc/>
-    public override IReadOnlyCollection<TopicPartition> Partitions { get; }
+    public override IReadOnlyCollection<TopicPartition> Partitions() => _partitions;
 
     internal override int FfiId => -21;
 }
