@@ -1223,13 +1223,15 @@ once without checking the transaction state, as Java's `KafkaProducer` does; the
 first, as Java's `MockProducer` does. `SendOffsetsToTransaction` passes the core's own `ConsumerGroupMetadata` handle, which the
 object keeps from the consumer that gave it, the mocks' included. Recorded deviations:
 
-- **Overlapping calls.** A transaction call while another one runs on the same producer throws
-  the core's `ConcurrentModificationException` "Transactional methods of KafkaProducer are not
-  safe for concurrent access."; Java has no such check.
+- **Overlapping calls.** A transaction call while the core still runs another one's operation on
+  the same producer throws the core's `ConcurrentModificationException` "Transactional methods of
+  KafkaProducer are not safe for concurrent access."; Java has no such check. The core releases its
+  flag before a commit or an abort waits for the delivery reports, so a call made during that wait
+  is not refused.
 - **Cancellation and retry.** A token already cancelled throws `OperationCanceledException` at
   the call. A token that fires later ends only the wait; the operation runs on in the core, as
   after Java's `max.block.ms` timeout, and a later call gets what the core answers: while the
-  operation still runs, `ConcurrentModificationException` (above; Java's retry would join the
+  core still runs the operation, `ConcurrentModificationException` (above; Java's retry would join the
   pending result, Python's async producer answers as .NET does); once the core has timed it out,
   Java's rules (the same call joins the pending result, another one throws
   `IllegalStateException` "Cannot attempt operation `X` because the previous call to `Y` timed out
