@@ -18,6 +18,14 @@
     <AnalysisLevel>latest</AnalysisLevel>
   </PropertyGroup>
 
+  <!-- The binding's own analyzers (analyzers/Confluent.Kafka.Analyzers, diagnostic ids CKRDA*), run by
+       every project but the analyzer and its tests; .editorconfig sets where each rule applies.
+       PrivateAssets keeps them out of the Confluent.Kafka package. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Confluent.Kafka.Analyzers' and '$(MSBuildProjectName)' != 'Confluent.Kafka.Analyzers.UnitTests'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)analyzers/Confluent.Kafka.Analyzers/Confluent.Kafka.Analyzers.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
   <!-- Common package metadata (Authors/Company = Confluent Inc.). -->
   <PropertyGroup>
     <Authors>Confluent Inc.</Authors>
