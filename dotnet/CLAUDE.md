@@ -66,7 +66,8 @@ as `IAdmin` (`KafkaAdminClient` / `MockAdminClient`, M15); since M15/P14 that is
 the sync flavour, beside the async `IAsyncAdmin` (`AsyncKafkaAdminClient` /
 `AsyncMockAdminClient`). Every admin RPC returns its `*Result_t` at once, its futures complete
 through `kafka_common_KafkaFuture_get_cb`, and only `close` and `close_with_timeout` have `_cb`
-twins (M19/P1). Producer transactions are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+twins (M19/P1). Producer transactions are exposed on all four producer classes (§4 **Producer
+transactions**). Source of truth for the surface = `src/ffi/*.rs` +
 `cbindgen.toml` (the header is generated, not checked in).
 
 ---
@@ -289,6 +290,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);   // Java close(Duration) (M19/P1)
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
     IReadOnlyDictionary<MetricName, IMetric> Metrics();   // Java metrics() — NON-blocking, so it stays SYNC (M11/P8)
+    // Java's five transaction methods (§4 Producer transactions); each async form waits on its _cb twin
+    Task InitTransactions(CancellationToken cancellationToken = default);
+    void BeginTransaction();                              // stays sync, as Java's; waits on begin_transaction_cb
+    Task SendOffsetsToTransaction(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata, CancellationToken cancellationToken = default);
+    Task CommitTransaction(CancellationToken cancellationToken = default);
+    Task AbortTransaction(CancellationToken cancellationToken = default);
 }
 
 public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Future<T> (producer send) — M11/P3.6
@@ -302,7 +310,9 @@ public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Futu
 // signature, the callback fired on the producer's completion thread (`confluent-kafka-producer-completion`) before Get() returns
 // (KafkaProducer: inside Send, on the caller's thread, for a serializer's ApiException, §3); void Flush() /
 // Close(); void Close(TimeSpan) (M19/P1); IReadOnlyList<PartitionInfo> PartitionsFor(string);
-// IReadOnlyDictionary<MetricName, IMetric> Metrics() (M11/P8). Real + mock: KafkaProducer / MockProducer.
+// IReadOnlyDictionary<MetricName, IMetric> Metrics() (M11/P8); void InitTransactions() / BeginTransaction() /
+// SendOffsetsToTransaction(offsets, groupMetadata) / CommitTransaction() / AbortTransaction(), each waiting on its
+// _cb twin (§4 Producer transactions). Real + mock: KafkaProducer / MockProducer.
 // `Metrics()` and the callback-taking `Send` are declared IDENTICALLY on both producer interfaces —
 // there is deliberately **no** `IProducerCommon` for them (M11/P8 decision D-6; the asymmetry with the
 // consumer's `IConsumerCommon` is recorded rather than typed away). Both are **public-API additions**
@@ -364,7 +374,9 @@ binding builds it (ledger 300; an internal `SerializedProducerRecord` carrier). 
     stage completes); nothing crosses the ABI. The core never sees the error, so the binding
     cannot run Java's `maybeTransitionToErrorState`: a serializer that throws one of Java's
     fatal producer classes (`ProducerFencedException`, …) does not make the producer fatal, as
-    in Python (the transactional case belongs to the transactions step). Any other exception
+    in Python. On a transactional producer that leaves the transaction open where Java's
+    producer would refuse every later call; fixing it needs a core hook that moves the producer
+    into an error state *(recorded deviation, as Python's)*. Any other exception
     is rethrown unchanged. *(Python's `send()` raises every serializer error.)* The mocks
     rethrow every serializer exception unchanged, with no callback and no history entry, as
     Java's `MockProducer` does (it calls its serializers with no `try`), and as the core's and
@@ -1130,6 +1142,55 @@ Naming: `Commit` is Python's `commit()`; `CommitAsync` keeps Java's `commitAsync
 Python's is `commit_nowait()` (root `CLAUDE.md`, Class family). The map reads Java's *blocking
 behavior*, not Java's method name, which is why Java's `commitSync` is our `Commit`. There is
 **no** `CommitSync` member.
+
+### Producer transactions
+
+Java's `initTransactions`, `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction` and
+`abortTransaction`, on `IProducer` (`void`) and `IAsyncProducer` (`Task`, with a
+`CancellationToken`; `BeginTransaction` stays a sync `void`, as Java's and the sync list above).
+Each calls its `_cb` twin and waits on a managed `Completion` or `TaskCompletionSource`
+(`ffi-marshalling.md` §A7), `BeginTransaction` included, so it waits while the core drains the
+sends already handed over (root `producer-transactions.md` §13). The core makes every check, with
+Java's class and message; the binding adds only its closed check, first, as for every producer
+call, and on `SendOffsetsToTransaction` the consumer commit's check of the offsets' contents
+(`ArgumentException` "Topic names must not be null." / "Offset value must not be null."), since
+the map is built from the managed dictionary. With an empty `offsets` the real producers return at
+once without checking the transaction state, as Java's `KafkaProducer` does; the mocks check it
+first, as Java's `MockProducer` does. `SendOffsetsToTransaction` passes the core's own `ConsumerGroupMetadata` handle, which the
+object keeps from the consumer that gave it, the mocks' included. Recorded deviations:
+
+- **Overlapping calls.** A transaction call while another one runs on the same producer throws
+  the core's `ConcurrentModificationException` "Transactional methods of KafkaProducer are not
+  safe for concurrent access."; Java has no such check.
+- **Cancellation and retry.** A token already cancelled throws `OperationCanceledException` at
+  the call. A token that fires later ends only the wait; the operation runs on in the core, as
+  after Java's `max.block.ms` timeout, and a later call gets what the core answers: while the
+  operation still runs, `ConcurrentModificationException` (above; Java's retry would join the
+  pending result, Python's async producer answers as .NET does); once the core has timed it out,
+  Java's rules (the same call joins the pending result, another one throws
+  `IllegalStateException` "Cannot attempt operation `X` because the previous call to `Y` timed out
+  and must be retried"); once it has succeeded, whatever the core answers for a new call (on the
+  mocks, `InitTransactions` again throws "MockProducer has already been initialized for
+  transactions."). Only `IAsyncProducer` takes a token.
+- **Order of the null checks.** `SendOffsetsToTransaction` reports a null `groupMetadata` first
+  (`IllegalArgumentException` "Consumer group metadata could not be null"), then a null `offsets`
+  (`ArgumentNullException`), before the state checks, on all four classes. Java's `MockProducer`
+  makes its closed and state checks first, and refuses a null `groupMetadata` with
+  `NullPointerException`.
+- **From a delivery callback.** From a sync delivery callback on `KafkaProducer` and
+  `AsyncKafkaProducer` each of the five calls ends after `max.block.ms` with Kafka's
+  `TimeoutException`, `BeginTransaction` included, where Java's `beginTransaction` returns at
+  once (Python's does the same as .NET); from an async callback after an `await`, a commit or an
+  abort does (`ffi-marshalling.md` §A7). On the mocks the five calls complete from a delivery
+  callback, as Java's mock completes them, with one exception: from a callback the core cannot
+  see (on `AsyncMockProducer`, a sync callback or an async callback's synchronous part queued
+  behind an async callback, or an async callback after an `await`), `CommitTransaction` and
+  `AbortTransaction` wait for that callback's own report, so they end after `max.block.ms`
+  (60000 on a mock) with Kafka's `TimeoutException` *(recorded deviation from Java's mock; it
+  goes when the core has a commit and abort form that skips the report wait)*. The other three
+  take the blocking form there, which waits for no report, and complete at once (§A7).
+- **A serializer's fatal error** does not make a transactional producer fatal (§3, the
+  serializer's throw).
 
 ### Threads and teardown (M19/P1)
 
