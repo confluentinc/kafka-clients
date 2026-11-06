@@ -19,6 +19,8 @@
     <AssemblyName>Confluent.Kafka.UnitTests</AssemblyName>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- Only NativeMemoryManager.cs, a MemoryManager<byte> over native memory, uses unsafe code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

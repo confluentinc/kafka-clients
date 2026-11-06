@@ -24,7 +24,7 @@ namespace Confluent.Kafka.Internal.Serialization;
 /// </summary>
 internal sealed class NullSerde : ISerde<object?>
 {
-    public byte[]? Serialize(string topic, object? data) => null;
+    public ReadOnlyMemory<byte>? Serialize(string topic, object? data) => null;
 
     public object? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 }

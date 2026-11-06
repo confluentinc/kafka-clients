@@ -225,10 +225,10 @@ public sealed class PublicProducerSendHeadersTests
 
         internal CallLog(List<(string Topic, string? Data)> calls) => _calls = calls;
 
-        public byte[]? Serialize(string topic, string data)
+        public ReadOnlyMemory<byte>? Serialize(string topic, string data)
         {
             _calls.Add((topic, data));
-            return data is null ? null : Encoding.UTF8.GetBytes(data);
+            return data is null ? (ReadOnlyMemory<byte>?)null : Encoding.UTF8.GetBytes(data);
         }
     }
 }

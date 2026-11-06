@@ -24,7 +24,7 @@ namespace Confluent.Kafka.Internal.Serialization;
 /// </summary>
 internal sealed class Int32Serde : ISerde<int>
 {
-    public byte[]? Serialize(string topic, int data) =>
+    public ReadOnlyMemory<byte>? Serialize(string topic, int data) =>
         new[]
         {
             (byte)(data >> 24),

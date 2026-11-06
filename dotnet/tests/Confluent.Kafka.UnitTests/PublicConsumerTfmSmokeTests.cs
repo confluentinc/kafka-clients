@@ -244,7 +244,7 @@ public sealed class PublicConsumerTfmSmokeTests
             consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
             consumer.Seek(new TopicPartition(Topic, Partition), 0L);
             consumer.AddRecord(
-                Topic, Partition, offset: 9, Serdes.String.Serialize(Topic, "tfm-key")!, Serdes.Int64.Serialize(Topic, 4242L)!);
+                Topic, Partition, offset: 9, Serdes.String.Serialize(Topic, "tfm-key")?.ToArray(), Serdes.Int64.Serialize(Topic, 4242L)?.ToArray());
 
             ConsumerRecords<string, long> records = default!;
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
