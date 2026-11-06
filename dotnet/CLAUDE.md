@@ -340,7 +340,12 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public void SetSendOffsetsToTransactionException(Exception? exception);
     public void SetCommitTransactionException(Exception? exception);
     public void SetAbortTransactionException(Exception? exception);
+    public void SetSendException(Exception? exception);                      // Java sendException, flushException, …
+    public void SetFlushException(Exception? exception);                     // also fails CommitTransaction / AbortTransaction
+    public void SetPartitionsForException(Exception? exception);
+    public void SetCloseException(Exception? exception);                     // Close throws it and leaves the producer open
     public void FenceProducer();
+    public bool Closed { get; }                   // Java closed(), read from the binding's state
     public bool TransactionInitialized { get; }   // Java transactionInitialized(), and likewise below
     public bool TransactionInFlight { get; }
     public bool TransactionCommitted { get; }
@@ -363,8 +368,8 @@ longer** among them: it shipped in M11/P8 as a Mode-A port over the already-pres
 only a count, hence `HistoryCount()` — a **method**, not a property, per the FDG
 precedent that `Assignment()`/`Subscription()`/`Paused()` are methods (each does a
 P/Invoke and can throw) plus Python `history_count()` parity), and for the same reason
-`MockProducer.uncommittedRecords()`, which also returns records; `closed()` is not exposed
-either. Add each when the ABI grows to cover it.
+`MockProducer.uncommittedRecords()`, which also returns records. Add each when the ABI grows to
+cover it.
 
 **The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
 the binding, **above** the bytes-based native producer and **before** the P/Invoke

@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
@@ -30,6 +31,22 @@ internal sealed partial class NativeProducer
     private delegate void MockErrorSetter(IntPtr mock, IntPtr error, ref IntPtr outErr);
 
     private delegate sbyte MockFlagReader(IntPtr mock, ref IntPtr outErr);
+
+    internal void MockSetSendError(Exception? exception) =>
+        MockSetError(NativeMethods.MockProducerSetSendError, exception);
+
+    internal void MockSetFlushError(Exception? exception) =>
+        MockSetError(NativeMethods.MockProducerSetFlushError, exception);
+
+    internal void MockSetPartitionsForError(Exception? exception) =>
+        MockSetError(NativeMethods.MockProducerSetPartitionsForError, exception);
+
+    internal void MockSetCloseError(Exception? exception) =>
+        MockSetError(NativeMethods.MockProducerSetCloseError, exception);
+
+    // Read from the binding's own state, not the core's MockProducer_closed: a close that succeeds destroys the mock,
+    // so the core could answer only while it is still open.
+    internal bool MockClosed => Volatile.Read(ref _closed) != 0;
 
     internal void MockSetInitTransactionError(Exception? exception) =>
         MockSetError(NativeMethods.MockProducerSetInitTransactionError, exception);
