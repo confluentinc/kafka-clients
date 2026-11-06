@@ -49,7 +49,7 @@ public sealed class PublicConsumerDeserializeThreadTests
         // Not wrapped in TestTimeout: the poll must run on this thread.
         ConsumerRecord<byte[], byte[]> record = Assert.Single(consumer.Poll(s_pollTimeout));
 
-        Assert.Equal(new byte[] { 2 }, record.Value);
+        Assert.Equal(new byte[] { 2 }, record.Value());
         Assert.Equal(1, valueDeserializer.InvocationCount);
         Assert.Equal(callerThreadId, valueDeserializer.LastThreadId);
     }

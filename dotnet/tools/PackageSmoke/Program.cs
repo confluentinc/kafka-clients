@@ -73,7 +73,7 @@ internal static class Program
         using (var mock = new MockProducer<string, string>(Serdes.String, Serdes.String))
         {
             RecordMetadata metadata = mock.Send(new ProducerRecord<string, string>("smoke", "value", "key")).Get();
-            Console.WriteLine($"OK: MockProducer sent to {metadata.Topic}-{metadata.Partition}@{metadata.Offset}");
+            Console.WriteLine($"OK: MockProducer sent to {metadata.Topic()}-{metadata.Partition()}@{metadata.Offset()}");
             mock.Close();
         }
 

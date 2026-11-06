@@ -114,13 +114,13 @@ public sealed class PublicProducerSendStringTests
         string message = field == TopicField ? TopicMessage : HeaderKeyMessage;
         Assert.Equal(new ArgumentException(message, "record").Message, rejected.Message);
 
-        Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
 
         if (subject.IsMock)
         {
             Assert.Equal(0, subject.HistoryCount());
             RecordMetadata? metadata = await subject.Deliver(Record(Topic, "h"));
-            Assert.Equal(0L, metadata!.Offset);
+            Assert.Equal(0L, metadata!.Offset());
             Assert.Equal(1, subject.HistoryCount());
         }
         else
@@ -160,10 +160,10 @@ public sealed class PublicProducerSendStringTests
 
         RecordMetadata? metadata = await subject.Deliver(record);
 
-        Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
         if (subject.IsMock)
         {
-            Assert.Equal(NonAsciiTopic, metadata!.Topic);
+            Assert.Equal(NonAsciiTopic, metadata!.Topic());
             Assert.Equal(1, subject.HistoryCount());
         }
     }
@@ -180,11 +180,11 @@ public sealed class PublicProducerSendStringTests
 
             RecordMetadata? metadata = await subject.Deliver(record);
 
-            Assert.Equal(!subject.IsMock, record.Headers.IsReadOnly);
+            Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
             if (subject.IsMock)
             {
                 // The topic the core holds, read back: the surrogate crossed as '?'.
-                Assert.Equal("t?u", metadata!.Topic);
+                Assert.Equal("t?u", metadata!.Topic());
                 Assert.Equal(1, subject.HistoryCount());
             }
         }

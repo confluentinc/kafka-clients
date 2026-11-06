@@ -262,8 +262,8 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
 
         Assert.Equal(
             new[] { "AddingReplicas", "RemovingReplicas", "Replicas" },
-            DeclaredPublicPropertyNames(typeof(PartitionReassignment)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(PartitionReassignment)));
+            DeclaredPublicMethodNames(typeof(PartitionReassignment)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(PartitionReassignment)));
 
         // Java declares a toString; pinned directly, since the helper filters object's members.
         Assert.Same(
@@ -273,12 +273,12 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         List<int> replicas = new List<int> { 1, 2, 3 };
         PartitionReassignment reassignment =
             new PartitionReassignment(replicas, new[] { 3 }, Array.Empty<int>());
-        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas);
-        Assert.Equal(new[] { 3 }, reassignment.AddingReplicas);
-        Assert.Empty(reassignment.RemovingReplicas);
+        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas());
+        Assert.Equal(new[] { 3 }, reassignment.AddingReplicas());
+        Assert.Empty(reassignment.RemovingReplicas());
 
         replicas.Add(9);
-        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas);
+        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas());
 
         Assert.Equal(
             "PartitionReassignment(replicas=[1, 2, 3], addingReplicas=[3], removingReplicas=[])",

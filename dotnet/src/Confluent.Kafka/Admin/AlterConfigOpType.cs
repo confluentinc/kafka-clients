@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Admin;
 /// Each member's value is Java's <c>OpType.id()</c>, written out rather than assigned by order.
 /// </para>
 /// <para>
-/// It is not nested, a recorded deviation: <see cref="AlterConfigOp.OpType"/> is a property, and a
+/// It is not nested, a recorded deviation: <see cref="AlterConfigOp.OpType()"/> is a method, and a
 /// nested type of the same name would not compile (<c>CS0102</c>).
 /// </para>
 /// </remarks>

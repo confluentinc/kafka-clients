@@ -25,8 +25,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Java's <c>Optional</c> becomes a C# nullable: <see langword="null"/> in <see cref="Type"/> or
-/// <see cref="GroupState"/> is Java's <c>Optional.empty()</c>, for a broker that did not report
+/// Java's <c>Optional</c> becomes a C# nullable: <see langword="null"/> in <see cref="Type()"/> or
+/// <see cref="GroupState()"/> is Java's <c>Optional.empty()</c>, for a broker that did not report
 /// it. It differs from <see cref="GroupType.UNKNOWN"/> and <see cref="GroupState.UNKNOWN"/>, which
 /// mean the broker named a value this client does not recognise, as in Java.
 /// </para>
@@ -38,6 +38,11 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class GroupListing
 {
+    private readonly string _groupId;
+    private readonly GroupType? _type;
+    private readonly string _protocol;
+    private readonly GroupState? _groupState;
+
     /// <summary>
     /// Creates a listing — Java's constructor.
     /// </summary>
@@ -52,45 +57,51 @@ public sealed class GroupListing
     /// </exception>
     /// <remarks>
     /// Both null checks are stricter than Java, which has neither: a recorded deviation that keeps
-    /// <see cref="GroupId"/> and <see cref="Protocol"/> non-nullable, as on
+    /// <see cref="GroupId()"/> and <see cref="Protocol()"/> non-nullable, as on
     /// <see cref="TopicListing"/>.
     /// </remarks>
     public GroupListing(string groupId, GroupType? type, string protocol, GroupState? groupState)
     {
-        GroupId = groupId ?? throw new ArgumentNullException(nameof(groupId));
-        Type = type;
-        Protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
-        GroupState = groupState;
+        _groupId = groupId ?? throw new ArgumentNullException(nameof(groupId));
+        _type = type;
+        _protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
+        _groupState = groupState;
     }
 
     /// <summary>The group id — Java's <c>groupId()</c>.</summary>
-    public string GroupId { get; }
+    /// <returns>The group id.</returns>
+    public string GroupId() => _groupId;
 
     /// <summary>
     /// The group type, or <see langword="null"/> when the broker did not report one —
     /// Java's <c>type()</c>.
     /// </summary>
-    public GroupType? Type { get; }
+    /// <returns>The group type, or <see langword="null"/> when the broker did not report one.</returns>
+    public GroupType? Type() => _type;
 
     /// <summary>The group protocol — Java's <c>protocol()</c>.</summary>
-    public string Protocol { get; }
+    /// <returns>The group protocol.</returns>
+    public string Protocol() => _protocol;
 
     /// <summary>
     /// The group state, or <see langword="null"/> when the broker did not report one —
     /// Java's <c>groupState()</c>.
     /// </summary>
-    public GroupState? GroupState { get; }
+    /// <returns>The group state, or <see langword="null"/> when the broker did not report one.</returns>
+    public GroupState? GroupState() => _groupState;
 
     /// <summary>
     /// Whether this is a simple consumer group — Java's <c>isSimpleConsumerGroup()</c>: a classic
     /// group with an empty protocol.
     /// </summary>
+    /// <returns>Whether this is a simple consumer group — Java's <c>isSimpleConsumerGroup()</c>: a classic group
+    /// with an empty protocol.</returns>
     /// <remarks>
-    /// Derived from <see cref="Type"/> and <see cref="Protocol"/>, as Java derives it, so a listing
+    /// Derived from <see cref="Type()"/> and <see cref="Protocol()"/>, as Java derives it, so a listing
     /// the caller builds answers as one the client returns; the core's
     /// <c>kafka_admin_GroupListing_is_simple_consumer_group</c> is not used.
     /// </remarks>
-    public bool IsSimpleConsumerGroup => Type == GroupType.CLASSIC && Protocol.Length == 0;
+    public bool IsSimpleConsumerGroup() => Type() == GroupType.CLASSIC && Protocol().Length == 0;
 
     /// <summary>
     /// Value equality over all four fields — Java's <c>equals</c>.
@@ -103,10 +114,10 @@ public sealed class GroupListing
     /// </remarks>
     public override bool Equals(object? obj) =>
         obj is GroupListing other
-        && string.Equals(GroupId, other.GroupId, StringComparison.Ordinal)
-        && Type == other.Type
-        && string.Equals(Protocol, other.Protocol, StringComparison.Ordinal)
-        && GroupState == other.GroupState;
+        && string.Equals(GroupId(), other.GroupId(), StringComparison.Ordinal)
+        && Type() == other.Type()
+        && string.Equals(Protocol(), other.Protocol(), StringComparison.Ordinal)
+        && GroupState() == other.GroupState();
 
     /// <summary>The hash of all four fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -115,10 +126,10 @@ public sealed class GroupListing
         unchecked
         {
             int hash = 17;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(GroupId);
-            hash = (hash * 31) + (Type is null ? 0 : ((int)Type.Value).GetHashCode());
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Protocol);
-            hash = (hash * 31) + (GroupState is null ? 0 : ((int)GroupState.Value).GetHashCode());
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_groupId);
+            hash = (hash * 31) + (_type is null ? 0 : ((int)_type.Value).GetHashCode());
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_protocol);
+            hash = (hash * 31) + (_groupState is null ? 0 : ((int)_groupState.Value).GetHashCode());
             return hash;
         }
     }
@@ -132,8 +143,8 @@ public sealed class GroupListing
         string.Format(
             CultureInfo.InvariantCulture,
             "(groupId='{0}', type={1}, protocol='{2}', groupState={3})",
-            GroupId,
-            Type is null ? "none" : GroupMarshal.NameFromType(Type.Value) ?? Type.Value.ToString(),
-            Protocol,
-            GroupState is null ? "none" : GroupMarshal.NameFromState(GroupState.Value) ?? GroupState.Value.ToString());
+            _groupId,
+            _type is null ? "none" : GroupMarshal.NameFromType(_type.Value) ?? _type.Value.ToString(),
+            _protocol,
+            _groupState is null ? "none" : GroupMarshal.NameFromState(_groupState.Value) ?? _groupState.Value.ToString());
 }

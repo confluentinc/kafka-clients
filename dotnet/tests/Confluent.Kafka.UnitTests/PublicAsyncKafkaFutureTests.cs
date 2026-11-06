@@ -207,7 +207,7 @@ public sealed class PublicAsyncKafkaFutureTests
         AsyncKafkaFuture<long> applied = future.ThenApply(value =>
         {
             appliedOn = Environment.CurrentManagedThreadId;
-            return value.Offset;
+            return value.Offset();
         });
         AsyncKafkaFuture<RecordMetadata> completed = future.WhenComplete((value, error) =>
         {
@@ -227,7 +227,7 @@ public sealed class PublicAsyncKafkaFutureTests
         if (outcome == "succeeded")
         {
             Assert.Equal(caller, appliedOn);
-            Assert.Equal(metadata.Offset, applied.GetNow(-1));
+            Assert.Equal(metadata.Offset(), applied.GetNow(-1));
             Assert.Same(metadata, seenValue);
             Assert.Null(seenError);
             Assert.Same(metadata, completed.GetNow(NewMetadata()));

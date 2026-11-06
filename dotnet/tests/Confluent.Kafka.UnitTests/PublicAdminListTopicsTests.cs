@@ -477,20 +477,20 @@ public sealed class PublicAdminListTopicsTests
     private static void AssertSeeded(IReadOnlyDictionary<string, TopicListing> listings)
     {
         Assert.Equal(new[] { Offsets, Orders }, listings.Keys.OrderBy(name => name, StringComparer.Ordinal));
-        Assert.Equal(Orders, listings[Orders].Name);
-        Assert.False(listings[Orders].IsInternal);
-        Assert.Equal(Offsets, listings[Offsets].Name);
-        Assert.True(listings[Offsets].IsInternal);
-        Assert.NotEqual(Uuid.ZERO_UUID, listings[Orders].TopicId);
-        Assert.NotEqual(Uuid.ZERO_UUID, listings[Offsets].TopicId);
-        Assert.NotEqual(listings[Orders].TopicId, listings[Offsets].TopicId);
+        Assert.Equal(Orders, listings[Orders].Name());
+        Assert.False(listings[Orders].IsInternal());
+        Assert.Equal(Offsets, listings[Offsets].Name());
+        Assert.True(listings[Offsets].IsInternal());
+        Assert.NotEqual(Uuid.ZERO_UUID, listings[Orders].TopicId());
+        Assert.NotEqual(Uuid.ZERO_UUID, listings[Offsets].TopicId());
+        Assert.NotEqual(listings[Orders].TopicId(), listings[Offsets].TopicId());
     }
 
     private static void AssertListings(IReadOnlyCollection<TopicListing> listings)
     {
         Assert.Equal(2, listings.Count);
-        Assert.Equal(new[] { Offsets, Orders }, listings.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal));
-        Assert.True(listings.Single(listing => listing.Name == Offsets).IsInternal);
+        Assert.Equal(new[] { Offsets, Orders }, listings.Select(listing => listing.Name()).OrderBy(name => name, StringComparer.Ordinal));
+        Assert.True(listings.Single(listing => listing.Name() == Offsets).IsInternal());
     }
 
     private static void AssertNames(IReadOnlyCollection<string> names) =>

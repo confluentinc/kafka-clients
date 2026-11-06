@@ -130,7 +130,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         {
             MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-            Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset);
+            Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset());
 
             TestTimeout.Run(() => producer.Close(s_negative), Deadline);
             Assert.Throws<IllegalStateException>(() => producer.Send(Record(topic)));
@@ -142,7 +142,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
                 new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => producer.Send(Record(topic)).AsTask(), Deadline);
-            Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset);
+            Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset());
 
             await TestTimeout.Run(() => producer.Close(s_negative), Deadline);
             Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(topic)); });

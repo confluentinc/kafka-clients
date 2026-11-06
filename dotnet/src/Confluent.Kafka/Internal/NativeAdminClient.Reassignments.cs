@@ -197,14 +197,14 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, NewPartitionReassignment?> entry in reassignments)
             {
-                if (entry.Key.Topic is null)
+                if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentException(
                         "The reassignments map must not contain a topic partition with a null topic.",
                         nameof(reassignments));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(reassignments));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(reassignments));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);
@@ -300,7 +300,7 @@ internal sealed partial class NativeAdminClient
 
     private static IntPtr NewNativePartitionReassignment(NewPartitionReassignment target)
     {
-        IReadOnlyList<int> replicas = target.TargetReplicas;
+        IReadOnlyList<int> replicas = target.TargetReplicas();
         int[] ids = new int[replicas.Count];
         for (int i = 0; i < ids.Length; i++)
         {

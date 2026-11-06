@@ -143,7 +143,7 @@ public sealed class PublicAdminCreateAclsTests
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { binding });
 
         AclBinding key = Assert.Single(result.Values).Key;
-        Assert.Equal("tópico-café-日本", key.Pattern.Name);
+        Assert.Equal("tópico-café-日本", key.Pattern().Name());
         Assert.Equal(binding, key);
 
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));

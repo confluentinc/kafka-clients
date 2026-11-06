@@ -46,7 +46,7 @@ public sealed class DescribeClassicGroupsOptions
     /// </summary>
     /// <remarks>
     /// While this is <see langword="false"/> the broker reports nothing, which is exactly
-    /// the case <see cref="ClassicGroupDescription.AuthorizedOperations"/> renders as
+    /// the case <see cref="ClassicGroupDescription.AuthorizedOperations()"/> renders as
     /// <see langword="null"/> rather than as an empty collection — the same distinction
     /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations"/> draws for
     /// the newer group generation.

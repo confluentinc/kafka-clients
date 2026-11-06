@@ -93,10 +93,10 @@ public sealed class PublicConsumerMetricsTests
         {
             MetricName original = entry.Key;
             MetricName rebuilt = new MetricName(
-                original.Name,
-                original.Group,
-                original.Description + "-mutated",
-                new Dictionary<string, string>(RebuildTags(original.Tags), StringComparer.Ordinal));
+                original.Name(),
+                original.Group(),
+                original.Description() + "-mutated",
+                new Dictionary<string, string>(RebuildTags(original.Tags()), StringComparer.Ordinal));
 
             Assert.True(metrics.ContainsKey(rebuilt));
             Assert.Same(entry.Value, metrics[rebuilt]);
@@ -165,19 +165,19 @@ public sealed class PublicConsumerMetricsTests
             IMetric metric = entry.Value;
 
             Assert.NotNull(name);
-            Assert.NotNull(name.Name);
-            Assert.NotNull(name.Group);
-            Assert.NotNull(name.Description);
-            Assert.NotNull(name.Tags);
+            Assert.NotNull(name.Name());
+            Assert.NotNull(name.Group());
+            Assert.NotNull(name.Description());
+            Assert.NotNull(name.Tags());
 
             Assert.NotNull(metric);
-            Assert.Equal(name, metric.Name);
+            Assert.Equal(name, metric.MetricName());
 
-            object value = metric.Value;
+            object value = metric.MetricValue();
             Assert.NotNull(value);
             Assert.True(
                 value is double || value is string || value is long || value is int,
-                $"Unexpected metric value type {value.GetType()} for {name.Name}");
+                $"Unexpected metric value type {value.GetType()} for {name.Name()}");
         }
     }
 

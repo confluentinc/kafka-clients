@@ -111,7 +111,7 @@ public class PublicAdminMockSeedingTests
             () => admin.ListConsumerGroupOffsets("g1").PartitionsToOffsetAndMetadata().Get(), s_deadline);
         OffsetAndMetadata? committed = Assert.Contains(partition, after);
         Assert.NotNull(committed);
-        Assert.Equal(17, committed!.Offset);
+        Assert.Equal(17, committed!.Offset());
     }
 
     [Fact]
@@ -122,8 +122,8 @@ public class PublicAdminMockSeedingTests
         FeatureMetadata? before = await TestTimeout.Run(
             () => unseeded.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
         Assert.NotNull(before);
-        Assert.Empty(before.FinalizedFeatures);
-        Assert.Empty(before.SupportedFeatures);
+        Assert.Empty(before.FinalizedFeatures());
+        Assert.Empty(before.SupportedFeatures());
 
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create()
             .FeatureLevels(new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 5 })
@@ -136,13 +136,13 @@ public class PublicAdminMockSeedingTests
             () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
         Assert.NotNull(after);
 
-        FinalizedVersionRange finalized = Assert.Contains("metadata.version", after.FinalizedFeatures);
-        Assert.Equal(5, finalized.MinVersionLevel);
-        Assert.Equal(5, finalized.MaxVersionLevel);
+        FinalizedVersionRange finalized = Assert.Contains("metadata.version", after.FinalizedFeatures());
+        Assert.Equal(5, finalized.MinVersionLevel());
+        Assert.Equal(5, finalized.MaxVersionLevel());
 
-        SupportedVersionRange supported = Assert.Contains("metadata.version", after.SupportedFeatures);
-        Assert.Equal(1, supported.MinVersion);
-        Assert.Equal(9, supported.MaxVersion);
+        SupportedVersionRange supported = Assert.Contains("metadata.version", after.SupportedFeatures());
+        Assert.Equal(1, supported.MinVersion());
+        Assert.Equal(9, supported.MaxVersion());
     }
 
     [Fact]

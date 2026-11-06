@@ -73,7 +73,7 @@ using var consumer = new KafkaConsumer<string, string>(config, Serdes.String, Se
 consumer.Subscribe(new[] { "orders" });
 foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 {
-    Console.WriteLine($"{record.Key}: {record.Value}");
+    Console.WriteLine($"{record.Key()}: {record.Value()}");
 }
 ```
 

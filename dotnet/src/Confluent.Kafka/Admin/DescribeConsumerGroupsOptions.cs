@@ -46,7 +46,7 @@ public sealed class DescribeConsumerGroupsOptions
     /// </summary>
     /// <remarks>
     /// While this is <see langword="false"/>,
-    /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> is <see langword="null"/>,
+    /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> is <see langword="null"/>,
     /// not an empty collection.
     /// </remarks>
     public bool IncludeAuthorizedOperations

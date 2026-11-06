@@ -26,6 +26,9 @@ namespace Confluent.Kafka.Common.Config;
 /// </remarks>
 public sealed class ConfigResource
 {
+    private readonly ConfigResourceType _type;
+    private readonly string _name;
+
     /// <summary>Creates a config resource — Java's constructor.</summary>
     /// <param name="type">
     /// The resource type. A value that is not a defined <see cref="ConfigResourceType"/>
@@ -35,45 +38,48 @@ public sealed class ConfigResource
     /// </param>
     /// <param name="name">
     /// The resource name; empty means "the default resource of this type"
-    /// (see <see cref="IsDefault"/>).
+    /// (see <see cref="IsDefault()"/>).
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
     public ConfigResource(ConfigResourceType type, string name)
     {
-        Type = DefinedOrUnknown(type);
-        Name = name ?? throw new ArgumentNullException(nameof(name));
+        _type = DefinedOrUnknown(type);
+        _name = name ?? throw new ArgumentNullException(nameof(name));
     }
 
     /// <summary>The resource type — Java's <c>type()</c>.</summary>
-    public ConfigResourceType Type { get; }
+    /// <returns>The resource type.</returns>
+    public ConfigResourceType Type() => _type;
 
     /// <summary>The resource name — Java's <c>name()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The resource name.</returns>
+    public string Name() => _name;
 
     /// <summary>
-    /// Whether this is the default resource of its type, that is whether <see cref="Name"/> is
+    /// Whether this is the default resource of its type, that is whether <see cref="Name()"/> is
     /// empty — Java's <c>isDefault()</c>.
     /// </summary>
-    public bool IsDefault => Name.Length == 0;
+    /// <returns>Whether this is the default resource of its type, that is whether <see cref="Name()"/> is empty.</returns>
+    public bool IsDefault() => Name().Length == 0;
 
     /// <summary>
-    /// Value equality over <see cref="Type"/> and <see cref="Name"/>, the name compared
+    /// Value equality over <see cref="Type()"/> and <see cref="Name()"/>, the name compared
     /// ordinally — Java's <c>equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same resource.</returns>
     public override bool Equals(object? obj) =>
         obj is ConfigResource other
-        && Type == other.Type
-        && string.Equals(Name, other.Name, StringComparison.Ordinal);
+        && Type() == other.Type()
+        && string.Equals(Name(), other.Name(), StringComparison.Ordinal);
 
-    /// <summary>The hash of <see cref="Type"/> and <see cref="Name"/> — Java's <c>hashCode</c>.</summary>
+    /// <summary>The hash of <see cref="Type()"/> and <see cref="Name()"/> — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
         unchecked
         {
-            return (((int)Type).GetHashCode() * 31) + StringComparer.Ordinal.GetHashCode(Name);
+            return (((int)Type()).GetHashCode() * 31) + StringComparer.Ordinal.GetHashCode(Name());
         }
     }
 
@@ -83,7 +89,7 @@ public sealed class ConfigResource
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
-        string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", ConstantName(Type), Name);
+        string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", ConstantName(Type()), Name());
 
     private static ConfigResourceType DefinedOrUnknown(ConfigResourceType type) =>
         Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.UNKNOWN;

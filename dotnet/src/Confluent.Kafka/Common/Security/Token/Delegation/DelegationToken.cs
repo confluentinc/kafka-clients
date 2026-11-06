@@ -24,6 +24,7 @@ namespace Confluent.Kafka.Common.Security.Token.Delegation;
 public sealed class DelegationToken
 {
     private readonly byte[] _hmac;
+    private readonly TokenInformation _tokenInfo;
 
     /// <summary>Creates a token — Java's constructor.</summary>
     /// <param name="tokenInfo">The token metadata.</param>
@@ -31,21 +32,25 @@ public sealed class DelegationToken
     /// <exception cref="ArgumentNullException">Either argument is null.</exception>
     public DelegationToken(TokenInformation tokenInfo, byte[] hmac)
     {
-        TokenInfo = tokenInfo ?? throw new ArgumentNullException(nameof(tokenInfo));
+        _tokenInfo = tokenInfo ?? throw new ArgumentNullException(nameof(tokenInfo));
         _hmac = hmac ?? throw new ArgumentNullException(nameof(hmac));
     }
 
     /// <summary>The token metadata — Java's <c>tokenInfo()</c>.</summary>
-    public TokenInformation TokenInfo { get; }
+    /// <returns>The token metadata.</returns>
+    public TokenInformation TokenInfo() => _tokenInfo;
 
     /// <summary>The raw MAC bytes — Java's <c>hmac()</c>.</summary>
-    public byte[] Hmac => _hmac;
+    /// <returns>The raw MAC bytes.</returns>
+    public byte[] Hmac() => _hmac;
 
     /// <summary>
     /// The MAC base64-encoded — Java's <c>hmacAsBase64String()</c>, derived from
-    /// <see cref="Hmac"/>.
+    /// <see cref="Hmac()"/>.
     /// </summary>
-    public string HmacAsBase64String => Convert.ToBase64String(_hmac);
+    /// <returns>The MAC base64-encoded — Java's <c>hmacAsBase64String()</c>, derived from
+    /// <see cref="Hmac()"/>.</returns>
+    public string HmacAsBase64String() => Convert.ToBase64String(_hmac);
 
     /// <summary>
     /// Value equality over the metadata and the MAC — Java's <c>equals</c>.
@@ -58,7 +63,7 @@ public sealed class DelegationToken
     /// </remarks>
     public override bool Equals(object? obj) =>
         obj is DelegationToken other
-        && TokenInfo.Equals(other.TokenInfo)
+        && TokenInfo().Equals(other.TokenInfo())
         && ConstantTimeEquals(_hmac, other._hmac);
 
     /// <summary>The hash of the metadata and the MAC — Java's <c>hashCode</c>.</summary>
@@ -67,7 +72,7 @@ public sealed class DelegationToken
     {
         unchecked
         {
-            int hash = TokenInfo.GetHashCode();
+            int hash = TokenInfo().GetHashCode();
             foreach (byte value in _hmac)
             {
                 hash = (hash * 31) + value;
@@ -86,7 +91,7 @@ public sealed class DelegationToken
         string.Format(
             CultureInfo.InvariantCulture,
             "DelegationToken{{tokenInformation={0}, hmac=[*******]}}",
-            TokenInfo);
+            TokenInfo());
 
     private static bool ConstantTimeEquals(byte[] left, byte[] right)
     {

@@ -175,19 +175,19 @@ public sealed class PublicAdminP4ShapeParityTests
 
         Assert.Equal(
             new[] { nameof(NewPartitionReassignment.TargetReplicas) },
-            DeclaredPublicPropertyNames(typeof(NewPartitionReassignment)));
-        Assert.Empty(DeclaredPublicMethodNames(typeof(NewPartitionReassignment)));
+            DeclaredPublicMethodNames(typeof(NewPartitionReassignment)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(NewPartitionReassignment)));
         Assert.Equal(
             typeof(IReadOnlyList<int>),
-            typeof(NewPartitionReassignment).GetProperty(
-                nameof(NewPartitionReassignment.TargetReplicas))!.PropertyType);
+            typeof(NewPartitionReassignment).GetMethod(
+                nameof(NewPartitionReassignment.TargetReplicas), Type.EmptyTypes)!.ReturnType);
 
         List<int> replicas = new List<int> { 3, 1, 2 };
         NewPartitionReassignment reassignment = new NewPartitionReassignment(replicas);
-        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas());
 
         replicas.Add(9);
-        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 3, 1, 2 }, reassignment.TargetReplicas());
 
         IllegalArgumentException empty =
             Assert.Throws<IllegalArgumentException>(() => new NewPartitionReassignment(Array.Empty<int>()));
@@ -203,17 +203,17 @@ public sealed class PublicAdminP4ShapeParityTests
     {
         List<int> source = new List<int> { 4, 5 };
         NewPartitionReassignment reassignment = new NewPartitionReassignment(source);
-        IReadOnlyList<int> replicas = reassignment.TargetReplicas;
+        IReadOnlyList<int> replicas = reassignment.TargetReplicas();
 
         Assert.False(replicas is List<int>);
         ICollection<int> asCollection = Assert.IsAssignableFrom<ICollection<int>>(replicas);
         Assert.True(asCollection.IsReadOnly);
         Assert.Throws<NotSupportedException>(() => asCollection.Clear());
-        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas());
 
         source.Clear();
         source.Add(9);
-        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas);
+        Assert.Equal(new[] { 4, 5 }, reassignment.TargetReplicas());
     }
 
     [Fact]

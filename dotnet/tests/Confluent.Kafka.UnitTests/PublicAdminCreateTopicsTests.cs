@@ -158,8 +158,8 @@ public sealed class PublicAdminCreateTopicsTests
 
         Assert.Equal(topicId, Uuid.Parse(topicId.ToString()));
 
-        Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
-        Assert.Equal(ConfigValue, config.Get("custom.marker")!.Value);
+        Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
+        Assert.Equal(ConfigValue, config.Get("custom.marker")!.Value());
         Assert.Null(config.Get("not.set.at.all"));
     }
 
@@ -503,15 +503,15 @@ public sealed class PublicAdminCreateTopicsTests
         Config config = default!;
         await TestTimeout.Run(async () => config = await created.Config(Topic).Get(), s_deadline);
 
-        ConfigEntry entry = Assert.Single(config.Entries);
+        ConfigEntry entry = Assert.Single(config.Entries());
         Assert.Equal(new ConfigEntry("cleanup.policy", "compact"), entry);
-        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, entry.Source);
-        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, entry.Type);
-        Assert.Null(entry.Documentation);
-        Assert.Empty(entry.Synonyms);
-        Assert.False(entry.IsDefault);
-        Assert.False(entry.IsSensitive);
-        Assert.False(entry.IsReadOnly);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, entry.Source());
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, entry.Type());
+        Assert.Null(entry.Documentation());
+        Assert.Empty(entry.Synonyms());
+        Assert.False(entry.IsDefault());
+        Assert.False(entry.IsSensitive());
+        Assert.False(entry.IsReadOnly());
     }
 
     [Fact]

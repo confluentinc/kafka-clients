@@ -89,10 +89,10 @@ public sealed class PublicProducerMetricsTests
         {
             MetricName original = entry.Key;
             MetricName rebuilt = new MetricName(
-                original.Name,
-                original.Group,
-                original.Description + "-mutated",
-                RebuildTags(original.Tags));
+                original.Name(),
+                original.Group(),
+                original.Description() + "-mutated",
+                RebuildTags(original.Tags()));
 
             Assert.True(metrics.ContainsKey(rebuilt));
             Assert.Same(entry.Value, metrics[rebuilt]);
@@ -184,21 +184,21 @@ public sealed class PublicProducerMetricsTests
             IMetric metric = entry.Value;
 
             Assert.NotNull(name);
-            Assert.NotNull(name.Name);
-            Assert.NotNull(name.Group);
-            Assert.NotNull(name.Description);
-            Assert.NotNull(name.Tags);
+            Assert.NotNull(name.Name());
+            Assert.NotNull(name.Group());
+            Assert.NotNull(name.Description());
+            Assert.NotNull(name.Tags());
 
             Assert.NotNull(metric);
             // IMetric.Name must equal (by value identity) the dictionary key.
-            Assert.Equal(name, metric.Name);
+            Assert.Equal(name, metric.MetricName());
 
             // Value is a boxed CLR value whose runtime type IS the kind: one of the four.
-            object value = metric.Value;
+            object value = metric.MetricValue();
             Assert.NotNull(value);
             Assert.True(
                 value is double || value is string || value is long || value is int,
-                $"Unexpected metric value type {value.GetType()} for {name.Name}");
+                $"Unexpected metric value type {value.GetType()} for {name.Name()}");
         }
     }
 

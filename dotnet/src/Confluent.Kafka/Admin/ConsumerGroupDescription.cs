@@ -29,20 +29,20 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// <para>
 /// Java's deprecated <c>state()</c> accessor and its three deprecated constructors are not
-/// translated; read <see cref="GroupState"/>, as Java's deprecation note says.
+/// translated; read <see cref="GroupState()"/>, as Java's deprecation note says.
 /// </para>
 /// <para>
-/// <see cref="AuthorizedOperations"/> is <see langword="null"/> when the broker reported none at
+/// <see cref="AuthorizedOperations()"/> is <see langword="null"/> when the broker reported none at
 /// all, and empty when it reported that none are authorized, as in Java.
 /// </para>
 /// <para>
-/// <see cref="GroupEpoch"/> and <see cref="TargetAssignmentEpoch"/> are set for a
+/// <see cref="GroupEpoch()"/> and <see cref="TargetAssignmentEpoch()"/> are set for a
 /// <see cref="GroupType.CONSUMER"/> group and <see langword="null"/>, Java's empty
 /// <c>Optional</c>, for a <see cref="GroupType.CLASSIC"/> one.
 /// </para>
 /// <para>
-/// Null arguments are coalesced as in Java: <see cref="GroupId"/> and
-/// <see cref="PartitionAssignor"/> become the empty string and <see cref="Members"/> an empty
+/// Null arguments are coalesced as in Java: <see cref="GroupId()"/> and
+/// <see cref="PartitionAssignor()"/> become the empty string and <see cref="Members()"/> an empty
 /// collection.
 /// </para>
 /// </remarks>
@@ -51,6 +51,14 @@ public sealed class ConsumerGroupDescription
     private readonly List<MemberDescription> _members;
 
     private readonly List<AclOperation>? _authorizedOperations;
+    private readonly string _groupId;
+    private readonly bool _isSimpleConsumerGroup;
+    private readonly string _partitionAssignor;
+    private readonly GroupType _type;
+    private readonly GroupState _groupState;
+    private readonly Node? _coordinator;
+    private readonly int? _groupEpoch;
+    private readonly int? _targetAssignmentEpoch;
 
     /// <summary>
     /// Creates a description — Java's current constructor.
@@ -91,86 +99,98 @@ public sealed class ConsumerGroupDescription
         int? groupEpoch,
         int? targetAssignmentEpoch)
     {
-        GroupId = groupId ?? string.Empty;
-        IsSimpleConsumerGroup = isSimpleConsumerGroup;
+        _groupId = groupId ?? string.Empty;
+        _isSimpleConsumerGroup = isSimpleConsumerGroup;
         _members = members is null
             ? new List<MemberDescription>()
             : new List<MemberDescription>(members);
-        PartitionAssignor = partitionAssignor ?? string.Empty;
-        Type = type;
-        GroupState = groupState;
-        Coordinator = coordinator;
+        _partitionAssignor = partitionAssignor ?? string.Empty;
+        _type = type;
+        _groupState = groupState;
+        _coordinator = coordinator;
         _authorizedOperations = CopyAsSet(authorizedOperations);
-        GroupEpoch = groupEpoch;
-        TargetAssignmentEpoch = targetAssignmentEpoch;
+        _groupEpoch = groupEpoch;
+        _targetAssignmentEpoch = targetAssignmentEpoch;
     }
 
     /// <summary>
     /// The id of the consumer group — Java's <c>groupId()</c>. Never <see langword="null"/>.
     /// </summary>
-    public string GroupId { get; }
+    /// <returns>The id of the consumer group.</returns>
+    public string GroupId() => _groupId;
 
     /// <summary>
     /// Whether the consumer group is simple — Java's <c>isSimpleConsumerGroup()</c>.
     /// </summary>
-    public bool IsSimpleConsumerGroup { get; }
+    /// <returns>Whether the consumer group is simple.</returns>
+    public bool IsSimpleConsumerGroup() => _isSimpleConsumerGroup;
 
     /// <summary>
     /// The members of the consumer group — Java's <c>members()</c>. Never
     /// <see langword="null"/>.
     /// </summary>
+    /// <returns>The members of the consumer group.</returns>
     /// <remarks>
     /// Java stores a <c>List.copyOf(...)</c>, so <see cref="Equals(object)"/> compares the members
     /// positionally.
     /// </remarks>
-    public IReadOnlyCollection<MemberDescription> Members => _members;
+    public IReadOnlyCollection<MemberDescription> Members() => _members;
 
     /// <summary>
     /// The consumer group partition assignor — Java's <c>partitionAssignor()</c>. Never
     /// <see langword="null"/>.
     /// </summary>
-    public string PartitionAssignor { get; }
+    /// <returns>The consumer group partition assignor.</returns>
+    public string PartitionAssignor() => _partitionAssignor;
 
     /// <summary>
     /// The group type (or the protocol) of this consumer group — Java's <c>type()</c>. It
     /// defaults to <see cref="GroupType.CLASSIC"/> if not provided by the server.
     /// </summary>
-    public GroupType Type { get; }
+    /// <returns>The group type (or the protocol) of this consumer group.</returns>
+    public GroupType Type() => _type;
 
     /// <summary>
     /// The group state, or <see cref="Confluent.Kafka.Common.GroupState.UNKNOWN"/> if the state is
     /// too new for this client to parse — Java's <c>groupState()</c>.
     /// </summary>
-    public GroupState GroupState { get; }
+    /// <returns>The group state, or <see cref="Confluent.Kafka.Common.GroupState.UNKNOWN"/> if the state is too new
+    /// for this client to parse.</returns>
+    public GroupState GroupState() => _groupState;
 
     /// <summary>
     /// The consumer group coordinator, or <see langword="null"/> if the coordinator is not
     /// known — Java's <c>coordinator()</c>.
     /// </summary>
-    public Node? Coordinator { get; }
+    /// <returns>The consumer group coordinator, or <see langword="null"/> if the coordinator is not known.</returns>
+    public Node? Coordinator() => _coordinator;
 
     /// <summary>
     /// The operations the caller is authorized to perform on this group, or
     /// <see langword="null"/> if the broker reported none at all — Java's
     /// <c>authorizedOperations()</c>. An empty collection means "reported, and none are authorized".
     /// </summary>
+    /// <returns>The operations the caller is authorized to perform on this group, or <see langword="null"/> if the
+    /// broker reported none at all.</returns>
     /// <remarks>
     /// Duplicates are collapsed, and <see cref="Equals(object)"/> and <see cref="GetHashCode"/> treat
     /// this member as a set, as Java's <c>Set</c> is.
     /// </remarks>
-    public IReadOnlyCollection<AclOperation>? AuthorizedOperations => _authorizedOperations;
+    public IReadOnlyCollection<AclOperation>? AuthorizedOperations() => _authorizedOperations;
 
     /// <summary>
     /// The epoch of the consumer group, or <see langword="null"/> for a classic group —
     /// Java's <c>groupEpoch()</c>.
     /// </summary>
-    public int? GroupEpoch { get; }
+    /// <returns>The epoch of the consumer group, or <see langword="null"/> for a classic group.</returns>
+    public int? GroupEpoch() => _groupEpoch;
 
     /// <summary>
     /// The epoch of the target assignment, or <see langword="null"/> for a classic group —
     /// Java's <c>targetAssignmentEpoch()</c>.
     /// </summary>
-    public int? TargetAssignmentEpoch { get; }
+    /// <returns>The epoch of the target assignment, or <see langword="null"/> for a classic group.</returns>
+    public int? TargetAssignmentEpoch() => _targetAssignmentEpoch;
 
     /// <summary>
     /// Compares all ten stored members — Java's <c>equals</c>.
@@ -178,7 +198,7 @@ public sealed class ConsumerGroupDescription
     /// <param name="obj">The object to compare against.</param>
     /// <returns>True when every member matches.</returns>
     /// <remarks>
-    /// <see cref="Coordinator"/> is compared by value over all of Java's <c>Node</c> fields, as Java's
+    /// <see cref="Coordinator()"/> is compared by value over all of Java's <c>Node</c> fields, as Java's
     /// <c>Node.equals</c> does, although <see cref="Node"/> itself has no value equality.
     /// </remarks>
     public override bool Equals(object? obj)
@@ -189,16 +209,16 @@ public sealed class ConsumerGroupDescription
         }
 
         return obj is ConsumerGroupDescription other
-            && IsSimpleConsumerGroup == other.IsSimpleConsumerGroup
-            && string.Equals(GroupId, other.GroupId, StringComparison.Ordinal)
+            && _isSimpleConsumerGroup == other._isSimpleConsumerGroup
+            && string.Equals(_groupId, other._groupId, StringComparison.Ordinal)
             && _members.SequenceEqual(other._members)
-            && string.Equals(PartitionAssignor, other.PartitionAssignor, StringComparison.Ordinal)
-            && Type == other.Type
-            && GroupState == other.GroupState
-            && CoordinatorsMatch(Coordinator, other.Coordinator)
+            && string.Equals(_partitionAssignor, other._partitionAssignor, StringComparison.Ordinal)
+            && _type == other._type
+            && _groupState == other._groupState
+            && CoordinatorsMatch(_coordinator, other._coordinator)
             && OperationsMatch(_authorizedOperations, other._authorizedOperations)
-            && GroupEpoch == other.GroupEpoch
-            && TargetAssignmentEpoch == other.TargetAssignmentEpoch;
+            && _groupEpoch == other._groupEpoch
+            && _targetAssignmentEpoch == other._targetAssignmentEpoch;
     }
 
     /// <summary>
@@ -211,16 +231,16 @@ public sealed class ConsumerGroupDescription
         unchecked
         {
             int hash = 17;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(GroupId);
-            hash = (hash * 31) + IsSimpleConsumerGroup.GetHashCode();
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_groupId);
+            hash = (hash * 31) + _isSimpleConsumerGroup.GetHashCode();
             hash = (hash * 31) + MembersHash(_members);
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(PartitionAssignor);
-            hash = (hash * 31) + ((int)Type).GetHashCode();
-            hash = (hash * 31) + ((int)GroupState).GetHashCode();
-            hash = (hash * 31) + CoordinatorHash(Coordinator);
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_partitionAssignor);
+            hash = (hash * 31) + ((int)_type).GetHashCode();
+            hash = (hash * 31) + ((int)_groupState).GetHashCode();
+            hash = (hash * 31) + CoordinatorHash(_coordinator);
             hash = (hash * 31) + OperationsHash(_authorizedOperations);
-            hash = (hash * 31) + GroupEpoch.GetHashCode();
-            hash = (hash * 31) + TargetAssignmentEpoch.GetHashCode();
+            hash = (hash * 31) + _groupEpoch.GetHashCode();
+            hash = (hash * 31) + _targetAssignmentEpoch.GetHashCode();
             return hash;
         }
     }
@@ -233,18 +253,18 @@ public sealed class ConsumerGroupDescription
             "(groupId={0}, isSimpleConsumerGroup={1}, members={2}, partitionAssignor={3}, " +
             "type={4}, groupState={5}, coordinator={6}, authorizedOperations={7}, " +
             "groupEpoch={8}, targetAssignmentEpoch={9})",
-            GroupId,
-            IsSimpleConsumerGroup ? "true" : "false",
+            _groupId,
+            _isSimpleConsumerGroup ? "true" : "false",
             string.Join(",", _members.Select(static member => member.ToString())),
-            PartitionAssignor,
-            GroupMarshal.NameFromType(Type) ?? "Unknown",
-            GroupMarshal.NameFromState(GroupState) ?? "Unknown",
-            Coordinator is null ? "null" : Coordinator.ToString(),
+            _partitionAssignor,
+            GroupMarshal.NameFromType(_type) ?? "Unknown",
+            GroupMarshal.NameFromState(_groupState) ?? "Unknown",
+            _coordinator is null ? "null" : _coordinator.ToString(),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]",
-            GroupEpoch is null ? "null" : GroupEpoch.Value.ToString(CultureInfo.InvariantCulture),
-            TargetAssignmentEpoch is null
+            _groupEpoch is null ? "null" : _groupEpoch.Value.ToString(CultureInfo.InvariantCulture),
+            _targetAssignmentEpoch is null
                 ? "null"
-                : TargetAssignmentEpoch.Value.ToString(CultureInfo.InvariantCulture));
+                : _targetAssignmentEpoch.Value.ToString(CultureInfo.InvariantCulture));
 
     private static List<AclOperation>? CopyAsSet(IEnumerable<AclOperation>? operations)
     {
@@ -275,11 +295,11 @@ public sealed class ConsumerGroupDescription
 
         return left is not null
             && right is not null
-            && left.Id == right.Id
-            && left.Port == right.Port
-            && string.Equals(left.Host, right.Host, StringComparison.Ordinal)
-            && string.Equals(left.Rack, right.Rack, StringComparison.Ordinal)
-            && left.IsFenced == right.IsFenced;
+            && left.Id() == right.Id()
+            && left.Port() == right.Port()
+            && string.Equals(left.Host(), right.Host(), StringComparison.Ordinal)
+            && string.Equals(left.Rack(), right.Rack(), StringComparison.Ordinal)
+            && left.IsFenced() == right.IsFenced();
     }
 
     private static int CoordinatorHash(Node? coordinator)
@@ -292,12 +312,12 @@ public sealed class ConsumerGroupDescription
         unchecked
         {
             int hash = 17;
-            hash = (hash * 31) + coordinator.Id;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(coordinator.Host);
-            hash = (hash * 31) + coordinator.Port;
+            hash = (hash * 31) + coordinator.Id();
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(coordinator.Host());
+            hash = (hash * 31) + coordinator.Port();
             hash = (hash * 31)
-                + (coordinator.Rack is null ? 0 : StringComparer.Ordinal.GetHashCode(coordinator.Rack));
-            hash = (hash * 31) + (coordinator.IsFenced ? 1 : 0);
+                + (coordinator.Rack() is { } rack ? StringComparer.Ordinal.GetHashCode(rack) : 0);
+            hash = (hash * 31) + (coordinator.IsFenced() ? 1 : 0);
             return hash;
         }
     }

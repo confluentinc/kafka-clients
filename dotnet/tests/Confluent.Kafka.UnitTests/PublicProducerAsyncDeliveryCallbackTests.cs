@@ -95,8 +95,8 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                 Assert.Equal(7, failure.Code);
                 Assert.Equal(MetadataTimeout(topic, MaxBlockMs), failure.Message);
                 Assert.Same(failure, callback.Delivered);
-                Assert.Equal(topic, callback.Metadata!.Topic);
-                Assert.Equal(-1L, callback.Metadata.Offset);
+                Assert.Equal(topic, callback.Metadata!.Topic());
+                Assert.Equal(-1L, callback.Metadata.Offset());
             },
             gate);
     }
@@ -526,7 +526,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                     await FirstStage(producer.Send(Record(Topic("async-then-apply")), callback));
                 TaskCompletionSource<string?> appliedOn =
                     new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-                AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset);
+                AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset());
                 _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
 
                 await Task.Delay(Settle);
@@ -556,7 +556,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         await Within(callback.WhenEnded);
         Assert.Same(injected, callback.Delivered);
         Assert.Equal(1, callback.Calls);
-        Assert.Equal(-1L, callback.Metadata!.Offset);
+        Assert.Equal(-1L, callback.Metadata!.Offset());
     }
 
     [Fact]
@@ -584,8 +584,8 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
             Assert.True(callback.Ended);
             Assert.Null(callback.Delivered);
             Assert.Same(metadata, callback.Metadata);
-            Assert.Equal(topic, metadata.Topic);
-            Assert.Equal(0L, metadata.Offset);
+            Assert.Equal(topic, metadata.Topic());
+            Assert.Equal(0L, metadata.Offset());
             Assert.Equal(1, callback.Calls);
         }
         finally

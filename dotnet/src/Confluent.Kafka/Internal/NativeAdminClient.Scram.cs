@@ -294,7 +294,7 @@ internal sealed partial class NativeAdminClient
                     "The SCRAM credential alterations must not contain a null element.", nameof(alterations));
             }
 
-            AdminStrings.Validate(alteration.User, nameof(alterations));
+            AdminStrings.Validate(alteration.User(), nameof(alterations));
             requested.Add(alteration);
         }
 

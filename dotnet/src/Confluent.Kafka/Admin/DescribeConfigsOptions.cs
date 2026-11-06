@@ -46,7 +46,7 @@ public sealed class DescribeConfigsOptions
     /// Return each entry's synonyms, in precedence order — Java's
     /// <c>includeSynonyms(boolean)</c> / <c>includeSynonyms()</c>. Defaults to
     /// <see langword="false"/>, as Java's does, in which case
-    /// <see cref="ConfigEntry.Synonyms"/> comes back empty.
+    /// <see cref="ConfigEntry.Synonyms()"/> comes back empty.
     /// </summary>
     public bool IncludeSynonyms
     {
@@ -61,7 +61,7 @@ public sealed class DescribeConfigsOptions
     /// <summary>
     /// Return each entry's documentation — Java's <c>includeDocumentation(boolean)</c> /
     /// <c>includeDocumentation()</c>. Defaults to <see langword="false"/>, as Java's does,
-    /// in which case <see cref="ConfigEntry.Documentation"/> comes back
+    /// in which case <see cref="ConfigEntry.Documentation()"/> comes back
     /// <see langword="null"/>.
     /// </summary>
     public bool IncludeDocumentation

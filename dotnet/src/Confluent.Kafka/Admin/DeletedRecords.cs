@@ -20,6 +20,8 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class DeletedRecords
 {
+    private readonly long _lowWatermark;
+
     /// <summary>
     /// Initializes an instance — Java's <c>DeletedRecords(long lowWatermark)</c>.
     /// </summary>
@@ -28,16 +30,17 @@ public sealed class DeletedRecords
     /// </param>
     public DeletedRecords(long lowWatermark)
     {
-        LowWatermark = lowWatermark;
+        _lowWatermark = lowWatermark;
     }
 
     /// <summary>
     /// The "low watermark" for the topic partition on which the deletion was executed —
     /// Java's <c>lowWatermark()</c>.
     /// </summary>
+    /// <returns>The "low watermark" for the topic partition on which the deletion was executed.</returns>
     /// <remarks>
     /// <c>-1</c> is a value, not a failure: a partition that failed fails its own future in
     /// <see cref="DeleteRecordsResult.LowWatermarks"/> and produces no <see cref="DeletedRecords"/>.
     /// </remarks>
-    public long LowWatermark { get; }
+    public long LowWatermark() => _lowWatermark;
 }

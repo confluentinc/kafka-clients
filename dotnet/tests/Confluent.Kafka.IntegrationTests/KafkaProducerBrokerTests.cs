@@ -72,12 +72,12 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(Record(topic, 0, "a"));
         Assert.False(firstStage.IsCompleted, "the first record was taken inside the call");
         AsyncKafkaFuture<RecordMetadata> first = await firstStage;
-        Assert.Equal(0L, (await first.Get(s_get)).Offset);
+        Assert.Equal(0L, (await first.Get(s_get)).Offset());
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> secondStage = producer.Send(Record(topic, 0, "b"));
         Assert.True(secondStage.IsCompletedSuccessfully, "the second record was not taken inside the call");
         AsyncKafkaFuture<RecordMetadata> second = await secondStage;
-        Assert.Equal(1L, (await second.Get(s_get)).Offset);
+        Assert.Equal(1L, (await second.Get(s_get)).Offset());
     }
 
     [SkippableFact]
@@ -88,7 +88,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             new KafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray, Serdes.ByteArray);
 
         KafkaFuture<RecordMetadata> warmUp = producer.Send(Record(topic, 0, "warm-up"));
-        Assert.Equal(0L, warmUp.Get(s_get).Offset);
+        Assert.Equal(0L, warmUp.Get(s_get).Offset());
 
         KafkaFuture<RecordMetadata>? first = null;
         Exception? firstFailure = null;
@@ -108,14 +108,14 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         // The blocking Send gives no signal that its record is queued, so the first send is given time to start.
         await Task.Delay(s_firstSendStarts);
         KafkaFuture<RecordMetadata> second = producer.Send(Record(topic, 0, "b"));
-        Assert.Equal(1L, second.Get(s_get).Offset);
+        Assert.Equal(1L, second.Get(s_get).Offset());
         Assert.Equal(new (long, string?)[] { (1L, "b") }, RecordsOf(topic, 0, fromOffset: 1));
         Assert.True(waiting.IsAlive, "the first Send no longer waits for its partition");
 
         await _broker.AddPartitionsAsync(topic, 2);
         Assert.True(waiting.Join(s_partitionWait), "the first Send still waits after the partition appeared");
         Assert.Null(firstFailure);
-        Assert.Equal(1, Assert.NotNull(first).Get(s_partitionWait).Partition);
+        Assert.Equal(1, Assert.NotNull(first).Get(s_partitionWait).Partition());
     }
 
     [SkippableFact]
@@ -126,20 +126,20 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             new AsyncKafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray, Serdes.ByteArray);
 
         AsyncKafkaFuture<RecordMetadata> warmUp = await producer.Send(Record(topic, 0, "warm-up"));
-        Assert.Equal(0L, (await warmUp.Get(s_get)).Offset);
+        Assert.Equal(0L, (await warmUp.Get(s_get)).Offset());
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(Record(topic, 1, "a"));
         Assert.False(firstStage.IsCompleted, "the first record was taken inside the call");
         ValueTask<AsyncKafkaFuture<RecordMetadata>> secondStage = producer.Send(Record(topic, 0, "b"));
         Assert.True(secondStage.IsCompletedSuccessfully, "the second record was held behind the first");
         AsyncKafkaFuture<RecordMetadata> second = await secondStage;
-        Assert.Equal(1L, (await second.Get(s_get)).Offset);
+        Assert.Equal(1L, (await second.Get(s_get)).Offset());
         Assert.Equal(new (long, string?)[] { (1L, "b") }, RecordsOf(topic, 0, fromOffset: 1));
         Assert.False(firstStage.IsCompleted, "the first record no longer waits for its partition");
 
         await _broker.AddPartitionsAsync(topic, 2);
         AsyncKafkaFuture<RecordMetadata> first = await firstStage.AsTask().WaitAsync(s_partitionWait);
-        Assert.Equal(1, (await first.Get(s_partitionWait)).Partition);
+        Assert.Equal(1, (await first.Get(s_partitionWait)).Partition());
     }
 
     [SkippableFact]
@@ -171,7 +171,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         using (KafkaProducer<byte[], byte[]> producer =
             new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray))
         {
-            Assert.Equal(0L, producer.Send(HeadersRecord(topic, HeadersOf(s_headers))).Get(s_get).Offset);
+            Assert.Equal(0L, producer.Send(HeadersRecord(topic, HeadersOf(s_headers))).Get(s_get).Offset());
         }
 
         AssertHeaders(s_headers, ConsumedHeaders(topic));
@@ -186,11 +186,11 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         {
             ProducerRecord<byte[], byte[]> record =
                 HeadersRecord(topic, new[] { new Header("given", Encoding.UTF8.GetBytes("1")) });
-            record.Headers.Add("added", null);
-            Assert.Equal(0L, producer.Send(record).Get(s_get).Offset);
+            record.Headers().Add("added", null);
+            Assert.Equal(0L, producer.Send(record).Get(s_get).Offset());
 
             IllegalStateException closed = Assert.Throws<IllegalStateException>(
-                () => record.Headers.Add("late", Encoding.UTF8.GetBytes("x")));
+                () => record.Headers().Add("late", Encoding.UTF8.GetBytes("x")));
             Assert.Equal("RecordHeaders has been closed.", closed.Message);
         }
 
@@ -207,7 +207,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray, Serdes.ByteArray))
         {
             AsyncKafkaFuture<RecordMetadata> future = await producer.Send(HeadersRecord(topic, HeadersOf(s_headers)));
-            Assert.Equal(0L, (await future.Get(s_get)).Offset);
+            Assert.Equal(0L, (await future.Get(s_get)).Offset());
         }
 
         AssertHeaders(s_headers, ConsumedHeaders(topic));
@@ -238,11 +238,11 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 
     private static void AssertDelivered(RecordMetadata metadata, int keySize, int valueSize)
     {
-        Assert.True(metadata.HasOffset);
-        Assert.True(metadata.HasTimestamp);
-        Assert.Equal(s_timestamp, metadata.Timestamp);
-        Assert.Equal(keySize, metadata.SerializedKeySize);
-        Assert.Equal(valueSize, metadata.SerializedValueSize);
+        Assert.True(metadata.HasOffset());
+        Assert.True(metadata.HasTimestamp());
+        Assert.Equal(s_timestamp, metadata.Timestamp());
+        Assert.Equal(keySize, metadata.SerializedKeySize());
+        Assert.Equal(valueSize, metadata.SerializedValueSize());
     }
 
     private static ProducerRecord<byte[], byte[]> Record(string topic, int partition, string value) =>
@@ -289,7 +289,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         {
             foreach (ConsumerRecord<byte[], byte[]> record in consumer.Poll(s_readBackPoll))
             {
-                return Array.ConvertAll(record.Headers.ToArray(), header => (header.Key, header.Value));
+                return Array.ConvertAll(record.Headers().ToArray(), header => (Key: header.Key(), Value: header.Value()));
             }
         }
 
@@ -316,7 +316,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         {
             foreach (ConsumerRecord<byte[], byte[]> record in consumer.Poll(s_readBackPoll))
             {
-                records.Add((record.Offset, record.Value is null ? null : Encoding.UTF8.GetString(record.Value)));
+                records.Add((Offset: record.Offset(), record.Value() is null ? null : Encoding.UTF8.GetString(record.Value())));
             }
         }
 

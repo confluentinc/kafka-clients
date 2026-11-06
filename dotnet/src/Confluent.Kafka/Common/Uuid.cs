@@ -37,12 +37,14 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
         new ReadOnlyCollection<Uuid>(new[] { ZERO_UUID, ONE_UUID });
 
     private static readonly Func<Uuid> s_unsafeRandomUuid = UnsafeRandomUuid;
+    private readonly long _mostSignificantBits;
+    private readonly long _leastSignificantBits;
 
     /// <summary>Initializes an id from its high and low 64 bits.</summary>
     public Uuid(long mostSignificantBits, long leastSignificantBits)
     {
-        MostSignificantBits = mostSignificantBits;
-        LeastSignificantBits = leastSignificantBits;
+        _mostSignificantBits = mostSignificantBits;
+        _leastSignificantBits = leastSignificantBits;
     }
 
     /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>
@@ -61,10 +63,12 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     public static IReadOnlyCollection<Uuid> RESERVED => s_reserved;
 
     /// <summary>The high 64 bits.</summary>
-    public long MostSignificantBits { get; }
+    /// <returns>The high 64 bits.</returns>
+    public long GetMostSignificantBits() => _mostSignificantBits;
 
     /// <summary>The low 64 bits.</summary>
-    public long LeastSignificantBits { get; }
+    /// <returns>The low 64 bits.</returns>
+    public long GetLeastSignificantBits() => _leastSignificantBits;
 
     /// <summary>Determines whether two ids are equal.</summary>
     public static bool operator ==(Uuid left, Uuid right) => left.Equals(right);
@@ -158,8 +162,8 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     public override string ToString()
     {
         byte[] bytes = new byte[ByteCount];
-        WriteBigEndianInt64(bytes, 0, MostSignificantBits);
-        WriteBigEndianInt64(bytes, 8, LeastSignificantBits);
+        WriteBigEndianInt64(bytes, 0, GetMostSignificantBits());
+        WriteBigEndianInt64(bytes, 8, GetLeastSignificantBits());
 
         return Convert.ToBase64String(bytes)
             .TrimEnd('=')
@@ -176,22 +180,22 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <inheritdoc/>
     public int CompareTo(Uuid other)
     {
-        if (MostSignificantBits > other.MostSignificantBits)
+        if (GetMostSignificantBits() > other.GetMostSignificantBits())
         {
             return 1;
         }
 
-        if (MostSignificantBits < other.MostSignificantBits)
+        if (GetMostSignificantBits() < other.GetMostSignificantBits())
         {
             return -1;
         }
 
-        if (LeastSignificantBits > other.LeastSignificantBits)
+        if (GetLeastSignificantBits() > other.GetLeastSignificantBits())
         {
             return 1;
         }
 
-        if (LeastSignificantBits < other.LeastSignificantBits)
+        if (GetLeastSignificantBits() < other.GetLeastSignificantBits())
         {
             return -1;
         }
@@ -201,8 +205,8 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
 
     /// <inheritdoc/>
     public bool Equals(Uuid other) =>
-        MostSignificantBits == other.MostSignificantBits &&
-        LeastSignificantBits == other.LeastSignificantBits;
+        GetMostSignificantBits() == other.GetMostSignificantBits() &&
+        GetLeastSignificantBits() == other.GetLeastSignificantBits();
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is Uuid other && Equals(other);
@@ -210,7 +214,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <inheritdoc/>
     public override int GetHashCode()
     {
-        long value = MostSignificantBits ^ LeastSignificantBits;
+        long value = GetMostSignificantBits() ^ GetLeastSignificantBits();
         return (int)(value ^ (value >> 32));
     }
 

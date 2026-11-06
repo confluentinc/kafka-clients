@@ -55,8 +55,8 @@ public sealed class RecordDeserializationExceptionTests
         Assert.Equal(new byte[] { (byte)'k' }, e.KeyBuffer);
         Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer);
         Header header = Assert.Single(e.Headers!);
-        Assert.Equal("h", header.Key);
-        Assert.Equal(new byte[] { (byte)'1' }, header.Value);
+        Assert.Equal("h", header.Key());
+        Assert.Equal(new byte[] { (byte)'1' }, header.Value());
         Assert.Equal("m", e.Message);
         Assert.Same(cause, e.InnerException);
         Assert.Equal(-27, e.Code);

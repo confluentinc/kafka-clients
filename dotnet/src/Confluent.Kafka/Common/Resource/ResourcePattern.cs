@@ -24,10 +24,10 @@ namespace Confluent.Kafka.Common.Resource;
 /// <c>org.apache.kafka.common.resource.ResourcePattern</c>.
 /// </summary>
 /// <remarks>
-/// A concrete pattern: <see cref="Name"/> is never null, and the filter-only values
+/// A concrete pattern: <see cref="Name()"/> is never null, and the filter-only values
 /// (<see cref="ResourceType.ANY"/>, <see cref="PatternType.ANY"/>, <see cref="PatternType.MATCH"/>)
 /// are rejected by the constructor, as in Java; use <see cref="ResourcePatternFilter"/> for them.
-/// <see cref="ResourceType"/> and <see cref="PatternType"/> only ever hold a defined member, as a
+/// <see cref="ResourceType()"/> and <see cref="PatternType()"/> only ever hold a defined member, as a
 /// Java pattern does.
 /// </remarks>
 public sealed class ResourcePattern
@@ -37,6 +37,10 @@ public sealed class ResourcePattern
     /// <c>WILDCARD_RESOURCE</c>.
     /// </summary>
     public const string WILDCARD_RESOURCE = "*";
+
+    private readonly ResourceType _resourceType;
+    private readonly string _name;
+    private readonly PatternType _patternType;
 
     /// <summary>Creates a resource pattern — Java's constructor.</summary>
     /// <param name="resourceType">
@@ -60,50 +64,54 @@ public sealed class ResourcePattern
     /// </exception>
     public ResourcePattern(ResourceType resourceType, string name, PatternType patternType)
     {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
+        _name = name ?? throw new ArgumentNullException(nameof(name));
 
         resourceType = AclEnumCodes.DefinedOrUnknown(resourceType);
         patternType = AclEnumCodes.DefinedOrUnknown(patternType);
 
-        if (resourceType == ResourceType.ANY)
+        if (resourceType == Resource.ResourceType.ANY)
         {
             throw new IllegalArgumentException("resourceType must not be ANY");
         }
 
-        if (patternType == PatternType.MATCH || patternType == PatternType.ANY)
+        if (patternType == Resource.PatternType.MATCH || patternType == Resource.PatternType.ANY)
         {
             throw new IllegalArgumentException(
                 string.Format(CultureInfo.InvariantCulture, "patternType must not be {0}", patternType));
         }
 
-        ResourceType = resourceType;
-        PatternType = patternType;
+        _resourceType = resourceType;
+        _patternType = patternType;
     }
 
     /// <summary>The resource type this pattern matches — Java's <c>resourceType()</c>.</summary>
-    public ResourceType ResourceType { get; }
+    /// <returns>The resource type this pattern matches.</returns>
+    public ResourceType ResourceType() => _resourceType;
 
     /// <summary>The resource name — Java's <c>name()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The resource name.</returns>
+    public string Name() => _name;
 
     /// <summary>The pattern type — Java's <c>patternType()</c>.</summary>
-    public PatternType PatternType { get; }
+    /// <returns>The pattern type.</returns>
+    public PatternType PatternType() => _patternType;
 
     /// <summary>Whether any component is <c>UNKNOWN</c> — Java's <c>isUnknown()</c>.</summary>
-    public bool IsUnknown => ResourceType == ResourceType.UNKNOWN || PatternType == PatternType.UNKNOWN;
+    /// <returns>Whether any component is <c>UNKNOWN</c>.</returns>
+    public bool IsUnknown() => ResourceType() == Resource.ResourceType.UNKNOWN || PatternType() == Resource.PatternType.UNKNOWN;
 
     /// <summary>A filter matching only this pattern — Java's <c>toFilter()</c>.</summary>
     /// <returns>The filter.</returns>
-    public ResourcePatternFilter ToFilter() => new ResourcePatternFilter(ResourceType, Name, PatternType);
+    public ResourcePatternFilter ToFilter() => new ResourcePatternFilter(ResourceType(), Name(), PatternType());
 
     /// <summary>Value equality over all three components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same pattern.</returns>
     public override bool Equals(object? obj) =>
         obj is ResourcePattern other
-        && ResourceType == other.ResourceType
-        && string.Equals(Name, other.Name, StringComparison.Ordinal)
-        && PatternType == other.PatternType;
+        && ResourceType() == other.ResourceType()
+        && string.Equals(Name(), other.Name(), StringComparison.Ordinal)
+        && PatternType() == other.PatternType();
 
     /// <summary>The hash of all three components — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -112,9 +120,9 @@ public sealed class ResourcePattern
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + ((int)ResourceType).GetHashCode();
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Name);
-            hash = (hash * 31) + ((int)PatternType).GetHashCode();
+            hash = (hash * 31) + ((int)ResourceType()).GetHashCode();
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Name());
+            hash = (hash * 31) + ((int)PatternType()).GetHashCode();
             return hash;
         }
     }
@@ -127,7 +135,7 @@ public sealed class ResourcePattern
         string.Format(
             CultureInfo.InvariantCulture,
             "ResourcePattern(resourceType={0}, name={1}, patternType={2})",
-            ResourceType,
-            Name,
-            PatternType);
+            ResourceType(),
+            Name(),
+            PatternType());
 }

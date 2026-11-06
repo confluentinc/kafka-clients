@@ -239,7 +239,7 @@ public sealed class PublicAdminAlterClientQuotasTests
             admin.AlterClientQuotas(new[] { Alteration("用户-café", 1d) });
 
         ClientQuotaEntity key = Assert.Single(result.Values).Key;
-        Assert.Equal("用户-café", key.Entries[ClientQuotaEntity.USER]);
+        Assert.Equal("用户-café", key.Entries()[ClientQuotaEntity.USER]);
         Assert.Equal(Entity("用户-café"), key);
 
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));

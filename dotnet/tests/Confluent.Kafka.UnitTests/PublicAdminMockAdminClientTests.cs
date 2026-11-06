@@ -186,12 +186,12 @@ public sealed class PublicAdminMockAdminClientTests
         MockAdminClient sync = MockAdminClient.Create().DefaultReplicationFactor(65538).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         Config syncConfig = sync.DescribeConfigs(new[] { broker }).Values[broker].Get(s_deadline);
-        Assert.Equal("2", syncConfig.Get("default.replication.factor")?.Value);
+        Assert.Equal("2", syncConfig.Get("default.replication.factor")?.Value());
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().DefaultReplicationFactor(65538).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         Config asyncConfig = await TestTimeout.Run(() => async.DescribeConfigs(new[] { broker }).Values[broker].Get(), s_deadline);
-        Assert.Equal("2", asyncConfig.Get("default.replication.factor")?.Value);
+        Assert.Equal("2", asyncConfig.Get("default.replication.factor")?.Value());
     }
 
     [Fact]
@@ -366,13 +366,13 @@ public sealed class PublicAdminMockAdminClientTests
 
         static void AssertElrRead(TopicDescription description)
         {
-            TopicPartitionInfo none = description.Partitions.Single(p => p.Partition == 0);
-            Assert.Null(none.Elr);
-            Assert.Null(none.LastKnownElr);
-            TopicPartitionInfo reported = description.Partitions.Single(p => p.Partition == 1);
-            AssertNode(Seeded(1), Assert.Single(reported.Elr!));
-            Assert.NotNull(reported.LastKnownElr);
-            Assert.Empty(reported.LastKnownElr!);
+            TopicPartitionInfo none = description.Partitions().Single(p => p.Partition() == 0);
+            Assert.Null(none.Elr());
+            Assert.Null(none.LastKnownElr());
+            TopicPartitionInfo reported = description.Partitions().Single(p => p.Partition() == 1);
+            AssertNode(Seeded(1), Assert.Single(reported.Elr()!));
+            Assert.NotNull(reported.LastKnownElr());
+            Assert.Empty(reported.LastKnownElr()!);
         }
     }
 
@@ -585,8 +585,8 @@ public sealed class PublicAdminMockAdminClientTests
         sync.CreateTopics(new[] { new NewTopic("t", 1, 2) }).All().Get(s_deadline);
         DescribeLogDirsResult syncResult = sync.DescribeLogDirs(brokers);
         LogDirDescription syncDescription = syncResult.Descriptions[0].Get(s_deadline)[DefaultLogDir];
-        Assert.Equal(new[] { partition }, syncDescription.ReplicaInfos.Keys);
-        Assert.Null(syncDescription.TotalBytes);
+        Assert.Equal(new[] { partition }, syncDescription.ReplicaInfos().Keys);
+        Assert.Null(syncDescription.TotalBytes());
         Assert.Empty(syncResult.Descriptions[2].Get(s_deadline));
 
         AsyncMockAdminClient async = AsyncAdmin();
@@ -594,8 +594,8 @@ public sealed class PublicAdminMockAdminClientTests
         await TestTimeout.Run(() => async.CreateTopics(new[] { new NewTopic("t", 1, 2) }).All().Get(), s_deadline);
         AsyncDescribeLogDirsResult asyncResult = async.DescribeLogDirs(brokers);
         LogDirDescription asyncDescription = (await TestTimeout.Run(() => asyncResult.Descriptions[0].Get(), s_deadline))[DefaultLogDir];
-        Assert.Equal(new[] { partition }, asyncDescription.ReplicaInfos.Keys);
-        Assert.Null(asyncDescription.TotalBytes);
+        Assert.Equal(new[] { partition }, asyncDescription.ReplicaInfos().Keys);
+        Assert.Null(asyncDescription.TotalBytes());
         Assert.Empty(await TestTimeout.Run(() => asyncResult.Descriptions[2].Get(), s_deadline));
     }
 
@@ -620,6 +620,6 @@ public sealed class PublicAdminMockAdminClientTests
     private static void AssertNode(Node expected, Node? actual)
     {
         Assert.NotNull(actual);
-        Assert.Equal((expected.Id, expected.Host, expected.Port), (actual!.Id, actual.Host, actual.Port));
+        Assert.Equal((Id: expected.Id(), Host: expected.Host(), Port: expected.Port()), (Id: actual!.Id(), Host: actual.Host(), Port: actual.Port()));
     }
 }

@@ -57,7 +57,7 @@ public sealed class PublicProducerSendHeadersTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "value", "key");
 
-        record.Headers.Add(new Header("test", Bytes("header2")));
+        record.Headers().Add(new Header("test", Bytes("header2")));
         TestTimeout.Run(() => _ = producer.Send(record), s_deadline);
 
         AssertSealedWithTheOriginalHeader(record);
@@ -74,7 +74,7 @@ public sealed class PublicProducerSendHeadersTests
             new AsyncKafkaProducer<string, string>(Unreachable(), serializer, serializer);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(Topic, "value", "key");
-        record.Headers.Add(new Header("test", Bytes("header2")));
+        record.Headers().Add(new Header("test", Bytes("header2")));
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(record);
         AssertSealedWithTheOriginalHeader(record);
@@ -118,12 +118,12 @@ public sealed class PublicProducerSendHeadersTests
         ProducerRecord<string, string> record = Record();
         KafkaFuture<RecordMetadata> first = default;
         TestTimeout.Run(() => first = producer.Send(record), s_deadline);
-        Assert.True(record.Headers.IsReadOnly);
+        Assert.True(record.Headers().IsReadOnly);
 
         KafkaFuture<RecordMetadata> again = default;
         TestTimeout.Run(() => again = producer.Send(record), s_deadline);
 
-        Assert.True(record.Headers.IsReadOnly);
+        Assert.True(record.Headers().IsReadOnly);
         AssertMetadataTimeout(first);
         AssertMetadataTimeout(again);
     }
@@ -136,11 +136,11 @@ public sealed class PublicProducerSendHeadersTests
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
         ValueTask<AsyncKafkaFuture<RecordMetadata>> first = producer.Send(record);
-        Assert.True(record.Headers.IsReadOnly);
+        Assert.True(record.Headers().IsReadOnly);
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> again = producer.Send(record);
 
-        Assert.True(record.Headers.IsReadOnly);
+        Assert.True(record.Headers().IsReadOnly);
         await AssertMetadataTimeout(first);
         await AssertMetadataTimeout(again);
     }
@@ -155,9 +155,9 @@ public sealed class PublicProducerSendHeadersTests
         RecordMetadata metadata = null!;
         TestTimeout.Run(() => metadata = producer.Send(record).Get(), s_deadline);
 
-        Assert.Equal(0L, metadata.Offset);
-        Assert.False(record.Headers.IsReadOnly);
-        record.Headers.Add("k", Bytes("after"));
+        Assert.Equal(0L, metadata.Offset());
+        Assert.False(record.Headers().IsReadOnly);
+        record.Headers().Add("k", Bytes("after"));
     }
 
     [Fact]
@@ -170,27 +170,27 @@ public sealed class PublicProducerSendHeadersTests
 
         RecordMetadata metadata = await TestTimeout.Run(() => producer.Send(record).Delivery(), s_deadline);
 
-        Assert.Equal(0L, metadata.Offset);
-        Assert.False(record.Headers.IsReadOnly);
-        record.Headers.Add("k", Bytes("after"));
+        Assert.Equal(0L, metadata.Offset());
+        Assert.False(record.Headers().IsReadOnly);
+        record.Headers().Add("k", Bytes("after"));
     }
 
     private static void AssertSealedWithTheOriginalHeader(ProducerRecord<string, string> record)
     {
-        Assert.True(record.Headers.IsReadOnly);
+        Assert.True(record.Headers().IsReadOnly);
         IllegalStateException closed = Assert.Throws<IllegalStateException>(
-            () => record.Headers.Add(new Header("test", Bytes("test"))));
+            () => record.Headers().Add(new Header("test", Bytes("test"))));
         Assert.Equal(Closed, closed.Message);
 
-        Assert.Equal(Bytes("header2"), record.Headers.LastHeader("test")?.Value);
-        Assert.Single(record.Headers.ToArray());
+        Assert.Equal(Bytes("header2"), record.Headers().LastHeader("test")?.Value());
+        Assert.Single(record.Headers().ToArray());
     }
 
     private static void AssertWritable(ProducerRecord<string, string> record)
     {
-        Assert.False(record.Headers.IsReadOnly);
-        record.Headers.Add("after", Bytes("x"));
-        Assert.Equal(new[] { "h", "after" }, Array.ConvertAll(record.Headers.ToArray(), header => header.Key));
+        Assert.False(record.Headers().IsReadOnly);
+        record.Headers().Add("after", Bytes("x"));
+        Assert.Equal(new[] { "h", "after" }, Array.ConvertAll(record.Headers().ToArray(), header => header.Key()));
     }
 
     private static void AssertMetadataTimeout(KafkaFuture<RecordMetadata> future)

@@ -50,9 +50,9 @@ public sealed class PublicSyncProducerTfmSmokeTests
                 new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)).Get(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
 
         TestTimeout.Run(producer.Close, s_deadline);
     }
@@ -70,7 +70,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
 
         RecordMetadata metadata = null!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
-        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(Topic, metadata.Topic());
         Assert.Equal(1, producer.HistoryCount());
     }
 

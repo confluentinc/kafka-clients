@@ -50,12 +50,12 @@ public sealed class PublicAdminClusterConfigResourcesTests
         AsyncDescribeClusterResult result = admin.DescribeCluster();
 
         IReadOnlyCollection<Node> nodes = await TestTimeout.Run(() => result.Nodes().Get(), s_deadline);
-        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(node => node.Id).OrderBy(id => id));
-        Assert.Equal(new[] { 1000, 1001, 1002 }, nodes.Select(node => node.Port).OrderBy(port => port));
+        Assert.Equal(new[] { 0, 1, 2 }, nodes.Select(node => node.Id()).OrderBy(id => id));
+        Assert.Equal(new[] { 1000, 1001, 1002 }, nodes.Select(node => node.Port()).OrderBy(port => port));
 
         Node? controller = await TestTimeout.Run(() => result.Controller().Get(), s_deadline);
         Assert.NotNull(controller);
-        Assert.Equal(0, controller!.Id);
+        Assert.Equal(0, controller!.Id());
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => result.ClusterId().Get(), s_deadline));
     }
@@ -73,12 +73,12 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
         IReadOnlyCollection<Node> nodes = await TestTimeout.Run(() => result.Nodes().Get(), s_deadline);
         Assert.Equal(3, nodes.Count);
-        Assert.All(nodes, node => Assert.False(node.IsFenced));
+        Assert.All(nodes, node => Assert.False(node.IsFenced()));
         Assert.All(nodes, node => Assert.EndsWith(" isFenced: false)", node.ToString(), StringComparison.Ordinal));
 
         Node? controller = await TestTimeout.Run(() => result.Controller().Get(), s_deadline);
         Assert.NotNull(controller);
-        Assert.False(controller!.IsFenced);
+        Assert.False(controller!.IsFenced());
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Equal(Sorted(byDefault), Sorted(empty));
 
         // A one-broker mock reports its broker's config and logger resources even with no topics.
-        Assert.True(byDefault.Select(resource => resource.Type).Distinct().Count() > 1);
+        Assert.True(byDefault.Select(resource => resource.Type()).Distinct().Count() > 1);
     }
 
     [Fact]
@@ -135,8 +135,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
         IReadOnlyCollection<ConfigResource> brokers = await TestTimeout.Run(
             () => admin.ListConfigResources(new[] { ConfigResourceType.BROKER }).All().Get(), s_deadline);
-        Assert.DoesNotContain(brokers, resource => resource.Type == ConfigResourceType.TOPIC);
-        Assert.Contains(brokers, resource => resource.Type == ConfigResourceType.BROKER);
+        Assert.DoesNotContain(brokers, resource => resource.Type() == ConfigResourceType.TOPIC);
+        Assert.Contains(brokers, resource => resource.Type() == ConfigResourceType.BROKER);
     }
 
     [Fact]
@@ -274,7 +274,7 @@ public sealed class PublicAdminClusterConfigResourcesTests
     }
 
     private static IEnumerable<ConfigResource> Sorted(IEnumerable<ConfigResource> resources) =>
-        resources.OrderBy(resource => (int)resource.Type).ThenBy(resource => resource.Name, StringComparer.Ordinal);
+        resources.OrderBy(resource => (int)resource.Type()).ThenBy(resource => resource.Name(), StringComparer.Ordinal);
 
     private static void AssertListConfigResourcesThreadExited(object? thrown) =>
         BlockingCall.AssertThrew(thrown, 7, ListConfigResourcesThreadExited);

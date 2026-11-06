@@ -93,8 +93,8 @@ public sealed class PublicProducerFirstStageTests
                 KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(exception);
                 Assert.Equal(7, timeout.Code);
                 Assert.Equal($"Topic {topic} not present in metadata after 2000 ms.", timeout.Message);
-                Assert.Equal(topic, metadata.Topic);
-                Assert.Equal(-1L, metadata.Offset);
+                Assert.Equal(topic, metadata.Topic());
+                Assert.Equal(-1L, metadata.Offset());
             }
             else
             {
@@ -131,15 +131,15 @@ public sealed class PublicProducerFirstStageTests
 
         Assert.True(producer.CompleteNext());
         RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), s_deadline);
-        Assert.Equal(topic, metadata.Topic);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(topic, metadata.Topic());
+        Assert.Equal(0L, metadata.Offset());
         Assert.False(future.IsCancelled);
 
         await callback.WaitForFirst(s_deadline);
         await Task.Delay(s_settle);
         (RecordMetadata delivered, Exception? exception) = Assert.Single(callback.Calls());
         Assert.Null(exception);
-        Assert.Equal(0L, delivered.Offset);
+        Assert.Equal(0L, delivered.Offset());
     }
 
     [Fact]

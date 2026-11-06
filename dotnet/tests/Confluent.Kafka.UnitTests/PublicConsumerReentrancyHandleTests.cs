@@ -215,7 +215,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         consumer.Pause(new[] { s_tp1 });
         using ConsumerHandle handle = consumer.Handle();
 
-        Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition));
+        Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition()));
         Assert.Equal(new[] { s_tp1 }, handle.Paused());
     }
 
@@ -296,7 +296,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         handle.CommitAsync(Offsets(6), recording);
         Assert.Equal(6, CommittedOffset(consumer));
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? delivered, Exception? exception) = Assert.Single(seen);
-        Assert.Equal(6, Assert.Single(delivered!).Value.Offset);
+        Assert.Equal(6, Assert.Single(delivered!).Value.Offset());
         Assert.Null(exception);
 
         consumer.Seek(s_tp0, 7);
@@ -311,7 +311,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         handle.CommitAsync(recording);
         Assert.Equal(9, CommittedOffset(consumer));
         Assert.Equal(2, seen.Count);
-        Assert.Equal(9, Assert.Single(seen[1].Offsets!).Value.Offset);
+        Assert.Equal(9, Assert.Single(seen[1].Offsets!).Value.Offset());
         Assert.Null(seen[1].Exception);
 
         Assert.Equal((long?)0, handle.CurrentLag(s_tp0));
@@ -598,7 +598,7 @@ public sealed class PublicConsumerReentrancyHandleTests
                 consumer.Pause(new[] { s_tp1 });
                 using ConsumerHandle handle = consumer.Handle();
 
-                Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition));
+                Assert.Equal(new[] { s_tp0, s_tp1 }, handle.Assignment().OrderBy(tp => tp.Partition()));
                 Assert.Equal(new[] { s_tp1 }, handle.Paused());
 
                 handle.Wakeup();
@@ -708,8 +708,8 @@ public sealed class PublicConsumerReentrancyHandleTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition unassigned = new TopicPartition("unassigned-lag-topic", 0);
         consumer.Assign(new[] { s_tp0 });
-        consumer.UpdateEndOffset(s_tp0.Topic, s_tp0.Partition, 2);
-        consumer.UpdateEndOffset(unassigned.Topic, unassigned.Partition, 2);
+        consumer.UpdateEndOffset(s_tp0.Topic(), s_tp0.Partition(), 2);
+        consumer.UpdateEndOffset(unassigned.Topic(), unassigned.Partition(), 2);
         consumer.Seek(s_tp0, 5);
         using ConsumerHandle handle = consumer.Handle();
         long? lag = null;
@@ -768,8 +768,8 @@ public sealed class PublicConsumerReentrancyHandleTests
                 using ConsumerHandle handle = consumer.Handle();
 
                 TopicPartition viaHandle = Assert.Single(handle.Assignment());
-                Assert.Equal(NonAsciiTopic, viaHandle.Topic);
-                Assert.Equal(3, viaHandle.Partition);
+                Assert.Equal(NonAsciiTopic, viaHandle.Topic());
+                Assert.Equal(3, viaHandle.Partition());
                 Assert.Equal(consumer.Assignment(), handle.Assignment());
             },
             s_deadline);
@@ -803,7 +803,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(offset) };
 
     private static long CommittedOffset(MockConsumer<byte[], byte[]> consumer) =>
-        consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset;
+        consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset();
 
     private static CommitCallbackRegistration? Registration(object consumer) =>
         ((NativeConsumer)consumer.GetType()

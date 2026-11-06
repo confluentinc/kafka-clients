@@ -30,6 +30,13 @@ namespace Confluent.Kafka.Admin;
 public sealed class ConfigEntry
 {
     private readonly IReadOnlyList<ConfigSynonym> _synonyms;
+    private readonly string _name;
+    private readonly string? _value;
+    private readonly ConfigSource _source;
+    private readonly bool _isSensitive;
+    private readonly bool _isReadOnly;
+    private readonly ConfigType? _type;
+    private readonly string? _documentation;
 
     /// <summary>
     /// Initializes a configuration entry with a name and value — Java's public
@@ -59,10 +66,10 @@ public sealed class ConfigEntry
     /// String documentation)</c>.
     /// </summary>
     /// <remarks>
-    /// <see cref="IsDefault"/> is not a parameter, as in Java: it derives from
+    /// <see cref="IsDefault()"/> is not a parameter, as in Java: it derives from
     /// <paramref name="source"/> (<see cref="ConfigSource.DEFAULT_CONFIG"/> → true). Recorded
     /// deviations: a null <paramref name="synonyms"/> or a null synonym element is rejected, where
-    /// Java stores it, because <see cref="Synonyms"/> is non-nullable and
+    /// Java stores it, because <see cref="Synonyms()"/> is non-nullable and
     /// <see cref="Equals(object?)"/>, <see cref="GetHashCode"/> and <see cref="ToString"/> read every
     /// element; and the list is copied, where Java stores the caller's list, so the entry's equality
     /// and hash cannot change after it is built.
@@ -94,64 +101,77 @@ public sealed class ConfigEntry
         ConfigType? type,
         string? documentation)
     {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
-        Value = value;
-        Source = source;
-        IsSensitive = isSensitive;
-        IsReadOnly = isReadOnly;
+        _name = name ?? throw new ArgumentNullException(nameof(name));
+        _value = value;
+        _source = source;
+        _isSensitive = isSensitive;
+        _isReadOnly = isReadOnly;
         _synonyms = CopySynonyms(synonyms);
-        Type = type;
-        Documentation = documentation;
+        _type = type;
+        _documentation = documentation;
     }
 
     /// <summary>The configuration key (Java's <c>name()</c>).</summary>
-    public string Name { get; }
+    /// <returns>The configuration key.</returns>
+    public string Name() => _name;
 
     /// <summary>
     /// The configuration value (Java's <c>value()</c>), or <see langword="null"/>.
     /// </summary>
-    public string? Value { get; }
+    /// <returns>The configuration value, or <see langword="null"/>.</returns>
+    public string? Value() => _value;
 
     /// <summary>Where this value came from (Java's <c>source()</c>).</summary>
-    public ConfigSource Source { get; }
+    /// <returns>Where this value came from.</returns>
+    public ConfigSource Source() => _source;
 
     /// <summary>
     /// Whether the value is the broker default (Java's <c>isDefault()</c>), derived from
-    /// <see cref="Source"/> as Java derives it.
+    /// <see cref="Source()"/> as Java derives it.
     /// </summary>
-    public bool IsDefault => Source == ConfigSource.DEFAULT_CONFIG;
+    /// <returns>Whether the value is the broker default, derived from
+    /// <see cref="Source()"/> as Java derives it.</returns>
+    public bool IsDefault() => Source() == ConfigSource.DEFAULT_CONFIG;
 
     /// <summary>
     /// Whether the value is sensitive, in which case the broker redacts it (Java's
     /// <c>isSensitive()</c>).
     /// </summary>
-    public bool IsSensitive { get; }
+    /// <returns>Whether the value is sensitive, in which case the broker redacts it (Java's
+    /// <c>isSensitive()</c>).</returns>
+    public bool IsSensitive() => _isSensitive;
 
     /// <summary>Whether the entry cannot be changed (Java's <c>isReadOnly()</c>).</summary>
-    public bool IsReadOnly { get; }
+    /// <returns>Whether the entry cannot be changed.</returns>
+    public bool IsReadOnly() => _isReadOnly;
 
     /// <summary>
     /// Every value that may be used for this config, with its source, in order of precedence —
     /// Java's <c>synonyms()</c>. Empty when synonyms were not requested through
     /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/>.
     /// </summary>
-    public IReadOnlyList<ConfigSynonym> Synonyms => _synonyms;
+    /// <returns>Every value that may be used for this config, with its source, in order of precedence.</returns>
+    public IReadOnlyList<ConfigSynonym> Synonyms() => _synonyms;
 
     /// <summary>
     /// The value's data type (Java's <c>type()</c>), or <see langword="null"/> for the entries of a
     /// <c>createTopics</c> result, which Java builds with a null type.
     /// </summary>
-    public ConfigType? Type { get; }
+    /// <returns>The value's data type, or <see langword="null"/> for the entries of a
+    /// <c>createTopics</c> result, which Java builds with a null type.</returns>
+    public ConfigType? Type() => _type;
 
     /// <summary>
     /// The documentation for this config, or <see langword="null"/> when the broker did
     /// not report it (Java's <c>documentation()</c>).
     /// </summary>
-    public string? Documentation { get; }
+    /// <returns>The documentation for this config, or <see langword="null"/> when the broker did not report it
+    ///.</returns>
+    public string? Documentation() => _documentation;
 
     /// <summary>
     /// Value equality over every field Java compares — Java's <c>equals</c>, which leaves out
-    /// <see cref="IsDefault"/>, derived from the compared <see cref="Source"/>.
+    /// <see cref="IsDefault()"/>, derived from the compared <see cref="Source()"/>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two entries carry the same configuration.</returns>
@@ -162,13 +182,13 @@ public sealed class ConfigEntry
             return false;
         }
 
-        return string.Equals(Name, other.Name, StringComparison.Ordinal)
-            && string.Equals(Value, other.Value, StringComparison.Ordinal)
-            && IsSensitive == other.IsSensitive
-            && IsReadOnly == other.IsReadOnly
-            && Source == other.Source
-            && Type == other.Type
-            && string.Equals(Documentation, other.Documentation, StringComparison.Ordinal)
+        return string.Equals(_name, other._name, StringComparison.Ordinal)
+            && string.Equals(_value, other._value, StringComparison.Ordinal)
+            && _isSensitive == other._isSensitive
+            && _isReadOnly == other._isReadOnly
+            && _source == other._source
+            && _type == other._type
+            && string.Equals(_documentation, other._documentation, StringComparison.Ordinal)
             && SynonymsEqual(_synonyms, other._synonyms);
     }
 
@@ -182,13 +202,13 @@ public sealed class ConfigEntry
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Name);
-            hash = (hash * 31) + (Value is null ? 0 : StringComparer.Ordinal.GetHashCode(Value));
-            hash = (hash * 31) + (IsSensitive ? 1 : 0);
-            hash = (hash * 31) + (IsReadOnly ? 1 : 0);
-            hash = (hash * 31) + Source.GetHashCode();
-            hash = (hash * 31) + Type.GetHashCode();
-            hash = (hash * 31) + (Documentation is null ? 0 : StringComparer.Ordinal.GetHashCode(Documentation));
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(_name);
+            hash = (hash * 31) + (_value is null ? 0 : StringComparer.Ordinal.GetHashCode(_value));
+            hash = (hash * 31) + (_isSensitive ? 1 : 0);
+            hash = (hash * 31) + (_isReadOnly ? 1 : 0);
+            hash = (hash * 31) + _source.GetHashCode();
+            hash = (hash * 31) + _type.GetHashCode();
+            hash = (hash * 31) + (_documentation is null ? 0 : StringComparer.Ordinal.GetHashCode(_documentation));
             foreach (ConfigSynonym synonym in _synonyms)
             {
                 hash = (hash * 31) + synonym.GetHashCode();
@@ -204,7 +224,7 @@ public sealed class ConfigEntry
     /// </summary>
     /// <returns>The rendering.</returns>
     /// <remarks>
-    /// <see cref="Source"/> and <see cref="Type"/> print as Java's constant names
+    /// <see cref="Source()"/> and <see cref="Type()"/> print as Java's constant names
     /// (<c>DEFAULT_CONFIG</c>, <c>STRING</c>), the two booleans lowercase, and a
     /// <see langword="null"/> value, type or documentation as <c>null</c>. A source or type that is not a
     /// defined member prints as its numeric value.
@@ -228,14 +248,14 @@ public sealed class ConfigEntry
             CultureInfo.InvariantCulture,
             "ConfigEntry(name={0}, value={1}, source={2}, isSensitive={3}, isReadOnly={4}, synonyms={5}, "
                 + "type={6}, documentation={7})",
-            Name,
-            IsSensitive ? "Redacted" : (Value ?? "null"),
-            ConstantName(Source),
-            IsSensitive ? "true" : "false",
-            IsReadOnly ? "true" : "false",
+            _name,
+            _isSensitive ? "Redacted" : (_value ?? "null"),
+            ConstantName(_source),
+            _isSensitive ? "true" : "false",
+            _isReadOnly ? "true" : "false",
             synonyms,
-            Type is null ? "null" : ConstantName(Type.Value),
-            Documentation ?? "null");
+            _type is null ? "null" : ConstantName(_type.Value),
+            _documentation ?? "null");
     }
 
     private static string ConstantName(ConfigSource source) => source switch
@@ -380,7 +400,7 @@ public sealed class ConfigEntry
 
         /// <summary>
         /// Java's <c>DEFAULT_CONFIG</c> — the built-in default. This is the one member
-        /// <see cref="ConfigEntry.IsDefault"/> tests for.
+        /// <see cref="ConfigEntry.IsDefault()"/> tests for.
         /// </summary>
         DEFAULT_CONFIG,
 
@@ -394,33 +414,40 @@ public sealed class ConfigEntry
     /// </summary>
     public sealed class ConfigSynonym
     {
+        private readonly string _name;
+        private readonly string? _value;
+        private readonly ConfigSource _source;
+
         internal ConfigSynonym(string name, string? value, ConfigSource source)
         {
-            Name = name;
-            Value = value;
-            Source = source;
+            _name = name;
+            _value = value;
+            _source = source;
         }
 
         /// <summary>The configuration name (Java's <c>name()</c>).</summary>
-        public string Name { get; }
+        /// <returns>The configuration name.</returns>
+        public string Name() => _name;
 
         /// <summary>
         /// The value, or <see langword="null"/> when the configuration is sensitive — Java's
         /// <c>value()</c>.
         /// </summary>
-        public string? Value { get; }
+        /// <returns>The value, or <see langword="null"/> when the configuration is sensitive.</returns>
+        public string? Value() => _value;
 
         /// <summary>Where this value came from (Java's <c>source()</c>).</summary>
-        public ConfigSource Source { get; }
+        /// <returns>Where this value came from.</returns>
+        public ConfigSource Source() => _source;
 
         /// <summary>Value equality — Java's <c>equals</c>.</summary>
         /// <param name="obj">The object to compare with.</param>
         /// <returns>Whether the two synonyms are the same.</returns>
         public override bool Equals(object? obj) =>
             obj is ConfigSynonym other
-            && string.Equals(Name, other.Name, StringComparison.Ordinal)
-            && string.Equals(Value, other.Value, StringComparison.Ordinal)
-            && Source == other.Source;
+            && string.Equals(Name(), other.Name(), StringComparison.Ordinal)
+            && string.Equals(Value(), other.Value(), StringComparison.Ordinal)
+            && Source() == other.Source();
 
         /// <summary>The hash of the three fields — Java's <c>hashCode</c>.</summary>
         /// <returns>The hash code.</returns>
@@ -429,9 +456,9 @@ public sealed class ConfigEntry
             unchecked
             {
                 int hash = 17;
-                hash = (hash * 31) + (Name is null ? 0 : StringComparer.Ordinal.GetHashCode(Name));
-                hash = (hash * 31) + (Value is null ? 0 : StringComparer.Ordinal.GetHashCode(Value));
-                hash = (hash * 31) + Source.GetHashCode();
+                hash = (hash * 31) + (_name is null ? 0 : StringComparer.Ordinal.GetHashCode(_name));
+                hash = (hash * 31) + (_value is null ? 0 : StringComparer.Ordinal.GetHashCode(_value));
+                hash = (hash * 31) + _source.GetHashCode();
                 return hash;
             }
         }
@@ -447,8 +474,8 @@ public sealed class ConfigEntry
             string.Format(
                 CultureInfo.InvariantCulture,
                 "ConfigSynonym(name={0}, value={1}, source={2})",
-                Name,
-                Value ?? "null",
-                ConstantName(Source));
+                Name(),
+                Value() ?? "null",
+                ConstantName(Source()));
     }
 }

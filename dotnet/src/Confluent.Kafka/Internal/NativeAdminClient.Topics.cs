@@ -813,7 +813,7 @@ internal sealed partial class NativeAdminClient
                         foreach (Uuid id in ids.TopicIds())
                         {
                             IntPtr outErr = IntPtr.Zero;
-                            natives[next++] = NativeMethods.UuidNew(id.MostSignificantBits, id.LeastSignificantBits, ref outErr);
+                            natives[next++] = NativeMethods.UuidNew(id.GetMostSignificantBits(), id.GetLeastSignificantBits(), ref outErr);
                             KafkaException.ThrowIfFfiFailed(ref outErr);
                         }
 

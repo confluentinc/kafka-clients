@@ -63,7 +63,7 @@ public sealed class PublicSyncProducerTeardownTests
         TestTimeout.Run(
             () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
             s_deadline);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(0L, metadata.Offset());
 
         TestTimeout.Run(producer.Close, s_deadline);
     }
@@ -146,8 +146,8 @@ public sealed class PublicSyncProducerTeardownTests
         Assert.True(future.IsDone, "the uncompleted send was still pending when Dispose returned");
         Assert.Equal(1, callback.Count);
         RecordMetadata metadata = future.Get(s_deadline);
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
         Thread.Sleep(200);
         Assert.Equal(1, callback.Count);
     }

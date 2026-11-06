@@ -215,9 +215,9 @@ public sealed class PublicAdminP7ShapeParityTests
             "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 },
             Array.Empty<byte>());
 
-        Assert.Null(generated.Salt);
-        Assert.NotNull(literal.Salt);
-        Assert.Empty(literal.Salt!);
+        Assert.Null(generated.Salt());
+        Assert.NotNull(literal.Salt());
+        Assert.Empty(literal.Salt()!);
     }
 
     [Fact]
@@ -228,8 +228,8 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.Equal(typeof(UserScramCredentialAlteration), typeof(UserScramCredentialDeletion).BaseType);
         Assert.Equal(
             typeof(string),
-            typeof(UserScramCredentialAlteration).GetProperty(
-                nameof(UserScramCredentialAlteration.User))!.PropertyType);
+            typeof(UserScramCredentialAlteration).GetMethod(
+                nameof(UserScramCredentialAlteration.User), Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]
@@ -237,23 +237,23 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(
             typeof(short),
-            typeof(FinalizedVersionRange).GetProperty(
-                nameof(FinalizedVersionRange.MinVersionLevel))!.PropertyType);
+            typeof(FinalizedVersionRange).GetMethod(
+                nameof(FinalizedVersionRange.MinVersionLevel), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(FinalizedVersionRange).GetProperty(
-                nameof(FinalizedVersionRange.MaxVersionLevel))!.PropertyType);
+            typeof(FinalizedVersionRange).GetMethod(
+                nameof(FinalizedVersionRange.MaxVersionLevel), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(SupportedVersionRange).GetProperty(
-                nameof(SupportedVersionRange.MinVersion))!.PropertyType);
+            typeof(SupportedVersionRange).GetMethod(
+                nameof(SupportedVersionRange.MinVersion), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(SupportedVersionRange).GetProperty(
-                nameof(SupportedVersionRange.MaxVersion))!.PropertyType);
+            typeof(SupportedVersionRange).GetMethod(
+                nameof(SupportedVersionRange.MaxVersion), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(short),
-            typeof(FeatureUpdate).GetProperty(nameof(FeatureUpdate.MaxVersionLevel))!.PropertyType);
+            typeof(FeatureUpdate).GetMethod(nameof(FeatureUpdate.MaxVersionLevel), Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]
@@ -261,25 +261,27 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, FinalizedVersionRange>),
-            typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.FinalizedFeatures))!.PropertyType);
+            typeof(FeatureMetadata).GetMethod(nameof(FeatureMetadata.FinalizedFeatures), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, SupportedVersionRange>),
-            typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.SupportedFeatures))!.PropertyType);
+            typeof(FeatureMetadata).GetMethod(nameof(FeatureMetadata.SupportedFeatures), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(long?),
-            typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.FinalizedFeaturesEpoch))!.PropertyType);
+            typeof(FeatureMetadata).GetMethod(nameof(FeatureMetadata.FinalizedFeaturesEpoch), Type.EmptyTypes)!.ReturnType);
 
         Assert.Empty(typeof(FeatureMetadata).GetConstructors());
     }
 
     [Fact]
-    public void UpgradeType_IsNested_WithJavasConstants()
+    public void UpgradeType_SitsBesideFeatureUpdate_WithJavasConstants()
     {
-        Assert.Equal(typeof(FeatureUpdate), typeof(FeatureUpdate.UpgradeType).DeclaringType);
+        Assert.Null(typeof(UpgradeType).DeclaringType);
+        Assert.Equal(typeof(FeatureUpdate).Namespace, typeof(UpgradeType).Namespace);
+        Assert.Equal(typeof(UpgradeType), typeof(FeatureUpdate).GetMethod(nameof(FeatureUpdate.UpgradeType), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             new[] { "UNKNOWN", "UPGRADE", "SAFE_DOWNGRADE", "UNSAFE_DOWNGRADE" },
-            Enum.GetValues(typeof(FeatureUpdate.UpgradeType))
-                .Cast<FeatureUpdate.UpgradeType>()
+            Enum.GetValues(typeof(UpgradeType))
+                .Cast<UpgradeType>()
                 .OrderBy(value => (int)value)
                 .Select(value => value.ToString()));
     }

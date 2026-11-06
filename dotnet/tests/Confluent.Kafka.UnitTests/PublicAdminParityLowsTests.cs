@@ -134,9 +134,9 @@ public sealed class PublicAdminParityLowsTests
 
         foreach (IReadOnlyList<int> list in new[]
         {
-            reassignment.Replicas,
-            reassignment.AddingReplicas,
-            reassignment.RemovingReplicas,
+            reassignment.Replicas(),
+            reassignment.AddingReplicas(),
+            reassignment.RemovingReplicas(),
         })
         {
             IList<int> mutable = Assert.IsAssignableFrom<IList<int>>(list);
@@ -145,9 +145,9 @@ public sealed class PublicAdminParityLowsTests
             Assert.Throws<NotSupportedException>(() => mutable.Clear());
         }
 
-        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas);
-        Assert.Equal(new[] { 3 }, reassignment.AddingReplicas);
-        Assert.Equal(new[] { 1 }, reassignment.RemovingReplicas);
+        Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas());
+        Assert.Equal(new[] { 3 }, reassignment.AddingReplicas());
+        Assert.Equal(new[] { 1 }, reassignment.RemovingReplicas());
     }
 
     [Fact]
@@ -163,14 +163,14 @@ public sealed class PublicAdminParityLowsTests
         LogDirDescription description = new LogDirDescription(null, replicas);
 
         IDictionary<TopicPartition, ReplicaInfo> mutable =
-            Assert.IsAssignableFrom<IDictionary<TopicPartition, ReplicaInfo>>(description.ReplicaInfos);
+            Assert.IsAssignableFrom<IDictionary<TopicPartition, ReplicaInfo>>(description.ReplicaInfos());
         Assert.True(mutable.IsReadOnly);
         Assert.Throws<NotSupportedException>(() => mutable.Clear());
         Assert.Throws<NotSupportedException>(() => mutable.Add(second, new ReplicaInfo(3, 4, true)));
-        Assert.Single(description.ReplicaInfos);
+        Assert.Single(description.ReplicaInfos());
 
         replicas[second] = new ReplicaInfo(3, 4, true);
-        Assert.Equal(2, description.ReplicaInfos.Count);
+        Assert.Equal(2, description.ReplicaInfos().Count);
     }
 
     [Fact]

@@ -23,9 +23,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The <see cref="ConsumerRecord{TKey, TValue}.LeaderEpoch"/>,
-/// <see cref="ConsumerRecord{TKey, TValue}.SerializedKeySize"/> and
-/// <see cref="ConsumerRecord{TKey, TValue}.SerializedValueSize"/> accessors, through both mock consumers.
+/// The <see cref="ConsumerRecord{TKey, TValue}.LeaderEpoch()"/>,
+/// <see cref="ConsumerRecord{TKey, TValue}.SerializedKeySize()"/> and
+/// <see cref="ConsumerRecord{TKey, TValue}.SerializedValueSize()"/> accessors, through both mock consumers.
 /// </summary>
 /// <remarks>
 /// A mock-added record has both serialized sizes -1, whatever its key and value, and no leader epoch, so the sizes
@@ -57,8 +57,8 @@ public sealed class PublicConsumerRecordAccessorTests
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
-        Assert.Equal(-1, record.SerializedKeySize);
-        Assert.Equal(-1, record.SerializedValueSize);
+        Assert.Equal(-1, record.SerializedKeySize());
+        Assert.Equal(-1, record.SerializedValueSize());
     }
 
     [Fact]
@@ -70,8 +70,8 @@ public sealed class PublicConsumerRecordAccessorTests
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
-        Assert.Equal(-1, record.SerializedKeySize);
-        Assert.Equal(-1, record.SerializedValueSize);
+        Assert.Equal(-1, record.SerializedKeySize());
+        Assert.Equal(-1, record.SerializedValueSize());
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public sealed class PublicConsumerRecordAccessorTests
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
-        Assert.Null(record.LeaderEpoch);
+        Assert.Null(record.LeaderEpoch());
     }
 
     [Fact]
@@ -102,9 +102,9 @@ public sealed class PublicConsumerRecordAccessorTests
             await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
 
             ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-            Assert.Null(record.LeaderEpoch);
-            Assert.Equal(-1, record.SerializedKeySize);
-            Assert.Equal(-1, record.SerializedValueSize);
+            Assert.Null(record.LeaderEpoch());
+            Assert.Equal(-1, record.SerializedKeySize());
+            Assert.Equal(-1, record.SerializedValueSize());
         }
         finally
         {

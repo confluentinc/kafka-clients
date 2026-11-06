@@ -108,7 +108,7 @@ public sealed class PublicConsumerPartitionArgumentTests
             consumer.Assign(new[] { s_negative });
             Assert.Contains(s_negative, consumer.Assignment());
             consumer.Commit(offsets);
-            Assert.Equal(5, consumer.Committed(new[] { s_negative })[s_negative]!.Offset);
+            Assert.Equal(5, consumer.Committed(new[] { s_negative })[s_negative]!.Offset());
         }
 
         AsyncMockConsumer<byte[], byte[]> asyncConsumer =
@@ -120,7 +120,7 @@ public sealed class PublicConsumerPartitionArgumentTests
             await TestTimeout.Run(() => asyncConsumer.Commit(offsets), s_deadline);
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => asyncConsumer.Committed(new[] { s_negative }), s_deadline);
-            Assert.Equal(5, committed[s_negative]!.Offset);
+            Assert.Equal(5, committed[s_negative]!.Offset());
         }
     }
 

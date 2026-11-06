@@ -164,12 +164,12 @@ public sealed class PublicAdminP3ShapeParityTests
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
         Assert.Equal(
-            typeof(ConfigResourceType), typeof(ConfigResource).GetProperty(nameof(ConfigResource.Type))!.PropertyType);
-        Assert.Equal(typeof(string), typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!.PropertyType);
-        Assert.Equal(typeof(bool), typeof(ConfigResource).GetProperty(nameof(ConfigResource.IsDefault))!.PropertyType);
+            typeof(ConfigResourceType), typeof(ConfigResource).GetMethod(nameof(ConfigResource.Type), Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(string), typeof(ConfigResource).GetMethod(nameof(ConfigResource.Name), Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(bool), typeof(ConfigResource).GetMethod(nameof(ConfigResource.IsDefault), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             NullableAnnotation.NotAnnotated,
-            NullableFlag(typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!));
+            NullableFlag(typeof(ConfigResource).GetMethod(nameof(ConfigResource.Name), Type.EmptyTypes)!));
 
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "t");
         ConfigResource sameTopic = new ConfigResource(ConfigResourceType.TOPIC, "t");
@@ -191,8 +191,8 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Equal(1, byResource[sameTopic]);
 
         // isDefault(): the default resource of a type has an empty name.
-        Assert.True(new ConfigResource(ConfigResourceType.BROKER, string.Empty).IsDefault);
-        Assert.False(topic.IsDefault);
+        Assert.True(new ConfigResource(ConfigResourceType.BROKER, string.Empty).IsDefault());
+        Assert.False(topic.IsDefault());
 
         Assert.Equal("ConfigResource(type=TOPIC, name='t')", topic.ToString());
         Assert.Throws<ArgumentNullException>(() => new ConfigResource(ConfigResourceType.TOPIC, null!));
@@ -212,8 +212,8 @@ public sealed class PublicAdminP3ShapeParityTests
 
         ConfigResource resource = new ConfigResource((ConfigResourceType)undefinedId, "x");
 
-        Assert.Equal(ConfigResourceType.UNKNOWN, resource.Type);
-        Assert.Equal("x", resource.Name);
+        Assert.Equal(ConfigResourceType.UNKNOWN, resource.Type());
+        Assert.Equal("x", resource.Name());
     }
 
     [Fact]
@@ -224,7 +224,7 @@ public sealed class PublicAdminP3ShapeParityTests
 
         foreach (ConfigResourceType type in defined)
         {
-            Assert.Equal(type, new ConfigResource(type, "x").Type);
+            Assert.Equal(type, new ConfigResource(type, "x").Type());
         }
     }
 

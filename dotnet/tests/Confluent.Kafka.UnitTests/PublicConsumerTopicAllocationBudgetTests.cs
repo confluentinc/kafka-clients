@@ -123,16 +123,16 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         string? first = null;
         foreach (ConsumerRecord<byte[], byte[]> record in records)
         {
-            Assert.Equal(topic, record.Topic);
+            Assert.Equal(topic, record.Topic());
             if (first is null)
             {
-                first = record.Topic;
+                first = record.Topic();
             }
             else
             {
                 // ReferenceEquals: a per-record decode gives equal but distinct strings.
                 Assert.True(
-                    ReferenceEquals(first, record.Topic),
+                    ReferenceEquals(first, record.Topic()),
                     "Each record decoded its own topic string — the per-batch topic memo is not being hit.");
             }
         }

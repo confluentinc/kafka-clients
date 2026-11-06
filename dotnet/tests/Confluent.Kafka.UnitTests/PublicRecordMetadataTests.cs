@@ -47,13 +47,13 @@ public sealed class PublicRecordMetadataTests
 
         RecordMetadata metadata = new RecordMetadata(tp, -1L, -1, timestamp, keySize, valueSize);
 
-        Assert.Equal(tp.Topic, metadata.Topic);
-        Assert.Equal(tp.Partition, metadata.Partition);
-        Assert.Equal(timestamp, metadata.Timestamp);
-        Assert.False(metadata.HasOffset);
-        Assert.Equal(-1L, metadata.Offset);
-        Assert.Equal(keySize, metadata.SerializedKeySize);
-        Assert.Equal(valueSize, metadata.SerializedValueSize);
+        Assert.Equal(tp.Topic(), metadata.Topic());
+        Assert.Equal(tp.Partition(), metadata.Partition());
+        Assert.Equal(timestamp, metadata.Timestamp());
+        Assert.False(metadata.HasOffset());
+        Assert.Equal(-1L, metadata.Offset());
+        Assert.Equal(keySize, metadata.SerializedKeySize());
+        Assert.Equal(valueSize, metadata.SerializedValueSize());
     }
 
     [Fact]
@@ -68,12 +68,12 @@ public sealed class PublicRecordMetadataTests
 
         RecordMetadata metadata = new RecordMetadata(tp, baseOffset, batchIndex, timestamp, keySize, valueSize);
 
-        Assert.Equal(tp.Topic, metadata.Topic);
-        Assert.Equal(tp.Partition, metadata.Partition);
-        Assert.Equal(timestamp, metadata.Timestamp);
-        Assert.Equal(baseOffset + batchIndex, metadata.Offset);
-        Assert.Equal(keySize, metadata.SerializedKeySize);
-        Assert.Equal(valueSize, metadata.SerializedValueSize);
+        Assert.Equal(tp.Topic(), metadata.Topic());
+        Assert.Equal(tp.Partition(), metadata.Partition());
+        Assert.Equal(timestamp, metadata.Timestamp());
+        Assert.Equal(baseOffset + batchIndex, metadata.Offset());
+        Assert.Equal(keySize, metadata.SerializedKeySize());
+        Assert.Equal(valueSize, metadata.SerializedValueSize());
     }
 
     [Fact]
@@ -82,8 +82,8 @@ public sealed class PublicRecordMetadataTests
         RecordMetadata metadata = new RecordMetadata(new TopicPartition("foo", 2), 7L, 0, -1L, -1, -1);
 
         Assert.Equal(-1, RecordMetadata.UNKNOWN_PARTITION);
-        Assert.True(metadata.HasOffset);
-        Assert.False(metadata.HasTimestamp);
+        Assert.True(metadata.HasOffset());
+        Assert.False(metadata.HasTimestamp());
         Assert.Equal("foo-2@7", metadata.ToString());
     }
 
@@ -92,12 +92,12 @@ public sealed class PublicRecordMetadataTests
     {
         RecordMetadata metadata = new RecordMetadata(null, 15L, 3, 2340234L, 3, 5);
 
-        Assert.True(metadata.HasOffset);
-        Assert.Equal(18L, metadata.Offset);
-        Assert.True(metadata.HasTimestamp);
-        Assert.Equal(2340234L, metadata.Timestamp);
-        Assert.Equal(3, metadata.SerializedKeySize);
-        Assert.Equal(5, metadata.SerializedValueSize);
+        Assert.True(metadata.HasOffset());
+        Assert.Equal(18L, metadata.Offset());
+        Assert.True(metadata.HasTimestamp());
+        Assert.Equal(2340234L, metadata.Timestamp());
+        Assert.Equal(3, metadata.SerializedKeySize());
+        Assert.Equal(5, metadata.SerializedValueSize());
     }
 
     [Theory]
@@ -124,14 +124,14 @@ public sealed class PublicRecordMetadataTests
         RecordMetadata made = new RecordMetadata(tp, offset, timestamp, keySize, valueSize);
         RecordMetadata built = new RecordMetadata(tp, offset, 0, timestamp, keySize, valueSize);
 
-        Assert.Equal(built.Topic, made.Topic);
-        Assert.Equal(built.Partition, made.Partition);
-        Assert.Equal(built.Offset, made.Offset);
-        Assert.Equal(built.HasOffset, made.HasOffset);
-        Assert.Equal(built.Timestamp, made.Timestamp);
-        Assert.Equal(built.HasTimestamp, made.HasTimestamp);
-        Assert.Equal(built.SerializedKeySize, made.SerializedKeySize);
-        Assert.Equal(built.SerializedValueSize, made.SerializedValueSize);
+        Assert.Equal(built.Topic(), made.Topic());
+        Assert.Equal(built.Partition(), made.Partition());
+        Assert.Equal(built.Offset(), made.Offset());
+        Assert.Equal(built.HasOffset(), made.HasOffset());
+        Assert.Equal(built.Timestamp(), made.Timestamp());
+        Assert.Equal(built.HasTimestamp(), made.HasTimestamp());
+        Assert.Equal(built.SerializedKeySize(), made.SerializedKeySize());
+        Assert.Equal(built.SerializedValueSize(), made.SerializedValueSize());
         Assert.Equal(built.ToString(), made.ToString());
     }
 
@@ -148,14 +148,14 @@ public sealed class PublicRecordMetadataTests
 
         Assert.Same(metadata, callback.Metadata);
         Assert.Null(callback.Exception);
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(2, metadata.Partition);
-        Assert.True(metadata.HasOffset);
-        Assert.Equal(0L, metadata.Offset);
-        Assert.False(metadata.HasTimestamp);
-        Assert.Equal(-1L, metadata.Timestamp);
-        Assert.Equal(0, metadata.SerializedKeySize);
-        Assert.Equal(0, metadata.SerializedValueSize);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(2, metadata.Partition());
+        Assert.True(metadata.HasOffset());
+        Assert.Equal(0L, metadata.Offset());
+        Assert.False(metadata.HasTimestamp());
+        Assert.Equal(-1L, metadata.Timestamp());
+        Assert.Equal(0, metadata.SerializedKeySize());
+        Assert.Equal(0, metadata.SerializedValueSize());
     }
 
     [Theory]
@@ -175,20 +175,20 @@ public sealed class PublicRecordMetadataTests
 
         RecordMetadata placeholder = Assert.IsType<RecordMetadata>(callback.Metadata);
         Assert.Equal(2, Assert.IsType<CorruptRecordException>(callback.Exception).Code);
-        Assert.Equal(Topic, placeholder.Topic);
-        Assert.Equal(2, placeholder.Partition);
-        Assert.False(placeholder.HasOffset);
-        Assert.Equal(-1L, placeholder.Offset);
-        Assert.False(placeholder.HasTimestamp);
-        Assert.Equal(-1L, placeholder.Timestamp);
-        Assert.Equal(-1, placeholder.SerializedKeySize);
-        Assert.Equal(-1, placeholder.SerializedValueSize);
+        Assert.Equal(Topic, placeholder.Topic());
+        Assert.Equal(2, placeholder.Partition());
+        Assert.False(placeholder.HasOffset());
+        Assert.Equal(-1L, placeholder.Offset());
+        Assert.False(placeholder.HasTimestamp());
+        Assert.Equal(-1L, placeholder.Timestamp());
+        Assert.Equal(-1, placeholder.SerializedKeySize());
+        Assert.Equal(-1, placeholder.SerializedValueSize());
     }
 
     private static object Read(RecordMetadata metadata, string member) => member switch
     {
-        nameof(RecordMetadata.Topic) => metadata.Topic,
-        nameof(RecordMetadata.Partition) => metadata.Partition,
+        nameof(RecordMetadata.Topic) => metadata.Topic(),
+        nameof(RecordMetadata.Partition) => metadata.Partition(),
         nameof(RecordMetadata.ToString) => metadata.ToString(),
         _ => throw new ArgumentOutOfRangeException(nameof(member), member, null),
     };

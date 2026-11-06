@@ -50,7 +50,7 @@ public sealed class DescribeTopicsOptions
     /// Java's does.
     /// </summary>
     /// <remarks>
-    /// While this is <see langword="false"/>, <see cref="TopicDescription.AuthorizedOperations"/>
+    /// While this is <see langword="false"/>, <see cref="TopicDescription.AuthorizedOperations()"/>
     /// is <see langword="null"/>, not an empty collection.
     /// </remarks>
     public bool IncludeAuthorizedOperations

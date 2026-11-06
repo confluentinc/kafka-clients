@@ -48,9 +48,9 @@ public sealed class PublicProducerMockControlTests
 
         RecordMetadata metadata = null!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
-        Assert.Equal(0L, metadata.Offset);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
     }
 
     [Fact]

@@ -56,9 +56,9 @@ public sealed class PublicSyncConsumerQueryTests
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = consumer.Committed(new[] { tp });
 
         Assert.True(result.ContainsKey(tp));
-        Assert.Equal(42, result[tp]!.Offset);
-        Assert.Equal("meta-x", result[tp]!.Metadata);
-        Assert.Equal(7, result[tp]!.LeaderEpoch);
+        Assert.Equal(42, result[tp]!.Offset());
+        Assert.Equal("meta-x", result[tp]!.Metadata());
+        Assert.Equal(7, result[tp]!.LeaderEpoch());
     }
 
     [Fact]
@@ -74,9 +74,9 @@ public sealed class PublicSyncConsumerQueryTests
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = consumer.Committed(new[] { tp });
 
         Assert.True(result.ContainsKey(tp));
-        Assert.Equal(100, result[tp]!.Offset);
-        Assert.Equal(string.Empty, result[tp]!.Metadata);
-        Assert.Null(result[tp]!.LeaderEpoch);
+        Assert.Equal(100, result[tp]!.Offset());
+        Assert.Equal(string.Empty, result[tp]!.Metadata());
+        Assert.Null(result[tp]!.LeaderEpoch());
     }
 
     [Fact]
@@ -244,23 +244,23 @@ public sealed class PublicSyncConsumerQueryTests
         for (int p = 0; p < 3; p++)
         {
             PartitionInfo info = FindPartition(partitions, p);
-            Assert.Equal(Topic, info.Topic);
-            Assert.Equal(p, info.Partition);
+            Assert.Equal(Topic, info.Topic());
+            Assert.Equal(p, info.Partition());
 
-            Assert.NotNull(info.Leader);
-            Assert.Equal(LeaderId, info.Leader!.Id);
-            Assert.Equal(LeaderHost, info.Leader.Host);
-            Assert.Equal(LeaderPort, info.Leader.Port);
+            Assert.NotNull(info.Leader());
+            Assert.Equal(LeaderId, info.Leader()!.Id());
+            Assert.Equal(LeaderHost, info.Leader()!.Host());
+            Assert.Equal(LeaderPort, info.Leader()!.Port());
 
-            Node replica = Assert.Single(info.Replicas);
-            Assert.Equal(LeaderId, replica.Id);
-            Assert.Equal(LeaderHost, replica.Host);
+            Node replica = Assert.Single(info.Replicas());
+            Assert.Equal(LeaderId, replica.Id());
+            Assert.Equal(LeaderHost, replica.Host());
 
-            Node isr = Assert.Single(info.InSyncReplicas);
-            Assert.Equal(LeaderId, isr.Id);
+            Node isr = Assert.Single(info.InSyncReplicas());
+            Assert.Equal(LeaderId, isr.Id());
 
-            Assert.Empty(info.OfflineReplicas);
-            Assert.Null(info.Leader.Rack);
+            Assert.Empty(info.OfflineReplicas());
+            Assert.Null(info.Leader()!.Rack());
         }
     }
 
@@ -292,8 +292,8 @@ public sealed class PublicSyncConsumerQueryTests
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
 
         PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
-        Assert.Equal(nonAsciiHost, info.Leader!.Host);
-        Assert.Equal(nonAsciiHost, info.Replicas[0].Host);
+        Assert.Equal(nonAsciiHost, info.Leader()!.Host());
+        Assert.Equal(nonAsciiHost, info.Replicas()[0].Host());
     }
 
     [Fact]
@@ -310,15 +310,15 @@ public sealed class PublicSyncConsumerQueryTests
 
         IReadOnlyList<PartitionInfo> a = map["topic-a"];
         Assert.Equal(2, a.Count);
-        Assert.Equal("topic-a", a[0].Topic);
-        Assert.Equal(LeaderId, a[0].Leader!.Id);
+        Assert.Equal("topic-a", a[0].Topic());
+        Assert.Equal(LeaderId, a[0].Leader()!.Id());
 
         IReadOnlyList<PartitionInfo> b = map["topic-b"];
         PartitionInfo bInfo = Assert.Single(b);
-        Assert.Equal("topic-b", bInfo.Topic);
-        Assert.Equal(9, bInfo.Leader!.Id);
-        Assert.Equal("broker-2", bInfo.Leader.Host);
-        Assert.Equal(9093, bInfo.Leader.Port);
+        Assert.Equal("topic-b", bInfo.Topic());
+        Assert.Equal(9, bInfo.Leader()!.Id());
+        Assert.Equal("broker-2", bInfo.Leader()!.Host());
+        Assert.Equal(9093, bInfo.Leader()!.Port());
     }
 
     [Fact]
@@ -493,7 +493,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         foreach (PartitionInfo info in partitions)
         {
-            if (info.Partition == partition)
+            if (info.Partition() == partition)
             {
                 return info;
             }

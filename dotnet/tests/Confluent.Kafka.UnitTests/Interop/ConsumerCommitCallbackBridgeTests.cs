@@ -84,8 +84,8 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.NotNull(offsets);
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(offsets!);
         Assert.Equal(s_tp0, entry.Key);
-        Assert.Equal(42, entry.Value.Offset);
-        Assert.Equal("meta", entry.Value.Metadata);
+        Assert.Equal(42, entry.Value.Offset());
+        Assert.Equal("meta", entry.Value.Metadata());
         Assert.True(registration.IsReleased);
     }
 
@@ -180,8 +180,8 @@ public sealed class ConsumerCommitCallbackBridgeTests
         AssertReleasedAfterTheReport(registration);
         KeyValuePair<TopicPartition, OffsetAndMetadata> entry = Assert.Single(delivered!);
         Assert.Equal(s_tp0, entry.Key);
-        Assert.Equal(9, entry.Value.Offset);
-        Assert.Equal("async", entry.Value.Metadata);
+        Assert.Equal(9, entry.Value.Offset());
+        Assert.Equal("async", entry.Value.Metadata());
     }
 
     [Fact]
@@ -345,7 +345,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
 
             CommitCallbackRegistration registration = Assert.IsType<CommitCallbackRegistration>(Registration(consumer));
             Assert.True(registration.IsReleased);
-            Assert.Equal(5, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset);
+            Assert.Equal(5, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset());
         }
         finally
         {
@@ -467,7 +467,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
             Assert.Equal(200, callback.Calls.Count);
             for (int i = 0; i < 200; i++)
             {
-                Assert.Equal(i, callback.Calls[i].Offsets![s_tp0].Offset);
+                Assert.Equal(i, callback.Calls[i].Offsets![s_tp0].Offset());
             }
         }
         finally

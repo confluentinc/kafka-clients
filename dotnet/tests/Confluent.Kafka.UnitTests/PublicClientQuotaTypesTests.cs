@@ -46,18 +46,18 @@ public class PublicClientQuotaTypesTests
         ClientQuotaFilterComponent specified =
             ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.USER);
 
-        Assert.Equal(ClientQuotaMatchType.Exact, exact.MatchType);
-        Assert.Equal("alice", exact.MatchName);
+        Assert.Equal(ClientQuotaMatchType.Exact, exact.MatchType());
+        Assert.Equal("alice", exact.Match());
 
-        Assert.Equal(ClientQuotaMatchType.Default, dflt.MatchType);
-        Assert.Null(dflt.MatchName);
+        Assert.Equal(ClientQuotaMatchType.Default, dflt.MatchType());
+        Assert.Null(dflt.Match());
 
-        Assert.Equal(ClientQuotaMatchType.Specified, specified.MatchType);
-        Assert.Null(specified.MatchName);
+        Assert.Equal(ClientQuotaMatchType.Specified, specified.MatchType());
+        Assert.Null(specified.Match());
 
-        Assert.Equal(ClientQuotaEntity.USER, exact.EntityType);
-        Assert.Equal(ClientQuotaEntity.USER, dflt.EntityType);
-        Assert.Equal(ClientQuotaEntity.USER, specified.EntityType);
+        Assert.Equal(ClientQuotaEntity.USER, exact.EntityType());
+        Assert.Equal(ClientQuotaEntity.USER, dflt.EntityType());
+        Assert.Equal(ClientQuotaEntity.USER, specified.EntityType());
     }
 
     [Fact]
@@ -203,8 +203,8 @@ public class PublicClientQuotaTypesTests
         var empty = new ClientQuotaEntity(new Dictionary<string, string?>());
 
         Assert.NotEqual(defaultUser, empty);
-        Assert.Single(defaultUser.Entries);
-        Assert.Empty(empty.Entries);
+        Assert.Single(defaultUser.Entries());
+        Assert.Empty(empty.Entries());
     }
 
     [Fact]
@@ -243,8 +243,8 @@ public class PublicClientQuotaTypesTests
         source[ClientQuotaEntity.USER] = "bob";
         source[ClientQuotaEntity.IP] = "10.0.0.1";
 
-        Assert.Single(entity.Entries);
-        Assert.Equal("alice", entity.Entries[ClientQuotaEntity.USER]);
+        Assert.Single(entity.Entries());
+        Assert.Equal("alice", entity.Entries()[ClientQuotaEntity.USER]);
     }
 
     [Fact]
@@ -278,14 +278,14 @@ public class PublicClientQuotaTypesTests
         ClientQuotaFilter containsOnly = ClientQuotaFilter.ContainsOnly(components);
         ClientQuotaFilter all = ClientQuotaFilter.All();
 
-        Assert.False(contains.Strict);
-        Assert.Single(contains.Components);
+        Assert.False(contains.Strict());
+        Assert.Single(contains.Components());
 
-        Assert.True(containsOnly.Strict);
-        Assert.Single(containsOnly.Components);
+        Assert.True(containsOnly.Strict());
+        Assert.Single(containsOnly.Components());
 
-        Assert.False(all.Strict);
-        Assert.Empty(all.Components);
+        Assert.False(all.Strict());
+        Assert.Empty(all.Components());
 
         Assert.NotEqual(contains, containsOnly);
     }
@@ -366,8 +366,8 @@ public class PublicClientQuotaTypesTests
         var clear = new ClientQuotaAlteration.Op("producer_byte_rate", null);
         var zero = new ClientQuotaAlteration.Op("producer_byte_rate", 0.0);
 
-        Assert.Null(clear.Value);
-        Assert.Equal(0.0, zero.Value!.Value);
+        Assert.Null(clear.Value());
+        Assert.Equal(0.0, zero.Value()!.Value);
         Assert.NotEqual(clear, zero);
 
         Assert.Equal(clear, new ClientQuotaAlteration.Op("producer_byte_rate", null));
@@ -404,12 +404,12 @@ public class PublicClientQuotaTypesTests
 
         var alteration = new ClientQuotaAlteration(entity, ops);
 
-        Assert.Equal(entity, alteration.Entity);
-        Assert.Equal(2, alteration.Ops.Count);
-        Assert.Contains(new ClientQuotaAlteration.Op("consumer_byte_rate", null), alteration.Ops);
+        Assert.Equal(entity, alteration.Entity());
+        Assert.Equal(2, alteration.Ops().Count);
+        Assert.Contains(new ClientQuotaAlteration.Op("consumer_byte_rate", null), alteration.Ops());
 
         ops[0] = new ClientQuotaAlteration.Op("producer_byte_rate", 9999.0);
-        Assert.Contains(new ClientQuotaAlteration.Op("producer_byte_rate", 1024.0), alteration.Ops);
+        Assert.Contains(new ClientQuotaAlteration.Op("producer_byte_rate", 1024.0), alteration.Ops());
     }
 
     [Fact]

@@ -28,6 +28,10 @@ namespace Confluent.Kafka.Consumer;
 /// </remarks>
 public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
 {
+    private readonly long _offset;
+    private readonly string _metadata;
+    private readonly int? _leaderEpoch;
+
     /// <summary>
     /// Initializes an offset to commit (Java's <c>OffsetAndMetadata(long, Optional&lt;Integer&gt;, String)</c>).
     /// </summary>
@@ -49,36 +53,40 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
             throw new IllegalArgumentException("Invalid negative offset");
         }
 
-        Offset = offset;
-        Metadata = metadata ?? string.Empty;
+        _offset = offset;
+        _metadata = metadata ?? string.Empty;
         // Java's leaderEpoch() reports a negative epoch as absent; .NET has no raw accessor, so the epoch is
         // normalised once, here, and Equals, GetHashCode and ToString see it as Java's do.
-        LeaderEpoch = leaderEpoch < 0 ? null : leaderEpoch;
+        _leaderEpoch = leaderEpoch < 0 ? null : leaderEpoch;
     }
 
     /// <summary>The committed offset.</summary>
-    public long Offset { get; }
+    /// <returns>The committed offset.</returns>
+    public long Offset() => _offset;
 
     /// <summary>The commit metadata; the empty string when none was set, never <see langword="null"/>.</summary>
-    public string Metadata { get; }
+    /// <returns>The commit metadata; the empty string when none was set, never <see langword="null"/>.</returns>
+    public string Metadata() => _metadata;
 
     /// <summary>
-    /// The leader epoch of the record at <see cref="Offset"/>, or <see langword="null"/> when absent (Java's
+    /// The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when absent (Java's
     /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>). A negative epoch is absent.
     /// </summary>
-    public int? LeaderEpoch { get; }
+    /// <returns>The leader epoch of the record at <see cref="Offset()"/>, or <see langword="null"/> when absent
+    /// (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).</returns>
+    public int? LeaderEpoch() => _leaderEpoch;
 
     /// <summary>
-    /// Value equality over <see cref="Offset"/>, <see cref="Metadata"/> (ordinal) and <see cref="LeaderEpoch"/>,
+    /// Value equality over <see cref="Offset()"/>, <see cref="Metadata()"/> (ordinal) and <see cref="LeaderEpoch()"/>,
     /// as Java's <c>equals</c>.
     /// </summary>
     /// <param name="other">The instance to compare with.</param>
     /// <returns>Whether the two describe the same committed offset.</returns>
     public bool Equals(OffsetAndMetadata? other) =>
         other is not null
-        && Offset == other.Offset
-        && string.Equals(Metadata, other.Metadata, StringComparison.Ordinal)
-        && LeaderEpoch == other.LeaderEpoch;
+        && Offset() == other.Offset()
+        && string.Equals(Metadata(), other.Metadata(), StringComparison.Ordinal)
+        && LeaderEpoch() == other.LeaderEpoch();
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => Equals(obj as OffsetAndMetadata);
@@ -91,9 +99,9 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
     {
         unchecked
         {
-            int hash = Offset.GetHashCode();
-            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Metadata);
-            return (hash * 31) + (LeaderEpoch?.GetHashCode() ?? 0);
+            int hash = Offset().GetHashCode();
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Metadata());
+            return (hash * 31) + (LeaderEpoch()?.GetHashCode() ?? 0);
         }
     }
 
@@ -104,7 +112,7 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
         string.Format(
             CultureInfo.InvariantCulture,
             "OffsetAndMetadata{{offset={0}, leaderEpoch={1}, metadata='{2}'}}",
-            Offset,
-            LeaderEpoch is null ? "null" : LeaderEpoch.Value.ToString(CultureInfo.InvariantCulture),
-            Metadata);
+            _offset,
+            _leaderEpoch is null ? "null" : _leaderEpoch.Value.ToString(CultureInfo.InvariantCulture),
+            _metadata);
 }
