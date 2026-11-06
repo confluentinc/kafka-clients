@@ -21,6 +21,7 @@ mod error_hierarchy;
 mod error_predicates;
 mod java;
 mod java_api;
+mod java_index_json;
 mod java_parse;
 mod javadoc;
 mod javascript_gen;
@@ -52,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         Some("java-api") => java_api::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("dotnet-java-name-baseline") => dotnet_java_name_baseline::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("fetch-java-refs") => fetch_java_refs()?,
+        Some("java-index") => java_index_json::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
         Some("doc-baseline") => lint_custom::write_doc_baseline()?,
@@ -2764,6 +2766,8 @@ fn print_help() {
   dotnet-java-name-baseline  Rewrite the .NET binding's CKRDA0013 baseline from a build; it only shrinks
                   (--add: also take findings it does not hold yet)
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
+  java-index      `--json [<out>]`: write the Java client's class index as JSON for the Node.js
+                  client's rule linter (default ../javascript/build/java-index.json)
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
                     check-no-data-carrying-enum-variants  public enum variants hold no data inline
