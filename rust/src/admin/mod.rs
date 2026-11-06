@@ -648,7 +648,10 @@ pub trait Admin: Send + Sync {
     ///
     /// # Returns
     ///
-    /// The DeleteRecordsResult.
+    /// The DeleteRecordsResult. A partition's future fails with
+    /// `Error::is_offset_out_of_range_error` if the given offset is out of range, for example
+    /// larger than the high watermark of the partition. See `RecordsToDelete::with_offset` for
+    /// valid values.
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteRecords")]
     fn delete_records_with_options(
         &self,
