@@ -1876,7 +1876,7 @@ bytes are **copy-out by default**.
 `IDeserializer<T>.Deserialize(ReadOnlySpan<byte>)` reads a span **directly over the
 native bytes** and returns an owned `T`; a ref-struct `Span` can't be stored or
 awaited, so it can't outlive the batch (safe). But the **raw-byte surface**
-(`ConsumerRecord.Value` as bytes) is **copy-out by default** — the single place we
+(`ConsumerRecord.Value()` as bytes) is **copy-out by default** — the single place we
 copy on receive — because the only zero-copy alternative is a native-backed
 `ReadOnlyMemory<byte>` coupled to the batch lifetime, and in .NET a stored
 `ReadOnlyMemory` over native memory is a use-after-`Dispose` footgun (Python is
@@ -2507,8 +2507,8 @@ The C shapes (BH at `25a4d475`):
     futures holds a reference on it until its own delivery, as Python's map futures keep the map's
     capsule alive (`python/_confluentkafka.c:1555-1571` at `25a4d475`; ledger 182).
   - **Reads** (decision 8, ledger 56): while the future is pending, its value source
-    (`IFutureValueSource<T>`) reads the handle. `IsDone` asks `kafka_common_KafkaFuture_is_done_err`
-    and settles nothing. `GetNow`, `IsCancelled`, `IsCompletedExceptionally` and `ToString` settle
+    (`IFutureValueSource<T>`) reads the handle. `IsDone()` asks `kafka_common_KafkaFuture_is_done_err`
+    and settles nothing. `GetNow`, `IsCancelled()`, `IsCompletedExceptionally()` and `ToString` settle
     a done handle from `kafka_common_KafkaFuture_get`. `Get()`, `Get(TimeSpan)` and
     `Get(CancellationToken)` wait in slices and re-read the handle each slice, on any thread, as
     Python's `get` does (`kafka_future.py:702-720` at `25a4d475`).
@@ -2525,11 +2525,11 @@ The C shapes (BH at `25a4d475`):
   - **Options** (ledger 176): each RPC builds its C options with `<X>Options_new`, which carries
     the core's Java defaults, then calls `set_<field>` only for the setters that ran, in the order
     they last ran (a setter run twice counts at its last run), as Python does. Each Options
-    property's setter records, in private state, that it ran; the managed starting value feeds only
-    the getter. The RPC copies the C options during the call (BH,
+    setter (`TimeoutMs(int?)` beside the getter `TimeoutMs()`, ledger 366) records, in private
+    state, that it ran; the managed starting value feeds only the getter. The RPC copies the C options during the call (BH,
     `kafka_admin_Admin_create_topics_with_options`), and the binding destroys them right after it.
-    A setter whose Java form takes a primitive (`DescribeFeaturesOptions.NodeId`,
-    `DescribeProducersOptions.BrokerId`) throws `ArgumentNullException` for `null`, as Python's
+    A setter whose Java form takes a primitive (`DescribeFeaturesOptions.NodeId(int?)`,
+    `DescribeProducersOptions.BrokerId(int?)`) throws `ArgumentNullException` for `null`, as Python's
     `TypeError`, and records nothing (ledger 181).
   - **Teardown** (decision 7): `dotnet/CLAUDE.md` §4 **Close/Dispose**. `Close()`, `Dispose` and
     `DisposeAsync` call `kafka_admin_Admin_close_cb`, which waits without a limit, as Java's
@@ -2554,7 +2554,7 @@ The C shapes (BH at `25a4d475`):
     teardown with `kafka_admin_MockAdminClient_destroy_err` (BH:9361).
 
 **Why:** the async flavour needs `get_cb` anyway, so one path serves both (decision 5). Keeping each
-handle until its delivery lets every state read ask the core first, as Python does, with no `IsDone`
+handle until its delivery lets every state read ask the core first, as Python does, with no `IsDone()`
 lag and no drain-thread guard (decision 8).
 
 **Anti-patterns:**
@@ -2576,16 +2576,16 @@ lag and no drain-thread guard (decision 8).
 
 **Tests required:**
 
-  - `IsDone` and `GetNow` answer from the handle before the delivery runs.
+  - `IsDone()` and `GetNow` answer from the handle before the delivery runs.
   - A `WhenComplete` action on future A that calls `B.Get()` for a done B answers on the drain thread.
   - `by_broker_id`'s inner futures stay readable after the outer delivery.
   - A `GetNow` that settles `ByBrokerId()` before its delivery builds the inner map once. The
     delivery then issues one `get_cb` per inner future, and the futures the read returned are the
     ones the delivery completes.
   - An RPC whose Options had no setter run sends the core's defaults. A setter run twice sends its
-    last value. `DescribeFeatures` without `NodeId` set sends no node id.
-  - Setting `NodeId` or `BrokerId` to `null` throws and leaves the field unset.
-  - After every map future's delivery has run, the map is destroyed once; a map future's `IsDone`
+    last value. `DescribeFeatures` without `NodeId(int?)` run sends no node id.
+  - Calling `NodeId(null)` or `BrokerId(null)` throws and leaves the field unset.
+  - After every map future's delivery has run, the map is destroyed once; a map future's `IsDone()`
     before its delivery answers from the handle.
   - A client destroyed with pending futures settles each of them and releases every future
     SafeHandle exactly once.

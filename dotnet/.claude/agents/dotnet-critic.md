@@ -22,7 +22,7 @@ Follow the **Critic** role and review loop in `.claude/rules/agent-roles.md` (wa
 - **Callback safety (ffi §A6/§B6, §A7/§B7) — THREE families, and they are graded differently:** (1) **ABI-crossing** (`RecordMetadata_copy`, the consumer completion callbacks): kept-alive Cdecl delegates + a **no-throw boundary** (no managed exception into native), `RunContinuationsAsynchronously` on the completion (pump/dispatcher). (2) **Multi-shot registration** (rebalance listener): as (1), plus the registration's release hook. (3) **Managed-only** (`IDeliveryCallback`, M14/P1 — ffi §A6 **form C**): invoked from a managed thread (the send pump, or the caller's own thread on the sync surface) and **never crosses the ABI**, so the absence of a `GCHandle` / keep-alive / `UnmanagedFunctionPointer` / `Cdecl` delegate is **correct by design and NOT a finding** — grade it as ordinary managed thread-safety and exactly-once invocation instead. For every family, user code must be wrapped in a swallow guard that cannot abort the surrounding loop or strand other awaiters.
 
 ## Secondary axes
-- **Shape fidelity:** mirrors the **Java** API, not confluent-kafka-dotnet; getters→properties; `Async` suffix; flat `KafkaException` (null handle = success); preconditions → standard .NET exceptions, never `KafkaException`.
+- **Shape fidelity:** mirrors the **Java** API, not confluent-kafka-dotnet; every Java method is a C# method with Java's exact name, getters included (`Topic()`, `IsDone()`, `GetName()`), a getter and setter of one name are two overloads, a `public static final` field is a field with Java's name, and a public property exists only where .NET requires one (`ConsumerRecords.Count`; CLAUDE.md §3 idiom map, ledgers 285, 365–369); no `Async` suffix, the interface carries the async distinction; each core error is the generated class of its id, with Java's parent (null handle = success); preconditions → the Java-named class Java throws, else the standard .NET exception, never the bare `KafkaException`.
 - **Decision hygiene (CLAUDE.md §4):** each decision point took the default or **recorded** a deviation — no silent divergence.
 - **Consistency invariants:** the `src/` / `Internal/` / `Internal/Interop/` split holds and everything under `Internal/` is `internal`; host-only scaffolding (`NativeMethods`/`SafeHandle`/completion bridge — pump or dispatcher) is **expected**, not a finding.
 
@@ -34,7 +34,7 @@ Use the root Critic's format, but cite the **C ABI header / Java API** as the re
 
 ## What NOT to report
 - **Rust internals / the ABI itself** — out of scope (that's `kafka-critic`).
-- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` suffix; `IProducer`/`IConsumer`; the `Confluent.Kafka` namespace).
+- Host-only scaffolding and the settled idioms the rulebook allows (`NativeMethods`/`SafeHandle`/completion bridge; the `Async` prefix on the async types (`IAsyncProducer`, `AsyncKafkaConsumer`); `IProducer`/`IConsumer`; the `Confluent.Kafka` namespace).
 - Style/formatting (`dotnet format` owns it); theoretical issues that can't occur under the constraints.
 
 # Agent Memory — local only, never committed
