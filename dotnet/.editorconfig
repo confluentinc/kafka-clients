@@ -179,3 +179,44 @@ dotnet_naming_rule.private_static_fields_are_s_camel_case.severity = warning
 
 # CA1715: Identifiers should have correct prefix (I-prefix on interfaces). CLAUDE.md §7.2 / §4.
 dotnet_diagnostic.CA1715.severity = warning
+
+#### The binding's own analyzers (analyzers/Confluent.Kafka.Analyzers) ####
+
+# CKRDA0001: a TaskCompletionSource runs its continuations asynchronously (ffi-marshalling.md §A7, §B7, §C1).
+# Off by default; on in src/, grpc-server/ and tests/.
+[*.cs]
+dotnet_diagnostic.CKRDA0001.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0001.severity = warning
+
+[grpc-server/**.cs]
+dotnet_diagnostic.CKRDA0001.severity = warning
+
+[tests/**.cs]
+dotnet_diagnostic.CKRDA0001.severity = warning
+
+# The P/Invoke, handle, native-callback and comment rules, on everywhere.
+#   CKRDA0002  a delegate type passed to native code is Cdecl (ffi-marshalling.md §A6, §B6)
+#   CKRDA0003  a delegate passed to native code is a static readonly field (§A6, §B6)
+#   CKRDA0004  a native callback cannot throw into native code, wherever it is created (§A6, §B6)
+#   CKRDA0005  a client handle reaches a P/Invoke as its SafeHandle (§A2, §B2)
+#   CKRDA0006  a DangerousAddRef is taken inside a try whose finally block releases it (§A2)
+#   CKRDA0007  a P/Invoke imports confluent_kafka with CallingConvention.Cdecl (§0.1)
+#   CKRDA0008  a bool crossing a P/Invoke is [MarshalAs(UnmanagedType.I1)] (§0.1)
+#   CKRDA0009  no string or StringBuilder in a P/Invoke (§0.1, §A3, §B3)
+#   CKRDA0010  no nint, nuint or UIntPtr in a P/Invoke (§0.1)
+#   CKRDA0011  no Java or Python source-line reference in a comment (CLAUDE.md §4 Comments)
+#   CKRDA0012  no phase or review id in a comment (CLAUDE.md §4 Comments)
+[*.cs]
+dotnet_diagnostic.CKRDA0002.severity = warning
+dotnet_diagnostic.CKRDA0003.severity = warning
+dotnet_diagnostic.CKRDA0004.severity = warning
+dotnet_diagnostic.CKRDA0005.severity = warning
+dotnet_diagnostic.CKRDA0006.severity = warning
+dotnet_diagnostic.CKRDA0007.severity = warning
+dotnet_diagnostic.CKRDA0008.severity = warning
+dotnet_diagnostic.CKRDA0009.severity = warning
+dotnet_diagnostic.CKRDA0010.severity = warning
+dotnet_diagnostic.CKRDA0011.severity = warning
+dotnet_diagnostic.CKRDA0012.severity = warning

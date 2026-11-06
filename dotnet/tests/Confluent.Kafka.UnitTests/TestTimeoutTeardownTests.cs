@@ -121,7 +121,10 @@ public sealed class TestTimeoutTeardownTests
         GenericTarget<int, long> target = new GenericTarget<int, long>();
 
         System.TimeoutException hung = await Assert.ThrowsAsync<System.TimeoutException>(
-            () => TestTimeout.TeardownAsync(target, () => new TaskCompletionSource<bool>().Task, s_short));
+            () => TestTimeout.TeardownAsync(
+                target,
+                () => new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task,
+                s_short));
 
         Assert.StartsWith(Hung("GenericTarget<Int32, Int64>"), hung.Message, StringComparison.Ordinal);
     }
@@ -176,7 +179,7 @@ public sealed class TestTimeoutTeardownTests
         public ValueTask DisposeAsync()
         {
             Calls++;
-            return new ValueTask(new TaskCompletionSource<bool>().Task);
+            return new ValueTask(new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task);
         }
     }
 

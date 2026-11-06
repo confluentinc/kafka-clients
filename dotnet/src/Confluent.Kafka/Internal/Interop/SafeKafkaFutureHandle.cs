@@ -36,7 +36,9 @@ internal sealed class SafeKafkaFutureHandle : SafeHandleZeroIsInvalid
     internal static SafeKafkaFutureHandle Borrowed(IntPtr future, SafeHandle owner)
     {
         bool added = false;
+#pragma warning disable CKRDA0006 // A borrowed future keeps its owner alive until this handle's ReleaseHandle releases it.
         owner.DangerousAddRef(ref added);
+#pragma warning restore CKRDA0006
         return new SafeKafkaFutureHandle(future, owner);
     }
 
