@@ -181,7 +181,7 @@ public sealed class SafeProducerHandleTests
         Assert.False(OpaqueReleased(completion));
     }
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:9092",
     };

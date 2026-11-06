@@ -66,18 +66,17 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
     public override Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IProducer<byte[], byte[]> producer;
         try
         {
             // An empty or all-blank config selects a MockProducer, as Python's servicer does.
-            if (IsEmptyConfig(config))
+            if (IsEmptyConfig(request.Config))
             {
                 producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             }
             else
             {
-                producer = new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
             }
         }
         catch (Exception ex)

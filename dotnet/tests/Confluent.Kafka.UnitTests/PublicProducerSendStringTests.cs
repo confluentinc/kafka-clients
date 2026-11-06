@@ -193,8 +193,8 @@ public sealed class PublicProducerSendStringTests
             "key",
             headers: new[] { new Header("first", Bytes("1")), new Header(headerKey, Bytes("2")) });
 
-    private static Dictionary<string, string> Unreachable() =>
-        new Dictionary<string, string>
+    private static Dictionary<string, object?> Unreachable() =>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["max.block.ms"] = "5",

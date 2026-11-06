@@ -73,24 +73,11 @@ internal sealed partial class NativeAdminClient : IDisposable
     }
 
     internal static NativeAdminClient Create(
-        IReadOnlyDictionary<string, string> config, AdminFlavour flavour = AdminFlavour.Sync)
+        IReadOnlyDictionary<string, object?> configs, AdminFlavour flavour = AdminFlavour.Sync)
     {
-        if (config is null)
-        {
-            throw new ArgumentNullException(nameof(config));
-        }
-
-        foreach (KeyValuePair<string, string> entry in config)
-        {
-            if (entry.Value is null)
-            {
-                throw new ArgumentException(
-                    $"Configuration value for key '{entry.Key}' must not be null.",
-                    nameof(config));
-            }
-        }
-
-        return Start(new SafeKafkaAdminClientHandle(NewAdminClient(config)), isMock: false, flavour);
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Admin);
+        IntPtr admin = ConfigMarshal.NewClient(prepared, ClientKind.Admin);
+        return Start(new SafeKafkaAdminClientHandle(admin), isMock: false, flavour);
     }
 
     internal static NativeAdminClient CreateMock(int numBrokers, AdminFlavour flavour = AdminFlavour.Sync)
@@ -113,55 +100,6 @@ internal sealed partial class NativeAdminClient : IDisposable
         }
 
         return Start(new SafeMockAdminClientHandle(view, mock), isMock: true, flavour);
-    }
-
-    private static IntPtr NewAdminClient(IReadOnlyDictionary<string, string> config)
-    {
-        List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(config.Count * 2);
-        IntPtr map = IntPtr.Zero;
-        IntPtr adminConfig = IntPtr.Zero;
-        IntPtr outErr = IntPtr.Zero;
-        try
-        {
-            map = NativeMethods.MapNew(ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            foreach (KeyValuePair<string, string> entry in config)
-            {
-                Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
-                pins.Add(key);
-                Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
-                pins.Add(value);
-                NativeMethods.MapPut(map, key.Pointer, value.Pointer, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-            }
-
-            adminConfig = NativeMethods.AdminClientConfigNew(map, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            IntPtr admin = NativeMethods.AdminClientCreate(adminConfig, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            return admin;
-        }
-        finally
-        {
-            IntPtr destroyErr = IntPtr.Zero;
-            if (adminConfig != IntPtr.Zero)
-            {
-                NativeMethods.AdminClientConfigDestroy(adminConfig, ref destroyErr);
-                FreeError(destroyErr);
-                destroyErr = IntPtr.Zero;
-            }
-
-            foreach (Utf8Marshal.PinnedUtf8String pin in pins)
-            {
-                pin.Dispose();
-            }
-
-            if (map != IntPtr.Zero)
-            {
-                NativeMethods.MapDestroy(map, ref destroyErr);
-                FreeError(destroyErr);
-            }
-        }
     }
 
     private static NativeAdminClient Start(SafeAdminClientHandle handle, bool isMock, AdminFlavour flavour)

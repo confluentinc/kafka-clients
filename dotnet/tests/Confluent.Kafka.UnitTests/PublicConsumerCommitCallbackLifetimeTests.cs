@@ -328,9 +328,9 @@ public sealed class PublicConsumerCommitCallbackLifetimeTests
             return callbacks;
         }
 
-        private static Dictionary<string, string> Config(bool withGroupId)
+        private static Dictionary<string, object?> Config(bool withGroupId)
         {
-            Dictionary<string, string> config = new Dictionary<string, string>
+            Dictionary<string, object?> config = new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "127.0.0.1:1",
                 ["group.protocol"] = "consumer",

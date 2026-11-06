@@ -55,7 +55,7 @@ internal sealed class ProducerProbe
 
     internal ManualResetEventSlim CloseEntered { get; } = new ManualResetEventSlim();
 
-    internal IReadOnlyDictionary<string, string>? Config { get; set; }
+    internal IReadOnlyDictionary<string, object?>? Config { get; set; }
 
     internal int CloseCalls => Volatile.Read(ref _closeCalls);
 

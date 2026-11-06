@@ -330,7 +330,7 @@ public sealed class PublicAdminStringTests
     public async Task RealClient_SingleGroupListConsumerGroupOffsets_BlamesGroupId(string kind)
     {
         AsyncKafkaAdminClient admin =
-            new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new AsyncKafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         ArgumentException rejected =

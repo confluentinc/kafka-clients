@@ -376,6 +376,6 @@ public sealed class PublicAdminTransactionsTests
         Assert.Equal("Timed out waiting for a node assignment. Call: " + call, exception.Message);
     }
 
-    private static Dictionary<string, string> Unreachable() =>
-        new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static Dictionary<string, object?> Unreachable() =>
+        new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" };
 }

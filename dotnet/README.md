@@ -42,7 +42,11 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 
-var config = new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" };
+var config = new Dictionary<string, object?>
+{
+    ["bootstrap.servers"] = "localhost:9092",
+    ["linger.ms"] = 5,
+};
 using var producer = new KafkaProducer<string, string>(config, Serdes.String, Serdes.String);
 var record = new ProducerRecord<string, string>("orders", value: "value", key: "key");
 RecordMetadata metadata = producer.Send(record).Get();
@@ -59,7 +63,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 
-var config = new Dictionary<string, string>
+var config = new Dictionary<string, object?>
 {
     ["bootstrap.servers"] = "localhost:9092",
     ["group.id"] = "orders-reader",

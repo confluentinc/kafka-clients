@@ -36,8 +36,8 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
     private const string ListConfigResourcesThreadExited = "The AdminClient thread has exited. Call: listConfigResources";
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     private const string MockClusterId = "I4ZmrWqfT2e-upky_4fdPA";
 

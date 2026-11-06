@@ -34,8 +34,8 @@ public sealed class PublicAdminP14SyncCloseTests
     private const string Mock = "mock";
     private const string Real = "real";
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Fact]
     public void Close_WithANegativeTimeout_ThrowsJavasMessageBeforeAnyNativeCall_AndTheClientStaysOpen()

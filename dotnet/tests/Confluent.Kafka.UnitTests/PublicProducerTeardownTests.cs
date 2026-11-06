@@ -143,7 +143,7 @@ public sealed class PublicProducerTeardownTests
     {
         // The real AsyncKafkaProducer with no broker tears down without hanging.
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            new System.Collections.Generic.Dictionary<string, string>
+            new System.Collections.Generic.Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:9092",
             },

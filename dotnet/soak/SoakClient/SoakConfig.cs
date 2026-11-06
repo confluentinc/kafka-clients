@@ -159,6 +159,17 @@ internal static class SoakConfig
         return result;
     }
 
+    internal static Dictionary<string, object?> ClientConfigs(IReadOnlyDictionary<string, string> conf)
+    {
+        var configs = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, string> entry in conf)
+        {
+            configs[entry.Key] = entry.Value;
+        }
+
+        return configs;
+    }
+
     // A shared file's key known only to the other client is dropped, not rejected, as Python's
     // soak; a key unknown to both still fails startup.
     internal static (Dictionary<string, string> Kept, IReadOnlyList<string> Routed) RouteSharedConfig(

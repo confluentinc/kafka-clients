@@ -187,5 +187,5 @@ public sealed class PublicAdminNonNumericBrokerNameTests
     }
 
     private static AsyncKafkaAdminClient NewUnconnectedClient() =>
-        new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        new AsyncKafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 }

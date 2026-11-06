@@ -191,6 +191,6 @@ public sealed class PublicAdminUnregisterControllerTests
         Assert.Throws<ObjectDisposedException>(() => asyncReal.UnregisterController(1));
     }
 
-    private static Dictionary<string, string> Unreachable() =>
-        new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static Dictionary<string, object?> Unreachable() =>
+        new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" };
 }

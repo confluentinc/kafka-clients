@@ -30,7 +30,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicProducerMetricsTests
 {
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
     };

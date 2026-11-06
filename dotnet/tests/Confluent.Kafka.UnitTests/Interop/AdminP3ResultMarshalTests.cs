@@ -120,7 +120,7 @@ public sealed class AdminP3ResultMarshalTests
     public async Task DescribeCluster_AFailedCall_FailsEachFuture()
     {
         IAsyncAdmin real = new AsyncKafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
             AsyncDescribeClusterResult result = real.DescribeCluster(new DescribeClusterOptions { TimeoutMs = 0 });

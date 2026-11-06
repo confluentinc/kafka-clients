@@ -363,7 +363,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         : Real(defaultApiTimeoutMs: 60_000);
 
     private static AsyncKafkaConsumer<byte[], byte[]> Real(int defaultApiTimeoutMs) => new AsyncKafkaConsumer<byte[], byte[]>(
-        new Dictionary<string, string>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["group.protocol"] = "consumer",

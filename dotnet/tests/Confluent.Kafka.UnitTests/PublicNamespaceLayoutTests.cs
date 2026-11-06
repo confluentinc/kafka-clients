@@ -269,6 +269,7 @@ public sealed class PublicNamespaceLayoutTests
         ("AclBindingFilter", "org.apache.kafka.common.acl.AclBindingFilter"),
         ("AclOperation", "org.apache.kafka.common.acl.AclOperation"),
         ("AclPermissionType", "org.apache.kafka.common.acl.AclPermissionType"),
+        ("ConfigException", "org.apache.kafka.common.config.ConfigException"),
         ("ConfigResource", "org.apache.kafka.common.config.ConfigResource"),
         ("ConfigResourceType", "org.apache.kafka.common.config.ConfigResource.Type"),
         ("RecordDeserializationException", "org.apache.kafka.common.errors.RecordDeserializationException"),
