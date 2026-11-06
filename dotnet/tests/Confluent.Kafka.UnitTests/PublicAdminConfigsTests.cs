@@ -53,7 +53,7 @@ public sealed class PublicAdminConfigsTests
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { resource });
 
-        Config config = await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
+        Config config = await TestTimeout.Run(() => result.Values()[resource].Get(), s_deadline);
         ConfigEntry entry = Assert.IsType<ConfigEntry>(config.Get("cleanup.policy"));
         Assert.Equal("compact", entry.Value());
 
@@ -83,7 +83,7 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
+        Config config = await TestTimeout.Run(() => described.Values()[resource].Get(), s_deadline);
         Assert.Equal("1000", config.Get("retention.ms")!.Value());
     }
 
@@ -115,7 +115,7 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config config = await TestTimeout.Run(() => described.Values[resource].Get(), s_deadline);
+        Config config = await TestTimeout.Run(() => described.Values()[resource].Get(), s_deadline);
         Assert.Null(config.Get("retention.ms"));
     }
 
@@ -137,10 +137,10 @@ public sealed class PublicAdminConfigsTests
                 [missing] = new[] { new AlterConfigOp(new ConfigEntry("a", "1"), AlterConfigOpType.SET) },
             });
 
-        await TestTimeout.Run(() => result.Values[present].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[present].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values()[missing].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-absent", failure.Message);
     }
 
@@ -172,7 +172,7 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal(subscription, Assert.Single(filtered));
 
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { subscription }).Values[subscription].Get(), s_deadline);
+            () => admin.DescribeConfigs(new[] { subscription }).Values()[subscription].Get(), s_deadline);
         Assert.Equal("60000", config.Get("interval.ms")!.Value());
     }
 
@@ -197,16 +197,16 @@ public sealed class PublicAdminConfigsTests
                 [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
 
-        await TestTimeout.Run(() => result.Values[noOps].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[noOps].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         // The sibling's operation was applied, so the success above is not a blanket one.
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { sibling }).Values[sibling].Get(), s_deadline);
+            () => admin.DescribeConfigs(new[] { sibling }).Values()[sibling].Get(), s_deadline);
         Assert.Equal("v", config.Get("k")!.Value());
 
         Config untouched = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { noOps }).Values[noOps].Get(), s_deadline);
+            () => admin.DescribeConfigs(new[] { noOps }).Values()[noOps].Get(), s_deadline);
         Assert.Empty(untouched.Entries());
     }
 
@@ -226,7 +226,7 @@ public sealed class PublicAdminConfigsTests
                 [resource] = Array.Empty<AlterConfigOp>(),
             });
 
-        await TestTimeout.Run(() => result.Values[resource].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[resource].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -245,7 +245,7 @@ public sealed class PublicAdminConfigsTests
                 [absent] = Array.Empty<AlterConfigOp>(),
             });
         UnknownTopicOrPartitionException zeroOpsFailure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => zeroOps.Values[absent].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => zeroOps.Values()[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
         // The same absent resource with one operation is sent, so the core rejects it.
@@ -255,7 +255,7 @@ public sealed class PublicAdminConfigsTests
                 [absent] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.SET) },
             });
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values[absent].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => withOps.Values()[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
     }
 
@@ -268,12 +268,12 @@ public sealed class PublicAdminConfigsTests
         ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { undefined });
 
-        ConfigResource key = Assert.Single(result.Values.Keys);
+        ConfigResource key = Assert.Single(result.Values().Keys);
         Assert.Equal(ConfigResourceType.UNKNOWN, key.Type());
-        Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
+        Assert.True(result.Values().ContainsKey(new ConfigResource(ConfigResourceType.UNKNOWN, "x")));
 
         UnsupportedOperationException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Values[undefined].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.Values()[undefined].Get()), s_deadline);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
@@ -356,7 +356,7 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         Config config = await TestTimeout.Run(
-            () => admin.DescribeConfigs(new[] { resource }).Values[resource].Get(), s_deadline);
+            () => admin.DescribeConfigs(new[] { resource }).Values()[resource].Get(), s_deadline);
         Assert.Equal("v", config.Get("k")!.Value());
     }
 

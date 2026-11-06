@@ -109,10 +109,10 @@ public sealed class PublicAdminTransactionsTests
 
         FenceProducersResult result = admin.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(1000));
 
-        Assert.Equal(s_transactionalIds.Length, result.FencedProducers.Count);
+        Assert.Equal(s_transactionalIds.Length, result.FencedProducers().Count);
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.FencedProducers[id].Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.FencedProducers()[id].Get(s_deadline)));
             AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.ProducerId(id).Get(s_deadline)));
             AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.EpochId(id).Get(s_deadline)));
         }
@@ -175,7 +175,7 @@ public sealed class PublicAdminTransactionsTests
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers()[id].Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
                 () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.ProducerId(id).Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
@@ -256,10 +256,10 @@ public sealed class PublicAdminTransactionsTests
         Assert.True(terminate.Result() == terminate.Result());
         Assert.True(asyncTerminate.Result() == asyncTerminate.Result());
 
-        Assert.NotSame(fence.FencedProducers, fence.FencedProducers);
-        Assert.NotSame(asyncFence.FencedProducers, asyncFence.FencedProducers);
-        Assert.False(fence.FencedProducers["txn-a"] == fence.FencedProducers["txn-a"]);
-        Assert.False(asyncFence.FencedProducers["txn-a"] == asyncFence.FencedProducers["txn-a"]);
+        Assert.NotSame(fence.FencedProducers(), fence.FencedProducers());
+        Assert.NotSame(asyncFence.FencedProducers(), asyncFence.FencedProducers());
+        Assert.False(fence.FencedProducers()["txn-a"] == fence.FencedProducers()["txn-a"]);
+        Assert.False(asyncFence.FencedProducers()["txn-a"] == asyncFence.FencedProducers()["txn-a"]);
         Assert.False(fence.ProducerId("txn-a") == fence.ProducerId("txn-a"));
         Assert.False(fence.EpochId("txn-a") == fence.EpochId("txn-a"));
         Assert.False(asyncFence.ProducerId("txn-a") == asyncFence.ProducerId("txn-a"));
@@ -317,11 +317,11 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (string id in s_transactionalIds)
         {
-            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.FencedProducers[id].Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.FencedProducers()[id].Get(s_deadline)));
             AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.ProducerId(id).Get(s_deadline)));
             AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.EpochId(id).Get(s_deadline)));
             AssertTimedOut(FenceCall, await TestTimeout.Run(
-                () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers()[id].Get()), s_deadline));
         }
 
         AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.All().Get(s_deadline)));

@@ -138,8 +138,8 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-y", "txn-x" });
 
-        Assert.Equal(2, result.FencedProducers.Count);
-        foreach (AsyncKafkaFuture fenced in result.FencedProducers.Values)
+        Assert.Equal(2, result.FencedProducers().Count);
+        foreach (AsyncKafkaFuture fenced in result.FencedProducers().Values)
         {
             UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fenced.Get());
             Assert.Equal("Not implemented yet", error.Message);
@@ -164,7 +164,7 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(Array.Empty<string>());
 
-        Assert.Empty(result.FencedProducers);
+        Assert.Empty(result.FencedProducers());
         await result.All().Get();
     }
 
@@ -176,7 +176,7 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
 
-        Assert.Equal(new[] { "txn-a" }, result.FencedProducers.Keys);
+        Assert.Equal(new[] { "txn-a" }, result.FencedProducers().Keys);
         AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 

@@ -88,7 +88,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         AsyncCreatePartitionsResult result = admin.CreatePartitions(
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
-        Task perTopic = Assert.Single(result.Values).Value.Get();
+        Task perTopic = Assert.Single(result.Values()).Value.Get();
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
 
@@ -106,7 +106,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
         AsyncDeleteRecordsResult result = admin.DeleteRecords(
             new Dictionary<TopicPartition, RecordsToDelete>());
 
-        Assert.Empty(result.LowWatermarks);
+        Assert.Empty(result.LowWatermarks());
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal(TaskStatus.RanToCompletion, result.All().Get().Status);
@@ -125,13 +125,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 [partition] = RecordsToDelete.BeforeOffset(10),
             });
 
-        Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value.Get();
+        Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks()).Value.Get();
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => perPartition, s_deadline));
 
         Assert.Equal(NotImplemented, failure.Message);
 
-        Assert.Equal(partition, Assert.Single(result.LowWatermarks).Key);
+        Assert.Equal(partition, Assert.Single(result.LowWatermarks()).Key);
     }
 
     [Fact]
@@ -192,7 +192,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
             [Copy(Topic)] = NewPartitions.IncreaseTo(3),
         };
         Assert.Equal(2, grow.Count);
-        Assert.Equal(Topic, Assert.Single(admin.CreatePartitions(grow).Values).Key);
+        Assert.Equal(Topic, Assert.Single(admin.CreatePartitions(grow).Values()).Key);
 
         Dictionary<TopicPartition, RecordsToDelete> delete =
             new Dictionary<TopicPartition, RecordsToDelete>(TopicIdentityComparer.Instance)
@@ -201,7 +201,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 [new TopicPartition(Copy(Topic), 0)] = RecordsToDelete.BeforeOffset(2),
             };
         Assert.Equal(2, delete.Count);
-        Assert.Equal(new TopicPartition(Topic, 0), Assert.Single(admin.DeleteRecords(delete).LowWatermarks).Key);
+        Assert.Equal(new TopicPartition(Topic, 0), Assert.Single(admin.DeleteRecords(delete).LowWatermarks()).Key);
 
         Dictionary<TopicPartition, OffsetSpec> offsets =
             new Dictionary<TopicPartition, OffsetSpec>(TopicIdentityComparer.Instance)

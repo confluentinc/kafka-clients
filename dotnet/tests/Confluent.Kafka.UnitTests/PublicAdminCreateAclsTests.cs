@@ -43,11 +43,11 @@ public sealed class PublicAdminCreateAclsTests
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("keyed-by-value") });
 
         AclBinding lookup = Binding("keyed-by-value");
-        Assert.NotSame(lookup, Assert.Single(result.Values).Key);
-        Assert.True(result.Values.ContainsKey(lookup));
+        Assert.NotSame(lookup, Assert.Single(result.Values()).Key);
+        Assert.True(result.Values().ContainsKey(lookup));
 
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -67,16 +67,16 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { alpha, beta });
 
-        Assert.Equal(2, result.Values.Count);
-        Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
+        Assert.Equal(2, result.Values().Count);
+        Assert.NotSame(result.Values()[alpha].Get(), result.Values()[beta].Get());
 
-        Assert.Contains(alpha, result.Values.Keys);
-        Assert.Contains(beta, result.Values.Keys);
+        Assert.Contains(alpha, result.Values().Keys);
+        Assert.Contains(beta, result.Values().Keys);
 
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[alpha].Get(), s_deadline));
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[beta].Get(), s_deadline));
     }
 
     [Fact]
@@ -89,7 +89,7 @@ public sealed class PublicAdminCreateAclsTests
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { first, Binding("solo-second") });
 
         UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-            () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
@@ -117,7 +117,7 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(Array.Empty<AclBinding>());
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -129,7 +129,7 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
 
-        Assert.Single(result.Values);
+        Assert.Single(result.Values());
         await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
@@ -142,7 +142,7 @@ public sealed class PublicAdminCreateAclsTests
         AclBinding binding = Binding("tópico-café-日本");
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { binding });
 
-        AclBinding key = Assert.Single(result.Values).Key;
+        AclBinding key = Assert.Single(result.Values()).Key;
         Assert.Equal("tópico-café-日本", key.Pattern().Name());
         Assert.Equal(binding, key);
 

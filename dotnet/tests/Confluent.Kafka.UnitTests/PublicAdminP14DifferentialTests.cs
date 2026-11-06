@@ -85,11 +85,11 @@ public sealed class PublicAdminP14DifferentialTests
         CreateTopicsResult syncResult = sync.CreateTopics(request);
         AsyncCreateTopicsResult asyncResult = async.CreateTopics(request);
 
-        Assert.Equal(syncResult.Values.Keys, asyncResult.Values.Keys);
+        Assert.Equal(syncResult.Values().Keys, asyncResult.Values().Keys);
 
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.Values["diff-ok"]), FutureProbe.Of(asyncResult.Values["diff-ok"])));
+            await Agree(FutureProbe.Of(syncResult.Values()["diff-ok"]), FutureProbe.Of(asyncResult.Values()["diff-ok"])));
         Assert.Equal(
             (object)3,
             await Agree(FutureProbe.Of(syncResult.NumPartitions("diff-ok")), FutureProbe.Of(asyncResult.NumPartitions("diff-ok"))));
@@ -107,7 +107,7 @@ public sealed class PublicAdminP14DifferentialTests
         AssertKafka(
             InvalidReplicationFactorCode,
             TooLarge,
-            await Agree(FutureProbe.Of(syncResult.Values["diff-bad"]), FutureProbe.Of(asyncResult.Values["diff-bad"])));
+            await Agree(FutureProbe.Of(syncResult.Values()["diff-bad"]), FutureProbe.Of(asyncResult.Values()["diff-bad"])));
         AssertKafka(
             InvalidReplicationFactorCode,
             TooLarge,
@@ -138,21 +138,21 @@ public sealed class PublicAdminP14DifferentialTests
         DeleteTopicsResult syncResult = sync.DeleteTopics(request);
         AsyncDeleteTopicsResult asyncResult = async.DeleteTopics(request);
 
-        Assert.Null(syncResult.TopicIdValues);
-        Assert.Null(asyncResult.TopicIdValues);
-        Assert.Equal(request, Sorted(syncResult.TopicNameValues!.Keys));
-        Assert.Equal(request, Sorted(asyncResult.TopicNameValues!.Keys));
+        Assert.Null(syncResult.TopicIdValues());
+        Assert.Null(asyncResult.TopicIdValues());
+        Assert.Equal(request, Sorted(syncResult.TopicNameValues()!.Keys));
+        Assert.Equal(request, Sorted(asyncResult.TopicNameValues()!.Keys));
 
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.TopicNameValues["diff-a"]), FutureProbe.Of(asyncResult.TopicNameValues["diff-a"])));
+            await Agree(FutureProbe.Of(syncResult.TopicNameValues()!["diff-a"]), FutureProbe.Of(asyncResult.TopicNameValues()!["diff-a"])));
         const string Missing = "Topic diff-missing does not exist.";
         AssertKafka(
             UnknownTopicOrPartitionCode,
             Missing,
             await Agree(
-                FutureProbe.Of(syncResult.TopicNameValues["diff-missing"]),
-                FutureProbe.Of(asyncResult.TopicNameValues["diff-missing"])));
+                FutureProbe.Of(syncResult.TopicNameValues()!["diff-missing"]),
+                FutureProbe.Of(asyncResult.TopicNameValues()!["diff-missing"])));
         AssertKafka(
             UnknownTopicOrPartitionCode,
             Missing,
@@ -180,20 +180,20 @@ public sealed class PublicAdminP14DifferentialTests
         DeleteTopicsResult syncResult = sync.DeleteTopics(TopicCollection.OfTopicIds(new[] { syncId, s_missingId }));
         AsyncDeleteTopicsResult asyncResult = async.DeleteTopics(TopicCollection.OfTopicIds(new[] { asyncId, s_missingId }));
 
-        Assert.Null(syncResult.TopicNameValues);
-        Assert.Null(asyncResult.TopicNameValues);
-        Assert.Equal(2, syncResult.TopicIdValues!.Count);
-        Assert.Equal(2, asyncResult.TopicIdValues!.Count);
+        Assert.Null(syncResult.TopicNameValues());
+        Assert.Null(asyncResult.TopicNameValues());
+        Assert.Equal(2, syncResult.TopicIdValues()!.Count);
+        Assert.Equal(2, asyncResult.TopicIdValues()!.Count);
 
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.TopicIdValues[syncId]), FutureProbe.Of(asyncResult.TopicIdValues[asyncId])));
+            await Agree(FutureProbe.Of(syncResult.TopicIdValues()![syncId]), FutureProbe.Of(asyncResult.TopicIdValues()![asyncId])));
         string missing = "Topic " + s_missingId + " does not exist.";
         AssertKafka(
             UnknownTopicOrPartitionCode,
             missing,
             await Agree(
-                FutureProbe.Of(syncResult.TopicIdValues[s_missingId]), FutureProbe.Of(asyncResult.TopicIdValues[s_missingId])));
+                FutureProbe.Of(syncResult.TopicIdValues()![s_missingId]), FutureProbe.Of(asyncResult.TopicIdValues()![s_missingId])));
         AssertKafka(
             UnknownTopicOrPartitionCode,
             missing,
@@ -215,17 +215,17 @@ public sealed class PublicAdminP14DifferentialTests
         DescribeTopicsResult syncResult = sync.DescribeTopics(request);
         AsyncDescribeTopicsResult asyncResult = async.DescribeTopics(request);
 
-        Assert.Null(syncResult.TopicIdValues);
-        Assert.Null(asyncResult.TopicIdValues);
+        Assert.Null(syncResult.TopicIdValues());
+        Assert.Null(asyncResult.TopicIdValues());
         Assert.Null(syncResult.AllTopicIds());
         Assert.Null(asyncResult.AllTopicIds());
-        Assert.Equal(request, Sorted(syncResult.TopicNameValues!.Keys));
-        Assert.Equal(request, Sorted(asyncResult.TopicNameValues!.Keys));
+        Assert.Equal(request, Sorted(syncResult.TopicNameValues()!.Keys));
+        Assert.Equal(request, Sorted(asyncResult.TopicNameValues()!.Keys));
 
         TopicDescription described = Assert.IsType<TopicDescription>(
             await Agree(
-                FutureProbe.Of(syncResult.TopicNameValues["diff-d"]),
-                FutureProbe.Of(asyncResult.TopicNameValues["diff-d"]),
+                FutureProbe.Of(syncResult.TopicNameValues()!["diff-d"]),
+                FutureProbe.Of(asyncResult.TopicNameValues()!["diff-d"]),
                 static outcome => outcome.ToString()!));
         Assert.Equal("diff-d", described.Name());
         Assert.False(described.IsInternal());
@@ -237,8 +237,8 @@ public sealed class PublicAdminP14DifferentialTests
             UnknownTopicOrPartitionCode,
             NotFound,
             await Agree(
-                FutureProbe.Of(syncResult.TopicNameValues["diff-nope"]),
-                FutureProbe.Of(asyncResult.TopicNameValues["diff-nope"])));
+                FutureProbe.Of(syncResult.TopicNameValues()!["diff-nope"]),
+                FutureProbe.Of(asyncResult.TopicNameValues()!["diff-nope"])));
         AssertKafka(
             UnknownTopicOrPartitionCode,
             NotFound,
@@ -272,15 +272,15 @@ public sealed class PublicAdminP14DifferentialTests
         DescribeTopicsResult syncResult = sync.DescribeTopics(TopicCollection.OfTopicIds(new[] { syncId, s_missingId }));
         AsyncDescribeTopicsResult asyncResult = async.DescribeTopics(TopicCollection.OfTopicIds(new[] { asyncId, s_missingId }));
 
-        Assert.Null(syncResult.TopicNameValues);
-        Assert.Null(asyncResult.TopicNameValues);
+        Assert.Null(syncResult.TopicNameValues());
+        Assert.Null(asyncResult.TopicNameValues());
         Assert.Null(syncResult.AllTopicNames());
         Assert.Null(asyncResult.AllTopicNames());
 
         TopicDescription described = Assert.IsType<TopicDescription>(
             await Agree(
-                FutureProbe.Of(syncResult.TopicIdValues![syncId]),
-                FutureProbe.Of(asyncResult.TopicIdValues![asyncId]),
+                FutureProbe.Of(syncResult.TopicIdValues()![syncId]),
+                FutureProbe.Of(asyncResult.TopicIdValues()![asyncId]),
                 static outcome => outcome.ToString()!));
         Assert.Equal("diff-e", described.Name());
         Assert.Equal(syncId, described.TopicId());
@@ -290,7 +290,7 @@ public sealed class PublicAdminP14DifferentialTests
             UnknownTopicIdCode,
             notFound,
             await Agree(
-                FutureProbe.Of(syncResult.TopicIdValues[s_missingId]), FutureProbe.Of(asyncResult.TopicIdValues[s_missingId])));
+                FutureProbe.Of(syncResult.TopicIdValues()![s_missingId]), FutureProbe.Of(asyncResult.TopicIdValues()![s_missingId])));
         AssertKafka(
             UnknownTopicIdCode,
             notFound,
@@ -366,11 +366,11 @@ public sealed class PublicAdminP14DifferentialTests
         CreatePartitionsResult syncResult = sync.CreatePartitions(request);
         AsyncCreatePartitionsResult asyncResult = async.CreatePartitions(request);
 
-        Assert.Equal(new[] { "diff-h" }, syncResult.Values.Keys);
-        Assert.Equal(new[] { "diff-h" }, asyncResult.Values.Keys);
+        Assert.Equal(new[] { "diff-h" }, syncResult.Values().Keys);
+        Assert.Equal(new[] { "diff-h" }, asyncResult.Values().Keys);
         AssertNotSupported(
                         NotImplementedYet,
-            await Agree(FutureProbe.Of(syncResult.Values["diff-h"]), FutureProbe.Of(asyncResult.Values["diff-h"])));
+            await Agree(FutureProbe.Of(syncResult.Values()["diff-h"]), FutureProbe.Of(asyncResult.Values()["diff-h"])));
         AssertNotSupported(
                         NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
@@ -393,11 +393,11 @@ public sealed class PublicAdminP14DifferentialTests
         DeleteRecordsResult syncResult = sync.DeleteRecords(request);
         AsyncDeleteRecordsResult asyncResult = async.DeleteRecords(request);
 
-        Assert.Equal(new[] { partition }, syncResult.LowWatermarks.Keys);
-        Assert.Equal(new[] { partition }, asyncResult.LowWatermarks.Keys);
+        Assert.Equal(new[] { partition }, syncResult.LowWatermarks().Keys);
+        Assert.Equal(new[] { partition }, asyncResult.LowWatermarks().Keys);
         AssertNotSupported(
                         NotImplementedYet,
-            await Agree(FutureProbe.Of(syncResult.LowWatermarks[partition]), FutureProbe.Of(asyncResult.LowWatermarks[partition])));
+            await Agree(FutureProbe.Of(syncResult.LowWatermarks()[partition]), FutureProbe.Of(asyncResult.LowWatermarks()[partition])));
         AssertNotSupported(
                         NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
@@ -405,8 +405,8 @@ public sealed class PublicAdminP14DifferentialTests
         Dictionary<TopicPartition, RecordsToDelete> none = new Dictionary<TopicPartition, RecordsToDelete>();
         DeleteRecordsResult syncEmpty = sync.DeleteRecords(none);
         AsyncDeleteRecordsResult asyncEmpty = async.DeleteRecords(none);
-        Assert.Empty(syncEmpty.LowWatermarks);
-        Assert.Empty(asyncEmpty.LowWatermarks);
+        Assert.Empty(syncEmpty.LowWatermarks());
+        Assert.Empty(asyncEmpty.LowWatermarks());
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
     }
 
@@ -493,31 +493,31 @@ public sealed class PublicAdminP14DifferentialTests
         DescribeConfigsResult syncResult = sync.DescribeConfigs(request);
         AsyncDescribeConfigsResult asyncResult = async.DescribeConfigs(request);
         ConfigResource[] coreOrder = { broker, absentBroker, present, missing };
-        Assert.Equal(coreOrder, syncResult.Values.Keys);
-        Assert.Equal(coreOrder, asyncResult.Values.Keys);
+        Assert.Equal(coreOrder, syncResult.Values().Keys);
+        Assert.Equal(coreOrder, asyncResult.Values().Keys);
 
         Config config = Assert.IsType<Config>(
             await Agree(
-                FutureProbe.Of(syncResult.Values[present]),
-                FutureProbe.Of(asyncResult.Values[present]),
+                FutureProbe.Of(syncResult.Values()[present]),
+                FutureProbe.Of(asyncResult.Values()[present]),
                 static outcome => string.Join(",", Entries((Config)outcome))));
         Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
 
         Assert.IsType<Config>(
             await Agree(
-                FutureProbe.Of(syncResult.Values[broker]),
-                FutureProbe.Of(asyncResult.Values[broker]),
+                FutureProbe.Of(syncResult.Values()[broker]),
+                FutureProbe.Of(asyncResult.Values()[broker]),
                 static outcome => string.Join(",", Entries((Config)outcome))));
 
         const string MissingTopic = "Resource ConfigResource(type=TOPIC, name='diff-k-missing') not found.";
         AssertKafka(
             UnknownTopicOrPartitionCode,
             MissingTopic,
-            await Agree(FutureProbe.Of(syncResult.Values[missing]), FutureProbe.Of(asyncResult.Values[missing])));
+            await Agree(FutureProbe.Of(syncResult.Values()[missing]), FutureProbe.Of(asyncResult.Values()[missing])));
         AssertKafka(
             InvalidRequestCode,
             "Broker 7 not found.",
-            await Agree(FutureProbe.Of(syncResult.Values[absentBroker]), FutureProbe.Of(asyncResult.Values[absentBroker])));
+            await Agree(FutureProbe.Of(syncResult.Values()[absentBroker]), FutureProbe.Of(asyncResult.Values()[absentBroker])));
         AssertKafka(
             InvalidRequestCode,
             "Broker 7 not found.",
@@ -541,17 +541,17 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterConfigsResult syncResult = sync.IncrementalAlterConfigs(request);
         AsyncAlterConfigsResult asyncResult = async.IncrementalAlterConfigs(request);
-        Assert.Equal(new[] { present, missing }, syncResult.Values.Keys);
-        Assert.Equal(new[] { present, missing }, asyncResult.Values.Keys);
+        Assert.Equal(new[] { present, missing }, syncResult.Values().Keys);
+        Assert.Equal(new[] { present, missing }, asyncResult.Values().Keys);
 
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.Values[present]), FutureProbe.Of(asyncResult.Values[present])));
+            await Agree(FutureProbe.Of(syncResult.Values()[present]), FutureProbe.Of(asyncResult.Values()[present])));
         const string NoSuchTopic = "No such topic as diff-l-absent";
         AssertKafka(
             UnknownTopicOrPartitionCode,
             NoSuchTopic,
-            await Agree(FutureProbe.Of(syncResult.Values[missing]), FutureProbe.Of(asyncResult.Values[missing])));
+            await Agree(FutureProbe.Of(syncResult.Values()[missing]), FutureProbe.Of(asyncResult.Values()[missing])));
         AssertKafka(
             UnknownTopicOrPartitionCode,
             NoSuchTopic,
@@ -559,8 +559,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         Config described = Assert.IsType<Config>(
             await Agree(
-                FutureProbe.Of(sync.DescribeConfigs(new[] { present }).Values[present]),
-                FutureProbe.Of(async.DescribeConfigs(new[] { present }).Values[present]),
+                FutureProbe.Of(sync.DescribeConfigs(new[] { present }).Values()[present]),
+                FutureProbe.Of(async.DescribeConfigs(new[] { present }).Values()[present]),
                 static outcome => string.Join(",", Entries((Config)outcome))));
         Assert.Equal("1000", described.Get("retention.ms")!.Value());
     }
@@ -577,22 +577,22 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeLogDirsResult syncResult = sync.DescribeLogDirs(request);
         AsyncDescribeLogDirsResult asyncResult = async.DescribeLogDirs(request);
-        Assert.Equal(request, syncResult.Descriptions.Keys);
-        Assert.Equal(request, asyncResult.Descriptions.Keys);
+        Assert.Equal(request, syncResult.Descriptions().Keys);
+        Assert.Equal(request, asyncResult.Descriptions().Keys);
 
         IReadOnlyDictionary<string, LogDirDescription> hosting =
             Assert.IsAssignableFrom<IReadOnlyDictionary<string, LogDirDescription>>(
                 await Agree(
-                    FutureProbe.Of(syncResult.Descriptions[0]),
-                    FutureProbe.Of(asyncResult.Descriptions[0]),
+                    FutureProbe.Of(syncResult.Descriptions()[0]),
+                    FutureProbe.Of(asyncResult.Descriptions()[0]),
                     static outcome => LogDirs((IReadOnlyDictionary<string, LogDirDescription>)outcome)));
         Assert.Equal("/tmp/kafka-logs:diff-m-0;diff-m-1", LogDirs(hosting));
 
         IReadOnlyDictionary<string, LogDirDescription> unknown =
             Assert.IsAssignableFrom<IReadOnlyDictionary<string, LogDirDescription>>(
                 await Agree(
-                    FutureProbe.Of(syncResult.Descriptions[5]),
-                    FutureProbe.Of(asyncResult.Descriptions[5]),
+                    FutureProbe.Of(syncResult.Descriptions()[5]),
+                    FutureProbe.Of(asyncResult.Descriptions()[5]),
                     static outcome => LogDirs((IReadOnlyDictionary<string, LogDirDescription>)outcome)));
         Assert.Empty(unknown);
 
@@ -630,21 +630,21 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterReplicaLogDirsResult syncResult = sync.AlterReplicaLogDirs(request);
         AsyncAlterReplicaLogDirsResult asyncResult = async.AlterReplicaLogDirs(request);
-        Assert.Equal(Replicas(new[] { moved, offline, nowhere }), Replicas(syncResult.Values.Keys));
-        Assert.Equal(Replicas(new[] { moved, offline, nowhere }), Replicas(asyncResult.Values.Keys));
+        Assert.Equal(Replicas(new[] { moved, offline, nowhere }), Replicas(syncResult.Values().Keys));
+        Assert.Equal(Replicas(new[] { moved, offline, nowhere }), Replicas(asyncResult.Values().Keys));
 
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.Values[moved]), FutureProbe.Of(asyncResult.Values[moved])));
+            await Agree(FutureProbe.Of(syncResult.Values()[moved]), FutureProbe.Of(asyncResult.Values()[moved])));
         const string Offline = "Log directory /mnt/absent is offline";
         AssertKafka(
             KafkaStorageErrorCode,
             Offline,
-            await Agree(FutureProbe.Of(syncResult.Values[offline]), FutureProbe.Of(asyncResult.Values[offline])));
+            await Agree(FutureProbe.Of(syncResult.Values()[offline]), FutureProbe.Of(asyncResult.Values()[offline])));
         AssertKafka(
             ReplicaNotAvailableCode,
             "Can't find diff-n-0-7",
-            await Agree(FutureProbe.Of(syncResult.Values[nowhere]), FutureProbe.Of(asyncResult.Values[nowhere])));
+            await Agree(FutureProbe.Of(syncResult.Values()[nowhere]), FutureProbe.Of(asyncResult.Values()[nowhere])));
         ReplicaNotAvailableException allFailure =
             Assert.IsType<ReplicaNotAvailableException>(await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
         Assert.Contains(
@@ -652,8 +652,8 @@ public sealed class PublicAdminP14DifferentialTests
             new[] { (KafkaStorageErrorCode, Offline), (ReplicaNotAvailableCode, "Can't find diff-n-0-7") });
 
         object? info = await Agree(
-            FutureProbe.Of(sync.DescribeReplicaLogDirs(new[] { moved }).Values[moved]),
-            FutureProbe.Of(async.DescribeReplicaLogDirs(new[] { moved }).Values[moved]),
+            FutureProbe.Of(sync.DescribeReplicaLogDirs(new[] { moved }).Values()[moved]),
+            FutureProbe.Of(async.DescribeReplicaLogDirs(new[] { moved }).Values()[moved]),
             static outcome => outcome.ToString()!);
         Assert.Equal(
             "(currentReplicaLogDir=/tmp/kafka-logs, futureReplicaLogDir=/tmp/kafka-logs, futureReplicaOffsetLag=0)",
@@ -675,12 +675,12 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeReplicaLogDirsResult syncResult = sync.DescribeReplicaLogDirs(request);
         AsyncDescribeReplicaLogDirsResult asyncResult = async.DescribeReplicaLogDirs(request);
-        Assert.Equal(new[] { atRest }, syncResult.Values.Keys);
-        Assert.Equal(new[] { atRest }, asyncResult.Values.Keys);
+        Assert.Equal(new[] { atRest }, syncResult.Values().Keys);
+        Assert.Equal(new[] { atRest }, asyncResult.Values().Keys);
 
         object? info = await Agree(
-            FutureProbe.Of(syncResult.Values[atRest]),
-            FutureProbe.Of(asyncResult.Values[atRest]),
+            FutureProbe.Of(syncResult.Values()[atRest]),
+            FutureProbe.Of(asyncResult.Values()[atRest]),
             static outcome => outcome.ToString()!);
         Assert.Equal(
             "ReplicaLogDirInfo(currentReplicaLogDir=/tmp/kafka-logs)",
@@ -800,19 +800,19 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterPartitionReassignmentsResult syncResult = sync.AlterPartitionReassignments(request);
         AsyncAlterPartitionReassignmentsResult asyncResult = async.AlterPartitionReassignments(request);
-        Assert.Equal(new[] { reassigned, cancelled, missing }, syncResult.Values.Keys);
-        Assert.Equal(new[] { reassigned, cancelled, missing }, asyncResult.Values.Keys);
+        Assert.Equal(new[] { reassigned, cancelled, missing }, syncResult.Values().Keys);
+        Assert.Equal(new[] { reassigned, cancelled, missing }, asyncResult.Values().Keys);
 
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.Values[reassigned]), FutureProbe.Of(asyncResult.Values[reassigned])));
+            await Agree(FutureProbe.Of(syncResult.Values()[reassigned]), FutureProbe.Of(asyncResult.Values()[reassigned])));
         Assert.Same(
             BlockingCall.Returned,
-            await Agree(FutureProbe.Of(syncResult.Values[cancelled]), FutureProbe.Of(asyncResult.Values[cancelled])));
+            await Agree(FutureProbe.Of(syncResult.Values()[cancelled]), FutureProbe.Of(asyncResult.Values()[cancelled])));
         AssertKafka(
             UnknownTopicOrPartitionCode,
             UnknownTopicOrPartitionMessage,
-            await Agree(FutureProbe.Of(syncResult.Values[missing]), FutureProbe.Of(asyncResult.Values[missing])));
+            await Agree(FutureProbe.Of(syncResult.Values()[missing]), FutureProbe.Of(asyncResult.Values()[missing])));
         AssertKafka(
             UnknownTopicOrPartitionCode,
             UnknownTopicOrPartitionMessage,
@@ -1020,14 +1020,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeConsumerGroupsResult syncResult = sync.DescribeConsumerGroups(groups);
         AsyncDescribeConsumerGroupsResult asyncResult = async.DescribeConsumerGroups(groups);
-        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DescribedGroups.Keys));
-        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DescribedGroups.Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DescribedGroups().Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DescribedGroups().Keys));
 
         foreach (string group in groups)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.DescribedGroups[group]), FutureProbe.Of(asyncResult.DescribedGroups[group])));
+                await Agree(FutureProbe.Of(syncResult.DescribedGroups()[group]), FutureProbe.Of(asyncResult.DescribedGroups()[group])));
         }
 
         AssertNotSupported(
@@ -1046,14 +1046,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeClassicGroupsResult syncResult = sync.DescribeClassicGroups(groups);
         AsyncDescribeClassicGroupsResult asyncResult = async.DescribeClassicGroups(groups);
-        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DescribedGroups.Keys));
-        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DescribedGroups.Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DescribedGroups().Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DescribedGroups().Keys));
 
         foreach (string group in groups)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.DescribedGroups[group]), FutureProbe.Of(asyncResult.DescribedGroups[group])));
+                await Agree(FutureProbe.Of(syncResult.DescribedGroups()[group]), FutureProbe.Of(asyncResult.DescribedGroups()[group])));
         }
 
         AssertNotSupported(
@@ -1182,14 +1182,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         DeleteConsumerGroupsResult syncResult = sync.DeleteConsumerGroups(groups);
         AsyncDeleteConsumerGroupsResult asyncResult = async.DeleteConsumerGroups(groups);
-        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DeletedGroups.Keys));
-        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DeletedGroups.Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DeletedGroups().Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DeletedGroups().Keys));
 
         foreach (string group in groups)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.DeletedGroups[group]), FutureProbe.Of(asyncResult.DeletedGroups[group])));
+                await Agree(FutureProbe.Of(syncResult.DeletedGroups()[group]), FutureProbe.Of(asyncResult.DeletedGroups()[group])));
         }
 
         AssertNotSupported(
@@ -1405,14 +1405,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         CreateAclsResult syncResult = sync.CreateAcls(requested);
         AsyncCreateAclsResult asyncResult = async.CreateAcls(requested);
-        Assert.True(new HashSet<AclBinding>(bindings).SetEquals(syncResult.Values.Keys));
-        Assert.True(new HashSet<AclBinding>(bindings).SetEquals(asyncResult.Values.Keys));
+        Assert.True(new HashSet<AclBinding>(bindings).SetEquals(syncResult.Values().Keys));
+        Assert.True(new HashSet<AclBinding>(bindings).SetEquals(asyncResult.Values().Keys));
 
         foreach (AclBinding binding in bindings)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.Values[binding]), FutureProbe.Of(asyncResult.Values[binding])));
+                await Agree(FutureProbe.Of(syncResult.Values()[binding]), FutureProbe.Of(asyncResult.Values()[binding])));
         }
 
         AssertNotSupported(
@@ -1432,14 +1432,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         DeleteAclsResult syncResult = sync.DeleteAcls(requested);
         AsyncDeleteAclsResult asyncResult = async.DeleteAcls(requested);
-        Assert.True(new HashSet<AclBindingFilter>(filters).SetEquals(syncResult.Values.Keys));
-        Assert.True(new HashSet<AclBindingFilter>(filters).SetEquals(asyncResult.Values.Keys));
+        Assert.True(new HashSet<AclBindingFilter>(filters).SetEquals(syncResult.Values().Keys));
+        Assert.True(new HashSet<AclBindingFilter>(filters).SetEquals(asyncResult.Values().Keys));
 
         foreach (AclBindingFilter filter in filters)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.Values[filter]), FutureProbe.Of(asyncResult.Values[filter])));
+                await Agree(FutureProbe.Of(syncResult.Values()[filter]), FutureProbe.Of(asyncResult.Values()[filter])));
         }
 
         AssertNotSupported(
@@ -1497,14 +1497,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterClientQuotasResult syncResult = sync.AlterClientQuotas(alterations);
         AsyncAlterClientQuotasResult asyncResult = async.AlterClientQuotas(alterations);
-        Assert.True(new HashSet<ClientQuotaEntity>(entities).SetEquals(syncResult.Values.Keys));
-        Assert.True(new HashSet<ClientQuotaEntity>(entities).SetEquals(asyncResult.Values.Keys));
+        Assert.True(new HashSet<ClientQuotaEntity>(entities).SetEquals(syncResult.Values().Keys));
+        Assert.True(new HashSet<ClientQuotaEntity>(entities).SetEquals(asyncResult.Values().Keys));
 
         foreach (ClientQuotaEntity entity in entities)
         {
             AssertNotSupported(
                                 NotImplementYet,
-                await Agree(FutureProbe.Of(syncResult.Values[entity]), FutureProbe.Of(asyncResult.Values[entity])));
+                await Agree(FutureProbe.Of(syncResult.Values()[entity]), FutureProbe.Of(asyncResult.Values()[entity])));
         }
 
         AssertNotSupported(
@@ -1603,14 +1603,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterUserScramCredentialsResult syncResult = sync.AlterUserScramCredentials(alterations);
         AsyncAlterUserScramCredentialsResult asyncResult = async.AlterUserScramCredentials(alterations);
-        Assert.True(new HashSet<string>(users).SetEquals(syncResult.Values.Keys));
-        Assert.True(new HashSet<string>(users).SetEquals(asyncResult.Values.Keys));
+        Assert.True(new HashSet<string>(users).SetEquals(syncResult.Values().Keys));
+        Assert.True(new HashSet<string>(users).SetEquals(asyncResult.Values().Keys));
 
         foreach (string user in users)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.Values[user]), FutureProbe.Of(asyncResult.Values[user])));
+                await Agree(FutureProbe.Of(syncResult.Values()[user]), FutureProbe.Of(asyncResult.Values()[user])));
         }
 
         AssertNotSupported(
@@ -1776,8 +1776,8 @@ public sealed class PublicAdminP14DifferentialTests
             InvalidRequestCode,
             "Invalid update version 1 for feature metadata.version. Can't upgrade above 0",
             await Agree(
-                FutureProbe.Of(syncRejected.Values["metadata.version"]),
-                FutureProbe.Of(asyncRejected.Values["metadata.version"])));
+                FutureProbe.Of(syncRejected.Values()["metadata.version"]),
+                FutureProbe.Of(asyncRejected.Values()["metadata.version"])));
         AssertKafka(
             InvalidRequestCode,
             "Invalid update version 1 for feature metadata.version. Can't upgrade above 0",
@@ -1790,15 +1790,15 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncUpdateFeaturesResult asyncAccepted = async.UpdateFeatures(accepted);
         Assert.Equal(
             features.OrderBy(key => key, StringComparer.Ordinal),
-            syncAccepted.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            syncAccepted.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
         Assert.Equal(
             features.OrderBy(key => key, StringComparer.Ordinal),
-            asyncAccepted.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            asyncAccepted.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
         foreach (string feature in features)
         {
             Assert.Same(
                 BlockingCall.Returned,
-                await Agree(FutureProbe.Of(syncAccepted.Values[feature]), FutureProbe.Of(asyncAccepted.Values[feature])));
+                await Agree(FutureProbe.Of(syncAccepted.Values()[feature]), FutureProbe.Of(asyncAccepted.Values()[feature])));
         }
 
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncAccepted.All()), FutureProbe.Of(asyncAccepted.All())));
@@ -1806,8 +1806,8 @@ public sealed class PublicAdminP14DifferentialTests
         Dictionary<string, FeatureUpdate> empty = new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal);
         UpdateFeaturesResult syncEmpty = sync.UpdateFeatures(empty);
         AsyncUpdateFeaturesResult asyncEmpty = async.UpdateFeatures(empty);
-        Assert.Empty(syncEmpty.Values);
-        Assert.Empty(asyncEmpty.Values);
+        Assert.Empty(syncEmpty.Values());
+        Assert.Empty(asyncEmpty.Values());
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
     }
 
@@ -1899,14 +1899,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         FenceProducersResult syncResult = sync.FenceProducers(requested);
         AsyncFenceProducersResult asyncResult = async.FenceProducers(requested);
-        Assert.Equal(ids, syncResult.FencedProducers.Keys);
-        Assert.Equal(ids, asyncResult.FencedProducers.Keys);
+        Assert.Equal(ids, syncResult.FencedProducers().Keys);
+        Assert.Equal(ids, asyncResult.FencedProducers().Keys);
 
         foreach (string id in ids)
         {
             AssertNotSupported(
                                 NotImplementedYet,
-                await Agree(FutureProbe.Of(syncResult.FencedProducers[id]), FutureProbe.Of(asyncResult.FencedProducers[id])));
+                await Agree(FutureProbe.Of(syncResult.FencedProducers()[id]), FutureProbe.Of(asyncResult.FencedProducers()[id])));
             AssertNotSupported(
                                 NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.ProducerId(id)), FutureProbe.Of(asyncResult.ProducerId(id))));
@@ -1921,8 +1921,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         FenceProducersResult syncEmpty = sync.FenceProducers(Array.Empty<string>());
         AsyncFenceProducersResult asyncEmpty = async.FenceProducers(Array.Empty<string>());
-        Assert.Empty(syncEmpty.FencedProducers);
-        Assert.Empty(asyncEmpty.FencedProducers);
+        Assert.Empty(syncEmpty.FencedProducers());
+        Assert.Empty(asyncEmpty.FencedProducers());
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
     }
 
@@ -2242,7 +2242,7 @@ public sealed class PublicAdminP14DifferentialTests
             .ToList();
 
     private static string Offsets(ListOffsetsResult.ListOffsetsResultInfo info) =>
-        info.Offset + "/" + info.Timestamp + "/" + (info.LeaderEpoch?.ToString() ?? "none");
+        info.Offset() + "/" + info.Timestamp() + "/" + (info.LeaderEpoch()?.ToString() ?? "none");
 
     private static string Listings(IEnumerable<GroupListing> listings) =>
         string.Join(

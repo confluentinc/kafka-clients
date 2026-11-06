@@ -216,7 +216,7 @@ public sealed class AdminConfigsSubmitArgumentTests
             };
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(configs, null));
 
-        Assert.Equal(new[] { s_topicResource }, result.Values.Keys);
+        Assert.Equal(new[] { s_topicResource }, result.Values().Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Config config = await Describe(admin, s_topicResource);
         Assert.Equal("2", config.Get("retention.ms")!.Value());
@@ -239,7 +239,7 @@ public sealed class AdminConfigsSubmitArgumentTests
             },
             new AlterConfigsOptions().ValidateOnly(validateOnly)));
 
-        await TestTimeout.Run(() => result.Values[s_topicResource].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[s_topicResource].Get(), s_deadline);
         Assert.Empty((await Describe(admin, s_topicResource)).Entries());
     }
 
@@ -252,7 +252,7 @@ public sealed class AdminConfigsSubmitArgumentTests
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>(), null));
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -273,10 +273,10 @@ public sealed class AdminConfigsSubmitArgumentTests
             },
             null));
 
-        Assert.Equal(3, result.Values.Count);
-        Assert.Contains(s_topicResource, result.Values.Keys);
-        Assert.Contains(new ConfigResource(ConfigResourceType.BROKER, "0"), result.Values.Keys);
-        Assert.Contains(new ConfigResource(ConfigResourceType.UNKNOWN, "x"), result.Values.Keys);
+        Assert.Equal(3, result.Values().Count);
+        Assert.Contains(s_topicResource, result.Values().Keys);
+        Assert.Contains(new ConfigResource(ConfigResourceType.BROKER, "0"), result.Values().Keys);
+        Assert.Contains(new ConfigResource(ConfigResourceType.UNKNOWN, "x"), result.Values().Keys);
     }
 
     private static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> Ops(
@@ -296,7 +296,7 @@ public sealed class AdminConfigsSubmitArgumentTests
 
     private static Task<Config> Describe(NativeAdminClient admin, ConfigResource resource) =>
         TestTimeout.Run(
-            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values[resource].Get(),
+            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values()[resource].Get(),
             s_deadline);
 
     private static (int TimeoutMs, sbyte IncludeSynonyms, sbyte IncludeDocumentation) ReadBack(

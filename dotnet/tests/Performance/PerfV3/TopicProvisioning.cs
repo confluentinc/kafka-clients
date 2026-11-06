@@ -50,7 +50,7 @@ internal static class TopicProvisioning
             new DeleteTopicsOptions().TimeoutMs(OperationTimeoutMs));
         try
         {
-            deleteResult.TopicNameValues![topic].Get();
+            deleteResult.TopicNameValues()![topic].Get();
             Console.WriteLine($">>> deleted '{topic}'");
         }
         catch (ExecutionException e) when (e.InnerException is UnknownTopicOrPartitionException)
@@ -69,7 +69,7 @@ internal static class TopicProvisioning
             new CreateTopicsOptions().TimeoutMs(OperationTimeoutMs));
         try
         {
-            createResult.Values[topic].Get();
+            createResult.Values()[topic].Get();
             Console.WriteLine($">>> created '{topic}'");
         }
         catch (ExecutionException e) when (e.InnerException is TopicExistsException)

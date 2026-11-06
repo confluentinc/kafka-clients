@@ -86,7 +86,7 @@ public sealed class PublicAdminParityLowsTests
 
         AsyncAlterClientQuotasResult result = new AsyncAlterClientQuotasResult(futures);
 
-        Assert.Same(futures, result.Values);
+        Assert.Same(futures, result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         futures[bob] = new AsyncKafkaFuture(TestFutures.Failed(failure));
@@ -116,7 +116,7 @@ public sealed class PublicAdminParityLowsTests
 
         AsyncAlterUserScramCredentialsResult result = new AsyncAlterUserScramCredentialsResult(futures);
 
-        Assert.Same(futures, result.Values);
+        Assert.Same(futures, result.Values());
         KafkaException thrown =
             await FutureAssert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Same(failure, thrown);

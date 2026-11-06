@@ -105,11 +105,15 @@ public sealed class ListOffsetsResult
     /// One partition's offset information — Java's <c>ListOffsetsResult.ListOffsetsResultInfo</c>.
     /// </summary>
     /// <remarks>
-    /// <see cref="LeaderEpoch"/> is <see langword="null"/> for Java's <c>Optional.empty()</c>, which the
+    /// <see cref="LeaderEpoch()"/> is <see langword="null"/> for Java's <c>Optional.empty()</c>, which the
     /// core reports as a leader epoch of <c>-1</c>.
     /// </remarks>
     public sealed class ListOffsetsResultInfo
     {
+        private readonly long _offset;
+        private readonly long _timestamp;
+        private readonly int? _leaderEpoch;
+
         /// <summary>
         /// Creates offset information — Java's
         /// <c>ListOffsetsResultInfo(long, long, Optional&lt;Integer&gt;)</c>.
@@ -122,25 +126,29 @@ public sealed class ListOffsetsResult
         /// </param>
         public ListOffsetsResultInfo(long offset, long timestamp, int? leaderEpoch)
         {
-            Offset = offset;
-            Timestamp = timestamp;
-            LeaderEpoch = leaderEpoch;
+            _offset = offset;
+            _timestamp = timestamp;
+            _leaderEpoch = leaderEpoch;
         }
 
         /// <summary>The offset — Java's <c>offset()</c>.</summary>
-        public long Offset { get; }
+        /// <returns>The offset.</returns>
+        public long Offset() => _offset;
 
         /// <summary>
         /// The timestamp associated with the offset, or <c>-1</c> when the broker reported
         /// none — Java's <c>timestamp()</c>.
         /// </summary>
-        public long Timestamp { get; }
+        /// <returns>The timestamp associated with the offset, or <c>-1</c> when the broker reported none.</returns>
+        public long Timestamp() => _timestamp;
 
         /// <summary>
         /// The leader epoch, or <see langword="null"/> when Java's <c>leaderEpoch()</c> is
         /// <c>Optional.empty()</c>.
         /// </summary>
-        public int? LeaderEpoch { get; }
+        /// <returns>The leader epoch, or <see langword="null"/> when Java's leader epoch is
+        /// <c>Optional.empty()</c>.</returns>
+        public int? LeaderEpoch() => _leaderEpoch;
 
         /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
         /// <returns>The rendering.</returns>
@@ -152,10 +160,10 @@ public sealed class ListOffsetsResult
             string.Format(
                 CultureInfo.InvariantCulture,
                 "ListOffsetsResultInfo(offset={0}, timestamp={1}, leaderEpoch={2})",
-                Offset,
-                Timestamp,
-                LeaderEpoch is null
+                _offset,
+                _timestamp,
+                _leaderEpoch is null
                     ? "Optional.empty"
-                    : string.Format(CultureInfo.InvariantCulture, "Optional[{0}]", LeaderEpoch.Value));
+                    : string.Format(CultureInfo.InvariantCulture, "Optional[{0}]", _leaderEpoch.Value));
     }
 }

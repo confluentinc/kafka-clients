@@ -64,14 +64,14 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("mixed-bad", 1, 5),
         });
 
-        await TestTimeout.Run(() => result.Values["mixed-ok"].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()["mixed-ok"].Get(), s_deadline);
 
         int numPartitions = 0;
         await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("mixed-ok").Get(), s_deadline);
         Assert.Equal(2, numPartitions);
 
         InvalidReplicationFactorException failure = await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(
-            () => TestTimeout.Run(() => result.Values["mixed-bad"].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()["mixed-bad"].Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
         Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
     }
@@ -88,11 +88,11 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("solo-bad", 1, 9),
         });
 
-        await TestTimeout.Run(() => result.Values["solo-ok"].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()["solo-ok"].Get(), s_deadline);
 
         // Await the failed sibling rather than read its Exception: the futures complete one at a time, so it can still be
         // pending here.
-        await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(() => TestTimeout.Run(() => result.Values["solo-bad"].Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(() => TestTimeout.Run(() => result.Values()["solo-bad"].Get(), s_deadline));
     }
 
     [Fact]
@@ -118,7 +118,7 @@ public sealed class PublicAdminCreateTopicsTests
             () => TestTimeout.Run(() => mixed.All().Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
 
-        await TestTimeout.Run(() => mixed.Values["all-c"].Get(), s_deadline);
+        await TestTimeout.Run(() => mixed.Values()["all-c"].Get(), s_deadline);
     }
 
     [Fact]
@@ -208,13 +208,13 @@ public sealed class PublicAdminCreateTopicsTests
             KafkaFuture<int> numPartitions = result.NumPartitions("linked");
             KafkaFuture<Config> config = result.Config("linked");
             KafkaFuture allBefore = result.All();
-            KafkaFuture cancelled = result.Values["linked"];
+            KafkaFuture cancelled = result.Values()["linked"];
 
             Assert.True(cancelled.Cancel(true));
 
             Assert.True(cancelled.IsCancelled);
             KafkaFuture allAfter = result.All();
-            KafkaFuture fresh = result.Values["linked"];
+            KafkaFuture fresh = result.Values()["linked"];
             Assert.False(numPartitions.IsDone);
             Assert.False(config.IsDone);
             Assert.False(allBefore.IsDone);
@@ -247,13 +247,13 @@ public sealed class PublicAdminCreateTopicsTests
             AsyncKafkaFuture<int> numPartitions = result.NumPartitions("linked");
             AsyncKafkaFuture<Config> config = result.Config("linked");
             AsyncKafkaFuture allBefore = result.All();
-            AsyncKafkaFuture cancelled = result.Values["linked"];
+            AsyncKafkaFuture cancelled = result.Values()["linked"];
 
             Assert.True(cancelled.Cancel(true));
 
             Assert.True(cancelled.IsCancelled);
             AsyncKafkaFuture allAfter = result.All();
-            AsyncKafkaFuture fresh = result.Values["linked"];
+            AsyncKafkaFuture fresh = result.Values()["linked"];
             Assert.False(numPartitions.IsDone);
             Assert.False(config.IsDone);
             Assert.False(allBefore.IsDone);
@@ -286,13 +286,13 @@ public sealed class PublicAdminCreateTopicsTests
         {
             CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
             AsyncCreateTopicsResult asyncResult = asyncAdmin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
-            KafkaFuture first = result.Values["t"];
-            AsyncKafkaFuture asyncFirst = asyncResult.Values["t"];
+            KafkaFuture first = result.Values()["t"];
+            AsyncKafkaFuture asyncFirst = asyncResult.Values()["t"];
             Assert.True(first.Cancel(true));
             Assert.True(asyncFirst.Cancel(true));
 
-            KafkaFuture fresh = result.Values["t"];
-            AsyncKafkaFuture asyncFresh = asyncResult.Values["t"];
+            KafkaFuture fresh = result.Values()["t"];
+            AsyncKafkaFuture asyncFresh = asyncResult.Values()["t"];
 
             Assert.NotEqual(first, fresh);
             Assert.NotEqual(asyncFirst, asyncFresh);
@@ -356,11 +356,11 @@ public sealed class PublicAdminCreateTopicsTests
         });
 
         TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
-            () => TestTimeout.Run(() => second.Values["dup"].Get(), s_deadline));
+            () => TestTimeout.Run(() => second.Values()["dup"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic dup exists already.", failure.Message);
 
-        await TestTimeout.Run(() => second.Values["fresh"].Get(), s_deadline);
+        await TestTimeout.Run(() => second.Values()["fresh"].Get(), s_deadline);
     }
 
     [Fact]
@@ -374,9 +374,9 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
         AsyncCreateTopicsResult second = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
 
-        Assert.Equal(new[] { Topic }, second.Values.Keys);
+        Assert.Equal(new[] { Topic }, second.Values().Keys);
         TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
-            () => TestTimeout.Run(() => second.Values[Topic].Get(), s_deadline));
+            () => TestTimeout.Run(() => second.Values()[Topic].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal($"Topic {Topic} exists already.", failure.Message);
     }
@@ -393,9 +393,9 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("repeated", 7, 1),
         });
 
-        Assert.Single(result.Values);
+        Assert.Single(result.Values());
         TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
-            () => TestTimeout.Run(() => result.Values["repeated"].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()["repeated"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic repeated exists already.", failure.Message);
         await FutureAssert.ThrowsAsync<TopicExistsException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
@@ -413,7 +413,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(Array.Empty<NewTopic>());
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 

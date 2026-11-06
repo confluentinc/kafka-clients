@@ -80,8 +80,8 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// with <see cref="TopicCollection.OfTopicNames"/> or
     /// <see cref="TopicCollection.OfTopicIds"/>; the choice selects which of the two ABI
     /// entry points runs, and which of
-    /// <see cref="AsyncDeleteTopicsResult.TopicNameValues"/> /
-    /// <see cref="AsyncDeleteTopicsResult.TopicIdValues"/> is non-null. A repeated topic yields
+    /// <see cref="AsyncDeleteTopicsResult.TopicNameValues()"/> /
+    /// <see cref="AsyncDeleteTopicsResult.TopicIdValues()"/> is non-null. A repeated topic yields
     /// one entry, as Java's map-keyed result does.
     /// </param>
     /// <param name="options">
@@ -111,7 +111,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One future per topic, in <see cref="AsyncDeleteTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="AsyncDeleteTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
     /// A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
@@ -167,7 +167,7 @@ public interface IAsyncAdmin : IAsyncDisposable, IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One future per topic, in <see cref="AsyncDescribeTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="AsyncDescribeTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
     /// A lone literal <see langword="null"/> argument matches both <c>DescribeTopics</c>

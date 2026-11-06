@@ -40,7 +40,7 @@ public sealed class DeletedRecords
     /// <returns>The "low watermark" for the topic partition on which the deletion was executed.</returns>
     /// <remarks>
     /// <c>-1</c> is a value, not a failure: a partition that failed fails its own future in
-    /// <see cref="DeleteRecordsResult.LowWatermarks"/> and produces no <see cref="DeletedRecords"/>.
+    /// <see cref="DeleteRecordsResult.LowWatermarks()"/> and produces no <see cref="DeletedRecords"/>.
     /// </remarks>
     public long LowWatermark() => _lowWatermark;
 }

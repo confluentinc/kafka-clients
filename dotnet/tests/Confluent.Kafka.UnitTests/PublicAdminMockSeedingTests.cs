@@ -227,6 +227,6 @@ public class PublicAdminMockSeedingTests
                 .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec })
                 .PartitionResult(partition).Get(),
             s_deadline);
-        return info.Offset;
+        return info.Offset();
     }
 }

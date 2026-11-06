@@ -40,13 +40,13 @@ public sealed class PublicAdminShapeParityTests
     [Fact]
     public void CreateTopicsResult_Values_ErasesTheMetadataLikeJava()
     {
-        PropertyInfo values = typeof(CreateTopicsResult).GetProperty(nameof(CreateTopicsResult.Values))!;
+        MethodInfo values = Getters.Get(typeof(CreateTopicsResult), nameof(CreateTopicsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.ReturnType);
 
-        PropertyInfo asyncValues = typeof(AsyncCreateTopicsResult).GetProperty(nameof(AsyncCreateTopicsResult.Values))!;
+        MethodInfo asyncValues = Getters.Get(typeof(AsyncCreateTopicsResult), nameof(AsyncCreateTopicsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>), asyncValues.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>), asyncValues.ReturnType);
     }
 
     [Fact]
@@ -234,7 +234,7 @@ public sealed class PublicAdminShapeParityTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic(Topic, 3, 2) });
 
-        Task creation = result.Values[Topic].Get();
+        Task creation = result.Values()[Topic].Get();
         await TestTimeout.Run(() => creation, s_deadline);
 
         int replicationFactor = 0;

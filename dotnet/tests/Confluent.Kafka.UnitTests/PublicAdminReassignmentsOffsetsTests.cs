@@ -101,11 +101,11 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         // The mock seeds no offsets, so -1 is expected: what is under test is that the kind is accepted.
         ListOffsetsResult.ListOffsetsResultInfo info =
             await TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline);
-        Assert.Equal(-1, info.Offset);
-        Assert.Equal(-1, info.Timestamp);
+        Assert.Equal(-1, info.Offset());
+        Assert.Equal(-1, info.Timestamp());
 
         // The mock builds every info without a leader epoch, so it reads as null.
-        Assert.Null(info.LeaderEpoch);
+        Assert.Null(info.LeaderEpoch());
     }
 
     [Fact]

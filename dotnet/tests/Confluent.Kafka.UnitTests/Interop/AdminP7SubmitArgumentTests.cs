@@ -114,8 +114,8 @@ public sealed class AdminP7SubmitArgumentTests
                 new UserScramCredentialDeletion("other", ScramMechanism.SCRAM_SHA_256),
             });
 
-        Assert.Equal(new[] { "dup", "other" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
-        foreach (KafkaFuture future in result.Values.Values)
+        Assert.Equal(new[] { "dup", "other" }, result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
+        foreach (KafkaFuture future in result.Values().Values)
         {
             AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
         }

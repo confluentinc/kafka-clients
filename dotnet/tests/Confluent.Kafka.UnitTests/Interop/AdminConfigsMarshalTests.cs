@@ -172,7 +172,7 @@ public sealed class AdminConfigsMarshalTests
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
         Config config = await TestTimeout.Run(
-            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values[resource].Get(),
+            () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { resource }, null)).Values()[resource].Get(),
             s_deadline);
 
         Assert.Equal(2, config.Entries().Count);
@@ -199,10 +199,10 @@ public sealed class AdminConfigsMarshalTests
         AsyncDescribeConfigsResult result =
             AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { present, missing }, null));
 
-        Assert.NotNull(await TestTimeout.Run(() => result.Values[present].Get(), s_deadline));
+        Assert.NotNull(await TestTimeout.Run(() => result.Values()[present].Get(), s_deadline));
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values()[missing].Get()), s_deadline);
         Assert.Equal("Resource ConfigResource(type=TOPIC, name='cfg-absent-topic') not found.", failure.Message);
 
         UnknownTopicOrPartitionException all = await TestTimeout.Run(

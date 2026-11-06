@@ -69,11 +69,11 @@ public sealed class AdminTransactionsMarshalTests
         DescribeProducersResult.PartitionProducerState copied =
             CopyOutBuiltProducers(new[] { first, second, third }, buildList: true);
 
-        Assert.Equal(new[] { first, second, third }, copied.ActiveProducers);
-        Assert.Null(copied.ActiveProducers[1].CoordinatorEpoch());
-        Assert.Null(copied.ActiveProducers[1].CurrentTransactionStartOffset());
-        Assert.Equal(0, copied.ActiveProducers[2].CoordinatorEpoch());
-        Assert.Equal(0L, copied.ActiveProducers[2].CurrentTransactionStartOffset());
+        Assert.Equal(new[] { first, second, third }, copied.ActiveProducers());
+        Assert.Null(copied.ActiveProducers()[1].CoordinatorEpoch());
+        Assert.Null(copied.ActiveProducers()[1].CurrentTransactionStartOffset());
+        Assert.Equal(0, copied.ActiveProducers()[2].CoordinatorEpoch());
+        Assert.Equal(0L, copied.ActiveProducers()[2].CurrentTransactionStartOffset());
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed class AdminTransactionsMarshalTests
         DescribeProducersResult.PartitionProducerState copied =
             CopyOutBuiltProducers(Array.Empty<ProducerState>(), buildList: true);
 
-        Assert.Empty(copied.ActiveProducers);
+        Assert.Empty(copied.ActiveProducers());
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public sealed class AdminTransactionsMarshalTests
     [Fact]
     public void CopyOut_ANullPointer_ReadsAsPythonReadsIt()
     {
-        Assert.Empty(PartitionProducerStateMarshal.CopyOut(IntPtr.Zero).ActiveProducers);
+        Assert.Empty(PartitionProducerStateMarshal.CopyOut(IntPtr.Zero).ActiveProducers());
         Assert.Null(TransactionDescriptionMarshal.CopyOut(IntPtr.Zero));
         Assert.Equal(
             "The admin result produced no producer state.",

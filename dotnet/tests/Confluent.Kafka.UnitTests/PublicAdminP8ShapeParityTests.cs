@@ -103,10 +103,10 @@ public sealed class PublicAdminP8ShapeParityTests
             typeof(DescribeProducersResult),
             typeof(DescribeProducersResult.PartitionProducerState).DeclaringType);
 
-        Assert.Empty(DeclaredPublicMethodNames(typeof(DescribeProducersResult.PartitionProducerState)));
         Assert.Equal(
             new[] { "ActiveProducers" },
-            DeclaredPublicPropertyNames(typeof(DescribeProducersResult.PartitionProducerState)));
+            DeclaredPublicMethodNames(typeof(DescribeProducersResult.PartitionProducerState)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(DescribeProducersResult.PartitionProducerState)));
     }
 
     [Theory]
@@ -155,8 +155,8 @@ public sealed class PublicAdminP8ShapeParityTests
     [InlineData(typeof(AsyncFenceProducersResult), typeof(AsyncKafkaFuture), typeof(AsyncKafkaFuture<>))]
     public void FenceProducersResult_PublishesExactlyJavasFourMembers(Type result, Type voidFuture, Type future)
     {
-        Assert.Equal(new[] { "All", "EpochId", "ProducerId" }, DeclaredPublicMethodNames(result));
-        Assert.Equal(new[] { "FencedProducers" }, DeclaredPublicPropertyNames(result));
+        Assert.Equal(new[] { "All", "EpochId", "FencedProducers", "ProducerId" }, DeclaredPublicMethodNames(result));
+        Assert.Empty(DeclaredPublicPropertyNames(result));
 
         // The two projections keep Java's widths: an epoch is a short here, although ProducerState.ProducerEpoch is an int.
         Assert.Equal(future.MakeGenericType(typeof(long)), result.GetMethod("ProducerId")!.ReturnType);
@@ -166,7 +166,7 @@ public sealed class PublicAdminP8ShapeParityTests
         // The erased view is payload-free, as Java's thenApply(p -> null) is.
         Assert.Equal(
             typeof(IReadOnlyDictionary<,>).MakeGenericType(typeof(string), voidFuture),
-            result.GetProperty("FencedProducers")!.PropertyType);
+            result.GetMethod("FencedProducers", Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]

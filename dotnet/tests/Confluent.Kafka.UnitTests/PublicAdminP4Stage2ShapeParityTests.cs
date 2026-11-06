@@ -146,7 +146,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Type info = typeof(ListOffsetsResult.ListOffsetsResultInfo);
 
         Assert.Same(typeof(ListOffsetsResult), info.DeclaringType);
-        Assert.True(info.IsNested, "Java declares it nested (ListOffsetsResult.java:70)");
+        Assert.True(info.IsNested, "Java declares it nested");
         Assert.True(info.IsSealed);
 
         ConstructorInfo only = Assert.Single(info.GetConstructors());
@@ -154,17 +154,17 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             new[] { typeof(long), typeof(long), typeof(int?) },
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
-        Assert.Equal(typeof(long), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.Offset))!.PropertyType);
-        Assert.Equal(typeof(long), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.Timestamp))!.PropertyType);
+        Assert.Equal(typeof(long), Getters.Get(info, nameof(ListOffsetsResult.ListOffsetsResultInfo.Offset)).ReturnType);
+        Assert.Equal(typeof(long), Getters.Get(info, nameof(ListOffsetsResult.ListOffsetsResultInfo.Timestamp)).ReturnType);
 
         // int? is Java's Optional<Integer>, which a plain int cannot express.
         Assert.Equal(
-            typeof(int?), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.LeaderEpoch))!.PropertyType);
+            typeof(int?), Getters.Get(info, nameof(ListOffsetsResult.ListOffsetsResultInfo.LeaderEpoch)).ReturnType);
 
         Assert.Equal(
-            new[] { "LeaderEpoch", "Offset", "Timestamp" }, DeclaredPublicPropertyNames(info));
+            new[] { "LeaderEpoch", "Offset", "Timestamp" }, DeclaredPublicMethodNames(info));
 
-        Assert.Empty(DeclaredPublicMethodNames(info));
+        Assert.Empty(DeclaredPublicPropertyNames(info));
 
         // ToString is overridden, as Java declares one; the helper filters object's members, so it is pinned here.
         Assert.Same(info, info.GetMethod("ToString", Type.EmptyTypes)!.DeclaringType);
@@ -172,12 +172,12 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         // A present epoch of -1 is present.
         ListOffsetsResult.ListOffsetsResultInfo negative =
             new ListOffsetsResult.ListOffsetsResultInfo(5, 7, -1);
-        Assert.Equal(-1, negative.LeaderEpoch);
+        Assert.Equal(-1, negative.LeaderEpoch());
         Assert.Equal("ListOffsetsResultInfo(offset=5, timestamp=7, leaderEpoch=Optional[-1])", negative.ToString());
 
         ListOffsetsResult.ListOffsetsResultInfo absent =
             new ListOffsetsResult.ListOffsetsResultInfo(5, 7, null);
-        Assert.Null(absent.LeaderEpoch);
+        Assert.Null(absent.LeaderEpoch());
         Assert.Equal("ListOffsetsResultInfo(offset=5, timestamp=7, leaderEpoch=Optional.empty)", absent.ToString());
     }
 

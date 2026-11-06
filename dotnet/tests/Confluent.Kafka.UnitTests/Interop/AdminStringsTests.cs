@@ -187,7 +187,7 @@ public sealed class AdminStringsTests
             Assert.Equal("configs", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
             Config before = await TestTimeout.Run(
-                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values[topic].Get(),
+                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values()[topic].Get(),
                 s_deadline);
             Assert.Null(before.Get("retention.ms"));
 
@@ -195,7 +195,7 @@ public sealed class AdminStringsTests
                 () => AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(SetOp(topic, "retention.ms", "1000"), null)).All().Get(),
                 s_deadline);
             Config config = await TestTimeout.Run(
-                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values[topic].Get(),
+                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values()[topic].Get(),
                 s_deadline);
             Assert.Equal("1000", config.Get("retention.ms")!.Value());
         }
@@ -335,7 +335,7 @@ public sealed class AdminStringsTests
     private static Task<long> EarliestOffset(NativeAdminClient admin, TopicPartition partition) =>
         Task.FromResult(admin
             .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, null)
-            .Futures[partition].Get(s_deadline).Offset);
+            .Futures[partition].Get(s_deadline).Offset());
 
     private static SafeAdminClientHandle HandleOf(NativeAdminClient native) =>
         (SafeAdminClientHandle)typeof(NativeAdminClient)

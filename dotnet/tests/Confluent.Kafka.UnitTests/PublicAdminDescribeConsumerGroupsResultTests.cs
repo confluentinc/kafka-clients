@@ -56,13 +56,14 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
     [InlineData(typeof(AsyncDescribeConsumerGroupsResult))]
     public void PublicShape_IsJavasTwoAccessors(Type result)
     {
-        Assert.Equal(new[] { "DescribedGroups" }, result.GetProperties().Select(property => property.Name));
+        Assert.Empty(result.GetProperties());
         Assert.Equal(
-            new[] { "All" },
+            new[] { "All", "DescribedGroups" },
             result
                 .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
                 .Where(method => !method.IsSpecialName)
-                .Select(method => method.Name));
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
         Assert.Empty(result.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
         Assert.Null(result.GetCustomAttribute<ObsoleteAttribute>());
     }
@@ -77,9 +78,9 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         futures["g-2"] = KafkaFuture.CompletedFuture(Description("g-2"));
         futures.Remove("g-1");
 
-        Assert.NotSame(futures, result.DescribedGroups);
-        Assert.Equal(new[] { "g-1" }, result.DescribedGroups.Keys);
-        Assert.Equal(first, result.DescribedGroups["g-1"]);
+        Assert.NotSame(futures, result.DescribedGroups());
+        Assert.Equal(new[] { "g-1" }, result.DescribedGroups().Keys);
+        Assert.Equal(first, result.DescribedGroups()["g-1"]);
         Assert.Equal(new[] { "g-1" }, result.All().Get(s_deadline).Keys);
     }
 
@@ -94,9 +95,9 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         futures["g-2"] = AsyncKafkaFuture.CompletedFuture(Description("g-2"));
         futures.Remove("g-1");
 
-        Assert.NotSame(futures, result.DescribedGroups);
-        Assert.Equal(new[] { "g-1" }, result.DescribedGroups.Keys);
-        Assert.Equal(first, result.DescribedGroups["g-1"]);
+        Assert.NotSame(futures, result.DescribedGroups());
+        Assert.Equal(new[] { "g-1" }, result.DescribedGroups().Keys);
+        Assert.Equal(first, result.DescribedGroups()["g-1"]);
         Assert.Equal(new[] { "g-1" }, (await result.All().Get()).Keys);
     }
 
@@ -159,7 +160,7 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
                 ["healthy"] = KafkaFuture.CompletedFuture(healthy),
                 ["broken"] = new KafkaFuture<ConsumerGroupDescription>(broken),
             });
-        Assert.Same(healthy, result.DescribedGroups["healthy"].Get(s_deadline));
+        Assert.Same(healthy, result.DescribedGroups()["healthy"].Get(s_deadline));
         Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => result.All().Get(s_deadline)));
 
         AsyncDescribeConsumerGroupsResult asyncResult = new AsyncDescribeConsumerGroupsResult(
@@ -168,7 +169,7 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
                 ["healthy"] = AsyncKafkaFuture.CompletedFuture(healthy),
                 ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken),
             });
-        Assert.Same(healthy, await asyncResult.DescribedGroups["healthy"].Get());
+        Assert.Same(healthy, await asyncResult.DescribedGroups()["healthy"].Get());
         Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => asyncResult.All().Get()));
     }
 

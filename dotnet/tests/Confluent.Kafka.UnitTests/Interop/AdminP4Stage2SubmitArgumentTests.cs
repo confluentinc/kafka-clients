@@ -134,7 +134,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         TopicPartition nullSpec = new TopicPartition("p4s2-args", 1);
         var listed = admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullSpec] = null! }, null);
-        Assert.Equal(-1L, listed.Futures[nullSpec].Get(TimeSpan.FromSeconds(30)).Offset);
+        Assert.Equal(-1L, listed.Futures[nullSpec].Get(TimeSpan.FromSeconds(30)).Offset());
     }
 
     private static OffsetSpec? Spec(string kind) => kind switch
