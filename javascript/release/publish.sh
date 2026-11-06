@@ -26,7 +26,10 @@
 # pre-release: a stable version would need the `latest` dist-tag, which the earlier
 # librdkafka-based client still holds (README.txt). A package already published with the same
 # tarball is skipped, so an interrupted run can be repeated; one published with another tarball
-# stops it.
+# stops it. Once every package is there it reads the dist-tags back, whether it published or
+# skipped: each package's `preview` must be the version, and the main package's `latest` (and
+# `rc` / `alpha`, when present) a version of the earlier client, below 4.0.0, so a publish that
+# moved one of them by hand is caught.
 #
 # Usage: ./publish.sh
 # Needs bash, node and npm (Node.js 20 or newer), and sha256sum or shasum.
@@ -159,7 +162,7 @@ echo "== Reading the registry back =="
 for i in "${!tarballs[@]}"; do
     local_integrity=$(integrity_of "${tarballs[$i]}")
     remote=""
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
         remote=$(published_integrity "${names[$i]}") || remote=""
         [ "$remote" = "$local_integrity" ] && break
         sleep 6
@@ -169,11 +172,62 @@ for i in "${!tarballs[@]}"; do
     echo "${names[$i]}@$version: $REGISTRY serves this tarball ($local_integrity)"
 done
 
+# What is wrong with the dist-tags of $1 once $version is published, one problem per line, or
+# nothing: `preview` must be $version, and for the main package `latest`, `rc` and `alpha`, when
+# present, a version below 4 (the earlier client's; the registry sets a new platform package's
+# `latest` on its first publish, which is harmless). Fails if the registry cannot be read.
+dist_tag_problems() {
+    local tags
+    tags=$(npm view "$1" dist-tags --json "${REGISTRY_FLAGS[@]}") || return 1
+    # shellcheck disable=SC2016 # JavaScript, not shell: nothing in it is for the shell to expand.
+    node -e '
+        const [json, name, version, main, distTag] = process.argv.slice(1);
+        let tags;
+        try {
+            tags = JSON.parse(json);
+        } catch {
+            tags = null;
+        }
+        if (tags === null || typeof tags !== "object") {
+            console.log(`npm printed no dist-tags for ${name}: ${json}`);
+            process.exit(0);
+        }
+        const problems = [];
+        if (tags[distTag] !== version) {
+            problems.push(`the ${distTag} dist-tag of ${name} is ${tags[distTag] ?? "not set"}, not ${version}`);
+        }
+        if (name === main) {
+            for (const tag of ["latest", "rc", "alpha"]) {
+                if (!(tag in tags)) continue;
+                const major = /^(0|[1-9][0-9]*)\./.exec(String(tags[tag]));
+                if (major === null || Number(major[1]) >= 4) {
+                    problems.push(`the ${tag} dist-tag of ${name} is ${tags[tag]}, but it must stay on the earlier ` +
+                        `client, below 4.0.0: point it back with \`npm dist-tag add ${name}@<its version> ${tag}\``);
+                }
+            }
+        }
+        if (problems.length > 0) console.log(problems.join("\n"));
+    ' "$tags" "$1" "$version" "$MAIN" "$DIST_TAG"
+}
+
+echo "== Checking the dist-tags =="
+# A tag set by a publish can take a little while to be served too.
+for i in "${!tarballs[@]}"; do
+    problems=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        problems=$(dist_tag_problems "${names[$i]}") || problems="could not read the dist-tags of ${names[$i]} from $REGISTRY"
+        [ -z "$problems" ] && break
+        sleep 6
+    done
+    [ -z "$problems" ] || die "$problems"
+    echo "${names[$i]}: $DIST_TAG is $version"
+done
+
 echo "== Summary =="
 for i in "${!tarballs[@]}"; do
     sum=$(grep -F "  ${tarballs[$i]}" SHA256SUMS | cut -d' ' -f1)
     echo "$sum  ${tarballs[$i]}  ${names[$i]}@$version"
 done
-echo "Published $MAIN $version under the $DIST_TAG dist-tag. Check it with:"
+echo "$MAIN $version is published under the $DIST_TAG dist-tag, and latest is on the earlier client. Check it with:"
 echo "  npm view $MAIN dist-tags"
 echo "then run the javascript-post-install Semaphore task with JAVASCRIPT_VERSION=$version (README.txt)."

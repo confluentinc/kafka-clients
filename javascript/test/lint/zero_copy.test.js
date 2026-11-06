@@ -28,7 +28,8 @@ const RULE = 'check-zero-copy';
 test('bytes read over their own memory, the listed allocations only', () => {
   const r = runN(RULE);
   assert.equal(r.status, 0, r.text);
-  assert.ok(r.out.includes('✅ check-zero-copy: 2 item(s) checked'), r.text);
+  // The C borrow and allocation, and the 3 calls of the fixture's lib/.
+  assert.ok(r.out.includes('✅ check-zero-copy: 5 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
@@ -59,4 +60,31 @@ test('an allowlist entry that matches nothing is a finding', () => {
 test('cannot run without the C sources', () => {
   const r = runN(RULE, { 'src/producer.c': undefined, 'src/callback_queue.c': undefined, 'src/record.c': undefined });
   assert.equal(r.err[1], '❌ check-zero-copy: cannot run, no C sources under src/');
+});
+
+test("lib/ copies none of the caller's bytes; encoding a string is no copy", () => {
+  const RECORD_TS = [
+    '// Node\'s Buffer, as @types/node declares the two calls used here.',
+    'declare class Buffer extends Uint8Array {',
+    '  static from(data: string | Uint8Array, encoding?: string): Buffer;',
+    '}',
+    'export type Data = Buffer | Uint8Array | string;',
+    'export function toBytes(value: Data | null): Uint8Array | null {',
+    '  if (value === null) return null;',
+    "  return typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value);",
+    '}',
+    'export function copies(key: Uint8Array, value: Data): Uint8Array[] {',
+    '  return [new Uint8Array(key), Uint8Array.from(key), key.slice(), new Uint8Array(key.buffer, 0, 1), key.subarray(0)];',
+    '}',
+    'void copies;',
+    '',
+  ].join('\n');
+  const r = runN(RULE, { 'lib/producer/record.ts': RECORD_TS });
+  const why = "copies bytes the caller handed over: pass the Buffer or Uint8Array itself (a string is encoded once)";
+  assert.deepEqual(findings(r), [
+    `lib/producer/record.ts:8: Buffer.from(value) ${why}`,
+    `lib/producer/record.ts:11: new Uint8Array(key) ${why}`,
+    `lib/producer/record.ts:11: Uint8Array.from(key) ${why}`,
+    `lib/producer/record.ts:11: key.slice() ${why}`,
+  ]);
 });

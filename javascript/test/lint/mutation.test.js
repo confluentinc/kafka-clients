@@ -185,6 +185,19 @@ MUTATIONS.push(
     apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '  timeoutMs?: number | undefined;', '  timeout?: number | undefined;'),
   },
   {
+    // The untranslated get(long, TimeUnit) is baselined by its own form: a
+    // positional timeout on get() is a wrong shape the baseline does not cover.
+    rule: 'check-overload-shape',
+    what: 'KafkaFuture.get taking a positional timeout',
+    apply: (root) =>
+      edit(
+        root,
+        'lib/common/kafka_future.ts',
+        '   * @returns resolving to the result value, rejecting with the error the\n   *   future failed with\n   */\n  get(): Promise<T> {',
+        '   * @param timeoutMs - The maximum time to wait\n   * @returns resolving to the result value, rejecting with the error the\n   *   future failed with\n   */\n  get(timeoutMs?: number): Promise<T> {\n    void timeoutMs;',
+      ),
+  },
+  {
     // The registry misses a use, flush's native path no longer resolves, and
     // so its Promise is no waiting call's.
     rules: ['check-type-mapping', 'check-waiting-call-promise', 'check-native-registry'],
@@ -242,6 +255,30 @@ MUTATIONS.push(
       ),
   },
   {
+    rule: 'check-cb-twin-only',
+    what: "the hand-over's future read through get_cb",
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (value != NULL) FFI_DISCARD(kafka_common_KafkaFuture_destroy_err(value, &ffi_err));',
+        '    if (value != NULL) kafka_common_KafkaFuture_get_cb(value, send_on_future, ctx);\n    if (value != NULL) FFI_DISCARD(kafka_common_KafkaFuture_destroy_err(value, &ffi_err));',
+      ),
+  },
+  {
+    rule: 'check-cb-twin-only',
+    what: 'a blocking flush in a macro of util.h',
+    apply: (root) => {
+      edit(root, 'src/util.h', '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n', '#define FFI_DISCARD(call) error_discard(FFI_ERR(call))\n#define FLUSH_VIEW(view) FFI_DISCARD(kafka_producer_Producer_flush((view), &ffi_err))\n');
+      edit(
+        root,
+        'src/producer.c',
+        '    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FLUSH_VIEW(p->view);\n    }\n    kafka_producer_Producer_flush_cb(p->view, flush_on_complete, ctx);',
+      );
+    },
+  },
+  {
     rule: 'check-out-err',
     what: 'an FFI_ERR dropped',
     apply: (root) =>
@@ -253,10 +290,37 @@ MUTATIONS.push(
       ),
   },
   {
+    rule: 'check-out-err',
+    what: "the drain's read of the executor's error deleted",
+    apply: (root) => edit(root, 'src/callback_queue.c', '        error_discard(ffi_take(&ffi_err));\n', ''),
+  },
+  {
+    rule: 'check-out-err',
+    what: 'the executor called with a NULL slot',
+    apply: (root) => edit(root, 'src/callback_queue.c', 'q->execute(q->client, &ffi_err)', 'q->execute(q->client, NULL)'),
+  },
+  {
+    rule: 'check-out-err',
+    what: 'FFI_DISCARD around a call given another slot',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (props != NULL) FFI_DISCARD(kafka_Map_destroy_err(props, &ffi_err));',
+        '    kafka_common_Error_t* map_err = NULL;\n    if (props != NULL) FFI_DISCARD(kafka_Map_destroy_err(props, &map_err));',
+      ),
+  },
+  {
     rule: 'check-notify-hook',
     what: 'a call added in cbq_notify',
     apply: (root) =>
       edit(root, 'src/callback_queue.c', '    pthread_mutex_unlock(&q->notify_mtx);\n}\n\nvoid cbq_schedule', '    pthread_mutex_unlock(&q->notify_mtx);\n    cbq_schedule(q);\n}\n\nvoid cbq_schedule'),
+  },
+  {
+    rule: 'check-notify-hook',
+    what: 'a return between the lock and the unlock of cbq_notify',
+    apply: (root) =>
+      edit(root, 'src/callback_queue.c', '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->notify_open)', '    pthread_mutex_lock(&q->notify_mtx);\n    if (q->stopped) return;\n    if (q->notify_open)'),
   },
   {
     rule: 'check-single-drainer',
@@ -278,10 +342,43 @@ MUTATIONS.push(
     },
   },
   {
+    rule: 'check-completion-order',
+    what: "the delivery callback's body moved into a module function completing the future first",
+    apply: (root) => {
+      const file = path.join(root, 'lib/producer/kafka_producer.ts');
+      const text = fs.readFileSync(file, 'utf8');
+      const body = /    const onComplete = \(metadata: RecordMetadata, error: Error \| null\): string \| undefined => \{\n[^]*?\n    \};\n/.exec(text);
+      assert.ok(body, 'kafka_producer.ts has no onComplete');
+      fs.writeFileSync(
+        file,
+        text.replace(body[0], '    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined =>\n      deliver(future, userCallback, metadata, error);\n') +
+          '\nfunction deliver(future: KafkaFuture<RecordMetadata>, userCallback: Callback | null, metadata: RecordMetadata, error: Error | null): string | undefined {\n' +
+          "  future['_complete'](metadata, error);\n  if (userCallback !== null) userCallback(metadata, error);\n  return undefined;\n}\n",
+      );
+    },
+  },
+  {
+    rule: 'check-completion-order',
+    what: 'the destroying guard guarding another statement than the report',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (!p->destroying) {\n        FFI_DISCARD(kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err));\n    } else {\n        // Destroy completes the unreported callbacks itself.\n        error_discard(report);\n    }\n',
+        '    if (!p->destroying) ctx->delivered = 1;\n    FFI_DISCARD(kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err));\n',
+      ),
+  },
+  {
     rule: 'check-ownership',
     what: 'a configuration never destroyed',
     apply: (root) =>
       edit(root, 'src/producer.c', '    if (config != NULL) FFI_DISCARD(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err));\n', ''),
+  },
+  {
+    rule: 'check-ownership',
+    what: "the delivery callback's borrowed error destroyed through a cast",
+    apply: (root) =>
+      edit(root, 'src/producer.c', '    ctx->delivered = 1;\n', '    error_discard((kafka_common_Error_t*)error);\n    ctx->delivered = 1;\n'),
   },
   {
     rule: 'check-zero-copy',
@@ -290,14 +387,51 @@ MUTATIONS.push(
       edit(root, 'src/record.c', '    out->bytes.len = (int32_t)length;', '    out->bytes.len = (int32_t)length;\n    memcpy((void*)out->bytes.data, data, length);'),
   },
   {
+    rule: 'check-zero-copy',
+    what: 'a Uint8Array key copied by Buffer.from in lib/',
+    apply: (root) =>
+      edit(root, 'lib/producer/producer_record.ts', "Buffer.from(value, 'utf8') : value;", "Buffer.from(value, 'utf8') : Buffer.from(value);"),
+  },
+  {
     rule: 'check-no-binding-queue',
     what: 'a mutex in producer.c',
     apply: (root) => edit(root, 'src/producer.c', 'typedef struct SendCtx SendCtx;', 'static pthread_mutex_t producer_lock = PTHREAD_MUTEX_INITIALIZER;\n\ntypedef struct SendCtx SendCtx;'),
   },
   {
+    rule: 'check-no-binding-queue',
+    what: 'a send queue in a private helper of lib/',
+    apply: (root) =>
+      add(
+        root,
+        'lib/_send_queue.ts',
+        `${fs.readFileSync(path.join(root, 'lib/_native.ts'), 'utf8').split(LICENSE_END)[0]}${LICENSE_END}\n` +
+          '// Holds records back.\nexport class SendQueue {\n  private readonly records: unknown[] = [];\n}\n',
+      ),
+  },
+  {
     rule: 'check-single-drainer',
     what: 'the producer destroyed in its close completion',
     apply: (root) => edit(root, 'src/producer.c', '    p->close_error = error;\n', '    p->close_error = error;\n    producer_destroy(env, p);\n'),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: 'the producer destroyed in its executor',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    return kafka_producer_Producer__execute_callbacks_err(((Producer*)client)->view, out_err);',
+        '    Producer* p = (Producer*)client;\n    int32_t ran = kafka_producer_Producer__execute_callbacks_err(p->view, out_err);\n' +
+          '    if (p->destroy_requested && !p->destroying) producer_destroy(p->env, p);\n    return ran;',
+      ),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: "the queue's after_drain moved inside the drain loop",
+    apply: (root) => {
+      edit(root, 'src/callback_queue.c', '    if (q->after_drain != NULL) q->after_drain(env, q->client);\n', '');
+      edit(root, 'src/callback_queue.c', '        if (ran <= 0) break;\n', '        if (ran <= 0) break;\n        if (q->after_drain != NULL) q->after_drain(env, q->client);\n');
+    },
   },
   {
     rule: 'check-tsdoc-tags',

@@ -42,6 +42,32 @@ test('the blocking form of a _cb twin is a finding', () => {
   assert.deepEqual(findings(r), ['src/producer.c:28: js_send calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
 });
 
+test('reading the future is a finding in every form, its _cb twins included', () => {
+  const { HEADER } = require('./_c_fixture');
+  const header = `${HEADER}\nvoid *kafka_common_KafkaFuture_get(const kafka_common_KafkaFuture_t *self_, kafka_common_Error_t **out_err);\n\nvoid kafka_common_KafkaFuture_get_cb(const kafka_common_KafkaFuture_t *self_, kafka_common_KafkaFuture_get_cb_t cb, void *opaque);\n\nvoid kafka_common_KafkaFuture_get_with_timeout_cb(const kafka_common_KafkaFuture_t *self_, int64_t timeout_ms, kafka_common_KafkaFuture_get_with_timeout_cb_t cb, void *opaque);\n`;
+  const r = runN(RULE, {
+    'confluent_kafka_bindings.h': header,
+    'src/producer.c': PRODUCER_C.replace(
+      '    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));',
+      '    kafka_common_KafkaFuture_get_cb(value, on_handover, opaque);\n    kafka_common_KafkaFuture_get_with_timeout_cb(value, 0, on_handover, opaque);\n    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));',
+    ),
+  });
+  const reason = "never read the future (javascript/CLAUDE.md rule 5): a send's future is destroyed unread, the delivery result comes from the record's Callback_t";
+  assert.deepEqual(findings(r), [
+    `src/producer.c:17: on_handover calls kafka_common_KafkaFuture_get_cb: ${reason}`,
+    `src/producer.c:18: on_handover calls kafka_common_KafkaFuture_get_with_timeout_cb: ${reason}`,
+  ]);
+});
+
+test("a macro's body is checked at its definition", () => {
+  const { UTIL_H } = require('./_c_fixture');
+  const r = runN(RULE, {
+    'src/util.h': `${UTIL_H}#define FLUSH_VIEW(view) \\\n    FFI_DISCARD(kafka_x_P_flush((view), &ffi_err))\n`,
+    'src/producer.c': PRODUCER_C.replace('    kafka_x_P_flush_cb(p, on_handover, ctx);', '    FLUSH_VIEW(p);'),
+  });
+  assert.deepEqual(findings(r), ['src/util.h:14: the macro FLUSH_VIEW calls kafka_x_P_flush, the blocking form of kafka_x_P_flush_cb: call the _cb twin']);
+});
+
 test('an allowlist entry allows exactly its call; one that allows nothing is a finding', () => {
   let r = runN(RULE, { 'src/producer.c': BLOCKING }, { ALLOWED: [{ key: 'src/producer.c:js_send:kafka_x_P_flush(p, &ffi_err)', reason: 'the test' }] });
   assert.equal(r.status, 0, r.text);

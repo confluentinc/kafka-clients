@@ -57,6 +57,8 @@ typedef struct {
     void* tsfn;
     void* client;
 } CallbackQueue;
+typedef int32_t (*cbq_execute_fn)(void* client, kafka_common_Error_t** out_err);
+typedef void (*cbq_client_fn)(void* client);
 `;
 
 const QUEUE_C = `#include "util.h"
@@ -82,10 +84,18 @@ void cbq_drain(CallbackQueue* q) {
         error_discard(ffi_take(&ffi_err));
         if (ran <= 0) break;
     }
+    if (q->after_drain != NULL) q->after_drain(q->client);
 }
 
 static void call_js(void* env, void* context) {
     cbq_drain((CallbackQueue*)context);
+}
+
+int cbq_init(CallbackQueue* q, void* client, cbq_execute_fn execute, cbq_client_fn after_drain) {
+    q->client = client;
+    q->execute = execute;
+    q->after_drain = after_drain;
+    return 0;
 }
 `;
 
@@ -126,6 +136,14 @@ void js_setup(void* p) {
     kafka_common_Error_t* ffi_err = NULL;
     FFI_DISCARD(kafka_x_P__set_callbacks_notify_err(p, cbq_notify, p, &ffi_err));
 }
+
+static void producer_after_drain(void* client) {
+    (void)client;
+}
+
+void js_create(CallbackQueue* q, void* p) {
+    cbq_init(q, p, producer_execute, producer_after_drain);
+}
 `;
 
 const RECORD_C = `#include "util.h"
@@ -140,8 +158,9 @@ int js_bytes(void* env, void* value, JsBytes* out) {
 }
 `;
 
-const NATIVE_TS = `interface Native {
-  send(onComplete: (m: unknown, e: unknown) => void): void;
+const NATIVE_TS = `import type { RecordMetadata } from './producer/record_metadata';
+interface Native {
+  send(onComplete: (m: RecordMetadata, e: unknown) => void): void;
 }
 declare const loaded: Native;
 const native: Native = loaded;
@@ -175,6 +194,7 @@ const FILES = {
   'src/record.c': RECORD_C,
   'lib/_native.ts': NATIVE_TS,
   'lib/producer/callback.ts': 'export type Callback = (m: unknown, e: unknown) => void;\n',
+  'lib/producer/record_metadata.ts': 'export class RecordMetadata {}\n',
   'lib/producer/producer.ts': PRODUCER_TS,
 };
 

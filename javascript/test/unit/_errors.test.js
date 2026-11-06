@@ -29,7 +29,7 @@ const path = require('node:path');
 const root = require('@confluentinc/kafka-javascript');
 const { common, producer, consumer } = root;
 const { ERRORS, FFI_NAMES } = require('../../dist/_error_registry');
-const { UNKNOWN_SERVER_ERROR, classForFfiId, errorClasses, fromNative } = require('../../dist/_errors');
+const { LOCAL_NULL_POINTER, UNKNOWN_SERVER_ERROR, classForFfiId, errorClasses, fromNative } = require('../../dist/_errors');
 const { ownFfiId } = require('../../dist/_throwable');
 
 const REPO = path.join(__dirname, '..', '..', '..');
@@ -148,8 +148,9 @@ test("every class's own FFI id names its class, and the id table is a bijection"
     assert.equal(e.errorName, FFI_NAMES.get(id), cls.name);
   }
   assert.equal(ids.size, 166);
-  // Every FFI id but NONE and LOCAL_CALLBACK (Rust-only) has a class.
-  const named = [...FFI_NAMES].filter(([, n]) => n !== 'NONE' && n !== 'LOCAL_CALLBACK').map(([v]) => v);
+  // Every FFI id but NONE and the Rust-only LOCAL_CALLBACK and LOCAL_NULL_POINTER has a class.
+  const rustOnly = new Set(['NONE', 'LOCAL_CALLBACK', 'LOCAL_NULL_POINTER']);
+  const named = [...FFI_NAMES].filter(([, n]) => !rustOnly.has(n)).map(([v]) => v);
   assert.deepEqual([...ids.keys()].sort((a, b) => a - b), named.sort((a, b) => a - b));
 });
 
@@ -244,6 +245,26 @@ test('fromNative: an unknown id constructs the base KafkaError', () => {
   assert.equal(e.message, 'some message');
   assert.equal(e.code, 999999);
   assert.equal(e.errorName, null);
+});
+
+test("fromNative: LOCAL_NULL_POINTER is JavaScript's own TypeError, as Python's", () => {
+  // Java's NullPointerException for a NULL mandatory argument has no class.
+  assert.equal(FFI_NAMES.get(LOCAL_NULL_POINTER), 'LOCAL_NULL_POINTER');
+  const cause = { code: 7, name: 'REQUEST_TIMED_OUT', message: 'inner', retriable: true, apiError: true };
+  const e = fromNative({
+    code: LOCAL_NULL_POINTER,
+    name: 'LOCAL_NULL_POINTER',
+    message: 'topic must not be null',
+    retriable: false,
+    apiError: false,
+    cause,
+  });
+  assert.equal(e.constructor, TypeError);
+  assert.ok(!(e instanceof KafkaError));
+  assert.equal(e.message, 'topic must not be null');
+  assert.equal(e.cause.constructor, common.errors.TimeoutError);
+  assert.equal(e.cause.message, 'inner');
+  assert.equal(fromNative({ code: LOCAL_NULL_POINTER, name: 'LOCAL_NULL_POINTER', message: 'm' }).cause, undefined);
 });
 
 test('fromNative: -1 is UnknownServerError for an ApiException, else the bare KafkaError', () => {

@@ -59,6 +59,18 @@ test('the lock entry allows its one declaration; a module store and a parameter 
   ]);
 });
 
+test('a private helper of lib/ is read too; a generated module is not', () => {
+  const queue = 'export class SendQueue {\n  private readonly records: unknown[] = [];\n  push(r: unknown): void {\n    if (this.records.length < SEND_QUEUE_LIMIT) this.records.push(r);\n  }\n}\n';
+  const r = runN(RULE, {
+    'lib/_send_queue.ts': `const SEND_QUEUE_LIMIT = 10000;\n${queue}`,
+    'lib/common/errors/_table.ts': '// GENERATED, DO NOT EDIT: by the test.\nexport const TABLE: string[] = [];\n',
+  });
+  assert.deepEqual(findings(r), [
+    'lib/_send_queue.ts:SEND_QUEUE_LIMIT: names a cap: the binding caps no records',
+    'SendQueue.records: holds a unknown[]: the binding keeps no records',
+  ]);
+});
+
 test('an allowlist entry that matches nothing is a finding', () => {
   const r = runN(RULE, {}, { ALLOWED: [{ key: 'src/util.h:CallbackQueue.notify_mtx', reason: "the queue's lock" }, { key: 'Producer.#gone', reason: 'the test' }] });
   assert.deepEqual(findings(r), ['Producer.#gone: is allowed as the test, but nothing matches it any more: delete the entry']);
