@@ -23,18 +23,50 @@
 //     method, such as
 //     `kafka_producer_Callback_new_err`'s `on_completion`) calls the JS side
 //     (`call_ref`) at one site, and `__set_callback_result_err` at one site,
-//     after it, under an `if (!…destroying)` guard (no report once destroy
-//     has begun);
+//     after it, as the statement an `if (!…destroying)` guards or inside its
+//     braced block (no report once destroy has begun);
 //   - TypeScript: the function lib/ hands the native send as its delivery
-//     completion (a function argument of a `native.<fn>` call that completes a
-//     future, `future['_complete'](...)`) runs the user callback (a value of the
-//     `Callback` type) before it completes the future, each at one site.
+//     completion (an argument for a native parameter whose function type
+//     takes a `RecordMetadata`, and any function argument of a `native.<fn>`
+//     call that completes a future, `future['_complete'](...)`) runs the user
+//     callback (a value of the `Callback` type) before it completes the
+//     future, each once, the functions it calls in lib/ followed; a delivery
+//     callback the rule cannot resolve to a function is a finding.
 // The completion functions are listed with what they run; an entry that
 // matches nothing is a finding.
 
 const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { nativeUses } = require('../native_uses');
-const { scan } = require('../c_source');
+const { scan, matching } = require('../c_source');
+
+/**
+ * Whether offset `at` of `code` (comments and literals blanked) lies in what
+ * an `if (!…destroying)` between `from` and `to` guards: its braced block, or
+ * the single statement after it (to that statement's `;`).
+ */
+function guarded(code, from, to, at) {
+  const re = /\bif\s*\(\s*!\s*(\w+\s*(->|\.)\s*)*destroying\s*\)/g;
+  re.lastIndex = from;
+  let m;
+  while ((m = re.exec(code)) !== null && m.index < to) {
+    let k = m.index + m[0].length;
+    while (/\s/.test(code[k])) k++;
+    if (code[k] === '{') {
+      if (at > k && at < matching(code, k)) return true;
+      continue;
+    }
+    // One statement: to its `;` outside brackets.
+    let depth = 0;
+    let end = k;
+    for (; end < to; end++) {
+      if ('([{'.includes(code[end])) depth++;
+      else if (')]}'.includes(code[end])) depth--;
+      else if (code[end] === ';' && depth === 0) break;
+    }
+    if (at >= k && at < end) return true;
+  }
+  return false;
+}
 
 /** The C delivery-completion functions, with why they are one. */
 const COMPLETIONS = [
@@ -43,7 +75,7 @@ const COMPLETIONS = [
 
 module.exports = {
   name: 'check-completion-order',
-  kinds: ['completion-order', 'completion-count', 'completion-unlisted', 'report-unguarded', 'order-unused-allowance'],
+  kinds: ['completion-order', 'completion-count', 'completion-unlisted', 'completion-unresolved', 'report-unguarded', 'order-unused-allowance'],
   needs: ['program', 'src', 'header'],
   COMPLETIONS,
   hint:
@@ -90,11 +122,11 @@ module.exports = {
           message: `reports __set_callback_result_err (line ${report[0].line}) before running the callback (line ${js[0].line})`,
         });
       }
-      // Rule 6: no report once destroy has begun, so the report sits under `if (!...destroying)`.
+      // Rule 6: no report once destroy has begun, so the report is the
+      // statement an `if (!...destroying)` guards, or inside its braced block.
       if (report.length === 1) {
         const code = scan(ctx.read(body.file)).code;
-        const before = code.slice(body.bodyStart, report[0].start);
-        if (!/if\s*\(\s*!\s*(\w+\s*(->|\.)\s*)*destroying\s*\)\s*\{?[^{}]*$/.test(before)) {
+        if (!guarded(code, body.bodyStart, body.bodyEnd, report[0].start)) {
           findings.push({
             kind: 'report-unguarded',
             subject: name,
@@ -103,40 +135,90 @@ module.exports = {
         }
       }
     }
-    // The TypeScript side: each function given to the native layer that completes a future.
+    // The TypeScript side: each function given to the native layer that
+    // completes a future, and every delivery callback (an argument for a
+    // native parameter whose function type takes a `RecordMetadata`), which
+    // must be a function the rule can follow: a function literal, or a
+    // `const` / `readonly` / module function of lib/ naming one. Calls to such
+    // functions inside it are followed, in call order, so a body moved into a
+    // helper is still read.
+    const isConst = (d) =>
+      (ts.isVariableDeclaration(d) && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const) !== 0) ||
+      (ts.isPropertyDeclaration(d) && (ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Readonly) !== 0);
+    const fnOf = (expr) => {
+      if (ts.isParenthesizedExpression(expr)) return fnOf(expr.expression);
+      if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) return expr;
+      if (!ts.isIdentifier(expr) && !ts.isPropertyAccessExpression(expr)) return null;
+      let symbol = checker.getSymbolAtLocation(ts.isPropertyAccessExpression(expr) ? expr.name : expr);
+      if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+      const d = symbol && symbol.valueDeclaration;
+      if (!d || d.getSourceFile().isDeclarationFile) return null;
+      if (ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d)) return d.body ? d : null;
+      return isConst(d) && d.initializer ? fnOf(d.initializer) : null;
+    };
+    const named = (t) => [t.symbol, t.aliasSymbol].some((sym) => sym && sym.name === 'RecordMetadata');
+    const takesMetadata = (type) =>
+      type !== undefined &&
+      (type.isUnion() ? type.types : [type]).some((t) =>
+        t.getCallSignatures().some((sig) => sig.parameters.some((p) => named(checker.getNonNullableType(checker.getTypeOfSymbol(p))))),
+      );
+    // A value of the `Callback` type itself (not a function taking one).
+    const isCallback = (t) => (t.aliasSymbol && t.aliasSymbol.name === 'Callback') || checker.typeToString(t) === 'Callback';
+    /** The user-callback runs and future completions of function `fn`, in call order. */
+    const events = (fn, stack = [fn]) => {
+      const out = [];
+      const visit = (n) => {
+        ts.forEachChild(n, visit);
+        if (!ts.isCallExpression(n)) return;
+        const e = n.expression;
+        if (ts.isElementAccessExpression(e) && ts.isStringLiteralLike(e.argumentExpression) && e.argumentExpression.text === '_complete') {
+          out.push({ what: 'complete', node: n });
+        } else if (isCallback(checker.getNonNullableType(checker.getTypeAtLocation(e)))) {
+          out.push({ what: 'user', node: n });
+        } else {
+          const callee = fnOf(e);
+          if (callee && !stack.includes(callee)) out.push(...events(callee, [...stack, callee]));
+        }
+      };
+      visit(fn.body);
+      return out;
+    };
     for (const u of nativeUses(ctx)) {
       const call = u.node.parent;
-      if (!ts.isCallExpression(call)) continue;
+      if (!ts.isCallExpression(call) || call.expression !== u.node) continue;
       for (const arg of call.arguments) {
-        const fn = ts.isIdentifier(arg) ? (checker.getSymbolAtLocation(arg) || {}).valueDeclaration : arg;
-        const literal = fn && ts.isVariableDeclaration(fn) ? fn.initializer : fn;
-        if (!literal || !(ts.isArrowFunction(literal) || ts.isFunctionExpression(literal))) continue;
-        const sf = literal.getSourceFile();
-        const completes = [];
-        const userCalls = [];
-        const visit = (n) => {
-          if (ts.isCallExpression(n)) {
-            const e = n.expression;
-            if (ts.isElementAccessExpression(e) && ts.isStringLiteralLike(e.argumentExpression) && e.argumentExpression.text === '_complete') {
-              completes.push(n);
-            } else if (/\bCallback\b/.test(checker.typeToString(checker.getTypeAtLocation(e)) + ' ' + (checker.getTypeAtLocation(e).aliasSymbol || { name: '' }).name)) {
-              userCalls.push(n);
-            }
-          }
-          ts.forEachChild(n, visit);
+        if (ts.isSpreadElement(arg)) continue;
+        const delivery = takesMetadata(checker.getContextualType(arg));
+        const fn = fnOf(arg);
+        const where = (n) => {
+          const sf = n.getSourceFile();
+          return `${ctx.rel(sf.fileName)}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
         };
-        visit(literal.body);
-        if (completes.length === 0) continue;
+        if (!fn) {
+          if (delivery) {
+            checked += 1;
+            findings.push({
+              kind: 'completion-unresolved',
+              subject: where(arg),
+              message: `hands native.${u.name} a delivery callback the rule cannot follow: a function literal, or a const, readonly or module function of lib/`,
+            });
+          }
+          continue;
+        }
+        const ev = events(fn);
+        const completes = ev.filter((x) => x.what === 'complete');
+        const userCalls = ev.filter((x) => x.what === 'user');
+        if (completes.length === 0 && !delivery) continue;
         checked += 1;
-        const at = (n) => `${ctx.rel(sf.fileName)}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
+        const subject = where(ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn) ? fn.name || fn : fn);
         if (completes.length !== 1 || userCalls.length !== 1) {
           findings.push({
             kind: 'completion-count',
-            subject: at(literal),
+            subject,
             message: `runs the user callback ${userCalls.length} time(s) and completes the future ${completes.length} time(s), not once each`,
           });
-        } else if (completes[0].getStart() < userCalls[0].getStart()) {
-          findings.push({ kind: 'completion-order', subject: at(literal), message: 'completes the future before running the user callback' });
+        } else if (ev.indexOf(completes[0]) < ev.indexOf(userCalls[0])) {
+          findings.push({ kind: 'completion-order', subject, message: 'completes the future before running the user callback' });
         }
       }
     }

@@ -305,6 +305,33 @@ MUTATIONS.push(
     },
   },
   {
+    rule: 'check-completion-order',
+    what: "the delivery callback's body moved into a module function completing the future first",
+    apply: (root) => {
+      const file = path.join(root, 'lib/producer/kafka_producer.ts');
+      const text = fs.readFileSync(file, 'utf8');
+      const body = /    const onComplete = \(metadata: RecordMetadata, error: Error \| null\): string \| undefined => \{\n[^]*?\n    \};\n/.exec(text);
+      assert.ok(body, 'kafka_producer.ts has no onComplete');
+      fs.writeFileSync(
+        file,
+        text.replace(body[0], '    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined =>\n      deliver(future, userCallback, metadata, error);\n') +
+          '\nfunction deliver(future: KafkaFuture<RecordMetadata>, userCallback: Callback | null, metadata: RecordMetadata, error: Error | null): string | undefined {\n' +
+          "  future['_complete'](metadata, error);\n  if (userCallback !== null) userCallback(metadata, error);\n  return undefined;\n}\n",
+      );
+    },
+  },
+  {
+    rule: 'check-completion-order',
+    what: 'the destroying guard guarding another statement than the report',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    if (!p->destroying) {\n        FFI_DISCARD(kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err));\n    } else {\n        // Destroy completes the unreported callbacks itself.\n        error_discard(report);\n    }\n',
+        '    if (!p->destroying) ctx->delivered = 1;\n    FFI_DISCARD(kafka_producer_Producer__set_callback_result_err(p->view, callback_id, NULL, report, &ffi_err));\n',
+      ),
+  },
+  {
     rule: 'check-ownership',
     what: 'a configuration never destroyed',
     apply: (root) =>

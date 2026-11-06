@@ -62,6 +62,54 @@ test('a report outside the destroying guard is a finding (rule 6)', () => {
   assert.deepEqual(findings(r), ['send_on_completion: reports __set_callback_result_err (line 11) outside an if (!…destroying) guard']);
 });
 
+test('the C report must be what the guard guards; a nested block inside the guard is fine', () => {
+  let r = runN(RULE, {
+    'src/producer.c': PRODUCER_C.replace(
+      '    if (!p->destroying) {\n        FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));\n    }',
+      '    if (!p->destroying) delivered = 1;\n    FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));',
+    ),
+  });
+  assert.deepEqual(findings(r), ['send_on_completion: reports __set_callback_result_err (line 11) outside an if (!…destroying) guard']);
+  r = runN(RULE, {
+    'src/producer.c': PRODUCER_C.replace(
+      '    if (!p->destroying) {\n',
+      '    if (!p->destroying) {\n        if (id < 0) {\n            id = 0;\n        }\n',
+    ),
+  });
+  assert.equal(r.status, 0, r.text);
+  // Unbraced, the report is the guarded statement.
+  r = runN(RULE, {
+    'src/producer.c': PRODUCER_C.replace(
+      '    if (!p->destroying) {\n        FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));\n    }',
+      '    if (!p->destroying) FFI_DISCARD(kafka_x_P__set_callback_result_err(self_, id, NULL, NULL, &ffi_err));',
+    ),
+  });
+  assert.equal(r.status, 0, r.text);
+});
+
+test('a delivery callback is followed into the functions it calls, and one the rule cannot follow is a finding', () => {
+  // The body moved into a module function that completes the future first.
+  let r = runN(RULE, {
+    'lib/producer/producer.ts': PRODUCER_TS.replace(
+      "    const onComplete = (m: unknown, e: unknown): void => {\n      callback(m, e);\n      future['_complete'](m);\n    };",
+      '    const onComplete = (m: unknown, e: unknown): void => deliver(future, callback, m, e);',
+    ) + "\nfunction deliver(future: Future, callback: Callback, m: unknown, e: unknown): void {\n  future['_complete'](m);\n  callback(m, e);\n}\n",
+  });
+  assert.deepEqual(findings(r), ['lib/producer/producer.ts:11: completes the future before running the user callback']);
+  // A delivery callback that never completes the future.
+  r = runN(RULE, {
+    'lib/producer/producer.ts': PRODUCER_TS.replace("      future['_complete'](m);\n", '      void future;\n'),
+  });
+  assert.deepEqual(findings(r), ['lib/producer/producer.ts:11: runs the user callback 1 time(s) and completes the future 0 time(s), not once each']);
+  // One built by a call: nothing to read.
+  r = runN(RULE, {
+    'lib/producer/producer.ts': PRODUCER_TS.replace('    native.send(onComplete);', '    native.send(((f) => f)(onComplete));'),
+  });
+  assert.deepEqual(findings(r), [
+    'lib/producer/producer.ts:15: hands native.send a delivery callback the rule cannot follow: a function literal, or a const, readonly or module function of lib/',
+  ]);
+});
+
 test('an unlisted completion and an unused entry are findings', () => {
   const r = runN(RULE, {}, { COMPLETIONS: [{ key: 'send_gone', reason: 'the test' }] });
   assert.deepEqual(findings(r), [

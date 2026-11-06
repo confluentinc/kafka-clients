@@ -158,8 +158,9 @@ int js_bytes(void* env, void* value, JsBytes* out) {
 }
 `;
 
-const NATIVE_TS = `interface Native {
-  send(onComplete: (m: unknown, e: unknown) => void): void;
+const NATIVE_TS = `import type { RecordMetadata } from './producer/record_metadata';
+interface Native {
+  send(onComplete: (m: RecordMetadata, e: unknown) => void): void;
 }
 declare const loaded: Native;
 const native: Native = loaded;
@@ -193,6 +194,7 @@ const FILES = {
   'src/record.c': RECORD_C,
   'lib/_native.ts': NATIVE_TS,
   'lib/producer/callback.ts': 'export type Callback = (m: unknown, e: unknown) => void;\n',
+  'lib/producer/record_metadata.ts': 'export class RecordMetadata {}\n',
   'lib/producer/producer.ts': PRODUCER_TS,
 };
 
