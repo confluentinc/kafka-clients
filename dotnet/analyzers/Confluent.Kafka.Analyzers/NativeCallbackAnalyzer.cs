@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
 
@@ -25,7 +27,8 @@ namespace Confluent.Kafka.Analyzers;
 
 /// <summary>
 /// Checks the delegates native code calls back: each one reaches native code from a <c>static readonly</c> field
-/// (CKRDA0003), and the method a native callback field points to cannot throw into native code (CKRDA0004).
+/// (CKRDA0003), and every method or lambda converted to a native callback type cannot throw into native code
+/// (CKRDA0004).
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
@@ -43,6 +46,8 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             + "P/Invoke, or to any parameter of a native callback type, is a static readonly field, null (a Java "
             + "default) or a parameter of the same native callback type forwarded as it is, whose callers this rule checks.");
 
+    // Reported when the compilation ends: a callback's body is judged from the bodies of the methods it calls, which
+    // can sit in other files of a partial type.
     private static readonly DiagnosticDescriptor s_noThrowCallback = new DiagnosticDescriptor(
         DiagnosticIds.NoThrowNativeCallback,
         title: "A native callback does not throw into native code",
@@ -51,8 +56,11 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
         description: "The frame below a native callback is Rust, so a managed exception that leaves the callback is "
-            + "undefined behaviour. The body is one try statement with a catch clause for every exception, or one call "
-            + "that passes parameters, constants or casts of them to a method of the same type whose body is.");
+            + "undefined behaviour. The body is empty; or one try statement with a catch clause for every exception, "
+            + "whose catch and finally blocks only make calls; or one call. Each call is to a method of the same type "
+            + "whose body is one of these, and passes only parameters, locals, constants, static fields and "
+            + "conversions of them that cannot throw.",
+        customTags: WellKnownDiagnosticTags.CompilationEnd);
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
@@ -70,18 +78,28 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
     {
         INamedTypeSymbol? unmanagedFunctionPointer =
             context.Compilation.GetTypeByMetadataName("System.Runtime.InteropServices.UnmanagedFunctionPointerAttribute");
-        ConcurrentDictionary<ISymbol, bool> checkedMethods = new ConcurrentDictionary<ISymbol, bool>(SymbolEqualityComparer.Default);
 
         context.RegisterOperationAction(
             operationContext => AnalyzeArguments(operationContext, unmanagedFunctionPointer),
             OperationKind.Invocation,
             OperationKind.ObjectCreation);
-        if (unmanagedFunctionPointer is not null)
+        if (unmanagedFunctionPointer is null)
         {
-            context.RegisterOperationAction(
-                operationContext => AnalyzeFieldInitializer(operationContext, unmanagedFunctionPointer, checkedMethods),
-                OperationKind.FieldInitializer);
+            return;
         }
+
+        INamedTypeSymbol? exception = context.Compilation.GetTypeByMetadataName("System.Exception");
+        ConcurrentDictionary<ISymbol, Body> bodies = new ConcurrentDictionary<ISymbol, Body>(SymbolEqualityComparer.Default);
+        ConcurrentBag<Callback> callbacks = new ConcurrentBag<Callback>();
+
+        context.RegisterOperationBlockAction(blockContext => RecordMethodBody(blockContext, exception, bodies));
+        context.RegisterOperationAction(
+            operationContext => RecordLocalFunctionBody(operationContext, exception, bodies),
+            OperationKind.LocalFunction);
+        context.RegisterOperationAction(
+            operationContext => RecordCallback(operationContext, unmanagedFunctionPointer, exception, callbacks),
+            OperationKind.DelegateCreation);
+        context.RegisterCompilationEndAction(endContext => ReportThrowingCallbacks(endContext, bodies, callbacks));
     }
 
     private static void AnalyzeArguments(OperationAnalysisContext context, INamedTypeSymbol? unmanagedFunctionPointer)
@@ -121,111 +139,127 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static void AnalyzeFieldInitializer(
+    private static void RecordMethodBody(
+        OperationBlockAnalysisContext context,
+        INamedTypeSymbol? exception,
+        ConcurrentDictionary<ISymbol, Body> bodies)
+    {
+        if (context.OwningSymbol is not IMethodSymbol method)
+        {
+            return;
+        }
+
+        foreach (IOperation block in context.OperationBlocks)
+        {
+            IBlockOperation? body = block switch
+            {
+                IMethodBodyOperation methodBody => methodBody.BlockBody ?? methodBody.ExpressionBody,
+                IBlockOperation plain => plain,
+                _ => null,
+            };
+            if (body is not null)
+            {
+                bodies[method.OriginalDefinition] = Body.Of(body, method.ContainingType, exception);
+            }
+        }
+    }
+
+    private static void RecordLocalFunctionBody(
+        OperationAnalysisContext context,
+        INamedTypeSymbol? exception,
+        ConcurrentDictionary<ISymbol, Body> bodies)
+    {
+        ILocalFunctionOperation function = (ILocalFunctionOperation)context.Operation;
+        if ((function.Body ?? function.IgnoredBody) is { } body)
+        {
+            bodies[function.Symbol.OriginalDefinition] = Body.Of(body, function.Symbol.ContainingType, exception);
+        }
+    }
+
+    // Every place a method or a lambda becomes a native callback: a field or property initializer, an assignment in a
+    // constructor or anywhere else, a local, or an argument.
+    private static void RecordCallback(
         OperationAnalysisContext context,
         INamedTypeSymbol unmanagedFunctionPointer,
-        ConcurrentDictionary<ISymbol, bool> checkedMethods)
+        INamedTypeSymbol? exception,
+        ConcurrentBag<Callback> callbacks)
     {
-        IFieldInitializerOperation initializer = (IFieldInitializerOperation)context.Operation;
-        foreach (IFieldSymbol field in initializer.InitializedFields)
+        IDelegateCreationOperation creation = (IDelegateCreationOperation)context.Operation;
+        if (creation.Type is null || !IsNativeCallbackType(creation.Type, unmanagedFunctionPointer))
         {
-            if (!IsNativeCallbackType(field.Type, unmanagedFunctionPointer)
-                || WithoutConversions(initializer.Value) is not IDelegateCreationOperation creation)
+            return;
+        }
+
+        switch (creation.Target)
+        {
+            case IMethodReferenceOperation reference:
+                callbacks.Add(new Callback(reference.Method.OriginalDefinition, lambda: null, Through(creation), creation.Syntax.GetLocation()));
+                break;
+            case IAnonymousFunctionOperation lambda:
+                callbacks.Add(new Callback(
+                    method: null,
+                    Body.Of(lambda.Body, lambda.Symbol.ContainingType, exception),
+                    Through(creation),
+                    lambda.Syntax.GetLocation()));
+                break;
+        }
+    }
+
+    private static void ReportThrowingCallbacks(
+        CompilationAnalysisContext context,
+        ConcurrentDictionary<ISymbol, Body> bodies,
+        ConcurrentBag<Callback> callbacks)
+    {
+        // A method several callbacks point to is reported once, naming the first of them in source order.
+        IEnumerable<IGrouping<ISymbol, Callback>> methods = callbacks
+            .Where(callback => callback.Method is not null)
+            .OrderBy(callback => callback.Creation.SourceTree?.FilePath, StringComparer.Ordinal)
+            .ThenBy(callback => callback.Creation.SourceSpan.Start)
+            .GroupBy(callback => callback.Method!, SymbolEqualityComparer.Default);
+        foreach (IGrouping<ISymbol, Callback> method in methods)
+        {
+            Callback first = method.First();
+            if (bodies.TryGetValue(method.Key, out Body? body) && body.CannotThrow(bodies, MaxForwardingDepth))
             {
                 continue;
             }
 
-            switch (creation.Target)
+            Location[] declarations = method.Key.Locations.Where(location => location.IsInSource).ToArray();
+            foreach (Location location in declarations.Length > 0 ? declarations : new[] { first.Creation })
             {
-                case IMethodReferenceOperation reference when checkedMethods.TryAdd(reference.Method, true):
-                    foreach (SyntaxReference declaration in reference.Method.DeclaringSyntaxReferences)
-                    {
-                        if (Declaration(declaration.GetSyntax(context.CancellationToken)) is { } method
-                            && !CannotThrow(method.Body, method.Expression, reference.Method.ContainingType, MaxForwardingDepth, context))
-                        {
-                            context.ReportDiagnostic(Diagnostic.Create(
-                                s_noThrowCallback, method.Name.GetLocation(), reference.Method.Name, field.Name));
-                        }
-                    }
+                context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, location, method.Key.Name, first.Through));
+            }
+        }
 
-                    break;
-                case IAnonymousFunctionOperation lambda when lambda.Syntax is AnonymousFunctionExpressionSyntax syntax:
-                    if (!CannotThrow(syntax.Block, syntax.ExpressionBody, field.ContainingType, MaxForwardingDepth, context))
-                    {
-                        context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, syntax.GetLocation(), "The lambda", field.Name));
-                    }
-
-                    break;
+        foreach (Callback lambda in callbacks.Where(callback => callback.Lambda is not null))
+        {
+            if (!lambda.Lambda!.CannotThrow(bodies, MaxForwardingDepth))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, lambda.Creation, "The lambda", lambda.Through));
             }
         }
     }
 
-    private static (BlockSyntax? Body, ExpressionSyntax? Expression, SyntaxToken Name)? Declaration(SyntaxNode node) => node switch
+    // The name the callback is stored or passed under: the field, property, local or parameter; else its type.
+    private static string Through(IDelegateCreationOperation creation)
     {
-        MethodDeclarationSyntax method => (method.Body, method.ExpressionBody?.Expression, method.Identifier),
-        LocalFunctionStatementSyntax function => (function.Body, function.ExpressionBody?.Expression, function.Identifier),
-        _ => null,
-    };
-
-    // The body is a catch-all try, or one call that passes only parameters, constants and casts of them to a method
-    // of the same type whose every overload of that name cannot throw either.
-    private static bool CannotThrow(
-        BlockSyntax? body,
-        ExpressionSyntax? expressionBody,
-        INamedTypeSymbol? containingType,
-        int depth,
-        OperationAnalysisContext context)
-    {
-        if (body is not null && body.Statements.Count == 1 && body.Statements[0] is TryStatementSyntax tryStatement)
+        IOperation? parent = creation.Parent;
+        while (parent is IConversionOperation)
         {
-            return tryStatement.Catches.Any(IsCatchAll);
+            parent = parent.Parent;
         }
 
-        ExpressionSyntax? forwarded = expressionBody ?? (body is { Statements.Count: 1 } ? body.Statements[0] switch
+        return parent switch
         {
-            ExpressionStatementSyntax statement => statement.Expression,
-            ReturnStatementSyntax returned => returned.Expression,
-            _ => null,
-        } : null);
-
-        if (depth == 0
-            || containingType is null
-            || forwarded is not InvocationExpressionSyntax call
-            || call.Expression is not IdentifierNameSyntax callee
-            || !call.ArgumentList.Arguments.All(argument => IsPlain(argument.Expression)))
-        {
-            return false;
-        }
-
-        IMethodSymbol[] helpers = containingType.GetMembers(callee.Identifier.ValueText).OfType<IMethodSymbol>().ToArray();
-        return helpers.Length > 0 && helpers.All(helper => helper.DeclaringSyntaxReferences.All(reference =>
-            Declaration(reference.GetSyntax(context.CancellationToken)) is { } helperDeclaration
-            && CannotThrow(helperDeclaration.Body, helperDeclaration.Expression, containingType, depth - 1, context)));
-    }
-
-    private static bool IsPlain(ExpressionSyntax expression) => expression switch
-    {
-        IdentifierNameSyntax or LiteralExpressionSyntax or DefaultExpressionSyntax => true,
-        MemberAccessExpressionSyntax member => IsPlain(member.Expression),
-        CastExpressionSyntax cast => IsPlain(cast.Expression),
-        ParenthesizedExpressionSyntax parenthesized => IsPlain(parenthesized.Expression),
-        _ => false,
-    };
-
-    private static bool IsCatchAll(CatchClauseSyntax clause)
-    {
-        if (clause.Filter is not null)
-        {
-            return false;
-        }
-
-        if (clause.Declaration is null)
-        {
-            return true;
-        }
-
-        string type = clause.Declaration.Type.ToString();
-        return type is "Exception" or "System.Exception" or "global::System.Exception";
+            IFieldInitializerOperation initializer => initializer.InitializedFields[0].Name,
+            IPropertyInitializerOperation initializer => initializer.InitializedProperties[0].Name,
+            IVariableInitializerOperation { Parent: IVariableDeclaratorOperation declarator } => declarator.Symbol.Name,
+            ISimpleAssignmentOperation { Target: IFieldReferenceOperation field } => field.Field.Name,
+            ISimpleAssignmentOperation { Target: IPropertyReferenceOperation property } => property.Property.Name,
+            ISimpleAssignmentOperation { Target: ILocalReferenceOperation local } => local.Local.Name,
+            IArgumentOperation { Parameter: { } parameter } => parameter.Name,
+            _ => creation.Type!.Name,
+        };
     }
 
     private static bool IsNativeCallbackType(ITypeSymbol type, INamedTypeSymbol? unmanagedFunctionPointer) =>
@@ -241,5 +275,155 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         }
 
         return operation;
+    }
+
+    /// <summary>A method or lambda converted to a native callback type, and the name it reaches native code under.</summary>
+    private sealed class Callback
+    {
+        internal Callback(ISymbol? method, Body? lambda, string through, Location creation)
+        {
+            Method = method;
+            Lambda = lambda;
+            Through = through;
+            Creation = creation;
+        }
+
+        internal ISymbol? Method { get; }
+
+        internal Body? Lambda { get; }
+
+        internal string Through { get; }
+
+        internal Location Creation { get; }
+    }
+
+    /// <summary>
+    /// What a body does where an exception would leave it: nothing, or calls to methods of its own type whose own
+    /// bodies decide; or something that can throw whatever it calls.
+    /// </summary>
+    private sealed class Body
+    {
+        private static readonly Body s_canThrow = new Body(null);
+
+        private readonly ImmutableArray<ISymbol>? _calls;
+
+        private Body(ImmutableArray<ISymbol>? calls) => _calls = calls;
+
+        // The body is empty; or one catch-all try whose catch and finally blocks only make calls; or one call.
+        internal static Body Of(IBlockOperation body, INamedTypeSymbol? owner, INamedTypeSymbol? exception)
+        {
+            IOperation[] statements = Statements(body);
+            if (statements.Length == 0)
+            {
+                return new Body(ImmutableArray<ISymbol>.Empty);
+            }
+
+            if (owner is null || statements.Length != 1)
+            {
+                return s_canThrow;
+            }
+
+            if (statements[0] is not ITryOperation tryOperation)
+            {
+                return Call(statements[0], owner) is { } forwarded ? new Body(ImmutableArray.Create(forwarded)) : s_canThrow;
+            }
+
+            if (!tryOperation.Catches.Any(clause => IsCatchAll(clause, exception)))
+            {
+                return s_canThrow;
+            }
+
+            ImmutableArray<ISymbol>.Builder calls = ImmutableArray.CreateBuilder<ISymbol>();
+            IEnumerable<IBlockOperation?> blocks = tryOperation.Catches.Select(clause => clause.Handler).Append(tryOperation.Finally);
+            foreach (IOperation statement in blocks.Where(block => block is not null).SelectMany(block => Statements(block!)))
+            {
+                if (Call(statement, owner) is not { } call)
+                {
+                    return s_canThrow;
+                }
+
+                calls.Add(call);
+            }
+
+            return new Body(calls.ToImmutable());
+        }
+
+        internal bool CannotThrow(ConcurrentDictionary<ISymbol, Body> bodies, int depth) =>
+            _calls is { } calls
+            && (calls.IsEmpty
+                || (depth > 0 && calls.All(call => bodies.TryGetValue(call, out Body? body) && body.CannotThrow(bodies, depth - 1))));
+
+        private static IOperation[] Statements(IBlockOperation block) =>
+            block.Operations.Where(operation => operation is not IEmptyOperation and not IReturnOperation { ReturnedValue: null }).ToArray();
+
+        private static bool IsCatchAll(ICatchClauseOperation clause, INamedTypeSymbol? exception) =>
+            clause.Filter is null
+            && (clause.ExceptionType.SpecialType == SpecialType.System_Object
+                || SymbolEqualityComparer.Default.Equals(clause.ExceptionType, exception));
+
+        // The method a statement calls when the statement is only that call, to a method of the owner type on no
+        // receiver or this, with arguments that cannot throw; null otherwise.
+        private static ISymbol? Call(IOperation statement, INamedTypeSymbol owner)
+        {
+            IOperation? expression = statement switch
+            {
+                IExpressionStatementOperation expressionStatement => expressionStatement.Operation,
+                IReturnOperation returned => returned.ReturnedValue,
+                _ => null,
+            };
+            while (expression is IConversionOperation conversion && ConversionCannotThrow(conversion))
+            {
+                expression = conversion.Operand;
+            }
+
+            if (expression is not IInvocationOperation call
+                || !SymbolEqualityComparer.Default.Equals(call.TargetMethod.ContainingType.OriginalDefinition, owner.OriginalDefinition)
+                || call.Instance is not (null or IInstanceReferenceOperation)
+                || !call.Arguments.All(argument => ArgumentCannotThrow(argument.Value)))
+            {
+                return null;
+            }
+
+            return call.TargetMethod.OriginalDefinition;
+        }
+
+        // Evaluating an argument runs before the called method's try begins, so it must run no code that can throw:
+        // no property getter, call, user-defined conversion, cast that can fail, or checked narrowing.
+        private static bool ArgumentCannotThrow(IOperation value) => value switch
+        {
+            { ConstantValue.HasValue: true } => true,
+            IParameterReferenceOperation or ILocalReferenceOperation or IInstanceReferenceOperation or IDefaultValueOperation => true,
+            IFieldReferenceOperation field => field.Field.IsStatic || field.Instance is IInstanceReferenceOperation,
+            IConversionOperation conversion => ConversionCannotThrow(conversion) && ArgumentCannotThrow(conversion.Operand),
+            _ => false,
+        };
+
+        private static bool ConversionCannotThrow(IConversionOperation conversion)
+        {
+            // (IntPtr)x from a 32-bit or smaller integer: a user-defined IntPtr operator before C# 11, which only
+            // throws for a long that does not fit a 32-bit process.
+            if (IsSmallIntegerToNativeInteger(conversion))
+            {
+                return true;
+            }
+
+            Conversion kind = conversion.GetConversion();
+            if (kind.IsUserDefined)
+            {
+                return false;
+            }
+
+            return kind.IsImplicit || ((kind.IsNumeric || kind.IsEnumeration) && !conversion.IsChecked);
+        }
+
+        private static bool IsSmallIntegerToNativeInteger(IConversionOperation conversion) =>
+            (conversion.Type?.SpecialType, conversion.Operand.Type?.SpecialType) switch
+            {
+                (SpecialType.System_IntPtr, SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Int16
+                    or SpecialType.System_UInt16 or SpecialType.System_Char or SpecialType.System_Int32) => true,
+                (SpecialType.System_UIntPtr, SpecialType.System_Byte or SpecialType.System_UInt16 or SpecialType.System_Char
+                    or SpecialType.System_UInt32) => true,
+                _ => false,
+            };
     }
 }

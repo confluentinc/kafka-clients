@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Analyzers.UnitTests;
 
 /// <summary>
 /// CKRDA0005 keeps a client handle's raw pointer out of a P/Invoke, and CKRDA0006 requires every
-/// <c>DangerousAddRef</c> to be released in a <c>finally</c> block of the same method.
+/// <c>DangerousAddRef</c> to be taken inside a <c>try</c> whose <c>finally</c> block releases it.
 /// </summary>
 public sealed class SafeHandleUseAnalyzerTests
 {
@@ -162,7 +162,81 @@ public sealed class SafeHandleUseAnalyzerTests
                 }
                 """,
             Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0)
-                .WithMessage("'handle.DangerousAddRef' has no matching 'handle.DangerousRelease()' in a finally block of the same method"));
+                .WithMessage("'handle.DangerousAddRef' is not inside a try whose finally block calls 'handle.DangerousRelease()'"));
+
+    [Theory]
+    [InlineData("{|#0:handle.DangerousAddRef(ref added)|};\nRisky();\ntry\n{\n}\nfinally\n{\n    if (added)\n    {\n        handle.DangerousRelease();\n    }\n}")]
+    [InlineData("{|#0:handle.DangerousAddRef(ref added)|};\nvoid Release()\n{\n    try\n    {\n    }\n    finally\n    {\n        handle.DangerousRelease();\n    }\n}")]
+    [InlineData("try\n{\n    {|#0:handle.DangerousAddRef(ref added)|};\n}\nfinally\n{\n    Action release = () => handle.DangerousRelease();\n}")]
+    [InlineData("try\n{\n    Action take = () => {|#0:handle.DangerousAddRef(ref added)|};\n}\nfinally\n{\n    handle.DangerousRelease();\n}")]
+    [InlineData("try\n{\n}\nfinally\n{\n    {|#0:handle.DangerousAddRef(ref added)|};\n    handle.DangerousRelease();\n}")]
+    public Task AReleaseThatDoesNotCoverTheAddRef_IsReported(string code) =>
+        Verifier.VerifyAsync(
+            Handles + $$"""
+                namespace Confluent.Kafka.Internal.Interop
+                {
+                    internal static class C
+                    {
+                        internal static void Run(SafeProducerHandle handle)
+                        {
+                            bool added = false;
+                            {{code}}
+                        }
+
+                        private static void Risky()
+                        {
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle", "DangerousAddRef"));
+
+    [Fact]
+    public Task AnAddRefInACatchBlockOfTheReleasingTry_IsNotReported() =>
+        Verifier.VerifyAsync(Handles + """
+            namespace Confluent.Kafka.Internal.Interop
+            {
+                internal static class C
+                {
+                    internal static void Run(SafeProducerHandle handle)
+                    {
+                        bool added = false;
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                            handle.DangerousAddRef(ref added);
+                        }
+                        finally
+                        {
+                            if (added)
+                            {
+                                handle.DangerousRelease();
+                            }
+                        }
+                    }
+                }
+            }
+            """);
+
+    [Fact]
+    public Task AMethodNamedLikeAWrapperWithoutARefBool_IsChecked() =>
+        Verifier.VerifyAsync(
+            Handles + """
+                namespace Confluent.Kafka.Internal.Interop
+                {
+                    internal static class C
+                    {
+                        internal static void DangerousAddRef_OnAClosedHandle_Throws(SafeProducerHandle handle)
+                        {
+                            bool added = false;
+                            {|#0:handle.DangerousAddRef(ref added)|};
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.AddRefReleasedInFinally).WithLocation(0).WithArguments("handle", "DangerousAddRef"));
 
     [Fact]
     public Task AWrapperHandsItsReferenceToItsCaller_WhoseReleaseIsChecked() =>

@@ -199,9 +199,9 @@ dotnet_diagnostic.CKRDA0001.severity = warning
 # The P/Invoke, handle, native-callback and comment rules, on everywhere.
 #   CKRDA0002  a delegate type passed to native code is Cdecl (ffi-marshalling.md §A6, §B6)
 #   CKRDA0003  a delegate passed to native code is a static readonly field (§A6, §B6)
-#   CKRDA0004  a native callback wraps its whole body in a catch-all try (§A6, §B6)
+#   CKRDA0004  a native callback cannot throw into native code, wherever it is created (§A6, §B6)
 #   CKRDA0005  a client handle reaches a P/Invoke as its SafeHandle (§A2, §B2)
-#   CKRDA0006  a DangerousAddRef is released in a finally block of the same method (§A2)
+#   CKRDA0006  a DangerousAddRef is taken inside a try whose finally block releases it (§A2)
 #   CKRDA0007  a P/Invoke imports confluent_kafka with CallingConvention.Cdecl (§0.1)
 #   CKRDA0008  a bool crossing a P/Invoke is [MarshalAs(UnmanagedType.I1)] (§0.1)
 #   CKRDA0009  no string or StringBuilder in a P/Invoke (§0.1, §A3, §B3)

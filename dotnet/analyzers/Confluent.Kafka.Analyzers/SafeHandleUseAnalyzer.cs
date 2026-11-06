@@ -25,8 +25,8 @@ namespace Confluent.Kafka.Analyzers;
 
 /// <summary>
 /// Checks how the binding uses its <c>SafeHandle</c>s: a client handle reaches a P/Invoke as the <c>SafeHandle</c>, not
-/// its raw pointer (CKRDA0005), and every <c>DangerousAddRef</c> is released in a <c>finally</c> block of the same
-/// method (CKRDA0006).
+/// its raw pointer (CKRDA0005), and every <c>DangerousAddRef</c> is taken inside a <c>try</c> whose <c>finally</c>
+/// block releases it (CKRDA0006).
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
@@ -46,14 +46,14 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
 
     private static readonly DiagnosticDescriptor s_addRefReleased = new DiagnosticDescriptor(
         DiagnosticIds.AddRefReleasedInFinally,
-        title: "DangerousAddRef is released in a finally block of the same method",
-        messageFormat: "'{0}.{1}' has no matching '{0}.DangerousRelease()' in a finally block of the same method",
+        title: "DangerousAddRef is taken inside a try whose finally block releases it",
+        messageFormat: "'{0}.{1}' is not inside a try whose finally block calls '{0}.DangerousRelease()'",
         category: "Reliability",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "A reference is call-scoped: it is taken and released on the same thread, the release in a "
-            + "finally so an exception cannot leak it. A method whose name holds AddRef hands its reference to its caller, "
-            + "whose own release this rule checks.");
+        description: "A reference is call-scoped: it is taken inside a try statement, or one of its catch blocks, and "
+            + "released in that try's finally block on the same thread, so no exception can leak it. A method named "
+            + "like AddRef that takes a ref bool hands its reference to its caller, whose own release this rule checks.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
@@ -99,7 +99,7 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         }
 
         if (!IsAddRef(invocation.TargetMethod.Name)
-            || IsAddRef(context.ContainingSymbol.Name)
+            || IsAddRefWrapper(context.ContainingSymbol)
             || invocation.Syntax is not InvocationExpressionSyntax syntax)
         {
             return;
@@ -123,6 +123,13 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
 
     // DangerousAddRef, DangerousAddRefClass, TryAddRef: a method of this name hands the reference to its caller.
     private static bool IsAddRef(string name) => name.IndexOf("AddRef", StringComparison.Ordinal) >= 0;
+
+    // A wrapper has the shape of DangerousAddRef: its name and a ref bool that tells its caller to release. A method
+    // whose name only mentions AddRef, a test's, is checked like any other.
+    private static bool IsAddRefWrapper(ISymbol symbol) =>
+        symbol is IMethodSymbol method
+        && IsAddRef(method.Name)
+        && method.Parameters.Any(p => p.RefKind == RefKind.Ref && p.Type.SpecialType == SpecialType.System_Boolean);
 
     private static void CheckArguments(
         OperationAnalysisContext context,
@@ -151,24 +158,36 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    // The AddRef sits in a try, or one of its catch blocks, whose finally block releases it, with no lambda or local
+    // function between them: then the release runs whatever happens after the reference is taken.
     private static bool IsReleasedInAFinally(InvocationExpressionSyntax addRef, string? receiver)
     {
-        SyntaxNode? body = addRef.FirstAncestorOrSelf<SyntaxNode>(node =>
-            node is BaseMethodDeclarationSyntax
-                or LocalFunctionStatementSyntax
-                or AnonymousFunctionExpressionSyntax
-                or AccessorDeclarationSyntax);
-        if (body is null)
+        foreach (SyntaxNode ancestor in addRef.Ancestors())
         {
-            return false;
+            if (IsFunction(ancestor))
+            {
+                return false;
+            }
+
+            if (ancestor is TryStatementSyntax { Finally: { } @finally }
+                && !@finally.Span.Contains(addRef.Span)
+                && @finally.Block.DescendantNodes(node => !IsFunction(node))
+                    .OfType<InvocationExpressionSyntax>()
+                    .Any(release => Name(release.Expression) == "DangerousRelease"
+                        && (receiver is null || Receiver(release.Expression) == receiver)))
+            {
+                return true;
+            }
         }
 
-        return body.DescendantNodes()
-            .OfType<InvocationExpressionSyntax>()
-            .Any(release => Name(release.Expression) == "DangerousRelease"
-                && (receiver is null || Receiver(release.Expression) == receiver)
-                && release.Ancestors().TakeWhile(node => node != body).Any(node => node is FinallyClauseSyntax));
+        return false;
     }
+
+    private static bool IsFunction(SyntaxNode node) =>
+        node is BaseMethodDeclarationSyntax
+            or LocalFunctionStatementSyntax
+            or AnonymousFunctionExpressionSyntax
+            or AccessorDeclarationSyntax;
 
     private static string Name(ExpressionSyntax expression) => expression switch
     {

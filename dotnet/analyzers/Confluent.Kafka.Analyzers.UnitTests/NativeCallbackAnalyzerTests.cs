@@ -14,6 +14,8 @@
 
 using System.Threading.Tasks;
 
+using Microsoft.CodeAnalysis.Testing;
+
 using Xunit;
 
 using Verifier = Confluent.Kafka.Analyzers.UnitTests.AnalyzerVerifier<Confluent.Kafka.Analyzers.NativeCallbackAnalyzer>;
@@ -35,6 +37,9 @@ public sealed class NativeCallbackAnalyzerTests
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void Callback(IntPtr opaque);
 
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate void ScalarCallback(sbyte present, IntPtr opaque);
+
             [DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]
             internal static extern void Submit(Callback cb, IntPtr opaque);
         }
@@ -44,6 +49,30 @@ public sealed class NativeCallbackAnalyzerTests
             First,
         }
 
+        """;
+
+    // On netstandard2.0, (IntPtr)present is IntPtr's user-defined operator; from C# 11 on .NET 7+ it is built in.
+    private const string ForwardedArgumentsTheBindingUses = """
+        internal static class C
+        {
+            private static readonly NativeMethods.Callback s_zero = OnZero;
+
+            private static readonly NativeMethods.ScalarCallback s_scalar = OnScalar;
+
+            private static void OnZero(IntPtr opaque) => Deliver(opaque, IntPtr.Zero, 0, Kind.First);
+
+            private static void OnScalar(sbyte present, IntPtr opaque) => Deliver(opaque, (IntPtr)present, (long)7, default);
+
+            private static void Deliver(IntPtr opaque, IntPtr value, long scalar, Kind kind)
+            {
+                try
+                {
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
         """;
 
     [Fact]
@@ -238,6 +267,178 @@ public sealed class NativeCallbackAnalyzerTests
                 private static void OnManaged(IntPtr opaque) => GC.KeepAlive(opaque);
             }
             """);
+
+    [Theory]
+    [InlineData("s_callback = OnCallback;", "s_callback")]
+    [InlineData("s_callback = new NativeMethods.Callback(OnCallback);", "s_callback")]
+    [InlineData("NativeMethods.Callback local = OnCallback;\nGC.KeepAlive(local);", "local")]
+    public Task ACallbackCreatedOutsideAFieldInitializer_IsChecked(string creation, string through) =>
+        Verifier.VerifyAsync(
+            Native + $$"""
+                internal static class C
+                {
+                    private static readonly NativeMethods.Callback s_callback;
+
+                    static C()
+                    {
+                        {{creation}}
+                    }
+
+                    private static void {|#0:OnCallback|}(IntPtr opaque) => GC.KeepAlive(opaque);
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", through));
+
+    [Fact]
+    public Task AGuardedCallbackSetInAStaticConstructor_IsNotReported() =>
+        Verifier.VerifyAsync(Native + """
+            internal static class C
+            {
+                private static readonly NativeMethods.Callback s_callback;
+
+                static C()
+                {
+                    s_callback = OnCallback;
+                }
+
+                private static void OnCallback(IntPtr opaque)
+                {
+                    try
+                    {
+                        GC.KeepAlive(opaque);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            }
+            """);
+
+    [Fact]
+    public Task AnEmptyCallback_IsNotReported() =>
+        Verifier.VerifyAsync(Native + Callback(marked: false, body: "{\n}"));
+
+    [Theory]
+    [InlineData("catch (Exception)\n{\n    throw;\n}")]
+    [InlineData("catch (Exception e)\n{\n    throw new InvalidOperationException(\"failed\", e);\n}")]
+    [InlineData("catch (InvalidOperationException)\n{\n    throw;\n}\ncatch (Exception)\n{\n}")]
+    [InlineData("catch (Exception)\n{\n    GC.KeepAlive(opaque);\n}")]
+    [InlineData("catch (Exception)\n{\n}\nfinally\n{\n    GC.KeepAlive(opaque);\n}")]
+    public Task ACatchOrFinallyBlockThatCanThrow_IsReported(string clauses) =>
+        Verifier.VerifyAsync(
+            Native + Callback(marked: true, body: $$"""
+                {
+                    try
+                    {
+                        GC.KeepAlive(opaque);
+                    }
+                    {{clauses}}
+                }
+                """),
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback"));
+
+    [Fact]
+    public Task ACatchAndFinallyThatCallGuardedHelpers_AreNotReported() =>
+        Verifier.VerifyAsync(Native + """
+            internal static class C
+            {
+                private static readonly NativeMethods.Callback s_callback = OnCallback;
+
+                private static void OnCallback(IntPtr opaque)
+                {
+                    try
+                    {
+                        GC.KeepAlive(opaque);
+                    }
+                    catch (Exception e)
+                    {
+                        Trace(e);
+                    }
+                    finally
+                    {
+                        Flush();
+                    }
+                }
+
+                private static void Trace(Exception e)
+                {
+                    try
+                    {
+                        GC.KeepAlive(e);
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+
+                private static void Flush()
+                {
+                    try
+                    {
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            """);
+
+    [Theory]
+    [InlineData("Value")]
+    [InlineData("(long)s_wrapper")]
+    [InlineData("checked((int)s_big)")]
+    [InlineData("(string)s_object")]
+    [InlineData("s_holder.Field")]
+    public Task AForwardedArgumentThatCanThrow_IsReported(string argument) =>
+        Verifier.VerifyAsync(
+            Native + $$"""
+                internal static class C
+                {
+                    private static readonly NativeMethods.Callback s_callback = OnCallback;
+
+                    private static readonly Holder s_holder = new Holder();
+
+                    private static long s_big;
+
+                    private static object s_object = "value";
+
+                    private static Wrapper s_wrapper;
+
+                    private static long Value => 1;
+
+                    private static void {|#0:OnCallback|}(IntPtr opaque) => Deliver(opaque, {{argument}});
+
+                    private static void Deliver(IntPtr opaque, object value)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+
+                    private struct Wrapper
+                    {
+                        public static explicit operator long(Wrapper wrapper) => 1;
+                    }
+
+                    private sealed class Holder
+                    {
+                        internal long Field;
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback"));
+
+    [Fact]
+    public Task TheForwardedArgumentsTheBindingUses_AreNotReported_OnNet80() =>
+        Verifier.VerifyAsync(Native + ForwardedArgumentsTheBindingUses);
+
+    [Fact]
+    public Task TheForwardedArgumentsTheBindingUses_AreNotReported_OnNetStandard20() =>
+        Verifier.VerifyAsync(ReferenceAssemblies.NetStandard.NetStandard20, Native + ForwardedArgumentsTheBindingUses);
+
 
     private static string Callback(string body, bool marked) =>
         $$"""
