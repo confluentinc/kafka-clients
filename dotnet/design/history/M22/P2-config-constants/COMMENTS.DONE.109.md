@@ -177,3 +177,127 @@
     Otherwise record the text as a deviation. Order and type are already Java's: a null `configs` is
     `ArgumentNullException` first, then key, then value, each a `ConfigException`.
   - **Resolved** (ledger 398, Pranav 2026-11-06: "lets go with (a)"): `NativeConsumer.RequireDeserializer` throws `new ConfigException(key, null, "must be non-null.")`, as `RequireSerializer` does, so the four consumers, the mocks included, read "Invalid value null for configuration key.deserializer: must be non-null." (the value likewise), Kafka 4.4's `appendDeserializerToConfig`; order unchanged (a null `configs` first, then key, then value), nothing disposed. Both helpers' summaries quote Java's text and drop the "always missing" claim. `dotnet/CLAUDE.md`'s Consumer deserializers bullet quotes the 4.4 text. Tests: `PublicSyncConsumerPreconditionTests` (its two asserts; the test renamed `Constructor_NullDeserializer_ThrowsJavasConfigException`) and `PublicDeserializerDisposalTests` (`MissingDeserializer` → `NullDeserializer`, plus the order asserts). Not changed: #316's closed plan's F18 row (`design/history/M22/P2-exception-call-site-parity/PLAN.md:93`), a history record.
+
+- **109-ATC-1** (Low; the same deadlock class, still open before the destroy; needs a ruling) — 0a29b348f — the gate
+  holders in `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs` (`CloseSync` `:1457`, `Dispose` `:2005`) and
+  `NativeConsumer.Async.cs` (`CloseOnceAsync` `:1379`, `DisposeOnThePumpAsync` `:1424`), together with `AfterDestroy`
+  (`NativeConsumer.cs:1661-1692`) and `dotnet/design/current/STATUS.md:23`.
+  - **What still deadlocks.** The flag only helps a call that arrives after the destroy. A thread B whose `Close`
+    or `Dispose` arrives while thread A's close is running, before the destroy, reads `_destroyed == false` and
+    blocks on `_closeGate`. A holds the gate through `TearDown` → destroy → `AfterDestroy` →
+    `_serdes.DisposeOnce()`. So a deserializer whose `Dispose` waits for B still deadlocks.
+  - **Python never waits there.** `_begin_close` raises `ConcurrentModificationError` for another thread while the
+    state is `_CLOSING`. Once the state is `_CLOSED`, which `_finish_close` sets before the destroy, it returns.
+  - **Probe.** On an archive of 0a29b348f I added a theory, net10.0 Release, 0 W / 0 E:
+    1. A poll is held inside its commit callback (`StartAPollHeldInsideItsCommitCallback`).
+    2. A calls `Dispose()` and holds the gate while it waits for the poll's use.
+    3. After 500 ms, B calls `Dispose()` or `Close()`. After another 500 ms it is asserted still blocked.
+    4. The callback is released.
+    5. `key.OnDispose` waits at most 5 s for B to return.
+
+    Result: 4/4 rows fail, sync and async × `Dispose` and `Close`, each with "DEADLOCK (bounded 5 s)". The deadlock
+    ends only because the probe's wait is bounded; B is released once A gives up.
+  - **Overstated claims.** STATUS's "a deserializer's `Dispose` that waits for another thread closing the consumer
+    no longer deadlocks on the close gate" is too broad, and so is the commit body. It holds only for a thread that
+    enters after the destroy, such as the one the new tests start from inside `Dispose`.
+  - **Options.**
+    - (a) Dispose the deserializers after `_closeGate.Release()`, on the same thread, at the four gate holders.
+      `AfterDestroy` would keep setting the flag, and the deserializers would still be disposed after the destroy
+      on the destroying thread. A blocked B would then get the gate, find `TryBeginClose` /
+      `TryBeginExplicitClose` false, and return, as the amended rule allows.
+    - (b) Record the pre-destroy window as a limit, and narrow the STATUS sentence.
+  - **Resolved** in the fixup of 0a29b348f, option (a), within ledger 396 ("Lets go with (a) what python does"): the deserializers are disposed after `_closeGate` is released, by `ReleaseTheGateThenDisposeTheDeserializers` at the four gate holders (sync `CloseSync` and `Dispose`, async `CloseOnceAsync` and `DisposeOnThePumpAsync`, which path 2 runs on the pool thread; a close whose core call failed goes through the same `finally`), only by the call whose teardown destroyed the consumer (`_destroyed` false when it took the gate, true after), so still after the destroy, on the thread that tore down, once, key then value. `AfterDestroy` only sets `_destroyed`; the four checks stay. The constructor-failure disposal is unchanged. A call parked on the gate before the destroy gets it, finds the consumer closed and returns. Test: `ADeserializerWhoseDisposeWaitsForACloseParkedBeforeTheDestroy_BothReturn` (sync and async × `Dispose` / `Close`, plus async `DisposeAsync`), the other call parked on the gate while a `Dispose` waits for a poll held in its commit callback. Mutation (disposal back before the release): those 5 rows fail on the 10 s bounded wait. STATUS's sentence now says what the code does.
+- **109-ATC-2** (Low; test gap) — 0a29b348f —
+  `dotnet/tests/Confluent.Kafka.UnitTests/PublicDeserializerDisposalTests.cs`
+  (`ADeserializerWhoseDisposeWaitsForAnotherThreadThatClosesItsConsumer_BothReturn`, `OtherThreadClose`).
+  - The other thread only ever calls `Dispose` or `Close`, never `DisposeAsync`. `DisposeAsyncHow` appears only as
+    the first closer, and the flag is false then. So the `_destroyed` check in `DisposeAsync`
+    (`NativeConsumer.Async.cs:631`) is not pinned.
+  - Mutant: with that check removed, the 10 new rows pass 10/10. Without the check, an other-thread `DisposeAsync`
+    after the destroy goes to `DisposeOnThePumpAsync` and awaits the gate, so a `Dispose` that waits on it
+    deadlocks.
+  - Fix: add `(AsyncFlavor, <how>, DisposeAsyncHow)` rows, with `OtherThreadClose` running `DisposeAsync().AsTask()`.
+  - **Resolved** in the same fixup: the post-destroy theory gains three `DisposeAsync` rows for the other thread. After the ATC-1 fix those rows no longer depend on the `DisposeAsync` check (the gate is free once the teardown ends), so a new theory pins the checks: `AfterTheDestroy_ACloseOrDisposeFromAnotherThread_DoesNotWaitForTheCloseGate` holds the close gate (reflection) after the destroy and calls `Close`, `Dispose` or `DisposeAsync` on another thread. Mutations: without `DisposeAsync`'s check its row fails; without all four checks the 5 rows fail.
+
+- **109-ATC-3** (Low; this pre-dates the fixup and is the same deadlock class with a commit callback in place of a
+  deserializer's `Dispose`; needs a ruling) — 944df7681 — `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs`
+  (`CloseSync` `:1444-1457`, `Dispose` `:2003-2044`, `WakeUpThenCloseAfterTheUses`) and `NativeConsumer.Async.cs`
+  (`CloseOnceAsync`, `DisposeOnThePumpAsync`).
+  - **What deadlocks.** The fixup takes the deserializers out from under the gate, but the user callbacks a close
+    delivers still run while that close holds the close gate or a use. A commit callback that waits for another
+    thread's `Dispose` on the same consumer therefore deadlocks. There are two shapes:
+    - In a sync `Dispose`, an async `Close` / `Dispose` / `DisposeAsync`, the callback runs while the closer holds
+      the gate (inside the blocking close, or on the drain thread while the closer awaits the pump's close). B
+      reads `_destroyed == false` and parks on the gate.
+    - In a sync `Close`, the callback runs in `CloseSync`'s `ExecuteCallbacks()` on a use, before the gate. B takes
+      the gate, claims the close, and waits in `WakeUpThenCloseAfterTheUses` for A's use to end.
+  - **Java and Python never wait there.** Java's `close(CloseOptions)` calls `acquire()` first, so B's `close()`
+    throws `ConcurrentModificationException` at once. Python's `_begin_close` sets `_CLOSING` before the callbacks
+    are delivered, so B's `close()` raises `ConcurrentModificationError` at once.
+  - **Probe.** On an archive of 944df7681 I added a theory, net10.0 Release, 0 W / 0 E:
+    1. `QueueCommitCallback(consumer, cb)` queues a callback; `cb` runs `Task.Run(() => consumer.Dispose())` and
+       waits at most 3 s for it.
+    2. `CloseBy(consumer, how)` closes the consumer.
+
+    Result: 5/5 rows fail with "DEADLOCK (bounded 3 s)": sync `Close` and `Dispose`, async `Close`, `Dispose` and
+    `DisposeAsync`. The callback was delivered by the close in every row. The deadlock ends only because the
+    callback's wait is bounded.
+  - **Options.**
+    - (a) While a close is claimed or running, another thread's `Close` throws `ConcurrentModificationException`
+      at once, and its `Dispose` / `DisposeAsync` returns at once, the closest a non-throwing `Dispose` gets to
+      Python's refusal. That changes today's "another thread's `Close` / `Dispose` waits for the teardown".
+    - (b) Record the limit: a callback delivered by a close must not wait for another thread's `Close` or
+      `Dispose` on the same consumer.
+  - **Resolved** (ledger 399, Pranav 2026-11-06: "Lets do (b)"): a new `_closerThread` records the close in progress: the thread of a sync `CloseSync` (set before its pre-drain `ExecuteCallbacks`, inside its use, and kept through the gate) or of a sync `Dispose` (set right after `TryBeginClose`), or `AsyncCloser` (-1) for `CloseOnceAsync` and `DisposeOnThePumpAsync` (set right after their claim), cleared when that call ends. `Dispose` and `DisposeAsync` return at once when it names another thread (after the `_destroyed` fast path and the inside-a-callback branch, which are unchanged); the close in progress finishes the teardown and disposes the deserializers. `_closingThread` and the owner check are untouched, so a cross-thread `Dispose` during an op still waits and a cross-thread explicit `Close` during a close still throws. Rule text: `dotnet/CLAUDE.md`'s Dispose bullet and an ffi-marshalling §B2 sibling bullet, as given. Tests: `ACommitCallbackTheCloseRunsWaitsForAnotherThreadsDispose_ItReturnsBeforeTheCloseEnds` (10 rows) and `ADisposeFromAnotherThreadWhileAnotherThreadsDisposeTearsDown_ReturnsAtOnce` (3); the parked-before-the-destroy test keeps its two `Close` rows, since a `Dispose` no longer parks while another thread closes. Mutation (both checks removed): the 13 new rows fail on the 10 s bounded waits.
+  - **Superseded** by ledger 399's change to (a), after Copilot's review of #320: the closer marker is removed and the limit is recorded instead (`dotnet/CLAUDE.md` §4, ffi-marshalling §B2).
+
+- **109-DC-1** (Low; a narrow race; record it, or close it) — 700fc62dd —
+  `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs:1459` (the sync `Close` becomes the closer before its
+  pre-drain), `:1472` (`TryBeginExplicitClose`, which can still throw) and `:1490` (`ReopenIfRefused`, −2), together
+  with the rule text "that close finishes the teardown" (`dotnet/CLAUDE.md:1172-1173`,
+  `dotnet/.claude/rules/ffi-marshalling.md:1616`).
+  - **What can be lost.** A `Dispose` that returns at once relies on the close in progress, but that close can
+    still fail to claim, or be refused after claiming:
+    - A sync `Close` registers as the closer before it has claimed anything. After its pre-drain `ExitUse`, an op
+      that another thread C starts before A's `TryBeginExplicitClose` makes that claim throw
+      `ConcurrentModificationException`.
+    - An async `Close` claims first and then registers, but the core can still refuse it with −2
+      (`ReopenIfRefused`).
+
+    Either way, a `Dispose` from B that returned at once during that close is lost. Before this commit, B waited at
+    the gate, then claimed the close and tore the consumer down, as ledger 34 (ii) describes. Now nothing does,
+    the consumer stays open, and C keeps polling. A later `Dispose` still closes it, since every exit path clears
+    the closer.
+  - **Reachability.** The window is narrow. A 30-iteration stress probe found no case: B's `Dispose` returns from a
+    commit callback in the pre-drain, then C spins on `Poll` until the claim. In every iteration A won the claim.
+    A mutant that never clears the sync closer passes all 464 tests in the disposal, sync-consumer-precondition and
+    `Close` filters. So clearing the closer on a refused claim is not pinned, and with today's tests it cannot be.
+  - **Inverse window.** A B that read 0 just before A registered still claims the close and waits for A's pre-drain
+    use. That is 109-ATC-3's sync-`Close` shape again, also µs-wide.
+  - **Options.**
+    - (a) Record the limit beside the rule: "the close in progress finishes the teardown, unless it is refused; a
+      `Dispose` that returned during a refused close must be repeated".
+    - (b) Close the gap. The early-returning `Dispose` sets a "deferred" flag. A close that then fails to claim, or
+      is refused while it is the closer, runs that `Dispose`'s teardown (wake, wait, close, tear down) before it
+      rethrows.
+  - **Resolved** in the fixup of 700fc62dd, as recorded (ledger 399, Pranav: "(i)"), with no code change: `dotnet/CLAUDE.md` §4's consumer-deviation bullet and ffi-marshalling §B2's "`Dispose` while a close runs" bullet say that if that close is then refused and the consumer reopens (a racing op refuses its claim, or the core's −2), the `Dispose` that returned is not carried out, and the consumer stays open until it is disposed again; STATUS says so too.
+  - **Superseded** by ledger 399's change to (a), after Copilot's review of #320: the closer marker is removed and the limit is recorded instead (`dotnet/CLAUDE.md` §4, ffi-marshalling §B2).
+- **109-DC-2** (Low; comment and rule text only; can wait for the phase's comment-only cleanup) — 700fc62dd.
+  - **The misplaced comment.** In `NativeConsumer.cs:1710-1712`, the comment for
+    `ReleaseTheGateThenDisposeTheDeserializers` now sits above `ClosingOnAnotherThread`: the three new members were
+    inserted between that comment and its method.
+  - **"Another thread" is narrower than the code.** The `_closerThread` comment (`:108-111`), `dotnet/CLAUDE.md:1172`
+    and `ffi-marshalling.md:1616` all say "another thread". An async close registers `AsyncCloser` (−1), so *every*
+    thread's `Dispose` or `DisposeAsync` returns at once during it, the async caller's own included.
+  - **Probe.** `var t = consumer.Close(); consumer.Dispose();` on one thread, with a commit callback the close runs
+    held for up to 10 s:
+    - at 700fc62dd, `Dispose` returns in 0 ms, before the close ends, with 0 disposals at that point and 1 after the
+      close;
+    - at 944df7681 the same `Dispose` blocked 9.7 s on the gate.
+
+    That matches Python: `_begin_close` returns `False` to a second `close()` from the closing thread while the
+    state is `_CLOSING`. So the behaviour is acceptable under (b), and no earlier test pinned the wait. But the text
+    should say it.
+  - **Fix.** Write "while a close is in progress on another thread, or an async close on any thread".
+  - **Resolved** in the same fixup: the `ReleaseTheGateThenDisposeTheDeserializers` comment is back above that method; the `_closerThread` comment, both rule texts and STATUS now say a `Dispose` / `DisposeAsync` returns at once while a close runs on another thread or as the caller's own async `Close` / `DisposeAsync` (ffi adds that Python's `close()` returns at once on the closing thread). Text only.
+  - **Superseded** by ledger 399's change to (a), after Copilot's review of #320: the closer marker is removed and the limit is recorded instead (`dotnet/CLAUDE.md` §4, ffi-marshalling §B2).
