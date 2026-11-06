@@ -23,6 +23,7 @@ mod java;
 mod java_api;
 mod java_parse;
 mod javadoc;
+mod javascript_gen;
 mod lint_custom;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -563,6 +564,11 @@ fn generate_error_codes() -> anyhow::Result<()> {
     // And the ConfigDef type of every producer / consumer / admin config key.
     println!("🔧 Generating the Python and .NET config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
+
+    // And the Node.js client's error hierarchy, config classes and key types,
+    // from the same sources.
+    println!("🔧 Generating the Node.js error hierarchy and config modules from the Java sources...");
+    javascript_gen::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
 
@@ -617,7 +623,9 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
 
     // The Python exception hierarchy generated from the Java sources.
-    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The Node.js client's generated modules, from the same sources.
+    hierarchy_stale.extend(javascript_gen::check_up_to_date(Path::new(REPO_ROOT))?);
     // The Python and .NET config tables generated from the Java config classes.
     let config_stale = config_types::check_up_to_date(Path::new(REPO_ROOT))?;
 
