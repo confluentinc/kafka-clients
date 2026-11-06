@@ -384,6 +384,13 @@ blocks:
             # Kafka tags pinned in xtask and fails without them.
             - (cd rust && cargo xtask fetch-java-refs)
             - make verify-javascript
+            # The static link of the release addon (binding.gyp's Linux
+            # branch: the .a, --gc-sections, --as-needed, addon.exports.map)
+            # is otherwise built only by the tag build: pack it with this
+            # machine's addon linked statically and install it into a fresh
+            # project, as the macOS job does (--dev skips only the release
+            # checks: the glibc and GCC floors and the clean checkout).
+            - make package-check-javascript
         - name: "verify-javascript (Linux amd64) — ssl"
           commands:
             - make test-integration-javascript-ssl
