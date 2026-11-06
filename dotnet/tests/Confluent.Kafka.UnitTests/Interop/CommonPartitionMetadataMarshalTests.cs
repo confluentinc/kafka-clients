@@ -118,7 +118,7 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
     public void PartitionInfoCopyOut_WithoutALeaderOrReplicas_HasANullLeaderAndEmptyLists()
     {
         PartitionInfo info = PartitionInfoMarshal.CopyOut(
-            NewPartitionInfo(Topic, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero));
+            NewPartitionInfo(Topic, 0, IntPtr.Zero, NewList(), NewList(), NewList()));
 
         Assert.Equal(Topic, info.Topic);
         Assert.Equal(0, info.Partition);
@@ -132,8 +132,8 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
     public void PartitionInfoListCopyOut_ReadsABorrowedListInOrder_AndFreesNothing()
     {
         IntPtr leader = NewNode(1, "host-1", 9091, rack: null, isFenced: false);
-        IntPtr first = NewPartitionInfo(Topic, 1, leader, NewList(leader), NewList(leader), IntPtr.Zero);
-        IntPtr second = NewPartitionInfo("other", 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        IntPtr first = NewPartitionInfo(Topic, 1, leader, NewList(leader), NewList(leader), NewList());
+        IntPtr second = NewPartitionInfo("other", 0, IntPtr.Zero, NewList(), NewList(), NewList());
         IntPtr list = NewList(first, second);
 
         IReadOnlyList<PartitionInfo> infos = PartitionInfoListMarshal.CopyOut(list);
@@ -154,12 +154,12 @@ public sealed class CommonPartitionMetadataMarshalTests : IDisposable
         IntPtr n1 = NewNode(1, "host-1", 9091, "rack-1", isFenced: false);
         IntPtr n2 = NewNode(2, "host-2", 9092, "rack-2", isFenced: false);
         IntPtr partitions = NewList(
-            NewPartitionInfo(Topic, 0, n1, NewList(n1, n2), NewList(n1), IntPtr.Zero),
+            NewPartitionInfo(Topic, 0, n1, NewList(n1, n2), NewList(n1), NewList()),
             NewPartitionInfo(Topic, 1, n2, NewList(n2, n1), NewList(n2, n1), NewList(n1)),
-            NewPartitionInfo("other", 0, n1, NewList(n1), NewList(n1), IntPtr.Zero));
+            NewPartitionInfo("other", 0, n1, NewList(n1), NewList(n1), NewList()));
 
         IntPtr outErr = IntPtr.Zero;
-        IntPtr cluster = NativeMethods.ClusterNew(IntPtr.Zero, NewList(n1, n2), partitions, IntPtr.Zero, IntPtr.Zero, ref outErr);
+        IntPtr cluster = NativeMethods.ClusterNew(IntPtr.Zero, NewList(n1, n2), partitions, NewList(), NewList(), ref outErr);
         Assert.Equal(IntPtr.Zero, outErr);
         try
         {

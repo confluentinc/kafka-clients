@@ -34,29 +34,25 @@ public sealed class PublicAdminP14SyncCloseTests
     private const string Mock = "mock";
     private const string Real = "real";
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Fact]
     public void Close_WithANegativeTimeout_ThrowsJavasMessageBeforeAnyNativeCall_AndTheClientStaysOpen()
     {
         IAdmin admin = new KafkaAdminClient(s_unreachable);
         TimeSpan negative = TimeSpan.FromMilliseconds(-1);
-        string expected = new ArgumentOutOfRangeException("timeout", "The timeout cannot be negative.").Message;
-
-        ArgumentOutOfRangeException thrown =
-            Assert.IsType<ArgumentOutOfRangeException>(BlockingCall.RunWait(() => admin.Close(negative)));
-        Assert.Equal("timeout", thrown.ParamName);
-        Assert.Equal(expected, thrown.Message);
+        IllegalArgumentException thrown =
+            Assert.IsType<IllegalArgumentException>(BlockingCall.RunWait(() => admin.Close(negative)));
+        Assert.Equal("The timeout cannot be negative.", thrown.Message);
 
         Assert.NotNull(admin.ListTopics());
 
         Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
 
-        ArgumentOutOfRangeException afterClose =
-            Assert.IsType<ArgumentOutOfRangeException>(BlockingCall.RunWait(() => admin.Close(negative)));
-        Assert.Equal("timeout", afterClose.ParamName);
-        Assert.Equal(expected, afterClose.Message);
+        IllegalArgumentException afterClose =
+            Assert.IsType<IllegalArgumentException>(BlockingCall.RunWait(() => admin.Close(negative)));
+        Assert.Equal("The timeout cannot be negative.", afterClose.Message);
         TestTimeout.Dispose(admin);
     }
 
@@ -92,7 +88,7 @@ public sealed class PublicAdminP14SyncCloseTests
 
             KafkaException woken = BlockingCall.AssertThrew(
                 blocked.Join(), 7, "The AdminClient thread has exited. Call: listTopics");
-            Assert.True(woken.IsRetriable);
+            Assert.IsAssignableFrom<Common.Errors.RetriableException>(woken);
             Assert.True(result.NamesToListings().IsDone);
             BlockingCall.AssertThrew(
                 BlockingCall.RunGet(() => result.Names().Get()), 7, "The AdminClient thread has exited. Call: listTopics");
@@ -124,34 +120,33 @@ public sealed class PublicAdminP14SyncCloseTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task AnRpcAfterClose_ThrowsObjectDisposed_OnTheRealClients(bool async)
+    public async Task AnRpcAfterClose_ThrowsIllegalState_OnTheRealClients(bool async)
     {
-        ObjectDisposedException thrown;
+        IllegalStateException thrown;
         if (async)
         {
             IAsyncAdmin admin = new AsyncKafkaAdminClient(s_unreachable);
             await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(5)), BlockingCall.Deadline);
-            thrown = Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+            thrown = Assert.Throws<IllegalStateException>(() => admin.ListTopics());
             await TestTimeout.DisposeAsync(admin);
         }
         else
         {
             IAdmin admin = new KafkaAdminClient(s_unreachable);
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.FromSeconds(5))));
-            thrown = Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+            thrown = Assert.Throws<IllegalStateException>(() => admin.ListTopics());
             TestTimeout.Dispose(admin);
         }
 
-        Assert.Equal(nameof(KafkaAdminClient), thrown.ObjectName);
-        Assert.Equal(new ObjectDisposedException(nameof(KafkaAdminClient)).Message, thrown.Message);
+        Assert.Equal("Cannot accept new calls when AdminClient is closing.", thrown.Message);
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task AnRpcAfterAMockClose_Works_AndAfterDispose_ThrowsObjectDisposed(bool async)
+    public async Task AnRpcAfterAMockClose_Works_AndAfterDispose_ThrowsIllegalState(bool async)
     {
-        ObjectDisposedException thrown;
+        IllegalStateException thrown;
         if (async)
         {
             IAsyncAdmin admin = AsyncMockAdminClient.Create().Build();
@@ -160,7 +155,7 @@ public sealed class PublicAdminP14SyncCloseTests
                 await TestTimeout.Run(() => admin.ListTopics().NamesToListings().Get(), BlockingCall.Deadline);
             Assert.Empty(topics);
             await TestTimeout.DisposeAsync(admin);
-            thrown = Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+            thrown = Assert.Throws<IllegalStateException>(() => admin.ListTopics());
         }
         else
         {
@@ -169,10 +164,10 @@ public sealed class PublicAdminP14SyncCloseTests
             object? topics = BlockingCall.RunGet(() => admin.ListTopics().NamesToListings().Get());
             Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<string, TopicListing>>(topics));
             TestTimeout.Dispose(admin);
-            thrown = Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+            thrown = Assert.Throws<IllegalStateException>(() => admin.ListTopics());
         }
 
-        Assert.Equal(nameof(MockAdminClient), thrown.ObjectName);
+        Assert.Equal("Cannot accept new calls when AdminClient is closing.", thrown.Message);
     }
 
     private static IAdmin Create(string kind) =>

@@ -27,6 +27,8 @@ using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -80,30 +82,48 @@ public sealed class PublicProducerInCallbackTests
         KafkaException error = Assert.IsType<KafkaException>(refused);
         Assert.Equal(FlushMessage, error.Message);
         Assert.Equal(-1, error.Code);
-        Assert.False(error.IsRetriable);
+        Assert.False(error is Common.Errors.RetriableException);
+        // Java's KafkaException(String): no cause.
+        Assert.Null(error.InnerException);
         Assert.Equal(flavor == AsyncFlavor, faultedInCall);
     }
 
     [Theory]
-    [InlineData(SyncFlavor)]
-    [InlineData(AsyncFlavor)]
-    public async Task PartitionsFor_FromADeliveryCallback_EndsAfterMaxBlockMs_WithTheCallbackTimeout(string flavor)
+    [InlineData(SyncFlavor, "string")]
+    [InlineData(SyncFlavor, "int")]
+    [InlineData(SyncFlavor, "long")]
+    [InlineData(AsyncFlavor, "string")]
+    [InlineData(AsyncFlavor, "int")]
+    [InlineData(AsyncFlavor, "long")]
+    public async Task PartitionsFor_FromADeliveryCallback_EndsAfterMaxBlockMs_WithTheCallbackTimeout(
+        string flavor,
+        string maxBlockMsType)
     {
         string topic = Topic("in-callback-partitions-for");
         Exception? timedOut = null;
         long elapsedMs = 0;
-        await Run(flavor, "in-callback-partitions-for-vehicle", producer =>
+        object maxBlockMs = maxBlockMsType switch
         {
-            Stopwatch elapsed = Stopwatch.StartNew();
-            timedOut = producer is KafkaProducer<byte[], byte[]> sync
-                ? Record(() => sync.PartitionsFor(topic))
-                : Record(() => WaitFor(((AsyncKafkaProducer<byte[], byte[]>)producer).PartitionsFor(topic)));
-            elapsedMs = elapsed.ElapsedMilliseconds;
-        });
+            "int" => (object)MaxBlockMs,
+            "long" => (object)(long)MaxBlockMs,
+            _ => MaxBlockMs.ToString(CultureInfo.InvariantCulture),
+        };
+        await Run(
+            flavor,
+            "in-callback-partitions-for-vehicle",
+            producer =>
+            {
+                Stopwatch elapsed = Stopwatch.StartNew();
+                timedOut = producer is KafkaProducer<byte[], byte[]> sync
+                    ? Record(() => sync.PartitionsFor(topic))
+                    : Record(() => WaitFor(((AsyncKafkaProducer<byte[], byte[]>)producer).PartitionsFor(topic)));
+                elapsedMs = elapsed.ElapsedMilliseconds;
+            },
+            maxBlockMs: maxBlockMs);
 
-        KafkaException error = Assert.IsType<KafkaException>(timedOut);
+        KafkaTimeoutException error = Assert.IsType<KafkaTimeoutException>(timedOut);
         Assert.Equal(7, error.Code);
-        Assert.True(error.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(error);
         Assert.Equal(
             $"Timeout expired after {MaxBlockMs}ms while awaiting the metadata of topic {topic} from a send() " +
             "callback, which blocks the producer's completion thread",
@@ -198,7 +218,7 @@ public sealed class PublicProducerInCallbackTests
         (int _, string? destroyThread) = Assert.Single(destroys.Destroys());
         Assert.Equal(flavor == SyncFlavor ? NativeProducer.CompletionThreadName : NativeProducer.PumpThreadName, destroyThread);
         Assert.Equal(0, destroysBeforeTheCallbackReturned);
-        Assert.Throws<ObjectDisposedException>(() => SendAfterClose(producerSeen!));
+        Assert.Throws<IllegalStateException>(() => SendAfterClose(producerSeen!));
     }
 
     private static IReadOnlyList<PartitionInfo> WaitFor(Task<IReadOnlyList<PartitionInfo>> partitions) =>
@@ -233,9 +253,11 @@ public sealed class PublicProducerInCallbackTests
         string flavor,
         string topicPrefix,
         Action<object> inCallback,
-        Action<object>? beforeSend = null)
+        Action<object>? beforeSend = null,
+        object? maxBlockMs = null)
     {
-        object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : Async(MaxBlockMs);
+        object maxBlock = maxBlockMs ?? MaxBlockMs.ToString(CultureInfo.InvariantCulture);
+        object producer = flavor == SyncFlavor ? Sync(maxBlock) : Async(maxBlock);
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback(producer));
         try
         {

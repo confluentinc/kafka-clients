@@ -555,8 +555,8 @@ fn generate_error_codes() -> anyhow::Result<()> {
     println!("🔧 Generating the Python error hierarchy from the Java sources...");
     error_hierarchy::generate(Path::new(REPO_ROOT))?;
 
-    // And the ConfigDef type of every producer / consumer config key.
-    println!("🔧 Generating the Python config key types from the Java sources...");
+    // And the ConfigDef type of every producer / consumer / admin config key.
+    println!("🔧 Generating the Python and .NET config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
@@ -601,17 +601,19 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
 
     // The Python exception hierarchy generated from the Java sources.
-    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
-    // The config key types generated from ProducerConfig / ConsumerConfig.
-    hierarchy_stale.extend(config_types::check_up_to_date(Path::new(REPO_ROOT))?);
+    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The Python and .NET config tables generated from the Java config classes.
+    let config_stale = config_types::check_up_to_date(Path::new(REPO_ROOT))?;
 
-    if codes_stale || !hierarchy_stale.is_empty() {
+    if codes_stale || !hierarchy_stale.is_empty() || !config_stale.is_empty() {
         if codes_stale {
             eprintln!("\n❌ Stale generated error-code constants: {ERROR_CODE_RS}");
         }
-        if !hierarchy_stale.is_empty() {
-            let files: Vec<String> = hierarchy_stale.iter().map(|p| p.display().to_string()).collect();
-            eprintln!("\n❌ Stale generated error hierarchy: {}", files.join(", "));
+        for (what, stale) in [("error hierarchy", &hierarchy_stale), ("config tables", &config_stale)] {
+            if !stale.is_empty() {
+                let files: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+                eprintln!("\n❌ Stale generated {what}: {}", files.join(", "));
+            }
         }
         eprintln!("   Run: cargo xtask generate-error-codes");
         exit(1);
@@ -619,6 +621,7 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
 
     println!("✅ Error-code constants are up to date ({} codes)", codes.len());
     println!("✅ Generated error hierarchy is up to date");
+    println!("✅ Generated config tables are up to date");
     Ok(())
 }
 
@@ -779,9 +782,54 @@ fn coverage_lcov() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs the unit and integration tests under coverage. `admin_examples_test`
+/// runs the example binaries from the test binary's target directory, which a
+/// plain `cargo llvm-cov` neither builds them into nor keeps them in, so the
+/// examples and the tests are built by plain `cargo` commands under the
+/// environment of `cargo llvm-cov show-env`, in its target directory, and the
+/// report is made afterwards.
 fn coverage_all() -> anyhow::Result<()> {
     println!("Running full test coverage (unit + integration, requires Docker)...");
-    run_coverage_lcov(&["--features", "integration-tests"])?;
+    fs::create_dir_all("coverage")?;
+    let target_dir = env::current_dir()?.join("target").join("llvm-cov-target");
+    let target_env = [("CARGO_TARGET_DIR".to_owned(), target_dir.display().to_string())];
+    // Every step, `clean` and `report` included, runs under the show-env
+    // environment: without it cargo-llvm-cov puts its own `llvm-cov-target`
+    // under `CARGO_TARGET_DIR` and looks for the profile data there.
+    let mut coverage_env = llvm_cov_show_env(&target_env)?;
+    coverage_env.extend(target_env.iter().cloned());
+    run_command_with_env("cargo", &["llvm-cov", "clean", "--workspace"], &coverage_env)?;
+    run_command_with_env(
+        "cargo",
+        &["build", "--examples", "--features", "integration-tests"],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "confluent-kafka",
+            "--features",
+            "integration-tests",
+        ],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "llvm-cov",
+            "report",
+            "--package",
+            "confluent-kafka",
+            "--ignore-filename-regex",
+            COVERAGE_IGNORE_FILENAME_REGEX,
+            "--lcov",
+            "--output-path",
+            "coverage/lcov.info",
+        ],
+        &coverage_env,
+    )?;
     run_grcov_html()?;
     println!("Coverage report: coverage/html/index.html");
     Ok(())
@@ -1581,6 +1629,45 @@ fn transactional_producer_perf_test() -> anyhow::Result<()> {
     run_command("cargo", &arg_refs)
 }
 
+/// The generated wire code, the `src/bin` tools, the test-only files (always fully run,
+/// so they only inflate the total) and the `Dyn*` client forwarders, whose forwarding
+/// `check-dyn-forwarding` already enforces, left out of every coverage report.
+const COVERAGE_IGNORE_FILENAME_REGEX: &str = concat!(
+    "(target/debug/build/.*/out/(test_)?generated/|src/bin/",
+    "|(_test|_test_utils)\\.rs$|/test_[a-z_]+\\.rs$|src/integration_tests/",
+    "|src/(consumer/dyn_consumer|producer/dyn_producer)\\.rs$)",
+);
+
+/// The environment `cargo llvm-cov show-env` gives for instrumenting the
+/// `confluent-kafka` package, its `KEY=VALUE` lines with the shell quotes
+/// removed, run with `env_vars` set.
+fn llvm_cov_show_env(env_vars: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+    let output = Command::new("cargo")
+        .args(["llvm-cov", "show-env", "--package", "confluent-kafka"])
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Command failed: cargo llvm-cov show-env\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .with_context(|| format!("unexpected cargo llvm-cov show-env line: {line}"))?;
+            let value = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')).unwrap_or(value);
+            if value.contains('\'') {
+                anyhow::bail!("unsupported quoting in cargo llvm-cov show-env line: {line}");
+            }
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
     fs::create_dir_all("coverage")?;
     let mut args = vec![
@@ -1588,7 +1675,7 @@ fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
         "--package",
         "confluent-kafka",
         "--ignore-filename-regex",
-        "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
+        COVERAGE_IGNORE_FILENAME_REGEX,
         "--lcov",
         "--output-path",
         "coverage/lcov.info",
@@ -2275,7 +2362,15 @@ fn package_rust_version() -> anyhow::Result<String> {
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(program).args(args).status()?;
+    run_command_with_env(program, args, &[])
+}
+
+/// [`run_command`] with `env_vars` added to the inherited environment.
+fn run_command_with_env(program: &str, args: &[&str], env_vars: &[(String, String)]) -> anyhow::Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .status()?;
 
     if !status.success() {
         anyhow::bail!("Command failed: {} {}", program, args.join(" "));
@@ -2661,8 +2756,10 @@ fn print_help() {
                     check-thread-safety-probe             src/api_promises.rs asserts every public type's auto traits
                     check-ffi-translation                 every public Rust item has its C counterpart
                     check-api-docs                        public API docs list parameters, returns and errors
+                    check-ffi-null-checks                 no C argument is read before its NULL check
                   With a rule name only that rule runs; `--no-baseline` ignores
-                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every finding is shown
+                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every
+                  finding is shown
   ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   doc-baseline    Rewrite xtask/doc-baseline.txt with the current check-api-docs findings
   javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit

@@ -66,18 +66,17 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
     public override Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IProducer<byte[], byte[]> producer;
         try
         {
             // An empty or all-blank config selects a MockProducer, as Python's servicer does.
-            if (IsEmptyConfig(config))
+            if (IsEmptyConfig(request.Config))
             {
                 producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             }
             else
             {
-                producer = new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
             }
         }
         catch (Exception ex)
@@ -111,7 +110,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             RecordMetadata metadata = future.Value.Get(_sendTimeout);
             return Task.FromResult(new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) });
         }
-        catch (TimeoutException) when (future is { IsDone: false })
+        catch (System.TimeoutException) when (future is { IsDone: false })
         {
             // Only the server's own bound is code 7: a future that failed with a TimeoutException
             // (the core's -5) is done, and goes out through ToProto.

@@ -48,12 +48,13 @@ pub(crate) fn box_alter_partition_reassignments_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_AlterPartitionReassignmentsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<AlterPartitionReassignmentsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_AlterPartitionReassignmentsResult_t` is built by
     // `box_result::<AlterPartitionReassignmentsResult, _>` (in
     // `box_alter_partition_reassignments_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Frees a `kafka_common_TopicPartition_t *` key of an owned map.
@@ -92,7 +93,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&TopicPartition, &KafkaFuture<()>)> = h.result.values().iter().collect();
     entries.sort_by(|a, b| (a.0.topic(), a.0.partition()).cmp(&(b.0.topic(), b.0.partition())));
     h.ctx.keyed_future_map(
@@ -123,7 +124,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

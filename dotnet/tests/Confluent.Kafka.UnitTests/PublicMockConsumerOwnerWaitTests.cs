@@ -596,7 +596,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
 
     private static void AssertRefused(Exception? thrown)
     {
-        InvalidOperationException refused = Assert.IsType<InvalidOperationException>(thrown);
+        ConcurrentModificationException refused = Assert.IsType<ConcurrentModificationException>(thrown);
         Assert.Equal(ConcurrentMessage, refused.Message);
     }
 
@@ -614,7 +614,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
         Thread other = StartThread(() => failure = Record.Exception(action));
         if (!other.Join(s_bound))
         {
-            throw new TimeoutException("the other thread's calls did not return");
+            throw new System.TimeoutException("the other thread's calls did not return");
         }
 
         if (failure is not null)
@@ -630,7 +630,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();

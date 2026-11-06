@@ -561,7 +561,8 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static void AssertNotImplemented(Exception? outcome)
     {
-        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
+        UnsupportedOperationException failure = FutureAssert.Cause<UnsupportedOperationException>(
+            Assert.IsAssignableFrom<Exception>(outcome));
         Assert.Equal("Not implemented yet", failure.Message);
     }
 

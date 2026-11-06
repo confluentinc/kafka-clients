@@ -151,7 +151,7 @@ public sealed class CommittedNullEntryTests
         return map;
     }
 
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "127.0.0.1:1",
         ["group.protocol"] = "consumer",

@@ -20,22 +20,25 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Admin construction and teardown as a user drives it: close before destroy, idempotent
-/// disposal, and a clear <see cref="ObjectDisposedException"/> afterwards. Every wait is
+/// disposal, and a clear <see cref="IllegalStateException"/> afterwards. Every wait is
 /// bounded by <see cref="TestTimeout"/>, so a teardown that hangs fails the run instead
 /// of blocking it.
 /// </summary>
 public sealed class PublicAdminTeardownTests
 {
+    private const string ClosedAdminMessage = "Cannot accept new calls when AdminClient is closing.";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Fact]
     public void Dispose_IsIdempotent()
@@ -82,17 +85,14 @@ public sealed class PublicAdminTeardownTests
     {
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        string expected = new ArgumentOutOfRangeException("timeout", "The timeout cannot be negative.").Message;
-
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(
             () => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); });
-        Assert.Equal("timeout", failure.ParamName);
-        Assert.Equal(expected, failure.Message);
+        Assert.Equal("The timeout cannot be negative.", failure.Message);
 
         await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
         Assert.Equal(
-            expected,
-            Assert.Throws<ArgumentOutOfRangeException>(() => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); }).Message);
+            "The timeout cannot be negative.",
+            Assert.Throws<IllegalArgumentException>(() => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); }).Message);
     }
 
     [Fact]
@@ -110,8 +110,8 @@ public sealed class PublicAdminTeardownTests
 
         await TestTimeout.DisposeAsync(admin);
         Assert.Equal(
-            nameof(MockAdminClient),
-            Assert.Throws<ObjectDisposedException>(() => admin.ListTopics()).ObjectName);
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => admin.ListTopics()).Message);
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public sealed class PublicAdminTeardownTests
 
         TestTimeout.Run(admin.Close, s_deadline);
         TestTimeout.Run(admin.Close, s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
         TestTimeout.Run(admin.Dispose, s_deadline);
     }
 
@@ -132,7 +132,7 @@ public sealed class PublicAdminTeardownTests
 
         await TestTimeout.Run(() => admin.Close(), s_deadline);
         await TestTimeout.Run(() => admin.Close(CancellationToken.None), s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
         await TestTimeout.DisposeAsync(admin);
     }
 
@@ -147,14 +147,14 @@ public sealed class PublicAdminTeardownTests
         Assert.Throws<OperationCanceledException>(() => { _ = admin.Close(TimeSpan.Zero, cancelled.Token); });
 
         await TestTimeout.Run(() => admin.Close(), s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
     }
 
     [Fact]
     public void SaslPlaintextWithoutAMechanism_FailsWithTheCoresConfigError()
     {
-        KafkaException failure = Assert.Throws<KafkaException>(() => new KafkaAdminClient(
-            new Dictionary<string, string>(StringComparer.Ordinal)
+        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(
+            new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["bootstrap.servers"] = "127.0.0.1:1",
                 ["security.protocol"] = "SASL_PLAINTEXT",
@@ -167,30 +167,30 @@ public sealed class PublicAdminTeardownTests
     }
 
     [Fact]
-    public void CallAfterDispose_ThrowsObjectDisposed()
+    public void CallAfterDispose_ThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.CreateTopics(new[] { new NewTopic("after-dispose", 1, 1) }));
     }
 
     [Fact]
-    public void X9_CallAfterDispose_NamesThePublicType()
+    public void X9_CallAfterDispose_ThrowsTheClosedAdminClientsIllegalState()
     {
         MockAdminClient mock = MockAdminClient.Create().Build();
         TestTimeout.Run(mock.Dispose, s_deadline);
         Assert.Equal(
-            nameof(MockAdminClient),
-            Assert.Throws<ObjectDisposedException>(() => mock.ListTopics()).ObjectName);
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => mock.ListTopics()).Message);
 
         KafkaAdminClient real = new KafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         TestTimeout.Run(real.Dispose, s_deadline);
         Assert.Equal(
-            nameof(KafkaAdminClient),
-            Assert.Throws<ObjectDisposedException>(() => real.ListTopics()).ObjectName);
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => real.ListTopics()).Message);
     }
 
     [Fact]
@@ -233,24 +233,47 @@ public sealed class PublicAdminTeardownTests
     public async Task RealClient_ConstructsAndTearsDownWithoutABroker()
     {
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
     }
 
     [Fact]
-    public void RealClient_RejectsANullConfigValue()
+    public void RealClient_RejectsANullConfigValueItsValidatorRefuses()
     {
-        ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = null! }));
-        Assert.Equal("config", failure.ParamName);
-        Assert.StartsWith(
-            "Configuration value for key 'bootstrap.servers' must not be null.",
-            failure.Message,
-            StringComparison.Ordinal);
+        ConfigException failure = Assert.Throws<ConfigException>(
+            () => new KafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = null }));
 
+        Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", failure.Message);
+        Assert.Equal(-10, failure.Code);
+    }
+
+    [Fact]
+    public void RealClient_LeavesANullConfigValueWithNoValidatorUnset()
+    {
+        var config = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9092",
+            ["sasl.login.connect.timeout.ms"] = null,
+        };
+
+        KafkaAdminClient admin = new KafkaAdminClient(config);
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+
+        config["sasl.login.connect.timeout.ms"] = "";
+        ConfigException failure = Assert.Throws<ConfigException>(() => new KafkaAdminClient(config));
         Assert.Equal(
-            "config",
+            "Invalid value  for configuration sasl.login.connect.timeout.ms: Not a number of type INT",
+            failure.Message);
+        Assert.Equal(-10, failure.Code);
+    }
+
+    [Fact]
+    public void RealClient_RejectsANullConfigMap()
+    {
+        Assert.Equal(
+            "configs",
             Assert.Throws<ArgumentNullException>(() => new KafkaAdminClient(null!)).ParamName);
     }
 }

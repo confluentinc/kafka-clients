@@ -30,7 +30,7 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicProducerMetricsTests
 {
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
     };
@@ -120,37 +120,37 @@ public sealed class PublicProducerMetricsTests
     }
 
     [Fact]
-    public void Metrics_SyncMockAfterDispose_ThrowsObjectDisposed()
+    public void Metrics_SyncMockAfterDispose_ThrowsIllegalState()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
-        Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
+        Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
 
     [Fact]
-    public void Metrics_SyncRealAfterDispose_ThrowsObjectDisposed()
+    public void Metrics_SyncRealAfterDispose_ThrowsIllegalState()
     {
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
-        Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
+        Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
 
     [Fact]
-    public async Task Metrics_AsyncMockAfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Metrics_AsyncMockAfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(producer);
-        Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
+        Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
 
     [Fact]
-    public async Task Metrics_AsyncRealAfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Metrics_AsyncRealAfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
             RealConfig(), Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(producer);
-        Assert.Throws<ObjectDisposedException>(() => producer.Metrics());
+        Assert.Throws<IllegalStateException>(() => producer.Metrics());
     }
 
     // Declared on each interface, with no shared base.

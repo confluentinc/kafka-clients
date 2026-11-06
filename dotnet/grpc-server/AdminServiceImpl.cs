@@ -65,14 +65,13 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
     public override Task<Proto.CreateAdminResponse> CreateAdmin(Proto.CreateAdminRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         int numBrokers = request.HasNumBrokers ? request.NumBrokers : 1;
         IAdmin admin;
         try
         {
-            admin = TranslateAdmin.SelectsMock(config)
+            admin = TranslateAdmin.SelectsMock(request.Config)
                 ? MockAdminClient.Create().NumBrokers(numBrokers).Build()
-                : (IAdmin)new KafkaAdminClient(config);
+                : (IAdmin)new KafkaAdminClient(Translate.ConfigsFromProto(request.Config));
         }
         catch (Exception ex)
         {
@@ -682,7 +681,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             // Java holds one future over the whole map, so its failure is the whole-call error; a
             // per-entry error is the Optional<Throwable> in the resolved map, absent meaning that
             // election succeeded.
-            (IReadOnlyDictionary<TopicPartition, KafkaException?> partitions, Proto.KafkaError? error) =
+            (IReadOnlyDictionary<TopicPartition, Exception?> partitions, Proto.KafkaError? error) =
                 TranslateAdmin.Resolve(result.Partitions());
             if (error is not null)
             {
@@ -690,7 +689,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             }
 
             Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
-            foreach (KeyValuePair<TopicPartition, KafkaException?> pair in partitions)
+            foreach (KeyValuePair<TopicPartition, Exception?> pair in partitions)
             {
                 Proto.VoidResultEntry entry = new Proto.VoidResultEntry
                 {
@@ -908,7 +907,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             Proto.DescribeTransactionsResponse response = new Proto.DescribeTransactionsResponse();
             foreach (string id in ids)
             {
-                (TransactionDescription description, Proto.KafkaError? error) =
+                (TransactionDescription? description, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(result.Description(id));
                 Proto.DescribeTransactionsEntry entry = new Proto.DescribeTransactionsEntry
                 {
@@ -918,7 +917,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 {
                     entry.Error = error;
                 }
-                else
+                else if (description is not null)
                 {
                     entry.Value = TranslateAdmin.TransactionDescriptionToProto(description);
                 }
@@ -1150,7 +1149,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             // valid() and errors() are independent lists of unrelated length: never zip them.
             IReadOnlyCollection<GroupListing> valid = result.Valid().Get();
-            IReadOnlyCollection<KafkaException> errors = result.Errors().Get();
+            IReadOnlyCollection<Exception> errors = result.Errors().Get();
 
             Proto.ListGroupsResponse response = new Proto.ListGroupsResponse();
             foreach (GroupListing listing in valid)
@@ -1158,7 +1157,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 response.Valid.Add(TranslateAdmin.GroupListingToProto(listing));
             }
 
-            foreach (KafkaException error in errors)
+            foreach (Exception error in errors)
             {
                 response.ListingErrors.Add(Translate.ToProto(error));
             }
@@ -1903,10 +1902,10 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             DescribeFeaturesResult result = admin.DescribeFeatures(options);
 
-            FeatureMetadata metadata = result.FeatureMetadata().Get();
+            FeatureMetadata? metadata = result.FeatureMetadata().Get();
             return Task.FromResult(new Proto.DescribeFeaturesResponse
             {
-                Metadata = TranslateAdmin.FeatureMetadataToProto(metadata),
+                Metadata = metadata is null ? null : TranslateAdmin.FeatureMetadataToProto(metadata),
             });
         }
         catch (Exception ex)

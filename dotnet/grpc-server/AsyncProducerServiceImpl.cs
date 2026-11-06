@@ -66,18 +66,17 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
     public override Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IAsyncProducer<byte[], byte[]> producer;
         try
         {
             // An empty or all-blank config selects an AsyncMockProducer, as Python's servicer does.
-            if (IsEmptyConfig(config))
+            if (IsEmptyConfig(request.Config))
             {
                 producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             }
             else
             {
-                producer = new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
             }
         }
         catch (Exception ex)
@@ -113,7 +112,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             RecordMetadata metadata = await send.WaitAsync(_sendTimeout).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
-        catch (TimeoutException) when (send is { IsCompleted: false })
+        catch (System.TimeoutException) when (send is { IsCompleted: false })
         {
             // Only the server's own bound is code 7: a send that failed with a TimeoutException
             // (the core's -5) is completed, and goes out through ToProto.

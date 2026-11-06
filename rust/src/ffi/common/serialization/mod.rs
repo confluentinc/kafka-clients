@@ -56,6 +56,7 @@
 //! the calling thread, parking it while a report is awaited
 //! ([`block_on_thread`]), and [`ready`] drives the built-ins.
 
+use crate::ffi::precondition::{require_map, require_ref};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, c_void};
 use std::pin::pin;
@@ -82,7 +83,6 @@ use crate::ffi::common::serialization::serializer::{
 use crate::ffi::common::{ErrorCompletion, box_error};
 use crate::ffi::util::{
     box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_destroy, kafka_Map_t,
-    map_entries,
 };
 
 pub(crate) mod byte_array_deserializer;
@@ -112,12 +112,12 @@ impl SerializerHandle {
     /// # Safety
     ///
     /// `ptr` must be a valid handle of this class, alive for `'a`.
-    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self, param: &'static str) -> &'a Self {
         // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this class alive for
         // `'a`: the `Box::into_raw` of `boxed`, not yet passed to `destroy`. A `SerializerHandle`
         // is changed only through its `OnceLock`, which allows shared access, so the shared
         // reference is sound for `'a`.
-        unsafe { &*ptr }
+        unsafe { require_ref::<_, Self>(ptr, param) }
     }
 
     /// The implementation as a `Serializer`: a view valid as long as the
@@ -166,12 +166,12 @@ impl DeserializerHandle {
     /// # Safety
     ///
     /// `ptr` must be a valid handle of this class, alive for `'a`.
-    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self) -> &'a Self {
+    pub(crate) unsafe fn from_ptr<'a>(ptr: *const Self, param: &'static str) -> &'a Self {
         // SAFETY: Per this function's `# Safety`, `ptr` is a valid handle of this class alive for
         // `'a`: the `Box::into_raw` of `boxed`, not yet passed to `destroy`. A `DeserializerHandle`
         // is changed only through its `OnceLock` and the `Mutex` around the implementation, which
         // both allow shared access, so the shared reference is sound for `'a`.
-        unsafe { &*ptr }
+        unsafe { require_ref::<_, Self>(ptr, param) }
     }
 
     /// The implementation as a `Deserializer`: a view valid as long as the
@@ -426,9 +426,9 @@ pub(crate) fn build_configs(configs: &HashMap<String, String>) -> *mut kafka_Map
 ///
 /// `configs` must be null or a valid map of NUL-terminated strings.
 pub(crate) unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String, String> {
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `map_entries`
-    // requires (null reads as empty); the borrow of its entries ends when they are collected.
-    unsafe { map_entries(configs) }
+    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `require_map`
+    // requires (a null panics); the borrow of its entries ends when they are collected.
+    unsafe { require_map(configs, "configs") }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key and value of `configs` is a valid
@@ -475,16 +475,16 @@ mod tests {
         // `serializer_ref` comes from `as_serializer` and is not owned, so `take_serializer` clones
         // its `Arc` and frees nothing.
         unsafe {
-            let h = SerializerHandle::from_ptr(handle);
+            let h = SerializerHandle::from_ptr(handle, "handle");
             assert_eq!(h.as_serializer(), h.as_serializer());
             assert_eq!(Arc::strong_count(&h.imp), 2, "handle + view");
             // Taking the view shares it: the handle keeps working and the
             // taken `Arc` is the view itself, holding the same implementation.
-            let shared = take_serializer(h.as_serializer().cast_mut());
+            let shared = take_serializer(h.as_serializer().cast_mut(), "serializer");
             assert_eq!(Arc::strong_count(&h.imp), 2);
             assert!(ptr::addr_eq(Arc::as_ptr(&shared), h.as_serializer()));
             assert!(ptr::addr_eq(shared.get(), Arc::as_ptr(&h.imp)));
-            assert_eq!(serializer_ref(h.as_serializer()).as_ptr(), h.as_serializer());
+            assert_eq!(serializer_ref(h.as_serializer(), "value").as_ptr(), h.as_serializer());
             drop(shared);
             SerializerHandle::destroy(handle);
             SerializerHandle::destroy(ptr::null_mut());
@@ -499,14 +499,17 @@ mod tests {
         // `deserializer_ref` comes from `as_deserializer` and is not owned, so `take_deserializer`
         // clones its `Arc` and frees nothing.
         unsafe {
-            let h = DeserializerHandle::from_ptr(handle);
+            let h = DeserializerHandle::from_ptr(handle, "handle");
             assert_eq!(h.as_deserializer(), h.as_deserializer());
             assert_eq!(Arc::strong_count(&h.imp), 2, "handle + view");
-            let shared = take_deserializer(h.as_deserializer());
+            let shared = take_deserializer(h.as_deserializer(), "deserializer");
             assert_eq!(Arc::strong_count(&h.imp), 2);
             assert!(ptr::addr_eq(Arc::as_ptr(&shared), h.as_deserializer()));
             assert!(ptr::addr_eq(shared.imp(), Arc::as_ptr(&h.imp)));
-            assert_eq!(deserializer_ref(h.as_deserializer()).as_ptr(), h.as_deserializer().cast_const());
+            assert_eq!(
+                deserializer_ref(h.as_deserializer(), "value").as_ptr(),
+                h.as_deserializer().cast_const()
+            );
             drop(shared);
             DeserializerHandle::destroy(handle);
             DeserializerHandle::destroy(ptr::null_mut());

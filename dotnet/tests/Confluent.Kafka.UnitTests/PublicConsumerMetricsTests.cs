@@ -26,14 +26,14 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// <see cref="IConsumerCommon.Metrics"/> on the four consumer classes: an empty map on the mocks, as Java's
 /// MockConsumer; well-formed entries on a real consumer without a broker, keyed by <see cref="MetricName"/> value
-/// identity; <see cref="ObjectDisposedException"/> after Dispose; and, while a poll holds the consumer, a state read
+/// identity; <see cref="IllegalStateException"/> after Dispose; and, while a poll holds the consumer, a state read
 /// refused beside an answered Metrics.
 /// </summary>
 public sealed class PublicConsumerMetricsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static Dictionary<string, string> RealConfig(string groupId) => new()
+    private static Dictionary<string, object?> RealConfig(string groupId) => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
         ["group.protocol"] = "consumer",
@@ -105,19 +105,19 @@ public sealed class PublicConsumerMetricsTests
     }
 
     [Fact]
-    public void Metrics_AfterDispose_ThrowsObjectDisposed()
+    public void Metrics_AfterDispose_ThrowsIllegalState()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Metrics());
+        Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
 
     [Fact]
-    public async Task Metrics_AfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Metrics_AfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Metrics());
+        Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public sealed class PublicConsumerMetricsTests
         Task<ConsumerRecords<byte[], byte[]>> inFlight = consumer.Poll(TimeSpan.FromSeconds(20));
         try
         {
-            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => consumer.Assignment());
+            ConcurrentModificationException ex = Assert.Throws<ConcurrentModificationException>(() => consumer.Assignment());
             Assert.Equal("KafkaConsumer is not safe for multi-threaded access.", ex.Message);
 
             AssertPopulatedAndWellFormed(consumer.Metrics());
@@ -210,7 +210,7 @@ public sealed class PublicConsumerMetricsTests
                 },
                 s_deadline);
         }
-        catch (TimeoutException)
+        catch (System.TimeoutException)
         {
         }
     }

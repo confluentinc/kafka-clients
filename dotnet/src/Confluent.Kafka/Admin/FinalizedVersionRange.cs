@@ -15,6 +15,7 @@
 using System;
 using System.Globalization;
 
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -30,7 +31,7 @@ public sealed class FinalizedVersionRange
     /// <summary>Creates a finalized range — Java's constructor.</summary>
     /// <param name="minVersionLevel">The minimum finalized version level.</param>
     /// <param name="maxVersionLevel">The maximum finalized version level.</param>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// Either level is negative, or the maximum is below the minimum. The bound is
     /// <c>&gt;= 0</c>, as Java's code enforces, although its javadoc says <c>&gt;= 1</c>.
     /// </exception>
@@ -38,7 +39,7 @@ public sealed class FinalizedVersionRange
     {
         if (minVersionLevel < 0 || maxVersionLevel < 0 || maxVersionLevel < minVersionLevel)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Expected minVersionLevel >= 0, maxVersionLevel >= 0 and"

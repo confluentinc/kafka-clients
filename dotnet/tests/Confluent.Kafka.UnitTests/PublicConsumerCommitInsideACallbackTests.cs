@@ -231,7 +231,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
                 {
                     "Assignment: ok [" + Topic + "-0]",
                     "CommitAsync: ok",
-                    "Pause: " + (mock ? "NotSupportedException: " + MockHandleUnsupported : "ok"),
+                    "Pause: " + (mock ? "UnsupportedOperationException: " + MockHandleUnsupported : "ok"),
                     "Paused: ok [" + (mock ? string.Empty : Topic + "-0") + "]",
                 },
                 Snapshot(seen));
@@ -305,8 +305,8 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(long offset) =>
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(offset) };
 
-    private static Dictionary<string, string> KafkaConfig() =>
-        new Dictionary<string, string>
+    private static Dictionary<string, object?> KafkaConfig() =>
+        new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",
             ["group.protocol"] = "consumer",

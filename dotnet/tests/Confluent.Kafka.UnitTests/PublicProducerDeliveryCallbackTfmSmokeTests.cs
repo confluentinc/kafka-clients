@@ -18,6 +18,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -94,9 +95,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 1),
             callback).Delivery();
-        Assert.True(producer.ErrorNext(new KafkaException(2, "tfm-delivery-error", isRetriable: true)));
+        Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-delivery-error")));
 
-        await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
 
         await TestTimeout.Run(() => WaitForCompletions(callback, 1), s_deadline);
 
@@ -106,14 +107,14 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Assert.Equal(1, callback.LastMetadata.Partition);
         Assert.Equal(-1L, callback.LastMetadata.Offset);
         Assert.NotNull(callback.LastException);
-        Assert.Equal(2, Assert.IsType<KafkaException>(callback.LastException).Code);
+        Assert.Equal(2, Assert.IsType<CorruptRecordException>(callback.LastException).Code);
     }
 
     [Fact]
     public void RealProducers_DeclareTheCallbackOverload()
     {
         // The real clients cannot be driven broker-free, so this pins only that the overload is callable on them.
-        Dictionary<string, string> config = new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" };
+        Dictionary<string, object?> config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
 
         AsyncKafkaProducer<byte[], byte[]> asyncProducer =
             new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);

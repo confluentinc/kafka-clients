@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Text;
 
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal.Interop;
@@ -22,12 +21,12 @@ namespace Confluent.Kafka.Internal.Serialization;
 
 /// <summary>
 /// The serde behind <see cref="Serdes.String"/>: UTF-8 strings, as Java's <c>StringSerializer</c> and
-/// <c>StringDeserializer</c>.
+/// <c>StringDeserializer</c>; an unpaired surrogate serializes as <c>'?'</c>, as Java's <c>getBytes(UTF_8)</c>.
 /// </summary>
 internal sealed class StringSerde : ISerde<string>
 {
     public byte[]? Serialize(string topic, string data) =>
-        data is null ? null : Encoding.UTF8.GetBytes(data);
+        data is null ? null : Utf8Marshal.QuestionMarkUtf8.GetBytes(data);
 
     public string Deserialize(string topic, ReadOnlySpan<byte> data) =>
         Utf8Marshal.GetString(data);

@@ -80,12 +80,14 @@ public sealed class AdminP5ResultMarshalTests
             c.Error(NewTimeoutError("listing timed out")),
             c.Error(NewGroupAuthorizationError("grüppe", "grüppe denied")));
 
-        KafkaException[] errors = GroupDescriptionMarshal.CopyOutErrors(list).ToArray();
+        Exception[] errors = GroupDescriptionMarshal.CopyOutErrors(list).ToArray();
 
-        Assert.Equal(new[] { 7, 30 }, errors.Select(e => e.Code));
+        Assert.Equal(
+            new[] { typeof(Common.Errors.TimeoutException), typeof(Common.Errors.GroupAuthorizationException) },
+            errors.Select(e => e.GetType()));
         Assert.Equal(new[] { "listing timed out", "grüppe denied" }, errors.Select(e => e.Message));
-        Assert.True(errors[0].IsRetriable);
-        Assert.False(errors[1].IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(errors[0]);
+        Assert.False(errors[1] is Common.Errors.RetriableException);
     }
 
     [Theory]

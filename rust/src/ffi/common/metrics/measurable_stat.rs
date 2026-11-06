@@ -32,6 +32,7 @@ use crate::ffi::common::metrics::metric_config::{
 };
 use crate::ffi::common::metrics::{Interface, c_type_name, type_name_c_str};
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{Required, require_fn};
 
 /// Opaque handle to a [`MeasurableStat`] implementation.
 #[repr(C)]
@@ -41,17 +42,20 @@ pub struct kafka_common_metrics_MeasurableStat_t {
 
 /// `record(MetricConfig config, double value, long timeMs)` of a C
 /// implementation: `config` is borrowed for the call.
-pub type kafka_common_metrics_MeasurableStat_record_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    config: *const kafka_common_metrics_MetricConfig_t,
-    value: f64,
-    time_ms: i64,
-);
+pub type kafka_common_metrics_MeasurableStat_record_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        config: *const kafka_common_metrics_MetricConfig_t,
+        value: f64,
+        time_ms: i64,
+    ),
+>;
 
 /// `measure(MetricConfig config, long now)` of a C implementation: `config`
 /// is borrowed for the call.
-pub type kafka_common_metrics_MeasurableStat_measure_fn_t =
-    unsafe extern "C" fn(self_: *mut c_void, config: *const kafka_common_metrics_MetricConfig_t, now: i64) -> f64;
+pub type kafka_common_metrics_MeasurableStat_measure_fn_t = Option<
+    unsafe extern "C" fn(self_: *mut c_void, config: *const kafka_common_metrics_MetricConfig_t, now: i64) -> f64,
+>;
 
 /// The Rust-only `type_name` of a C implementation, the provider's name in
 /// `KafkaMetric_to_string`: a NUL-terminated string that stays valid and
@@ -65,8 +69,8 @@ pub type kafka_common_metrics_MeasurableStat_type_name_fn_t =
 /// `kafka_common_metrics_MeasurableStat_new`.
 struct CMeasurableStat {
     self_: *mut c_void,
-    record: kafka_common_metrics_MeasurableStat_record_fn_t,
-    measure: kafka_common_metrics_MeasurableStat_measure_fn_t,
+    record: Required<kafka_common_metrics_MeasurableStat_record_fn_t>,
+    measure: Required<kafka_common_metrics_MeasurableStat_measure_fn_t>,
     type_name: kafka_common_metrics_MeasurableStat_type_name_fn_t,
 }
 
@@ -146,12 +150,13 @@ impl Measurable for ArcMeasurableStat {
 /// `stat` must be a valid measurable-stat handle, alive for `'a`.
 pub(crate) unsafe fn measurable_stat_ref<'a>(
     stat: *const kafka_common_metrics_MeasurableStat_t,
+    param: &'static str,
 ) -> &'a dyn MeasurableStat {
     // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable-stat handle alive for
     // `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_MeasurableStat_t` is an
     // `Interface<dyn MeasurableStat>`, owned or a view; the reference returned lives for the same
     // `'a`.
-    unsafe { Interface::<dyn MeasurableStat>::from_ptr(stat as *const Interface<dyn MeasurableStat>) }.get()
+    unsafe { Interface::<dyn MeasurableStat>::from_ptr(stat as *const Interface<dyn MeasurableStat>, param) }.get()
 }
 
 /// Takes the implementation a `*mut` parameter received (see
@@ -201,6 +206,8 @@ pub extern "C" fn kafka_common_metrics_MeasurableStat_new(
     measure: kafka_common_metrics_MeasurableStat_measure_fn_t,
     type_name: kafka_common_metrics_MeasurableStat_type_name_fn_t,
 ) -> *mut kafka_common_metrics_MeasurableStat_t {
+    let record = require_fn(record, "record");
+    let measure = require_fn(measure, "measure");
     let stat: Arc<dyn MeasurableStat> = Arc::new(CMeasurableStat { self_, record, measure, type_name });
     Interface::owned(stat) as *mut kafka_common_metrics_MeasurableStat_t
 }
@@ -228,7 +235,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_record(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
     // `measurable_stat_ref` requires, and `config` a valid metric-config handle, as
     // `metric_config_ref` requires; both references are used only within this call.
-    unsafe { measurable_stat_ref(self_) }.record(unsafe { metric_config_ref(config) }, value, time_ms);
+    unsafe { measurable_stat_ref(self_, "self_") }.record(
+        unsafe { metric_config_ref(config, "config") },
+        value,
+        time_ms,
+    );
 }
 
 /// `measure(MetricConfig config, long now)`.
@@ -256,7 +267,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
     // `measurable_stat_ref` requires, and `config` a valid metric-config handle, as
     // `metric_config_ref` requires; both references are used only within this call.
-    unsafe { measurable_stat_ref(self_) }.measure(unsafe { metric_config_ref(config) }, now)
+    unsafe { measurable_stat_ref(self_, "self_") }.measure(unsafe { metric_config_ref(config, "config") }, now)
 }
 
 /// Returns the provider's type name as `kafka_common_metrics_KafkaMetric_to_string` reports it,
@@ -273,7 +284,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_type_name(
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid measurable-stat handle, as
     // `measurable_stat_ref` requires; the reference is used only within this call.
-    type_name_c_str(unsafe { measurable_stat_ref(self_) }.type_name())
+    type_name_c_str(unsafe { measurable_stat_ref(self_, "self_") }.type_name())
 }
 
 /// Frees an owned handle; null is a no-op. The view a class handle hands
@@ -330,8 +341,8 @@ mod tests {
         let sum = Mutex::new(0.0_f64);
         let handle = kafka_common_metrics_MeasurableStat_new(
             &sum as *const Mutex<f64> as *mut c_void,
-            c_record,
-            c_measure,
+            Some(c_record),
+            Some(c_measure),
             None,
         );
         let config = MetricConfig::new();
@@ -340,7 +351,7 @@ mod tests {
         // not used; `config_handle` comes from `kafka_common_metrics_MetricConfig_new` and is
         // destroyed once.
         unsafe {
-            measurable_stat_ref(handle).record(&config, 1.5, 0);
+            measurable_stat_ref(handle, "handle").record(&config, 1.5, 0);
             let config_handle = kafka_common_metrics_MetricConfig_new();
             kafka_common_metrics_MeasurableStat_record(handle, config_handle, 2.0, 0);
             assert_eq!(kafka_common_metrics_MeasurableStat_measure(handle, config_handle, 0), 3.5);
@@ -359,9 +370,13 @@ mod tests {
 
     #[test]
     fn type_name_is_the_c_slot_or_none_when_the_slot_is_null() {
-        let named =
-            kafka_common_metrics_MeasurableStat_new(ptr::null_mut(), c_record, c_measure, Some(c_type_name_slot));
-        let unnamed = kafka_common_metrics_MeasurableStat_new(ptr::null_mut(), c_record, c_measure, None);
+        let named = kafka_common_metrics_MeasurableStat_new(
+            ptr::null_mut(),
+            Some(c_record),
+            Some(c_measure),
+            Some(c_type_name_slot),
+        );
+        let unnamed = kafka_common_metrics_MeasurableStat_new(ptr::null_mut(), Some(c_record), Some(c_measure), None);
         // SAFETY: Test code: both handles come from `kafka_common_metrics_MeasurableStat_new` over a null
         // `self_` the C functions never read; the strings the invoker returns stay valid for the
         // rest of the program; `measurable_stat_ref` borrows each handle within the block, and each handle is
@@ -372,8 +387,8 @@ mod tests {
                 Ok("my.CMeasurableStat")
             );
             assert!(kafka_common_metrics_MeasurableStat_type_name(unnamed).is_null());
-            assert_eq!(measurable_stat_ref(named).type_name(), Some("my.CMeasurableStat"));
-            assert_eq!(measurable_stat_ref(unnamed).type_name(), None);
+            assert_eq!(measurable_stat_ref(named, "named").type_name(), Some("my.CMeasurableStat"));
+            assert_eq!(measurable_stat_ref(unnamed, "unnamed").type_name(), None);
             // The shared-stat adapter `take_measurable_stat` returns reports the stat it wraps, not its
             // own type.
             assert_eq!(take_measurable_stat(named).type_name(), Some("my.CMeasurableStat"));

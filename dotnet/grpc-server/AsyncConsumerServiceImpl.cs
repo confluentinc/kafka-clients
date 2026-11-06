@@ -92,18 +92,17 @@ internal sealed class AsyncConsumerServiceImpl
 
     public override Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
     {
-        Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IAsyncConsumer<byte[], byte[]> consumer;
         try
         {
             // An empty or all-blank config selects an AsyncMockConsumer, as Python's servicer does.
-            if (IsEmptyConfig(config))
+            if (IsEmptyConfig(request.Config))
             {
                 consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
             }
             else
             {
-                consumer = new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+                consumer = new AsyncKafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
             }
         }
         catch (Exception ex)
@@ -123,7 +122,7 @@ internal sealed class AsyncConsumerServiceImpl
         // Pattern subscription is not ported: answer -31 rather than subscribe to no topic.
         if (request.HasPattern)
         {
-            return RunStatus(request.ConsumerId, _ => throw new NotSupportedException(Translate.PatternSubscribeUnsupported));
+            return RunStatus(request.ConsumerId, _ => throw new UnsupportedOperationException(Translate.PatternSubscribeUnsupported));
         }
 
         List<string> topics = new List<string>(request.Topics);

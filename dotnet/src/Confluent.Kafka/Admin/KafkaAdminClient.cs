@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The real Kafka admin client — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.KafkaAdminClient</c>, created from a
-/// configuration map (Java's <c>Admin.create(Properties)</c>).
+/// configuration map (Java's <c>Admin.create(Map)</c>).
 /// </summary>
 public sealed class KafkaAdminClient : IAdmin
 {
@@ -35,16 +35,23 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <summary>
     /// Creates an admin client from a configuration map — Java's
-    /// <c>Admin.create(Properties)</c>. Keys are the Java dotted names;
+    /// <c>Admin.create(Map)</c>. Keys are the Java dotted names;
     /// <c>bootstrap.servers</c> is required.
     /// </summary>
-    /// <param name="config">Configuration keyed by Java dotted names.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
-    /// <exception cref="ArgumentException">A configuration value is null.</exception>
+    /// <param name="configs">
+    /// The admin client configuration, keyed by Java's dotted names: each value of the type Java's
+    /// <c>ConfigDef</c> accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key
+    /// unset, unless the key's validator refuses <c>null</c>.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+    /// <c>null</c>, or the client refuses a value.
+    /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public KafkaAdminClient(IReadOnlyDictionary<string, string> config)
+    public KafkaAdminClient(IReadOnlyDictionary<string, object?> configs)
     {
-        _native = NativeAdminClient.Create(config, AdminFlavour.Sync);
+        _native = NativeAdminClient.Create(configs, AdminFlavour.Sync);
     }
 
     /// <inheritdoc/>
@@ -216,7 +223,7 @@ public sealed class KafkaAdminClient : IAdmin
     public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         RemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

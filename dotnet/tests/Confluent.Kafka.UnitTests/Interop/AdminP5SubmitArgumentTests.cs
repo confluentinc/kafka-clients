@@ -377,7 +377,7 @@ public sealed class AdminP5SubmitArgumentTests
 
     private static void AssertNotImplemented(Exception? outcome)
     {
-        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
+        UnsupportedOperationException failure = Assert.IsType<UnsupportedOperationException>(outcome);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 

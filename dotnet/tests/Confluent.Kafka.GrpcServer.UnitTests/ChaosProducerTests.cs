@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
@@ -73,7 +74,9 @@ public sealed class ChaosProducerTests
         Assert.True(lastSentAt < statsAt, "ProducerStats precedes a Sent");
 
         // The client was built from the request's config verbatim, closed once and disposed.
-        Assert.Equal(request.Config.OrderBy(kv => kv.Key), harness.Producer.Config!.OrderBy(kv => kv.Key));
+        Assert.Equal(
+            request.Config.OrderBy(kv => kv.Key).Select(kv => new KeyValuePair<string, object?>(kv.Key, kv.Value)),
+            harness.Producer.Config!.OrderBy(kv => kv.Key));
         Assert.Equal(1, harness.Producer.CloseCalls);
         Assert.Equal(1, harness.Producer.DisposeCalls);
         Assert.Equal(flavour == ChaosFlavour.Async ? 1 : 0, harness.Producer.DisposeAsyncCalls);
@@ -137,11 +140,10 @@ public sealed class ChaosProducerTests
         foreach (Proto.WorkloadEvent failure in failures)
         {
             Exception thrown = harness.Producer.SendThrew[failure.SendFailed.Index];
-            ObjectDisposedException disposed = Assert.IsType<ObjectDisposedException>(thrown);
-            string withoutObjectName = new ObjectDisposedException((string?)null).Message;
-            Assert.StartsWith(withoutObjectName, disposed.Message, StringComparison.Ordinal);
+            IllegalStateException closed = Assert.IsType<IllegalStateException>(thrown);
+            Assert.Equal("MockProducer is already closed.", closed.Message);
             Assert.Equal(-4, failure.SendFailed.Error.Code);
-            Assert.Equal(withoutObjectName, failure.SendFailed.Error.Message);
+            Assert.Equal("MockProducer is already closed.", failure.SendFailed.Error.Message);
         }
 
         // The healthy records' callbacks fired once each; a throwing Send's never did.
@@ -297,11 +299,11 @@ public sealed class ChaosProducerTests
     public async Task ARealClientThatCannotBeBuilt_EndsTheWorkloadFailed_WithItsKafkaException(ChaosFlavour flavour)
     {
         // The flavour's own real client, built the way its servicer builds it.
-        KafkaException expected = flavour == ChaosFlavour.Async
-            ? Assert.Throws<KafkaException>(
-                () => new AsyncKafkaProducer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray))
-            : Assert.Throws<KafkaException>(
-                () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, string>(), Serdes.ByteArray, Serdes.ByteArray));
+        ConfigException expected = flavour == ChaosFlavour.Async
+            ? Assert.Throws<ConfigException>(
+                () => new AsyncKafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray, Serdes.ByteArray))
+            : Assert.Throws<ConfigException>(
+                () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray, Serdes.ByteArray));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);
         Proto.RunProducerRequest request = ChaosHarness.ProducerRequest("p-real");
         request.Config.Clear();

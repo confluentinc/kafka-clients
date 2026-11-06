@@ -21,12 +21,15 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -307,7 +310,7 @@ public sealed class ConsumerAsyncCancelTests
             disposing.Start();
             WaitUntilParked(disposing);
 
-            KafkaException woken = Assert.IsType<KafkaException>(PollTheCore(handle));
+            WakeupException woken = Assert.IsType<WakeupException>(PollTheCore(handle));
             Assert.Equal(-18, woken.Code);
             Assert.False(unsubscribe.IsCompleted);
         }
@@ -329,12 +332,12 @@ public sealed class ConsumerAsyncCancelTests
         await WithDeadline(Task.Run(consumer.Dispose));
 
         Assert.True(pending.IsCompleted);
-        KafkaException ended = await Assert.ThrowsAsync<KafkaException>(() => pending);
+        KafkaTimeoutException ended = await Assert.ThrowsAsync<KafkaTimeoutException>(() => pending);
         Assert.Equal(7, ended.Code);
         TimedOutMessage.AssertCallerOrReaper("Failed to get offsets by times in 1500ms", ended.Message);
     }
 
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:1",
         ["group.protocol"] = "consumer",
@@ -441,7 +444,7 @@ public sealed class ConsumerAsyncCancelTests
     {
         if (await Task.WhenAny(task, Task.Delay(s_deadline)) != task)
         {
-            throw new TimeoutException("The operation did not end within " + s_deadline + ".");
+            throw new System.TimeoutException("The operation did not end within " + s_deadline + ".");
         }
 
         await task;

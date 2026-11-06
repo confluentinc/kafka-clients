@@ -20,6 +20,10 @@
 //! `kafka_Map_t` of `int32_t *` keys to `kafka_List_t *` values holding
 //! `int32_t *` elements.
 
+use crate::common::Error;
+use crate::ffi::precondition::{
+    fail, require_element_ref, require_list, require_map, require_mut, require_ref, require_str,
+};
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
@@ -27,7 +31,7 @@ use crate::admin::NewTopic;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, destroy_string_element, into_c_string,
-    kafka_List_destroy, kafka_List_t, kafka_Map_t, list_elements, map_entries, owned_c_string,
+    kafka_List_destroy, kafka_List_t, kafka_Map_t, owned_c_string,
 };
 
 /// Opaque handle to a [`NewTopic`].
@@ -56,12 +60,12 @@ impl NewTopicInner {
 ///
 /// `topic` must be a valid new-topic handle, kept alive for `'a`, during
 /// which no setter runs on it.
-unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopicInner {
+unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t, param: &'static str) -> &'a NewTopicInner {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid new-topic handle kept alive for
     // `'a`, during which no setter runs on it; every `kafka_admin_NewTopic_t` is the
     // `Box::into_raw` of a `Box<NewTopicInner>` (`box_new_topic`, the only producer), so the shared
     // reference is to a live `NewTopicInner` that nothing mutates while it is held.
-    unsafe { &*(topic as *const NewTopicInner) }
+    unsafe { require_ref::<_, NewTopicInner>(topic, param) }
 }
 
 /// The topic behind a handle.
@@ -70,10 +74,10 @@ unsafe fn inner_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopicInn
 ///
 /// `topic` must be a valid new-topic handle, kept alive for `'a`, during
 /// which no setter runs on it.
-pub(crate) unsafe fn new_topic_ref<'a>(topic: *const kafka_admin_NewTopic_t) -> &'a NewTopic {
+pub(crate) unsafe fn new_topic_ref<'a>(topic: *const kafka_admin_NewTopic_t, param: &'static str) -> &'a NewTopic {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid new-topic handle kept alive for
     // `'a`, during which no setter runs on it, as `inner_ref` requires.
-    &unsafe { inner_ref(topic) }.topic
+    &unsafe { inner_ref(topic, param) }.topic
 }
 
 /// Hands `topic` to C as an owned handle, freed with
@@ -82,21 +86,21 @@ pub(crate) fn box_new_topic(topic: NewTopic) -> *mut kafka_admin_NewTopic_t {
     Box::into_raw(Box::new(NewTopicInner::new(topic))) as *mut kafka_admin_NewTopic_t
 }
 
-/// Reads a borrowed list of `const int32_t *` into values; `NULL` reads as empty.
+/// Reads a borrowed list of `const int32_t *` into values; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
-unsafe fn list_i32(list: *const kafka_List_t) -> Vec<i32> {
+unsafe fn list_i32(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_list` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
-        .map(|&element| unsafe { *(element as *const i32) })
+        .map(|&element| *unsafe { require_element_ref::<i32>(element, param) })
         .collect()
 }
 
@@ -123,31 +127,38 @@ unsafe fn destroy_list_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must each point at an `int32_t`.
+/// `a` and `b` must each be `NULL` or point at an `int32_t`.
 unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    // SAFETY: Per this function's `# Safety`, `a` and `b` each point at a live `int32_t`, read by
-    // copy.
+    if a.is_null() || b.is_null() {
+        return a.is_null() && b.is_null();
+    }
+    // SAFETY: Both are non-null (checked above) and, per this function's `# Safety`, each points
+    // at a live `int32_t`, read by copy.
     unsafe { *(a as *const i32) == *(b as *const i32) }
 }
 
 /// Reads a borrowed map of `const int32_t *` to `const kafka_List_t *` of
-/// `const int32_t *`; `NULL` reads as empty.
+/// `const int32_t *`; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `map` must be `NULL` or a valid map whose keys point at `int32_t`s and whose
 /// values are valid lists whose elements point at `int32_t`s, all kept alive
 /// and not mutated for this call.
-unsafe fn map_replicas_assignments(map: *const kafka_Map_t) -> BTreeMap<i32, Vec<i32>> {
+unsafe fn map_replicas_assignments(map: *const kafka_Map_t, param: &'static str) -> BTreeMap<i32, Vec<i32>> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map, alive and not mutated
-    // for this call, as `map_entries` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_map` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { map_entries(map) }
+    unsafe { require_map(map, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
-        // read by copy, and each value `v` is a valid list whose elements point at `int32_t`s,
-        // alive and not mutated for this call, as `list_i32` requires.
-        .map(|&(k, v)| (unsafe { *(k as *const i32) }, unsafe { list_i32(v as *const kafka_List_t) }))
+        .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, each key `k` of `map` points at a live `int32_t`,
+            // read by copy, and each value `v` is a valid list whose elements point at `int32_t`s,
+            // alive and not mutated for this call, as `list_i32` requires.
+            (*unsafe { require_element_ref::<i32>(k, param) }, unsafe {
+                list_i32(v as *const kafka_List_t, param)
+            })
+        })
         .collect()
 }
 
@@ -159,6 +170,14 @@ unsafe fn map_replicas_assignments(map: *const kafka_Map_t) -> BTreeMap<i32, Vec
 /// - `name` - the topic name.
 /// - `num_partitions` - the number of partitions, `-1` for the broker default.
 /// - `replication_factor` - the replication factor, `-1` for the broker default.
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name` panics; Java stores `null`.
 ///
 /// # Safety
 ///
@@ -173,8 +192,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 ) -> *mut kafka_admin_NewTopic_t {
     box_new_topic(NewTopic::with_num_partitions_replication_factor(
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires.
-        unsafe { c_str_to_string(name) },
+        // `require_str` requires.
+        unsafe { require_str(name, "name") },
         (num_partitions >= 0).then_some(num_partitions),
         (replication_factor >= 0).then_some(replication_factor),
     ))
@@ -182,7 +201,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 
 /// `new NewTopic(String name, Map<Integer, List<Integer>> replicasAssignments)`: a borrowed map of
 /// `const int32_t *` partition ids to `const kafka_List_t *` of `const int32_t *` broker ids,
-/// copied (`NULL` reads as empty).
+/// copied.
 ///
 /// # Parameters
 ///
@@ -191,10 +210,18 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_num_partitions_replication_fa
 ///   not enforced, it is generally a good idea for all partitions to have the same number of
 ///   replicas. The first replica will be treated as the preferred leader.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `name` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `name` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `replicas_assignments`
-/// `NULL` or a valid map whose keys point at `int32_t`s and whose values are
+/// a valid map whose keys point at `int32_t`s and whose values are
 /// valid lists whose elements point at `int32_t`s, all kept alive and not
 /// mutated for this call.
 ///
@@ -206,11 +233,12 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_with_replicas_assignments(
     replicas_assignments: *const kafka_Map_t,
 ) -> *mut kafka_admin_NewTopic_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `replicas_assignments` null or a valid map of the shape
+    // `require_str` requires, and `replicas_assignments` a valid map of the shape
     // `map_replicas_assignments` requires, kept alive and not mutated for this call.
-    box_new_topic(NewTopic::with_replicas_assignments(unsafe { c_str_to_string(name) }, unsafe {
-        map_replicas_assignments(replicas_assignments)
-    }))
+    box_new_topic(NewTopic::with_replicas_assignments(
+        unsafe { require_str(name, "name") },
+        unsafe { map_replicas_assignments(replicas_assignments, "replicas_assignments") },
+    ))
 }
 
 /// Returns the name of the topic to be created.
@@ -227,27 +255,26 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_name(self_: *const kafka_admin_New
     // call uses the handle at the same time, so none runs during the borrow, as `inner_ref`
     // requires; the returned pointer borrows `name_c`, which no setter replaces and which lives as
     // long as the handle.
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// The number of partitions for the new topic or -1 if a replica assignment has been specified.
 ///
 /// # Returns
 ///
-/// The count, `-1` (`CreateTopicsRequest.NO_NUM_PARTITIONS`) also when the broker default
-/// applies. A caught Rust panic returns 0, which is no valid partition count.
+/// The count, `-1` (`CreateTopicsRequest.NO_NUM_PARTITIONS`) also when the broker default applies.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
-#[ffi_guard(fallback = 0)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka_admin_NewTopic_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    unsafe { new_topic_ref(self_) }.num_partitions()
+    unsafe { new_topic_ref(self_, "self_") }.num_partitions()
 }
 
 /// The replication factor for the new topic or -1 if a replica assignment has been specified.
@@ -255,19 +282,19 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_num_partitions(self_: *const kafka
 /// # Returns
 ///
 /// The factor, `-1` (`CreateTopicsRequest.NO_REPLICATION_FACTOR`) also when the broker default
-/// applies. A caught Rust panic returns 0, which is no valid replication factor.
+/// applies.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle.
-#[ffi_guard(fallback = 0)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_replication_factor(self_: *const kafka_admin_NewTopic_t) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle, kept alive for
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    unsafe { new_topic_ref(self_) }.replication_factor()
+    unsafe { new_topic_ref(self_, "self_") }.replication_factor()
 }
 
 /// A map from partition id to replica ids (i.e. broker ids) or `NULL` if the number of partitions
@@ -291,7 +318,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    match unsafe { new_topic_ref(self_) }.replicas_assignments() {
+    match unsafe { new_topic_ref(self_, "self_") }.replicas_assignments() {
         None => std::ptr::null_mut(),
         Some(assignments) => {
             let entries = assignments
@@ -321,8 +348,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
 ///
 /// # Panics
 ///
-/// - if a value is `NULL`, a value the broker rejects with `INVALID_CONFIG`; the configs are
-///   then left unchanged, and the `_err` twin reports it as an `IllegalStateError`
+/// - `LocalNullPointerError` if a value is `NULL`, a value the broker rejects with `INVALID_CONFIG`;
+///   the configs are then left unchanged
 ///
 /// # Safety
 ///
@@ -340,17 +367,21 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     } else {
         // SAFETY: `configs` is non-null (checked above) and, per this function's `# Safety`, a
         // valid map, kept alive by the caller for this call, which is as long as the borrow of its
-        // entries lasts, as `map_entries` requires.
-        let entries = unsafe { map_entries(configs) };
+        // entries lasts, as `require_map` requires.
+        let entries = unsafe { require_map(configs, "configs") };
         let mut copied = BTreeMap::new();
         for &(name, value) in entries.iter() {
             // SAFETY: Per this function's `# Safety`, every key is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied.
             let name = unsafe { c_str_to_string(name as *const c_char) };
-            // A `NULL` value breaks this function's `# Safety`; it is checked anyway, since
-            // reading it would be undefined behaviour, and refused before `self_` is touched.
-            assert!(!value.is_null(), "The value of config {name} must not be NULL");
-            // SAFETY: `value` is non-null (asserted above) and, per this function's `# Safety`, a
+            // A `NULL` value is refused before `self_` is touched, since reading it would be
+            // undefined behaviour.
+            if value.is_null() {
+                fail(Error::local_null_pointer(format!(
+                    "The value of config {name} must not be null"
+                )));
+            }
+            // SAFETY: `value` is non-null (checked above) and, per this function's `# Safety`, a
             // NUL-terminated string, as `c_str_to_string` requires; it is copied.
             copied.insert(name, unsafe { c_str_to_string(value as *const c_char) });
         }
@@ -360,7 +391,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     // call uses at the same time; every handle is the `Box::into_raw` of a `Box<NewTopicInner>`
     // (`box_new_topic`), so the exclusive reference is to a live `NewTopicInner` that nothing else
     // reads or writes until it is dropped at the end of this call.
-    let inner = unsafe { &mut *(self_ as *mut NewTopicInner) };
+    let inner = unsafe { require_mut::<_, NewTopicInner>(self_, "self_") };
     inner.topic = inner.topic.clone().set_configs(configs);
 }
 
@@ -381,7 +412,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    unsafe { new_topic_ref(self_) }
+    unsafe { new_topic_ref(self_, "self_") }
         .configs()
         .map_or(std::ptr::null_mut(), |configs| {
             box_string_keyed_map(
@@ -404,7 +435,7 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_to_string(self_: *const kafka_admi
     // this call, and `kafka_admin_NewTopic_set_configs`, the only setter, requires that no other
     // call uses the handle at the same time, so none runs during the borrow, as `new_topic_ref`
     // requires.
-    into_c_string(&unsafe { new_topic_ref(self_) }.to_string())
+    into_c_string(&unsafe { new_topic_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned topic handle; `NULL` is a no-op.
@@ -432,7 +463,7 @@ mod tests {
 
     use super::*;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_state_error;
+    use crate::ffi::error_predicates::kafka_common_Error_is_local_null_pointer_error;
     use crate::ffi::util::{
         kafka_List_add, kafka_List_get, kafka_List_new, kafka_List_size, kafka_Map_destroy, kafka_Map_get,
         kafka_Map_key, kafka_Map_new, kafka_Map_put, kafka_Map_size, kafka_Map_value, kafka_string_destroy,
@@ -450,7 +481,7 @@ mod tests {
         unsafe {
             let topic = kafka_admin_NewTopic_with_num_partitions_replication_factor(c"orders".as_ptr(), 3, -1);
             assert_eq!(
-                *new_topic_ref(topic),
+                *new_topic_ref(topic, "topic"),
                 NewTopic::with_num_partitions_replication_factor("orders", Some(3), None)
             );
             assert_eq!(CStr::from_ptr(kafka_admin_NewTopic_name(topic)).to_str().unwrap(), "orders");
@@ -477,7 +508,7 @@ mod tests {
             );
             kafka_Map_destroy(configs);
             let s = kafka_admin_NewTopic_to_string(topic);
-            assert_eq!(CStr::from_ptr(s).to_str().unwrap(), new_topic_ref(topic).to_string());
+            assert_eq!(CStr::from_ptr(s).to_str().unwrap(), new_topic_ref(topic, "topic").to_string());
             kafka_string_destroy(s);
             kafka_admin_NewTopic_destroy(topic);
             kafka_admin_NewTopic_destroy(ptr::null_mut());
@@ -503,12 +534,12 @@ mod tests {
             kafka_admin_NewTopic_set_configs(topic, configs);
             kafka_Map_destroy(configs);
             assert_eq!(
-                new_topic_ref(topic).configs(),
+                new_topic_ref(topic, "topic").configs(),
                 Some(&BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]))
             );
 
             kafka_admin_NewTopic_set_configs(topic, ptr::null());
-            assert_eq!(new_topic_ref(topic).configs(), None);
+            assert_eq!(new_topic_ref(topic, "topic").configs(), None);
             assert!(kafka_admin_NewTopic_configs(topic).is_null());
             kafka_admin_NewTopic_destroy(topic);
         }
@@ -542,15 +573,14 @@ mod tests {
             kafka_admin_NewTopic_set_configs_err(topic, configs, &mut err);
             kafka_Map_destroy(configs);
             assert!(!err.is_null());
-            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
+            assert_eq!(kafka_common_Error_is_local_null_pointer_error(err), 1);
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
-                "Rust panic caught at the FFI boundary in kafka_admin_NewTopic_set_configs_err: \
-                 The value of config retention.ms must not be NULL"
+                "The value of config retention.ms must not be null"
             );
             kafka_common_Error_destroy(err);
             assert_eq!(
-                new_topic_ref(topic).configs(),
+                new_topic_ref(topic, "topic").configs(),
                 Some(&BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]))
             );
             kafka_admin_NewTopic_destroy(topic);
@@ -580,7 +610,7 @@ mod tests {
             kafka_List_destroy(brokers);
 
             let expected = NewTopic::with_replicas_assignments("orders", BTreeMap::from([(0, vec![1, 2])]));
-            assert_eq!(*new_topic_ref(topic), expected);
+            assert_eq!(*new_topic_ref(topic, "topic"), expected);
             assert_eq!(kafka_admin_NewTopic_num_partitions(topic), -1);
             let map = kafka_admin_NewTopic_replicas_assignments(topic);
             assert_eq!(kafka_Map_size(map), 1);

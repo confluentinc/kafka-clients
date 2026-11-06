@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -75,9 +76,9 @@ public sealed class PublicProducerSendTfmSmokeTests
 
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Delivery();
-        Assert.True(producer.ErrorNext(new KafkaException(2, "tfm-error", isRetriable: true)));
+        Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
-        await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(async () => await sendTask);
     }
 
     [Fact]
@@ -85,7 +86,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
-            new System.Collections.Generic.Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new System.Collections.Generic.Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 

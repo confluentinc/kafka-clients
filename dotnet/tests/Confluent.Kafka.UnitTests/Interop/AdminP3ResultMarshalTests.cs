@@ -26,6 +26,8 @@ using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
@@ -120,7 +122,7 @@ public sealed class AdminP3ResultMarshalTests
     public async Task DescribeCluster_AFailedCall_FailsEachFuture()
     {
         IAsyncAdmin real = new AsyncKafkaAdminClient(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
             AsyncDescribeClusterResult result = real.DescribeCluster(new DescribeClusterOptions { TimeoutMs = 0 });
@@ -250,6 +252,6 @@ public sealed class AdminP3ResultMarshalTests
         }
     }
 
-    private static Task<KafkaException> Failure(Func<Task> call) =>
-        TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(call), s_deadline);
+    private static Task<KafkaTimeoutException> Failure(Func<Task> call) =>
+        TestTimeout.Run(() => FutureAssert.ThrowsAsync<KafkaTimeoutException>(call), s_deadline);
 }

@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Xunit;
@@ -44,7 +45,7 @@ public sealed class PublicConsumerOwnerCheckTests
     private static readonly TopicPartition s_tp0 = new TopicPartition(Topic, 0);
 
     [Fact]
-    public void KafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupAndHandlePass()
+    public void KafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupHandleMetricsAndEnforceRebalancePass()
     {
         KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer();
         try
@@ -58,6 +59,7 @@ public sealed class PublicConsumerOwnerCheckTests
                     seen["Commit"] = Record.Exception(() => consumer.Commit(Empty()));
                     seen["Assignment"] = Record.Exception(() => consumer.Assignment());
                     seen["Metrics"] = Record.Exception(() => consumer.Metrics());
+                    seen["EnforceRebalance"] = Record.Exception(() => consumer.EnforceRebalance());
                     seen["Close"] = Record.Exception(() => consumer.Close());
                     seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
                     seen["Wakeup"] = Record.Exception(consumer.Wakeup);
@@ -65,10 +67,15 @@ public sealed class PublicConsumerOwnerCheckTests
 
             Exception? delivering = Record.Exception(() => TestTimeout.Run(() => consumer.Commit(Empty()), s_deadline));
 
-            Assert.True(delivering is null || delivering is KafkaException { Code: WakeupCode }, delivering?.ToString());
+            Assert.True(delivering is null || delivering is WakeupException { Code: WakeupCode }, delivering?.ToString());
             AssertRefused(seen["Commit"]);
             AssertRefused(seen["Assignment"]);
-            AssertRefused(seen["Metrics"]);
+            // Java's metrics() and enforceRebalance() take no acquire(), so the binding makes no owner check; the core
+            // answers enforceRebalance itself while the delivering call holds its flag.
+            Assert.Null(seen["Metrics"]);
+            Assert.True(
+                seen["EnforceRebalance"] is null or ConcurrentModificationException,
+                seen["EnforceRebalance"]?.ToString());
             AssertRefused(seen["Close"]);
             Assert.Null(seen["Handle"]);
             Assert.Null(seen["Wakeup"]);
@@ -81,7 +88,7 @@ public sealed class PublicConsumerOwnerCheckTests
     }
 
     [Fact]
-    public async Task AsyncKafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupAndHandlePass()
+    public async Task AsyncKafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupHandleMetricsAndEnforceRebalancePass()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
         try
@@ -97,6 +104,7 @@ public sealed class PublicConsumerOwnerCheckTests
                         seen["Seek"] = Record.Exception(() => { _ = consumer.Seek(s_tp0, 1); });
                         seen["Assignment"] = Record.Exception(() => consumer.Assignment());
                         seen["Metrics"] = Record.Exception(() => consumer.Metrics());
+                        seen["EnforceRebalance"] = Record.Exception(() => consumer.EnforceRebalance());
                         close = CloseCatching(consumer);
                         seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
                         seen["Wakeup"] = Record.Exception(consumer.Wakeup);
@@ -106,10 +114,15 @@ public sealed class PublicConsumerOwnerCheckTests
             Exception? delivering = await Record.ExceptionAsync(
                 () => TestTimeout.Run(() => consumer.Commit(Empty()), s_deadline));
 
-            Assert.True(delivering is null || delivering is KafkaException { Code: WakeupCode }, delivering?.ToString());
+            Assert.True(delivering is null || delivering is WakeupException { Code: WakeupCode }, delivering?.ToString());
             AssertRefused(seen["Seek"]);
             AssertRefused(seen["Assignment"]);
-            AssertRefused(seen["Metrics"]);
+            // Java's metrics() and enforceRebalance() take no acquire(), so the binding makes no owner check; the core
+            // answers enforceRebalance itself while the delivering call holds its flag.
+            Assert.Null(seen["Metrics"]);
+            Assert.True(
+                seen["EnforceRebalance"] is null or ConcurrentModificationException,
+                seen["EnforceRebalance"]?.ToString());
             AssertRefused(await Record.ExceptionAsync(() => TestTimeout.Run(() => close!, s_deadline)));
             Assert.Null(seen["Handle"]);
             Assert.Null(seen["Wakeup"]);
@@ -134,11 +147,11 @@ public sealed class PublicConsumerOwnerCheckTests
             Exception? assignment = Record.Exception(() => consumer.Assignment());
             consumer.Wakeup();
 
-            KafkaException woken = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => poll, s_deadline));
+            WakeupException woken = await Assert.ThrowsAsync<WakeupException>(() => TestTimeout.Run(() => poll, s_deadline));
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Null(metrics);
             Assert.True(
-                assignment is null || assignment is InvalidOperationException { Message: ConcurrentMessage },
+                assignment is null || assignment is ConcurrentModificationException { Message: ConcurrentMessage },
                 assignment?.ToString());
             Assert.Equal(new[] { s_tp0 }, consumer.Assignment());
         }
@@ -210,7 +223,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
             AssertRefused(seen["Assignment"]);
             AssertRefused(seen["Close"]);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
             Assert.True(disposer!.Join(s_deadline), "the other thread's Dispose never returned");
             Assert.Null(disposing);
         }
@@ -251,7 +264,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
             AssertRefused(seen["Assignment"]);
             AssertRefused(await Record.ExceptionAsync(() => TestTimeout.Run(() => close!, s_deadline)));
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
             Assert.True(disposer!.Join(s_deadline), "the other thread's Dispose never returned");
             Assert.Null(disposing);
         }
@@ -300,7 +313,7 @@ public sealed class PublicConsumerOwnerCheckTests
 
     private static void AssertRefused(Exception? thrown)
     {
-        InvalidOperationException refused = Assert.IsType<InvalidOperationException>(thrown);
+        ConcurrentModificationException refused = Assert.IsType<ConcurrentModificationException>(thrown);
         Assert.Equal(ConcurrentMessage, refused.Message);
     }
 
@@ -312,7 +325,7 @@ public sealed class PublicConsumerOwnerCheckTests
         other.Start();
         if (!other.Join(s_deadline))
         {
-            throw new TimeoutException("the other thread's calls did not return");
+            throw new System.TimeoutException("the other thread's calls did not return");
         }
 
         if (failure is not null)
@@ -336,7 +349,7 @@ public sealed class PublicConsumerOwnerCheckTests
     private static Dictionary<TopicPartition, OffsetAndMetadata> Empty() =>
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:1",
         ["group.protocol"] = "consumer",

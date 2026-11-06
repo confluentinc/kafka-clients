@@ -14,11 +14,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
@@ -104,18 +106,34 @@ public sealed class AdminConstructedNullTopicTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void GroupOffsetResultLookups_RejectANullTopic(bool constructed)
+    public async Task GroupOffsetResultLookups_ANullTopic_AnswersAsJava(bool constructed)
     {
-        const string Message = "The partition must not have a null topic.";
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        AsyncAlterConsumerGroupOffsetsResult altered = AsyncAlterConsumerGroupOffsetsResult.OfClient(admin.AlterConsumerGroupOffsets(
-            "g", new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("t", 0)] = new OffsetAndMetadata(1) }, null));
-        AsyncDeleteConsumerGroupOffsetsResult deleted = AsyncDeleteConsumerGroupOffsetsResult.OfClient(
-            admin.DeleteConsumerGroupOffsets("g", new[] { new TopicPartition("t", 0) }, null));
+        SafeAdminResultHandle alteredHandle = admin.AlterConsumerGroupOffsets(
+            "g", new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("t", 0)] = new OffsetAndMetadata(1) }, null);
+        SafeAdminResultHandle deletedHandle = admin.DeleteConsumerGroupOffsets("g", new[] { new TopicPartition("t", 0) }, null);
 
-        AssertRejected(Assert.Throws<ArgumentException>(() => altered.PartitionResult(NullTopic(constructed))), "partition", Message);
-        AssertRejected(Assert.Throws<ArgumentException>(() => deleted.PartitionResult(NullTopic(constructed))), "partition", Message);
+        // Alter: Java's future fails, for a partition that was not attempted.
+        const string NotAttempted = "Alter offset for partition \"null-0\" was not attempted";
+        IllegalArgumentException asyncAltered = await FutureAssert.ThrowsAsync<IllegalArgumentException>(
+            () => AsyncAlterConsumerGroupOffsetsResult.OfClient(alteredHandle).PartitionResult(NullTopic(constructed)).Get());
+        Assert.Equal(NotAttempted, asyncAltered.Message);
+        KafkaFuture syncAltered = AlterConsumerGroupOffsetsResult.OfClient(alteredHandle).PartitionResult(NullTopic(constructed));
+        Assert.Equal(
+            NotAttempted,
+            FutureAssert.Throws<IllegalArgumentException>(() => syncAltered.Get(TimeSpan.FromSeconds(30))).Message);
+
+        // Delete: Java's membership check throws at the call.
+        const string NotIncluded = "Partition null-0 was not included in the original request";
+        Assert.Equal(
+            NotIncluded,
+            Assert.Throws<IllegalArgumentException>(
+                () => AsyncDeleteConsumerGroupOffsetsResult.OfClient(deletedHandle).PartitionResult(NullTopic(constructed))).Message);
+        Assert.Equal(
+            NotIncluded,
+            Assert.Throws<IllegalArgumentException>(
+                () => DeleteConsumerGroupOffsetsResult.OfClient(deletedHandle).PartitionResult(NullTopic(constructed))).Message);
     }
 
     [Theory]

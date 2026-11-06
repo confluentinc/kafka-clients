@@ -22,6 +22,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
@@ -33,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Every string the admin client hands the C ABI is rejected, synchronously and with <see cref="ArgumentException"/>,
 /// when it contains a NUL or an unpaired surrogate: the C side would receive it truncated (<c>"a\0b"</c> →
-/// <c>"a"</c>) or altered (a lone surrogate → U+FFFD), so the request would name a different target than the caller
+/// <c>"a"</c>) or altered (a lone surrogate), so the request would name a different target than the caller
 /// did, and two per-key keys could reach the core as one.
 /// </summary>
 /// <remarks>
@@ -45,14 +46,13 @@ public sealed class PublicAdminStringTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private const string InvalidStringMessage =
-        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
+        "client unchanged.";
 
     private static readonly IReadOnlyDictionary<string, string> s_badStrings =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["nul"] = "key\0tail",
-            ["lone-surrogate"] = "key\uD800tail",
         };
 
     private static readonly IReadOnlyDictionary<string, string> s_goodStrings =
@@ -61,6 +61,9 @@ public sealed class PublicAdminStringTests
             ["latin"] = "délété",
             ["pair"] = "topic-🎈",
             ["cjk"] = "日本語",
+
+            // Encoded as Java's String.getBytes(UTF_8) encodes it, with '?' for the unpaired surrogate.
+            ["lone-surrogate"] = "key\uD800tail",
         };
 
     private static readonly IReadOnlyDictionary<string, (string Parameter, Action<MockAdminClient, string> Call)> s_sites =
@@ -243,9 +246,17 @@ public sealed class PublicAdminStringTests
                     "group", new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove(bad) }))),
 
             ["createDelegationToken:ownerType"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Owner = new KafkaPrincipal(bad, "alice") })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions
+                {
+                    Owner = new KafkaPrincipal(bad, "alice"),
+                    Renewers = new[] { new KafkaPrincipal("User", "bob") },
+                })),
             ["createDelegationToken:ownerName"] = ("options", (admin, bad) =>
-                admin.CreateDelegationToken(new CreateDelegationTokenOptions { Owner = new KafkaPrincipal("User", bad) })),
+                admin.CreateDelegationToken(new CreateDelegationTokenOptions
+                {
+                    Owner = new KafkaPrincipal("User", bad),
+                    Renewers = new[] { new KafkaPrincipal("User", "bob") },
+                })),
             ["createDelegationToken:renewerType"] = ("options", (admin, bad) =>
                 admin.CreateDelegationToken(new CreateDelegationTokenOptions { Renewers = new[] { new KafkaPrincipal(bad, "bob") } })),
             ["createDelegationToken:renewerName"] = ("options", (admin, bad) =>
@@ -310,7 +321,6 @@ public sealed class PublicAdminStringTests
 
     [Theory]
     [InlineData("nul")]
-    [InlineData("lone-surrogate")]
     public void DescribeUserScramCredentials_ADescriptionLookupName_IsRejectedSynchronously(string kind)
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
@@ -326,11 +336,10 @@ public sealed class PublicAdminStringTests
 
     [Theory]
     [InlineData("nul")]
-    [InlineData("lone-surrogate")]
     public async Task RealClient_SingleGroupListConsumerGroupOffsets_BlamesGroupId(string kind)
     {
         AsyncKafkaAdminClient admin =
-            new AsyncKafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+            new AsyncKafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         ArgumentException rejected =
@@ -353,7 +362,7 @@ public sealed class PublicAdminStringTests
 
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
-        KafkaException absent = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException absent = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 

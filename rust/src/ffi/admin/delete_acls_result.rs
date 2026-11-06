@@ -15,6 +15,7 @@
 //! C bindings for `org.apache.kafka.clients.admin.DeleteAclsResult` and its
 //! nested `DeleteAclsResult.FilterResult` / `DeleteAclsResult.FilterResults`.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_void;
 use std::ptr;
 
@@ -67,13 +68,16 @@ impl FilterResultInner {
 /// # Safety
 ///
 /// `value` must be a valid filter-result handle, kept alive for `'a`.
-unsafe fn filter_result_inner<'a>(value: *const kafka_admin_DeleteAclsResult_FilterResult_t) -> &'a FilterResultInner {
+unsafe fn filter_result_inner<'a>(
+    value: *const kafka_admin_DeleteAclsResult_FilterResult_t,
+    param: &'static str,
+) -> &'a FilterResultInner {
     // SAFETY: Per this function's `# Safety`, `value` is a valid filter-result handle kept alive
     // for `'a`. Every `kafka_admin_DeleteAclsResult_FilterResult_t` is the `Box::into_raw` of a
     // `Box<FilterResultInner>` (`box_filter_result`, the only place one is made), so it points at a
     // live `FilterResultInner`. Nothing takes a `&mut` to it: only the destroy takes the box back,
     // and its `# Safety` excludes any other use at the same time or afterwards.
-    unsafe { &*(value as *const FilterResultInner) }
+    unsafe { require_ref::<_, FilterResultInner>(value, param) }
 }
 
 /// Hands `value` to C as an owned handle.
@@ -117,7 +121,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid filter-result handle, kept alive
     // for this call, as `filter_result_inner` requires. The pointer handed out borrows the handle's
     // own binding, which lives as long as the handle.
-    unsafe { filter_result_inner(self_) }
+    unsafe { filter_result_inner(self_, "self_") }
         .binding
         .as_ref()
         .map_or(ptr::null(), |binding| {
@@ -136,7 +140,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
 /// `self_` must be a valid filter-result handle.
 ///
 /// The returned error is borrowed from `self_` and is never passed to `kafka_common_Error_destroy`.
-#[ffi_guard(fallback = ::core::ptr::null())]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
     self_: *const kafka_admin_DeleteAclsResult_FilterResult_t,
@@ -144,7 +148,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid filter-result handle, kept alive
     // for this call, as `filter_result_inner` requires. The pointer handed out borrows the handle's
     // own error, which lives as long as the handle.
-    unsafe { filter_result_inner(self_) }
+    unsafe { filter_result_inner(self_, "self_") }
         .error
         .as_ref()
         .map_or(ptr::null(), |error| error as *const ErrorInner as *const kafka_common_Error_t)
@@ -194,6 +198,7 @@ pub(crate) fn box_filter_results(value: FilterResults) -> *mut kafka_admin_Delet
 /// `value` must be a valid filter-results handle, kept alive for `'a`.
 pub(crate) unsafe fn filter_results_ref<'a>(
     value: *const kafka_admin_DeleteAclsResult_FilterResults_t,
+    param: &'static str,
 ) -> &'a FilterResults {
     // SAFETY: Per this function's `# Safety`, `value` is a valid filter-results handle kept alive
     // for `'a`. Every `kafka_admin_DeleteAclsResult_FilterResults_t` is the `Box::into_raw` of a
@@ -201,7 +206,7 @@ pub(crate) unsafe fn filter_results_ref<'a>(
     // or the value a future delivers), so it points at a live `FilterResults`. Nothing takes a
     // `&mut` to it: only the destroy takes the box back, and its `# Safety` excludes any other use
     // at the same time or afterwards.
-    unsafe { &*(value as *const FilterResults) }
+    unsafe { require_ref::<_, FilterResults>(value, param) }
 }
 
 /// Frees a `kafka_admin_DeleteAclsResult_FilterResults_t *` element of an
@@ -239,7 +244,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResults_values(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid filter-results handle, kept alive
     // for this call, as `filter_results_ref` requires; the borrow ends once the copies are made.
-    let elements = unsafe { filter_results_ref(self_) }
+    let elements = unsafe { filter_results_ref(self_, "self_") }
         .values()
         .iter()
         .map(|value| box_filter_result(value.clone()) as *mut c_void)
@@ -288,11 +293,14 @@ pub(crate) fn box_delete_acls_result(result: DeleteAclsResult, ctx: &FutureCtx) 
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DeleteAclsResult_t) -> &'a ResultHandle<DeleteAclsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DeleteAclsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DeleteAclsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DeleteAclsResult_t` is built by `box_result::<DeleteAclsResult, _>`
     // (in `box_delete_acls_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Frees a `kafka_common_acl_AclBindingFilter_t *` key of an owned map.
@@ -317,8 +325,8 @@ unsafe fn acl_binding_filter_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     // alive for this call, as `acl_binding_filter_ref` requires; both borrows end with the
     // comparison.
     unsafe {
-        acl_binding_filter_ref(a as *const kafka_common_acl_AclBindingFilter_t)
-            == acl_binding_filter_ref(b as *const kafka_common_acl_AclBindingFilter_t)
+        acl_binding_filter_ref(a as *const kafka_common_acl_AclBindingFilter_t, "a")
+            == acl_binding_filter_ref(b as *const kafka_common_acl_AclBindingFilter_t, "b")
     }
 }
 
@@ -365,7 +373,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let mut entries: Vec<(&AclBindingFilter, &KafkaFuture<FilterResults>)> = h.result.values().iter().collect();
     entries.sort_by_cached_key(|(filter, _)| filter.to_string());
     h.ctx.keyed_future_map(
@@ -411,7 +419,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_list_element` frees exactly the list `acl_binding_list` makes through
     // `box_list`, and the handle holds only owned data and no thread-bound state, so it may be
     // freed from any thread and read from several at once, as `handle_future` requires.

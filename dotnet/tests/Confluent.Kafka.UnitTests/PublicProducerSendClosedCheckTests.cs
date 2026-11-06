@@ -25,13 +25,13 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Send checks for a closed producer before it serializes, as Java's doSend does, on all four producer types: the
 /// serializer is never invoked, so a stateful one takes no action for a doomed send, and its throw cannot mask
-/// the ObjectDisposedException. A null record is checked first.
+/// the IllegalStateException. A null record is checked first.
 /// </summary>
 public sealed class PublicProducerSendClosedCheckTests
 {
     private const string Topic = "closed-check-topic";
 
-    private static Dictionary<string, string> RealConfig() => new()
+    private static Dictionary<string, object?> RealConfig() => new()
     {
         ["bootstrap.servers"] = "localhost:9092",
     };
@@ -47,7 +47,7 @@ public sealed class PublicProducerSendClosedCheckTests
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, value);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
+        Assert.Throws<IllegalStateException>(() => producer.Send(Record()));
         Assert.Equal(0, key.InvocationCount);
         Assert.Equal(0, value.InvocationCount);
     }
@@ -60,7 +60,7 @@ public sealed class PublicProducerSendClosedCheckTests
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(RealConfig(), key, value);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
+        Assert.Throws<IllegalStateException>(() => producer.Send(Record()));
         Assert.Equal(0, key.InvocationCount);
         Assert.Equal(0, value.InvocationCount);
     }
@@ -74,7 +74,7 @@ public sealed class PublicProducerSendClosedCheckTests
         TestTimeout.Dispose(producer);
 
         // Send throws synchronously (not an async method), so Assert.Throws is the overload.
-        Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record()); });
+        Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });
         Assert.Equal(0, key.InvocationCount);
         Assert.Equal(0, value.InvocationCount);
     }
@@ -87,30 +87,30 @@ public sealed class PublicProducerSendClosedCheckTests
         AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), key, value);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record()); });
+        Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });
         Assert.Equal(0, key.InvocationCount);
         Assert.Equal(0, value.InvocationCount);
     }
 
     [Fact]
-    public void SyncSend_AfterDispose_WithThrowingSerializer_SurfacesObjectDisposed()
+    public void SyncSend_AfterDispose_WithThrowingSerializer_SurfacesIllegalState()
     {
         ThrowingSerializer<byte[]> key = new ThrowingSerializer<byte[]>();
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(key, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Send(Record()));
+        Assert.Throws<IllegalStateException>(() => producer.Send(Record()));
         Assert.Equal(0, key.InvocationCount);
     }
 
     [Fact]
-    public void AsyncSend_AfterDispose_WithThrowingSerializer_SurfacesObjectDisposed()
+    public void AsyncSend_AfterDispose_WithThrowingSerializer_SurfacesIllegalState()
     {
         ThrowingSerializer<byte[]> key = new ThrowingSerializer<byte[]>();
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, Serdes.ByteArray);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(Record()); });
+        Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });
         Assert.Equal(0, key.InvocationCount);
     }
 

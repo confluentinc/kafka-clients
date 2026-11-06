@@ -230,15 +230,15 @@ public sealed class ConfigEntry
                 + "type={6}, documentation={7})",
             Name,
             IsSensitive ? "Redacted" : (Value ?? "null"),
-            JavaName(Source),
+            ConstantName(Source),
             IsSensitive ? "true" : "false",
             IsReadOnly ? "true" : "false",
             synonyms,
-            Type is null ? "null" : JavaName(Type.Value),
+            Type is null ? "null" : ConstantName(Type.Value),
             Documentation ?? "null");
     }
 
-    private static string JavaName(ConfigSource source) => source switch
+    private static string ConstantName(ConfigSource source) => source switch
     {
         ConfigSource.DYNAMIC_TOPIC_CONFIG => "DYNAMIC_TOPIC_CONFIG",
         ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG => "DYNAMIC_BROKER_LOGGER_CONFIG",
@@ -252,7 +252,7 @@ public sealed class ConfigEntry
         _ => ((int)source).ToString(CultureInfo.InvariantCulture),
     };
 
-    private static string JavaName(ConfigType type) => type switch
+    private static string ConstantName(ConfigType type) => type switch
     {
         ConfigType.UNKNOWN => "UNKNOWN",
         ConfigType.BOOLEAN => "BOOLEAN",
@@ -449,6 +449,6 @@ public sealed class ConfigEntry
                 "ConfigSynonym(name={0}, value={1}, source={2})",
                 Name,
                 Value ?? "null",
-                JavaName(Source));
+                ConstantName(Source));
     }
 }

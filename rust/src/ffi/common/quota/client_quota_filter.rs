@@ -15,6 +15,7 @@
 //! `kafka_common_quota_ClientQuotaFilter_t`:
 //! `org.apache.kafka.common.quota.ClientQuotaFilter` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::common::quota::ClientQuotaFilter;
@@ -40,12 +41,13 @@ pub struct kafka_common_quota_ClientQuotaFilter_t {
 /// `filter` must be a valid client-quota-filter handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_filter_ref<'a>(
     filter: *const kafka_common_quota_ClientQuotaFilter_t,
+    param: &'static str,
 ) -> &'a ClientQuotaFilter {
     // SAFETY: Per this function's `# Safety`, `filter` is a valid client-quota-filter handle alive
     // for `'a`, so it points at a live `ClientQuotaFilter`, an owned one (no view of this type is
     // handed out). Nothing mutates a `ClientQuotaFilter` while a handle to it exists, so the shared
     // reference is sound for `'a`.
-    unsafe { &*(filter as *const ClientQuotaFilter) }
+    unsafe { require_ref::<_, ClientQuotaFilter>(filter, param) }
 }
 
 /// Hands `filter` to C as an owned handle, freed with
@@ -65,9 +67,17 @@ pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_c
 ///
 /// the new filter
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `components` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `components` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `components` must be null or a valid list of borrowed
+/// `components` must be a valid list of borrowed
 /// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during the call.
 /// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]
@@ -75,11 +85,11 @@ pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_c
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
     components: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaFilter_t {
-    // SAFETY: Per this function's `# Safety`, `components` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `components` is a valid list of
     // filter-component handles, as `list_client_quota_filter_components` requires; the components
     // are copied, so nothing borrows the list after this call.
     box_client_quota_filter(ClientQuotaFilter::contains(unsafe {
-        list_client_quota_filter_components(components)
+        list_client_quota_filter_components(components, "components")
     }))
 }
 
@@ -94,9 +104,17 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
 ///
 /// the new filter
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `components` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `components` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `components` must be null or a valid list of borrowed
+/// `components` must be a valid list of borrowed
 /// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during the call.
 /// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]
@@ -104,11 +122,11 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
     components: *const kafka_List_t,
 ) -> *mut kafka_common_quota_ClientQuotaFilter_t {
-    // SAFETY: Per this function's `# Safety`, `components` is null or a valid list of
+    // SAFETY: Per this function's `# Safety`, `components` is a valid list of
     // filter-component handles, as `list_client_quota_filter_components` requires; the components
     // are copied, so nothing borrows the list after this call.
     box_client_quota_filter(ClientQuotaFilter::contains_only(unsafe {
-        list_client_quota_filter_components(components)
+        list_client_quota_filter_components(components, "components")
     }))
 }
 
@@ -146,7 +164,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-filter handle, as
     // `client_quota_filter_ref` requires; the result is copied into an owned value before return,
     // so the borrow lasts for this call only.
-    let elements = unsafe { client_quota_filter_ref(self_) }
+    let elements = unsafe { client_quota_filter_ref(self_, "self_") }
         .components()
         .iter()
         .map(|component| box_client_quota_filter_component(component.clone()) as *mut c_void)
@@ -170,7 +188,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_strict(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-filter handle, as
     // `client_quota_filter_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { client_quota_filter_ref(self_) }.strict())
+    i8::from(unsafe { client_quota_filter_ref(self_, "self_") }.strict())
 }
 
 /// # Returns
@@ -189,7 +207,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-filter handle, as
     // `client_quota_filter_ref` requires; the result is copied into an owned value before return,
     // so the borrow lasts for this call only.
-    into_c_string(&unsafe { client_quota_filter_ref(self_) }.to_string())
+    into_c_string(&unsafe { client_quota_filter_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned filter handle. Null is a no-op.
@@ -252,9 +270,12 @@ mod tests {
             kafka_common_quota_ClientQuotaFilterComponent_destroy(c0);
             kafka_common_quota_ClientQuotaFilterComponent_destroy(c1);
 
-            assert_eq!(*client_quota_filter_ref(loose), ClientQuotaFilter::contains(expected.clone()));
             assert_eq!(
-                *client_quota_filter_ref(strict),
+                *client_quota_filter_ref(loose, "loose"),
+                ClientQuotaFilter::contains(expected.clone())
+            );
+            assert_eq!(
+                *client_quota_filter_ref(strict, "strict"),
                 ClientQuotaFilter::contains_only(expected.clone())
             );
             assert_eq!(kafka_common_quota_ClientQuotaFilter_strict(loose), 0);
@@ -264,7 +285,8 @@ mod tests {
             let copies: Vec<ClientQuotaFilterComponent> = (0..2)
                 .map(|i| {
                     client_quota_filter_component_ref(
-                        kafka_List_get(components, i) as *const kafka_common_quota_ClientQuotaFilterComponent_t
+                        kafka_List_get(components, i) as *const kafka_common_quota_ClientQuotaFilterComponent_t,
+                        "value",
                     )
                     .clone()
                 })
@@ -290,7 +312,7 @@ mod tests {
         // once.
         unsafe {
             let all = kafka_common_quota_ClientQuotaFilter_all();
-            assert_eq!(*client_quota_filter_ref(all), ClientQuotaFilter::all());
+            assert_eq!(*client_quota_filter_ref(all, "all"), ClientQuotaFilter::all());
             let components = kafka_common_quota_ClientQuotaFilter_components(all);
             assert_eq!(crate::ffi::util::kafka_List_size(components), 0);
             kafka_List_destroy(components);

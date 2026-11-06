@@ -22,7 +22,9 @@ using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.Soak.Tests;
 
@@ -147,7 +149,7 @@ public sealed class TopicSetupTests
     public async Task CreateTopicAuthFailureIsFatal()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException authentication = SoakTestSupport.KafkaError(58, "bad creds");
+        KafkaException authentication = new SaslAuthenticationException("bad creds");
         recorder.CreateTopicsError = authentication;
 
         SoakFatalStartupException ex = await Assert.ThrowsAsync<SoakFatalStartupException>(
@@ -171,7 +173,7 @@ public sealed class TopicSetupTests
         SoakTransientStartupException ex = await Assert.ThrowsAsync<SoakTransientStartupException>(
             () => CreateTopic(recorder, Options(3, 1, recreate: false)));
 
-        KafkaException timeout = Assert.IsType<KafkaException>(ex.InnerException);
+        KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(ex.InnerException);
         Assert.Equal(7, timeout.Code);
         Assert.Equal("The mock timed out the request.", timeout.Message);
         Assert.Equal(
@@ -249,7 +251,7 @@ public sealed class TopicSetupTests
         var mock = AsyncMockAdminClient.Create().Build();
         await mock.CreateTopics(new[] { new NewTopic("t", 3, 1) }).All().Get();
         RecordingAdmin recorder = RecordingAdmin.Over(mock);
-        recorder.DeleteTopicsError = SoakTestSupport.KafkaError(3, "gone");
+        recorder.DeleteTopicsError = new UnknownTopicOrPartitionException("gone");
         using var output = new StringWriter();
 
         await CreateTopic(recorder, Options(4, 1, recreate: true), output: output);
@@ -272,7 +274,7 @@ public sealed class TopicSetupTests
     public async Task RecreateTopicAuthFailureOnDeleteIsFatal()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException authentication = SoakTestSupport.KafkaError(58, "bad creds");
+        KafkaException authentication = new SaslAuthenticationException("bad creds");
         recorder.DeleteTopicsError = authentication;
 
         SoakFatalStartupException ex = await Assert.ThrowsAsync<SoakFatalStartupException>(
@@ -290,7 +292,7 @@ public sealed class TopicSetupTests
     public async Task RecreateTopicAuthFailureOnCreateIsFatal()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException authorization = SoakTestSupport.KafkaError(29, "denied");
+        KafkaException authorization = new TopicAuthorizationException("denied");
         recorder.CreateTopicsError = authorization;
 
         SoakFatalStartupException ex = await Assert.ThrowsAsync<SoakFatalStartupException>(
@@ -314,7 +316,7 @@ public sealed class TopicSetupTests
         SoakTransientStartupException ex = await Assert.ThrowsAsync<SoakTransientStartupException>(
             () => CreateTopic(recorder, Options(4, 1, recreate: true)));
 
-        KafkaException timeout = Assert.IsType<KafkaException>(ex.InnerException);
+        KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(ex.InnerException);
         Assert.Equal(7, timeout.Code);
         Assert.Equal(
             "could not delete topic 't': The mock timed out the request.. "
@@ -327,7 +329,7 @@ public sealed class TopicSetupTests
     public async Task RecreateTopicOtherFailureOnCreateIsTransient()
     {
         RecordingAdmin recorder = RecordingAdmin.Over(AsyncMockAdminClient.Create().Build());
-        KafkaException timeout = SoakTestSupport.KafkaError(7, "slow");
+        KafkaException timeout = new KafkaTimeoutException("slow");
         recorder.CreateTopicsError = timeout;
 
         SoakTransientStartupException ex = await Assert.ThrowsAsync<SoakTransientStartupException>(

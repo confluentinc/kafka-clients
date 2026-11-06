@@ -26,19 +26,38 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Each exported type sits in the namespace of its Java class's package, or, for a .NET-only type
-/// (a <c>=</c> row), in that of the type it pairs with, and nests where its Java class nests; every
-/// Java class the table names exists in the Kafka sources.
+/// Each exported type sits in the namespace of its Java class's package (a JDK class in the root
+/// namespace), or, for a .NET-only type (a <c>=</c> row), in that of the type it pairs with, and nests
+/// where its Java class nests; every Java class the table names exists in the Kafka sources, or, for a
+/// JDK class, in the error generator's table. The error classes' rows come from the generator.
 /// </summary>
 public sealed class PublicNamespaceLayoutTests
 {
     private const string RootNamespace = "Confluent.Kafka";
     private const string JavaPrefix = "org.apache.kafka.";
     private const string ClientsSegment = "clients.";
+    private const string JdkPrefix = "java.";
 
     private static readonly Type[] s_exported = typeof(KafkaException).Assembly.GetExportedTypes();
 
-    private static IReadOnlyList<(string DotNet, string Java)> JavaCounterparts { get; } = new[]
+    // The JDK exception classes, the only public types in the root namespace, as Python keeps them at
+    // confluent_kafka.
+    private static readonly string[] s_jdkClasses =
+    {
+        "ConcurrentModificationException",
+        "ExecutionException",
+        "IllegalArgumentException",
+        "IllegalStateException",
+        "IndexOutOfBoundsException",
+        "NoSuchElementException",
+        "TimeoutException",
+        "UnsupportedOperationException",
+    };
+
+    private static IReadOnlyList<(string DotNet, string Java)> JavaCounterparts { get; } =
+        HandWrittenRows.Concat(ErrorClassRows.Rows).ToArray();
+
+    private static IReadOnlyList<(string DotNet, string Java)> HandWrittenRows => new[]
     {
         ("AbortTransactionOptions", "org.apache.kafka.clients.admin.AbortTransactionOptions"),
         ("AbortTransactionResult", "org.apache.kafka.clients.admin.AbortTransactionResult"),
@@ -248,7 +267,6 @@ public sealed class PublicNamespaceLayoutTests
         ("GroupType", "org.apache.kafka.common.GroupType"),
         ("IMetric", "org.apache.kafka.common.Metric"),
         ("IsolationLevel", "org.apache.kafka.common.IsolationLevel"),
-        ("KafkaException", "org.apache.kafka.common.KafkaException"),
         ("KafkaFuture", "org.apache.kafka.common.KafkaFuture"),
         ("KafkaFuture+BaseFunction`2", "org.apache.kafka.common.KafkaFuture.BaseFunction"),
         ("KafkaFuture+BiConsumer`2", "org.apache.kafka.common.KafkaFuture.BiConsumer"),
@@ -271,10 +289,9 @@ public sealed class PublicNamespaceLayoutTests
         ("AclPermissionType", "org.apache.kafka.common.acl.AclPermissionType"),
         ("ConfigResource", "org.apache.kafka.common.config.ConfigResource"),
         ("ConfigResourceType", "org.apache.kafka.common.config.ConfigResource.Type"),
-        ("RecordDeserializationException", "org.apache.kafka.common.errors.RecordDeserializationException"),
         ("RecordDeserializationException+DeserializationExceptionOrigin", "org.apache.kafka.common.errors.RecordDeserializationException.DeserializationExceptionOrigin"),
-        ("SerializationException", "org.apache.kafka.common.errors.SerializationException"),
         ("Header", "org.apache.kafka.common.header.Header"),
+        ("KafkaMetric", "org.apache.kafka.common.metrics.KafkaMetric"),
         ("Headers", "org.apache.kafka.common.header.Headers"),
         ("ClientQuotaAlteration", "org.apache.kafka.common.quota.ClientQuotaAlteration"),
         ("ClientQuotaAlteration+Op", "org.apache.kafka.common.quota.ClientQuotaAlteration.Op"),
@@ -334,62 +351,70 @@ public sealed class PublicNamespaceLayoutTests
 
     public static TheoryData<string, string> AllRows => ToTheoryData(JavaCounterparts);
 
-    public static TheoryData<string, string> JavaBackedRows =>
-        ToTheoryData(JavaCounterparts.Where(row => !IsDotNetOnly(row.Java)));
+    public static TheoryData<string, string> KafkaBackedRows =>
+        ToTheoryData(JavaCounterparts.Where(row => !IsDotNetOnly(row.Java) && !IsJdk(row.Java)));
+
+    public static TheoryData<string, string> JdkBackedRows => ToTheoryData(JavaCounterparts.Where(row => IsJdk(row.Java)));
 
     [Fact]
     public void EveryExportedType_HasARow_AndEveryRowNamesAnExportedType()
     {
-        string[] exported = s_exported.Select(NameBelowNamespace).ToArray();
-        string[] rows = JavaCounterparts.Select(row => row.DotNet).ToArray();
+        string[] exported = s_exported.Select(type => type.FullName!).ToArray();
+        string[] rows = JavaCounterparts.Select(ExpectedFullName).ToArray();
 
         var problems = new List<string>();
         AddProblem(problems, "Exported types without a row", exported.Except(rows, StringComparer.Ordinal));
         AddProblem(problems, "Rows naming no exported type", rows.Except(exported, StringComparer.Ordinal));
-        AddProblem(problems, "Exported names below two namespaces", Duplicates(exported));
         AddProblem(problems, "Rows listed twice", Duplicates(rows));
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
     [Fact]
-    public void NoPublicType_IsInTheRootNamespace() =>
-        Assert.DoesNotContain(s_exported, type => type.Namespace == RootNamespace);
+    public void NoPublicType_IsInTheRootNamespace()
+    {
+        string[] root = s_exported
+            .Where(type => type.Namespace == RootNamespace)
+            .Select(type => type.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(s_jdkClasses.OrderBy(name => name, StringComparer.Ordinal), root);
+    }
 
     [Theory]
     [MemberData(nameof(AllRows))]
     public void TheNamespace_IsTheJavaPackages_OrThePairedTypes(string dotnet, string java)
     {
-        Type type = Exported(dotnet);
-
-        string expected;
         if (IsDotNetOnly(java))
         {
             string pair = java.Substring(1);
             Assert.True(
-                JavaCounterparts.Any(row => row.DotNet == pair),
-                $"{dotnet} pairs with {pair}, which has no row.");
-            expected = Exported(pair).Namespace!;
+                JavaCounterparts.Count(row => row.DotNet == pair) == 1,
+                $"{dotnet} pairs with {pair}, which has no row or several.");
         }
         else
         {
-            Assert.StartsWith(JavaPrefix, java, StringComparison.Ordinal);
-            expected = NamespaceOf(JavaPackage(java));
+            Assert.True(
+                java.StartsWith(JavaPrefix, StringComparison.Ordinal) || IsJdk(java),
+                $"{dotnet}: {java} is neither a Kafka class nor a JDK class.");
         }
 
-        Assert.Equal(expected, type.Namespace);
+        string expected = ExpectedFullName((dotnet, java));
+        Type type = Exported(expected);
+        Assert.Equal(expected.Substring(0, expected.Length - dotnet.Length - 1), type.Namespace);
     }
 
     [Fact]
     public void AJavaNestedType_IsNestedInTheTypeOfItsOuterClass()
     {
-        Dictionary<string, string> javaOf = JavaCounterparts.ToDictionary(row => row.DotNet, row => row.Java);
+        Dictionary<string, string> javaOf = JavaCounterparts.ToDictionary(ExpectedFullName, row => row.Java);
         var problems = new List<string>();
 
         foreach ((string dotnet, string java) in JavaCounterparts.Where(row => !IsDotNetOnly(row.Java)))
         {
-            Type type = Exported(dotnet);
-            string? declaring = type.DeclaringType is null ? null : NameBelowNamespace(type.DeclaringType);
+            Type type = Exported(ExpectedFullName((dotnet, java)));
+            string? declaring = type.DeclaringType?.FullName;
             bool javaNested = JavaClassLevels(java).Length > 1;
 
             if (!javaNested || JavaNestedTypesKeptTopLevel.Contains(dotnet))
@@ -411,7 +436,8 @@ public sealed class PublicNamespaceLayoutTests
 
         foreach (string kept in JavaNestedTypesKeptTopLevel)
         {
-            if (!javaOf.TryGetValue(kept, out string? java) || IsDotNetOnly(java) || JavaClassLevels(java).Length == 1)
+            string? java = JavaCounterparts.Where(row => row.DotNet == kept).Select(row => row.Java).FirstOrDefault();
+            if (java is null || IsDotNetOnly(java) || JavaClassLevels(java).Length == 1)
             {
                 problems.Add($"{kept} is listed as a Java nested type kept top-level, but its row names none.");
             }
@@ -421,7 +447,7 @@ public sealed class PublicNamespaceLayoutTests
     }
 
     [Theory]
-    [MemberData(nameof(JavaBackedRows))]
+    [MemberData(nameof(KafkaBackedRows))]
     public void TheJavaClass_ExistsInTheKafkaSources(string dotnet, string java)
     {
         string root = KafkaSourceRoot();
@@ -444,6 +470,17 @@ public sealed class PublicNamespaceLayoutTests
                 Regex.IsMatch(source, $@"\b(?:class|interface|enum|record)\s+{name}\b"),
                 $"{dotnet}: {file} declares no class, interface, enum or record {name} ({java}).");
         }
+    }
+
+    [Theory]
+    [MemberData(nameof(JdkBackedRows))]
+    public void TheJdkClass_IsInTheErrorGeneratorsTable(string dotnet, string java)
+    {
+        string generator = Path.Combine(KafkaSourceRoot(), "..", "..", "..", "rust", "xtask", "src", "error_hierarchy.rs");
+        Assert.True(File.Exists(generator), $"The error generator is not at {generator}.");
+        Assert.True(
+            File.ReadAllText(generator).Contains($"\"{java}\"", StringComparison.Ordinal),
+            $"{dotnet}: {java} is not in the JDK table of {generator}.");
     }
 
     private static TheoryData<string, string> ToTheoryData(IEnumerable<(string DotNet, string Java)> rows)
@@ -471,23 +508,46 @@ public sealed class PublicNamespaceLayoutTests
 
     private static bool IsDotNetOnly(string java) => java.StartsWith("=", StringComparison.Ordinal);
 
-    private static string NameBelowNamespace(Type type) => type.FullName!.Substring(type.Namespace!.Length + 1);
+    private static bool IsJdk(string java) => java.StartsWith(JdkPrefix, StringComparison.Ordinal);
 
-    private static Type Exported(string name)
+    private static string ExpectedFullName((string DotNet, string Java) row)
     {
-        Type? type = s_exported.SingleOrDefault(candidate => NameBelowNamespace(candidate) == name);
-        Assert.True(type is not null, $"{name} is not an exported type.");
+        if (!IsDotNetOnly(row.Java))
+        {
+            return NamespaceOf(JavaPackage(row.Java)) + "." + row.DotNet;
+        }
+
+        string pair = row.Java.Substring(1);
+        (string DotNet, string Java)[] paired = JavaCounterparts.Where(other => other.DotNet == pair).ToArray();
+        if (paired.Length != 1)
+        {
+            return "(no single row " + pair + ")." + row.DotNet;
+        }
+
+        string pairName = ExpectedFullName(paired[0]);
+        return pairName.Substring(0, pairName.Length - pair.Length) + row.DotNet;
+    }
+
+    internal static Type Exported(string fullName)
+    {
+        Type? type = s_exported.SingleOrDefault(candidate => candidate.FullName == fullName);
+        Assert.True(type is not null, $"{fullName} is not an exported type.");
         return type!;
     }
 
-    private static string JavaPackage(string java) =>
+    internal static string JavaPackage(string java) =>
         string.Join(".", java.Split('.').TakeWhile(segment => char.IsLower(segment[0])));
 
     private static string[] JavaClassLevels(string java) =>
         java.Split('.').SkipWhile(segment => char.IsLower(segment[0])).ToArray();
 
-    private static string NamespaceOf(string javaPackage)
+    internal static string NamespaceOf(string javaPackage)
     {
+        if (javaPackage.StartsWith(JdkPrefix, StringComparison.Ordinal))
+        {
+            return RootNamespace;
+        }
+
         string below = javaPackage.Substring(JavaPrefix.Length);
         if (below.StartsWith(ClientsSegment, StringComparison.Ordinal))
         {
@@ -498,7 +558,7 @@ public sealed class PublicNamespaceLayoutTests
             + string.Join(".", below.Split('.').Select(segment => char.ToUpperInvariant(segment[0]) + segment.Substring(1)));
     }
 
-    private static string KafkaSourceRoot() =>
+    internal static string KafkaSourceRoot() =>
         typeof(PublicNamespaceLayoutTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
             .Single(attribute => attribute.Key == "KafkaSourceRoot").Value!;
 }

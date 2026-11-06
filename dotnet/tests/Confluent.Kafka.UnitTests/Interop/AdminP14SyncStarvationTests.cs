@@ -114,7 +114,7 @@ public sealed class AdminP14SyncStarvationTests
     [Fact]
     public void Close_OnAStarvedThreadPool_TheSyncCloseReturnsWithinItsTimeout()
     {
-        KafkaAdminClient sync = new KafkaAdminClient(new Dictionary<string, string>(StringComparer.Ordinal)
+        KafkaAdminClient sync = new KafkaAdminClient(new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["bootstrap.servers"] = "127.0.0.1:1",
         });
@@ -156,7 +156,7 @@ public sealed class AdminP14SyncStarvationTests
 
         pool.AssertReleased();
 
-        Assert.Throws<ObjectDisposedException>(() => sync.ListTopics());
+        Assert.Throws<IllegalStateException>(() => sync.ListTopics());
         TestTimeout.Run(sync.Dispose, s_releaseDeadline);
     }
 

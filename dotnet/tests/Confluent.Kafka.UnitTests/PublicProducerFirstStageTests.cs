@@ -155,7 +155,7 @@ public sealed class PublicProducerFirstStageTests
                 new ProducerRecord<byte[], byte[]>("first-stage-closed", Encoding.UTF8.GetBytes("v")), callback);
 
             Assert.True(stage.IsFaulted, "the refusal did not fault the first stage inside the call");
-            InvalidOperationException refused = await Assert.ThrowsAsync<InvalidOperationException>(() => stage.AsTask());
+            IllegalStateException refused = await Assert.ThrowsAsync<IllegalStateException>(() => stage.AsTask());
             Assert.Equal("Cannot perform operation after producer has been closed", refused.Message);
 
             await Task.Delay(s_settle);
@@ -186,7 +186,7 @@ public sealed class PublicProducerFirstStageTests
             Assert.True(elapsed.ElapsedMilliseconds < 1000, $"Send took {elapsed.ElapsedMilliseconds} ms");
 
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => stage.AsTask(), s_deadline);
-            KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(
+            KafkaException failure = await FutureAssert.ThrowsAnyAsync<KafkaException>(
                 () => TestTimeout.Run(() => future.Get(), s_deadline));
             Assert.Equal(7, failure.Code);
             Assert.Equal($"Topic {topic} not present in metadata after 1000 ms.", failure.Message);
@@ -261,7 +261,7 @@ public sealed class PublicProducerFirstStageTests
 
     private static AsyncKafkaProducer<byte[], byte[]> Unreachable(int maxBlockMs) =>
         new AsyncKafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string>
+            new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",
                 ["max.block.ms"] = maxBlockMs.ToString(System.Globalization.CultureInfo.InvariantCulture),

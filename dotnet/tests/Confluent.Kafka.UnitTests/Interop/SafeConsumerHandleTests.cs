@@ -113,31 +113,31 @@ public sealed class SafeConsumerHandleTests
         TestTimeout.Run(consumer.Dispose, s_deadline);
 
         Assert.Equal(1, probe.Count);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+        Assert.Throws<IllegalStateException>(() => consumer.Handle);
     }
 
     [Fact]
-    public void Handle_AfterDispose_ThrowsObjectDisposedException()
+    public void Handle_AfterDispose_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
         TestTimeout.Run(consumer.Dispose, s_deadline);
 
-        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
-        Assert.Equal(nameof(NativeConsumer), failure.ObjectName);
+        IllegalStateException failure = Assert.Throws<IllegalStateException>(() => consumer.Handle);
+        Assert.Equal("This consumer has already been closed.", failure.Message);
     }
 
     [Fact]
-    public void Getters_AfterDispose_ThrowObjectDisposedException_AndWakeupIsANoOp()
+    public void Getters_AfterDispose_ThrowIllegalState_AndWakeupIsANoOp()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
 
         TestTimeout.Run(consumer.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
-        Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
-        Assert.Throws<ObjectDisposedException>(() => consumer.Paused());
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Subscription());
+        Assert.Throws<IllegalStateException>(() => consumer.Paused());
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
         consumer.Wakeup();
     }
 
@@ -155,12 +155,12 @@ public sealed class SafeConsumerHandleTests
     [Fact]
     public void Create_WithTheClassicProtocol_ThrowsTheCoreError()
     {
-        Dictionary<string, string> config = Config();
+        Dictionary<string, object?> config = Config();
         config["group.protocol"] = "classic";
 
         for (int i = 0; i < 50; i++)
         {
-            NotSupportedException failure = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(config));
+            UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => NativeConsumer.Create(config));
             Assert.Equal(ClassicProtocolMessage, failure.Message);
         }
     }
@@ -168,7 +168,7 @@ public sealed class SafeConsumerHandleTests
     [Fact]
     public void CreateMock_WithAnUnknownResetStrategy_ThrowsTheCoreError()
     {
-        ArgumentException failure = Assert.Throws<ArgumentException>(() => NativeConsumer.CreateMock("nowhere"));
+        IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(() => NativeConsumer.CreateMock("nowhere"));
         Assert.Equal("Unknown auto offset reset strategy: nowhere", failure.Message);
     }
 
@@ -188,7 +188,7 @@ public sealed class SafeConsumerHandleTests
         Assert.False(closer.Join(TimeSpan.FromMilliseconds(200)));
         Assert.False(handle.IsClosed);
         Assert.Equal(0, probe.Count);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
 
         ExitUse(consumer, owner);
 
@@ -248,7 +248,7 @@ public sealed class SafeConsumerHandleTests
                             consumer.CreateReentrancyHandle().Dispose();
                         }
                     }
-                    catch (ObjectDisposedException)
+                    catch (IllegalStateException)
                     {
                     }
                     catch (Exception e)
@@ -299,7 +299,7 @@ public sealed class SafeConsumerHandleTests
         Assert.Equal(0, probe.Count);
     }
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:9092",
         ["group.protocol"] = "consumer",

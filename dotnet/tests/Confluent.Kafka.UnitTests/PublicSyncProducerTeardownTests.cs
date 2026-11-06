@@ -30,7 +30,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The sync producer's teardown: Close and Dispose return without hanging and are idempotent under one latch;
 /// Dispose first flushes a manual mock's pending sends, while Close leaves them pending; a call after teardown
-/// throws ObjectDisposedException.
+/// throws IllegalStateException.
 /// </summary>
 public sealed class PublicSyncProducerTeardownTests
 {
@@ -103,16 +103,16 @@ public sealed class PublicSyncProducerTeardownTests
     }
 
     [Fact]
-    public void Ops_AfterClose_ThrowObjectDisposed()
+    public void Ops_AfterClose_ThrowIllegalState()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Teardown(producer, () => producer.Close());
 
-        // Every operation throws ObjectDisposedException after teardown; the type only, as for the consumer.
-        Assert.Throws<ObjectDisposedException>(
+        // Every operation throws IllegalStateException after teardown; the type only, as for the consumer.
+        Assert.Throws<IllegalStateException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
-        Assert.Throws<ObjectDisposedException>(() => producer.Flush());
-        Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
+        Assert.Throws<IllegalStateException>(() => producer.Flush());
+        Assert.Throws<IllegalStateException>(() => producer.PartitionsFor(Topic));
 
         TestTimeout.Dispose(producer);
     }
@@ -122,7 +122,7 @@ public sealed class PublicSyncProducerTeardownTests
     {
         // The real KafkaProducer with no broker tears down without hanging.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 
@@ -185,7 +185,7 @@ public sealed class PublicSyncProducerTeardownTests
                 future.Get(TimeSpan.FromSeconds(2));
                 return false;
             }
-            catch (TimeoutException)
+            catch (System.TimeoutException)
             {
                 return true;
             }
@@ -207,7 +207,7 @@ public sealed class PublicSyncProducerTeardownTests
         {
             if (sw.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "The blocking send never registered within the deadline — treated as a hang.");
             }
 

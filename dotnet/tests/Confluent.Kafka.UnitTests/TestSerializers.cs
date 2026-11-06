@@ -42,9 +42,24 @@ internal sealed class RecordingSerializer<T> : ISerializer<T>
     }
 }
 
-/// <summary>A serializer that counts its calls and always throws a <see cref="BoomException"/>.</summary>
+/// <summary>
+/// A serializer that counts its calls and always throws, a <see cref="BoomException"/> unless it is given what to
+/// throw, and keeps the last exception it threw.
+/// </summary>
 internal sealed class ThrowingSerializer<T> : ISerializer<T>
 {
+    private readonly Func<Exception> _make;
+
+    internal ThrowingSerializer()
+        : this(() => new BoomException())
+    {
+    }
+
+    internal ThrowingSerializer(Func<Exception> make)
+    {
+        _make = make;
+    }
+
     /// <summary>The distinctive exception this serializer throws, asserted as the inner exception.</summary>
     internal sealed class BoomException : Exception
     {
@@ -56,10 +71,14 @@ internal sealed class ThrowingSerializer<T> : ISerializer<T>
 
     internal int InvocationCount { get; private set; }
 
+    internal Exception? LastThrown { get; private set; }
+
     public byte[]? Serialize(string topic, T data)
     {
         InvocationCount++;
-        throw new BoomException();
+        Exception thrown = _make();
+        LastThrown = thrown;
+        throw thrown;
     }
 }
 

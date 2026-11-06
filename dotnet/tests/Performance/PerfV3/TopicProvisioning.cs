@@ -18,6 +18,7 @@ using System.Globalization;
 using System.Threading;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 
 namespace Confluent.Kafka.Performance.V3;
 
@@ -30,13 +31,9 @@ internal static class TopicProvisioning
     private const int OperationTimeoutMs = 30000;
     private const int PropagationDelayMs = 10000;
 
-    private const int UnknownTopicOrPartitionCode = 3;
-
-    private const int TopicAlreadyExistsCode = 36;
-
     internal static void RecreateTopic(string bootstrapServers, string topic, int partitions)
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = bootstrapServers,
         };
@@ -56,7 +53,7 @@ internal static class TopicProvisioning
             deleteResult.TopicNameValues![topic].Get();
             Console.WriteLine($">>> deleted '{topic}'");
         }
-        catch (KafkaException e) when (e.Code == UnknownTopicOrPartitionCode)
+        catch (ExecutionException e) when (e.InnerException is UnknownTopicOrPartitionException)
         {
             Console.WriteLine($">>> '{topic}' did not exist (ok)");
         }
@@ -75,7 +72,7 @@ internal static class TopicProvisioning
             createResult.Values[topic].Get();
             Console.WriteLine($">>> created '{topic}'");
         }
-        catch (KafkaException e) when (e.Code == TopicAlreadyExistsCode)
+        catch (ExecutionException e) when (e.InnerException is TopicExistsException)
         {
             Console.WriteLine($">>> '{topic}' already exists (ok)");
         }

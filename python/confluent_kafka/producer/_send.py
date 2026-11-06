@@ -75,11 +75,13 @@ _CO_COROUTINE = inspect.CO_COROUTINE
 _callback_scope = threading.local()
 
 
-def failure_metadata(topic: str, partition: int | None) -> RecordMetadata:
+def failure_metadata(topic: str | None, partition: int | None) -> RecordMetadata:
     """The metadata Java hands a callback on failure: ``RecordMetadata(tp, -1,
     -1, RecordBatch.NO_TIMESTAMP, -1, -1)``, the partition -1 when none was
-    chosen (``KafkaProducer.AppendCallbacks.onCompletion``)."""
-    tp = TopicPartition(topic=topic, partition=-1 if partition is None else partition)
+    chosen (``KafkaProducer.AppendCallbacks.onCompletion``). ``topic`` is
+    ``None`` only for a ``None`` record, kept as Java's ``TopicPartition``
+    keeps a null topic."""
+    tp = TopicPartition(topic=cast(str, topic), partition=-1 if partition is None else partition)
     return RecordMetadata(topic_partition=tp, base_offset=-1, batch_index=-1, timestamp=-1,
                           serialized_key_size=-1, serialized_value_size=-1)
 
@@ -90,7 +92,7 @@ def failure_metadata(topic: str, partition: int | None) -> RecordMetadata:
 MetadataTuple = tuple[str, int, int, int, int, int]
 
 
-def completion_to_python(metadata_tuple: MetadataTuple | None, error: int, topic: str,
+def completion_to_python(metadata_tuple: MetadataTuple | None, error: int, topic: str | None,
                          partition: int | None) -> tuple[RecordMetadata, Exception | None]:
     """The ``(metadata, exception)`` of a completion, from what the delivery
     callback received: the metadata tuple and the BORROWED error handle, which

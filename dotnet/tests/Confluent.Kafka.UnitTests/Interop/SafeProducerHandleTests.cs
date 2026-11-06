@@ -65,28 +65,28 @@ public sealed class SafeProducerHandleTests
         await TestTimeout.Run(() => producer.DisposeAsync().AsTask(), s_deadline);
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+        Assert.Throws<IllegalStateException>(() => producer.Handle);
     }
 
     [Fact]
-    public void Handle_AfterDispose_ThrowsObjectDisposedException()
+    public void Handle_AfterDispose_ThrowsIllegalState()
     {
         NativeProducer producer = NativeProducer.Create(Config());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        ObjectDisposedException failure = Assert.Throws<ObjectDisposedException>(() => producer.Handle);
-        Assert.Equal(nameof(NativeProducer), failure.ObjectName);
+        IllegalStateException failure = Assert.Throws<IllegalStateException>(() => producer.Handle);
+        Assert.Equal("Cannot perform operation after producer has been closed", failure.Message);
     }
 
     [Fact]
-    public void Flush_AfterDispose_ThrowsObjectDisposedException()
+    public void Flush_AfterDispose_ThrowsIllegalState()
     {
         NativeProducer producer = NativeProducer.Create(Config());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Flush());
+        Assert.Throws<IllegalStateException>(() => producer.Flush());
     }
 
     [Fact]
@@ -133,7 +133,7 @@ public sealed class SafeProducerHandleTests
         Assert.Equal(completionThread.ManagedThreadId, probe.ThreadId);
         Assert.True(completionThread.Join(s_deadline));
         Assert.True(OpaqueReleased(completion));
-        Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+        Assert.Throws<IllegalStateException>(() => producer.Handle);
     }
 
     [Fact]
@@ -181,7 +181,7 @@ public sealed class SafeProducerHandleTests
         Assert.False(OpaqueReleased(completion));
     }
 
-    private static Dictionary<string, string> Config() => new Dictionary<string, string>
+    private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "localhost:9092",
     };

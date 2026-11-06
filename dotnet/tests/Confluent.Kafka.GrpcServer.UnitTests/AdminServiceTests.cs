@@ -127,7 +127,8 @@ public sealed class AdminServiceTests
         Proto.StatusResponse response = await server.Service.Close(request, server.Context);
 
         Assert.Null(response.Error);
-        Assert.Throws<ObjectDisposedException>(() => ListTopics(client));
+        IllegalStateException closed = Assert.Throws<IllegalStateException>(() => ListTopics(client));
+        Assert.Equal("Cannot accept new calls when AdminClient is closing.", closed.Message);
         Proto.DescribeFeaturesResponse after = await server.Service.DescribeFeatures(
             new Proto.DescribeFeaturesRequest { AdminId = adminId }, server.Context);
         Assert.Equal(-4, after.Error.Code);
@@ -145,6 +146,42 @@ public sealed class AdminServiceTests
             new Proto.AdminCloseRequest { AdminId = 99 }, server.Context);
 
         Assert.Null(response.Error);
+    }
+
+    [Theory]
+    [InlineData("sync")]
+    [InlineData("async")]
+    public async Task ListGroups_WithANonKafkaListingError_KeepsTheValidListingsAndSendsTheErrorAsMinusFour(string flavour)
+    {
+        using AdminServer server = AdminServer.Create(flavour);
+        ulong adminId = await server.CreateMockAdmin();
+        server.OverrideListGroups(
+            adminId,
+            new[] { new GroupListing("g1", null, "consumer", null) },
+            new Exception[]
+            {
+                new IllegalStateException("broker listing failed"),
+                new InvalidOperationException("listing invariant broken"),
+            });
+
+        Proto.ListGroupsResponse response = await server.Service.ListGroups(
+            new Proto.ListGroupsRequest { AdminId = adminId }, server.Context);
+
+        Assert.Null(response.Error);
+        Proto.GroupListing listing = Assert.Single(response.Valid);
+        Assert.Equal("g1", listing.GroupId);
+        Assert.Collection(
+            response.ListingErrors,
+            error =>
+            {
+                Assert.Equal(-4, error.Code);
+                Assert.Equal("broker listing failed", error.Message);
+            },
+            error =>
+            {
+                Assert.Equal(-4, error.Code);
+                Assert.Equal("dotnet server: InvalidOperationException: listing invariant broken", error.Message);
+            });
     }
 
     private static void ListTopics(object client)

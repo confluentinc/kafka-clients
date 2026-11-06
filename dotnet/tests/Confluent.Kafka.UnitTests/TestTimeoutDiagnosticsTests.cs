@@ -61,7 +61,7 @@ public sealed class TestTimeoutDiagnosticsTests
         ManualResetEventSlim gate = new ManualResetEventSlim();
         try
         {
-            TimeoutException timedOut = Assert.Throws<TimeoutException>(() => TestTimeout.Run(() => gate.Wait(), s_short));
+            System.TimeoutException timedOut = Assert.Throws<System.TimeoutException>(() => TestTimeout.Run(() => gate.Wait(), s_short));
 
             Assert.Matches(
                 $@"^Operation did not complete within {Escaped(s_short)} — treated as a hang \(fail fast\)\. Diagnostics: the action "
@@ -77,7 +77,7 @@ public sealed class TestTimeoutDiagnosticsTests
     [Fact]
     public async Task TheAsyncRun_ThatTimesOut_DescribesThePoolAndTheProcess()
     {
-        TimeoutException timedOut = await Assert.ThrowsAsync<TimeoutException>(
+        System.TimeoutException timedOut = await Assert.ThrowsAsync<System.TimeoutException>(
             () => TestTimeout.Run(
                 () => new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task,
                 s_short));

@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Teardown through the public surface: Dispose, DisposeAsync and Close return, an unawaited operation in flight
 /// included, are idempotent under double and mixed calls, and every operation throws
-/// <see cref="ObjectDisposedException"/> after them.
+/// <see cref="IllegalStateException"/> after them.
 /// </summary>
 public sealed class PublicConsumerTeardownTests
 {
@@ -91,16 +91,16 @@ public sealed class PublicConsumerTeardownTests
     }
 
     [Fact]
-    public async Task UseAfterDispose_ThrowsObjectDisposed()
+    public async Task UseAfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Unsubscribe());
-        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), 0L); });
-        Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Poll(s_pollTimeout));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Subscribe(ProofTopic()));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Unsubscribe());
+        Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), 0L); });
+        Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
     }
 
     [Fact]
@@ -120,12 +120,12 @@ public sealed class PublicConsumerTeardownTests
     }
 
     [Fact]
-    public async Task Close_UseAfterClose_ThrowsObjectDisposed()
+    public async Task Close_UseAfterClose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.TeardownAsync(consumer, () => consumer.Close());
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.Subscribe(ProofTopic()));
     }
 
     [Fact]

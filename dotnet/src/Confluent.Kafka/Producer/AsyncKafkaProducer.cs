@@ -18,6 +18,8 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
@@ -39,23 +41,32 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// Creates a producer from a configuration map of Java's dotted keys and the key and value serializers
     /// (Java <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>).
     /// </summary>
-    /// <param name="config">The producer configuration.</param>
+    /// <param name="configs">
+    /// The producer configuration, keyed by Java's dotted names: each value of the type Java's <c>ConfigDef</c>
+    /// accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the
+    /// key's validator refuses <c>null</c>. The serializer keys (<c>key.serializer</c>, <c>value.serializer</c>,
+    /// <c>serializer.encoding</c>, <c>key.serializer.encoding</c>, <c>value.serializer.encoding</c>) are ignored: the
+    /// serializers are the arguments.
+    /// </param>
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="config"/>, <paramref name="keySerializer"/>, or
+    /// <paramref name="configs"/>, <paramref name="keySerializer"/>, or
     /// <paramref name="valueSerializer"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">A config value is null.</exception>
+    /// <exception cref="ConfigException">
+    /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+    /// <c>null</c>, or the client refuses a value.
+    /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
     public AsyncKafkaProducer(
-        IReadOnlyDictionary<string, string> config,
+        IReadOnlyDictionary<string, object?> configs,
         ISerializer<TKey> keySerializer,
         ISerializer<TValue> valueSerializer)
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
-        _native = NativeProducer.Create(config, NativeProducer.PumpThreadName);
+        _native = NativeProducer.Create(configs, NativeProducer.PumpThreadName);
     }
 
     /// <inheritdoc/>
@@ -117,8 +128,17 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();
 
-        SerializedProducerRecord serialized =
-            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
+        SerializedProducerRecord serialized;
+        try
+        {
+            serialized = SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer, wrapInvalidCast: true);
+        }
+        catch (ApiException error)
+        {
+            return FutureFailure.SendAsync(
+                record.Topic, record.Partition, error, callback, asyncCallback, cancellationToken,
+                _native.FailureCallbacks);
+        }
 
         // As Java's doSend, the headers turn read-only once the serializers ran; the mocks leave them writable.
         record.Headers.SetReadOnly();

@@ -45,12 +45,15 @@ pub(crate) fn box_describe_cluster_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DescribeClusterResult_t) -> &'a ResultHandle<DescribeClusterResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DescribeClusterResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DescribeClusterResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeClusterResult_t` is built by
     // `box_result::<DescribeClusterResult, _>` (in `box_describe_cluster_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Frees a `kafka_common_Node_t *` a future delivered.
@@ -83,7 +86,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_list_element` frees exactly the list `node_list` makes through `box_list`,
     // and the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.
@@ -119,7 +122,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_node_element` frees exactly the handle `box_node` makes, and the handle
     // holds only owned data and no thread-bound state, so it may be freed from any thread and read
     // from several at once, as `handle_future` requires. A `None` gives null, which is never freed.
@@ -150,7 +153,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.string_future(&h.result.cluster_id())
 }
 
@@ -176,7 +179,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_list_element` frees exactly the list `box_list` makes (a view list: its
     // elements are static singletons it does not free), and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as

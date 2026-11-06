@@ -50,18 +50,17 @@ public sealed class AsyncDescribeProducersResult
     /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c>.</summary>
     /// <param name="partition">A topic partition from the request.</param>
     /// <returns>That partition's future.</returns>
-    /// <exception cref="ArgumentException">
-    /// The partition was not in the request (Java's <c>IllegalArgumentException</c>), thrown at the call.
+    /// <exception cref="IllegalArgumentException">
+    /// The partition was not in the request, thrown at the call with Java's message.
     /// </exception>
     public AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> PartitionResult(TopicPartition partition) =>
         _futures.TryGetValue(partition, out AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> future)
             ? future
-            : throw new ArgumentException(
+            : throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Topic partition {0} was not included in the request",
-                    partition),
-                nameof(partition));
+                    partition));
 
     /// <summary>
     /// Every partition's producers in one map, succeeding only if every partition did —
@@ -86,7 +85,7 @@ public sealed class AsyncDescribeProducersResult
                     new Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>(futures.Count);
                 foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> entry in futures)
                 {
-                    states.Add(entry.Key, entry.Value.GetNow(null!));
+                    states.Add(entry.Key, entry.Value.Impl.GetNow(null!));
                 }
 
                 return states;

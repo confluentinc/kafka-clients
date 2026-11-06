@@ -17,6 +17,7 @@
 //! handle points at the Rust value, so a `MemberAssignment` held inside a
 //! `kafka_admin_MemberDescription_t` is borrowed out by address.
 
+use crate::ffi::precondition::require_ref;
 use std::collections::HashSet;
 use std::ffi::c_char;
 
@@ -52,13 +53,14 @@ pub(crate) fn member_assignment_ptr(assignment: &MemberAssignment) -> *const kaf
 /// `'a`.
 pub(crate) unsafe fn member_assignment_ref<'a>(
     assignment: *const kafka_admin_MemberAssignment_t,
+    param: &'static str,
 ) -> &'a MemberAssignment {
     // SAFETY: Per this function's `# Safety`, `assignment` is a live member-assignment handle kept
     // alive for `'a`. Every `kafka_admin_MemberAssignment_t` points at a `MemberAssignment`:
     // `box_member_assignment` boxes one and `member_assignment_ptr` borrows one inside its parent
     // handle, so the cast yields a valid shared reference. The type has no setters, so nothing
     // mutates it while borrowed.
-    unsafe { &*(assignment as *const MemberAssignment) }
+    unsafe { require_ref::<_, MemberAssignment>(assignment, param) }
 }
 
 /// Creates an instance with the specified parameters.
@@ -79,7 +81,15 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
 ) -> *mut kafka_admin_MemberAssignment_t {
     // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
     // topic-partition handles, as `list_topic_partitions` requires.
-    let partitions: HashSet<TopicPartition> = unsafe { list_topic_partitions(topic_partitions) }.into_iter().collect();
+    let partitions: HashSet<TopicPartition> = unsafe {
+        if topic_partitions.is_null() {
+            Default::default()
+        } else {
+            list_topic_partitions(topic_partitions, "topic_partitions")
+        }
+    }
+    .into_iter()
+    .collect();
     box_member_assignment(MemberAssignment::new(partitions))
 }
 
@@ -100,7 +110,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-assignment handle, kept
     // alive for this call, as `member_assignment_ref` requires.
-    sorted_topic_partition_list(unsafe { member_assignment_ref(self_) }.topic_partitions())
+    sorted_topic_partition_list(unsafe { member_assignment_ref(self_, "self_") }.topic_partitions())
 }
 
 /// Returns the text form of the assignment.
@@ -116,7 +126,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid member-assignment handle, kept
     // alive for this call, as `member_assignment_ref` requires.
-    into_c_string(&unsafe { member_assignment_ref(self_) }.to_string())
+    into_c_string(&unsafe { member_assignment_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned member-assignment handle. Null is a no-op; a handle

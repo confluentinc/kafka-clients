@@ -41,7 +41,7 @@ public sealed class ProducerFoundationTfmSmokeTests
     [Fact]
     public void KafkaProducer_CreateFromConfigDispose_RoundTrips()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
         };
@@ -58,6 +58,6 @@ public sealed class ProducerFoundationTfmSmokeTests
         Assert.False(producer.Handle.IsInvalid);
         await TestTimeout.DisposeAsync(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+        Assert.Throws<IllegalStateException>(() => producer.Handle);
     }
 }

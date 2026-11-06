@@ -15,6 +15,7 @@
 using System;
 using System.Globalization;
 
+
 namespace Confluent.Kafka.Consumer;
 
 /// <summary>
@@ -38,14 +39,14 @@ public sealed class OffsetAndMetadata : IEquatable<OffsetAndMetadata>
     /// The leader epoch, or <see langword="null"/> when absent. A negative value is stored as
     /// <see langword="null"/>.
     /// </param>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="offset"/> is negative (Java: <c>"Invalid negative offset"</c>).
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="offset"/> is negative, with Java's message <c>"Invalid negative offset"</c>.
     /// </exception>
     public OffsetAndMetadata(long offset, string? metadata = null, int? leaderEpoch = null)
     {
         if (offset < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(offset), offset, "Invalid negative offset");
+            throw new IllegalArgumentException("Invalid negative offset");
         }
 
         Offset = offset;

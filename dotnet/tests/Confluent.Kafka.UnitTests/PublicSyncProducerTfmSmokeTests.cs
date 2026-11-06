@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -82,9 +83,9 @@ public sealed class PublicSyncProducerTfmSmokeTests
         Task<RecordMetadata> sendTask = Task.Run(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)).Get());
 
-        DriveUntilResolved(() => producer.ErrorNext(new KafkaException(2, "tfm-error", isRetriable: true)));
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("tfm-error")));
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => sendTask, s_deadline));
+        await FutureAssert.ThrowsAsync<CorruptRecordException>(() => TestTimeout.Run(() => sendTask, s_deadline));
     }
 
     [Fact]
@@ -92,7 +93,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
         KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray,
             Serdes.ByteArray);
 
@@ -107,7 +108,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
         {
             if (sw.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "No pending send registered to drive within the deadline — treated as a hang.");
             }
 

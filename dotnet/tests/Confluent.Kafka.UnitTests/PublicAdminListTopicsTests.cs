@@ -30,6 +30,8 @@ using Confluent.Kafka.UnitTests.Interop;
 
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -51,8 +53,8 @@ public sealed class PublicAdminListTopicsTests
 
     private const string ThreadExited = "The AdminClient thread has exited. Call: listTopics";
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     [Theory]
     [InlineData(null)]
@@ -142,7 +144,7 @@ public sealed class PublicAdminListTopicsTests
     [InlineData(AsyncMock)]
     [InlineData(Real)]
     [InlineData(AsyncReal)]
-    public async Task ListTopicsAfterDispose_ThrowsObjectDisposed_NamingTheClient(string kind)
+    public async Task ListTopicsAfterDispose_ThrowsIllegalState_NamingTheClient(string kind)
     {
         object admin = Create(kind);
         if (admin is IAsyncDisposable asyncAdmin)
@@ -154,12 +156,11 @@ public sealed class PublicAdminListTopicsTests
             TestTimeout.Dispose((IDisposable)admin);
         }
 
-        ObjectDisposedException thrown = Assert.Throws<ObjectDisposedException>(() =>
+        IllegalStateException thrown = Assert.Throws<IllegalStateException>(() =>
         {
             _ = admin is IAdmin sync ? (object)sync.ListTopics() : ((IAsyncAdmin)admin).ListTopics();
         });
-        string expected = kind is Mock or AsyncMock ? nameof(MockAdminClient) : nameof(KafkaAdminClient);
-        Assert.Equal(expected, thrown.ObjectName);
+        Assert.Equal("Cannot accept new calls when AdminClient is closing.", thrown.Message);
     }
 
     [Theory]
@@ -497,10 +498,10 @@ public sealed class PublicAdminListTopicsTests
 
     private static void AssertThreadExited(Exception? thrown)
     {
-        KafkaException error = Assert.IsType<KafkaException>(thrown);
+        KafkaTimeoutException error = FutureAssert.Cause<KafkaTimeoutException>(Assert.IsAssignableFrom<Exception>(thrown));
         Assert.Equal(7, error.Code);
         Assert.Equal(ThreadExited, error.Message);
-        Assert.True(error.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(error);
     }
 
     private static NativeAdminClient NativeOf(object admin) =>
@@ -533,8 +534,21 @@ public sealed class PublicAdminListTopicsTests
             IntPtr mock = handle.DangerousAddRefClass(ref added);
             using Utf8Marshal.PinnedUtf8String text = Utf8Marshal.Pin(name);
             IntPtr outErr = IntPtr.Zero;
-            Native.MockAdminClientAddTopic(mock, isInternal ? (sbyte)1 : (sbyte)0, text.Pointer, IntPtr.Zero, IntPtr.Zero, ref outErr);
+            IntPtr partitions = NativeMethods.ListNew(ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
+            try
+            {
+                // Java's MockAdminClient.addTopic takes a partition list it reads at once;
+                // a topic without partitions is an empty list, not null.
+                Native.MockAdminClientAddTopic(
+                    mock, isInternal ? (sbyte)1 : (sbyte)0, text.Pointer, partitions, IntPtr.Zero, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+            finally
+            {
+                NativeMethods.ListDestroy(partitions, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
         }
         finally
         {

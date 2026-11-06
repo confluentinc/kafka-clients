@@ -161,7 +161,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         Java's mock. Subscribing without one releases the previous listener.
 
         Raises ``IllegalArgumentError`` if ``callback`` is ``None``
-        ("RebalanceListener cannot be None"), if ``topics`` or ``pattern`` is
+        ("RebalanceListener cannot be null", the core's Java text), if ``topics`` or ``pattern`` is
         ``None`` or ``topics`` contains a null or empty topic,
         ``IllegalStateError`` if ``subscribe()`` is called after ``assign()`` or
         with an incompatible subscription type, and ``InvalidGroupIdError``
@@ -544,21 +544,19 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_subscribe_topics(self, topics: Iterable[str],
                             callback: ConsumerRebalanceListener) -> None:
         reject_str("topics", topics)  # the shape check precedes the others
-        listener = self._subscribe_listener(callback)
-        self._check_not_null("subscribe_topics", topics)
+        listener, has_listener = self._subscribe_listener(callback)
         topic_list = blank_null_topics(topics)
         previous, self._listener = self._listener, listener
         try:
-            self._run_sync(*self._subscribe_topics_spec(topic_list, listener))
+            self._run_sync(*self._subscribe_topics_spec(topic_list, listener, has_listener))
         except BaseException:
             self._listener = previous
             raise
 
     def _c_subscribe_pattern(self, pattern: SubscriptionPattern,
                              callback: ConsumerRebalanceListener) -> None:
-        listener = self._subscribe_listener(callback)
-        self._check_not_null("subscribe_pattern", pattern)
-        if pattern.pattern() is None:
+        listener, has_listener = self._subscribe_listener(callback)
+        if pattern is not None and pattern.pattern() is None:
             # Java's subscriptionPattern.pattern().isEmpty() dereferences it; the FFI
             # cannot carry it (Types; exception 4). Java checks it after acquire()
             # (subscribeToRegex), so the closed and the concurrency checks come first.
@@ -566,14 +564,14 @@ class Consumer(Generic[K, V], _ConsumerState):
                 raise TypeError("SubscriptionPattern.pattern must not be None")
         previous, self._listener = self._listener, listener
         try:
-            self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), listener))
+            self._run_sync(*self._subscribe_pattern_spec(
+                None if pattern is None else pattern.pattern(), listener, has_listener))
         except BaseException:
             self._listener = previous
             raise
 
     def _tp_op(self, op: str, fn: Any, partitions: Iterable[TopicPartition]) -> None:
-        self._check_not_null(op, partitions)
-        partition_list = list(partitions)
+        partition_list = None if partitions is None else list(partitions)
         if self._in_callback():
             self._reentrant_use(op, partition_list)
             return
@@ -584,7 +582,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         # assign): from inside a callback it reaches the busy consumer and
         # reports ConcurrentModificationError, as Java's acquire() does from
         # another thread.
-        partition_list = list(self._assign_partitions(partitions))
+        partition_list = self._assign_partitions(partitions)
         self._run_sync(*self._void_spec(_lib.Consumer_assign_cb, tp_to_spec(partition_list)))
 
     def _c_unsubscribe(self) -> None:
@@ -648,7 +646,7 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._check_committed_timeout(partitions, timeout)
         timeout_ms = self._timeout_ms(timeout, group=True)
         self._check_committed_partitions(partitions)
-        partition_list = list(partitions)
+        partition_list = None if partitions is None else list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
                 "committed", partition_list, timeout_ms)
@@ -656,7 +654,6 @@ class Consumer(Generic[K, V], _ConsumerState):
         return self._run_sync(*self._committed_spec(partition_list, timeout_ms))
 
     def _c_current_lag(self, topic_partition: TopicPartition) -> int | None:
-        self._check_not_null("current_lag", topic_partition)
         if self._in_callback():
             in_callback: int | None = self._reentrant_use("current_lag", topic_partition)
             return in_callback
@@ -688,9 +685,8 @@ class Consumer(Generic[K, V], _ConsumerState):
     def _c_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
                              timeout: Duration = MISSING
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
-        self._check_not_null("offsets_for_times", timestamps_to_search)
         timeout_ms = self._timeout_ms(empty_input_timeout(timestamps_to_search, timeout))
-        timestamps = dict(timestamps_to_search)
+        timestamps = None if timestamps_to_search is None else dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
                 "offsets_for_times", timestamps, timeout_ms)
@@ -699,8 +695,7 @@ class Consumer(Generic[K, V], _ConsumerState):
 
     def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition],
                       timeout: Duration) -> dict[TopicPartition, int]:
-        self._check_not_null(op, partitions)
-        partition_list = list(partitions)
+        partition_list = None if partitions is None else list(partitions)
         timeout_ms = self._timeout_ms(empty_input_timeout(partition_list, timeout))
         if self._in_callback():
             offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list,

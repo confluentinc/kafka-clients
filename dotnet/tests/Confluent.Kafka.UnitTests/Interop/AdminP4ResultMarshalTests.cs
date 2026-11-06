@@ -41,7 +41,7 @@ public sealed class AdminP4ResultMarshalTests
     {
         IntPtr error = KafkaError("Election for élection-1 failed.");
 
-        IReadOnlyDictionary<TopicPartition, KafkaException?> copied = CopyOutElection(
+        IReadOnlyDictionary<TopicPartition, Exception?> copied = CopyOutElection(
             new[] { (s_elected, IntPtr.Zero), (s_failed, error) });
 
         Assert.Equal(2, copied.Count);
@@ -52,7 +52,7 @@ public sealed class AdminP4ResultMarshalTests
     }
 
     [Fact]
-    public void ElectLeaders_AnErrorThatIsNotAKafkaError_IsThrown()
+    public void ElectLeaders_AnErrorThatIsNotAKafkaError_IsCopiedOutAsItsClass()
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr error;
@@ -63,9 +63,10 @@ public sealed class AdminP4ResultMarshalTests
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(
-            () => CopyOutElection(new[] { (s_failed, error) }));
-        Assert.Equal("not a Kafka error", thrown.Message);
+        IReadOnlyDictionary<TopicPartition, Exception?> copied = CopyOutElection(new[] { (s_failed, error) });
+
+        IllegalStateException failure = Assert.IsType<IllegalStateException>(copied[s_failed]);
+        Assert.Equal("not a Kafka error", failure.Message);
     }
 
     [Fact]
@@ -86,13 +87,28 @@ public sealed class AdminP4ResultMarshalTests
     }
 
     [Fact]
-    public void PartitionReassignment_NullListsAreCopiedOutEmpty()
+    public void PartitionReassignment_EmptyListsAreCopiedOutEmpty()
     {
-        PartitionReassignment copied = WithReassignment(null, null, null, PartitionReassignmentMarshal.CopyOut);
+        PartitionReassignment copied = WithReassignment(
+            Array.Empty<int>(), Array.Empty<int>(), Array.Empty<int>(), PartitionReassignmentMarshal.CopyOut);
 
         Assert.Empty(copied.Replicas);
         Assert.Empty(copied.AddingReplicas);
         Assert.Empty(copied.RemovingReplicas);
+    }
+
+    [Theory]
+    [InlineData(0, "replicas must not be null")]
+    [InlineData(1, "adding_replicas must not be null")]
+    [InlineData(2, "removing_replicas must not be null")]
+    public void PartitionReassignmentNew_ANullList_IsRefusedWithTheNullPointerError(int nullList, string message)
+    {
+        int[]? ListUnless(int index) => nullList == index ? null : Array.Empty<int>();
+
+        ArgumentNullException refused = Assert.Throws<ArgumentNullException>(
+            () => WithReassignment(ListUnless(0), ListUnless(1), ListUnless(2), PartitionReassignmentMarshal.CopyOut));
+
+        Assert.Equal(message, refused.Message);
     }
 
     [Fact]
@@ -101,7 +117,7 @@ public sealed class AdminP4ResultMarshalTests
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> copied = WithReassignment(
             new[] { 5 },
             new[] { 6 },
-            null,
+            Array.Empty<int>(),
             reassignment =>
             {
                 IntPtr outErr = IntPtr.Zero;
@@ -130,7 +146,7 @@ public sealed class AdminP4ResultMarshalTests
         Assert.Empty(reassignment.RemovingReplicas);
     }
 
-    private static IReadOnlyDictionary<TopicPartition, KafkaException?> CopyOutElection(
+    private static IReadOnlyDictionary<TopicPartition, Exception?> CopyOutElection(
         IReadOnlyList<(TopicPartition Partition, IntPtr Error)> entries)
     {
         IntPtr outErr = IntPtr.Zero;

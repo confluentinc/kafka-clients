@@ -23,6 +23,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 using Confluent.Kafka.UnitTests.Interop;
@@ -41,8 +42,8 @@ public sealed class PublicAdminCreateTopicsTests
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
-        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
     private const int InvalidReplicationFactorCode = 38;
 
@@ -69,7 +70,7 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("mixed-ok").Get(), s_deadline);
         Assert.Equal(2, numPartitions);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        InvalidReplicationFactorException failure = await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(
             () => TestTimeout.Run(() => result.Values["mixed-bad"].Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
         Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
@@ -91,7 +92,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         // Await the failed sibling rather than read its Exception: the futures complete one at a time, so it can still be
         // pending here.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.Values["solo-bad"].Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(() => TestTimeout.Run(() => result.Values["solo-bad"].Get(), s_deadline));
     }
 
     [Fact]
@@ -113,7 +114,7 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("all-d", 1, 4),
         });
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        InvalidReplicationFactorException failure = await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(
             () => TestTimeout.Run(() => mixed.All().Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
 
@@ -182,8 +183,8 @@ public sealed class PublicAdminCreateTopicsTests
         };
         foreach (Func<Task> get in gets)
         {
-            ArgumentException failure =
-                await Assert.ThrowsAsync<ArgumentException>(() => TestTimeout.Run(get, s_deadline));
+            IllegalArgumentException failure =
+                await FutureAssert.ThrowsAsync<IllegalArgumentException>(() => TestTimeout.Run(get, s_deadline));
             Assert.Equal(Unrequested, failure.Message);
         }
 
@@ -191,7 +192,7 @@ public sealed class PublicAdminCreateTopicsTests
         using IDisposable syncDisposal = TestTimeout.Disposal(syncAdmin);
         CreateTopicsResult syncResult = syncAdmin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
         KafkaFuture<int> unknown = syncResult.NumPartitions("unknown");
-        Assert.Equal(Unrequested, Assert.Throws<ArgumentException>(() => unknown.Get()).Message);
+        Assert.Equal(Unrequested, FutureAssert.Throws<IllegalArgumentException>(() => unknown.Get()).Message);
         Assert.True(unknown.IsCompletedExceptionally);
 
         ArgumentNullException nullTopic =
@@ -356,7 +357,7 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("fresh", 1, 1),
         });
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
             () => TestTimeout.Run(() => second.Values["dup"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic dup exists already.", failure.Message);
@@ -376,7 +377,7 @@ public sealed class PublicAdminCreateTopicsTests
         AsyncCreateTopicsResult second = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
 
         Assert.Equal(new[] { Topic }, second.Values.Keys);
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
             () => TestTimeout.Run(() => second.Values[Topic].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal($"Topic {Topic} exists already.", failure.Message);
@@ -395,11 +396,11 @@ public sealed class PublicAdminCreateTopicsTests
         });
 
         Assert.Single(result.Values);
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
             () => TestTimeout.Run(() => result.Values["repeated"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic repeated exists already.", failure.Message);
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<TopicExistsException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
 
         IReadOnlyCollection<string> names = Array.Empty<string>();
         await TestTimeout.Run(async () => names = await admin.ListTopics().Names().Get(), s_deadline);
@@ -664,10 +665,10 @@ public sealed class PublicAdminCreateTopicsTests
     public void MockAdminClient_Builder_RejectsNoBrokerAtBuild_AndANegativeCountAtTheSetter()
     {
         MockAdminClient.Builder builder = MockAdminClient.Create().NumBrokers(0);
-        ArgumentException noBroker = Assert.Throws<ArgumentException>(() => builder.Build());
+        IllegalArgumentException noBroker = Assert.Throws<IllegalArgumentException>(() => builder.Build());
         Assert.Equal("Index 0 out of bounds for length 0", noBroker.Message);
 
-        ArgumentException negative = Assert.Throws<ArgumentException>(() => MockAdminClient.Create().NumBrokers(-5));
+        IllegalArgumentException negative = Assert.Throws<IllegalArgumentException>(() => MockAdminClient.Create().NumBrokers(-5));
         Assert.Equal("fromIndex(0) > toIndex(-5)", negative.Message);
     }
 

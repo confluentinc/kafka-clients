@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The real asynchronous Kafka admin client — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.KafkaAdminClient</c> whose per-key futures are awaited, created from a
-/// configuration map (Java's <c>Admin.create(Properties)</c>).
+/// configuration map (Java's <c>Admin.create(Map)</c>).
 /// </summary>
 /// <seealso cref="KafkaAdminClient"/>
 public sealed class AsyncKafkaAdminClient : IAsyncAdmin
@@ -38,16 +38,23 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
 
     /// <summary>
     /// Creates an admin client from a configuration map — Java's
-    /// <c>Admin.create(Properties)</c>. Keys are the Java dotted names;
+    /// <c>Admin.create(Map)</c>. Keys are the Java dotted names;
     /// <c>bootstrap.servers</c> is required.
     /// </summary>
-    /// <param name="config">Configuration keyed by Java dotted names.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
-    /// <exception cref="ArgumentException">A configuration value is null.</exception>
+    /// <param name="configs">
+    /// The admin client configuration, keyed by Java's dotted names: each value of the type Java's
+    /// <c>ConfigDef</c> accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key
+    /// unset, unless the key's validator refuses <c>null</c>.
+    /// </param>
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+    /// <c>null</c>, or the client refuses a value.
+    /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public AsyncKafkaAdminClient(IReadOnlyDictionary<string, string> config)
+    public AsyncKafkaAdminClient(IReadOnlyDictionary<string, object?> configs)
     {
-        _native = NativeAdminClient.Create(config, AdminFlavour.Async);
+        _native = NativeAdminClient.Create(configs, AdminFlavour.Async);
     }
 
     /// <inheritdoc/>
@@ -219,7 +226,7 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     public AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         AsyncRemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

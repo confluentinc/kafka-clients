@@ -189,7 +189,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
             record.Headers.Add("added", null);
             Assert.Equal(0L, producer.Send(record).Get(s_get).Offset);
 
-            InvalidOperationException closed = Assert.Throws<InvalidOperationException>(
+            IllegalStateException closed = Assert.Throws<IllegalStateException>(
                 () => record.Headers.Add("late", Encoding.UTF8.GetBytes("x")));
             Assert.Equal("RecordHeaders has been closed.", closed.Message);
         }
@@ -256,9 +256,9 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         return topic;
     }
 
-    private Dictionary<string, string> Configs(int? maxBlockMs = null)
+    private Dictionary<string, object?> Configs(int? maxBlockMs = null)
     {
-        Dictionary<string, string> configs = new Dictionary<string, string>
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = _broker.ExternalBootstrap!,
         };
@@ -272,7 +272,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 
     private (string Key, byte[]? Value)[] ConsumedHeaders(string topic)
     {
-        Dictionary<string, string> configs = new Dictionary<string, string>
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = _broker.ExternalBootstrap!,
             ["group.protocol"] = "consumer",
@@ -298,7 +298,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 
     private List<(long Offset, string? Value)> RecordsOf(string topic, int partition, long fromOffset)
     {
-        Dictionary<string, string> configs = new Dictionary<string, string>
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = _broker.ExternalBootstrap!,
             ["group.protocol"] = "consumer",

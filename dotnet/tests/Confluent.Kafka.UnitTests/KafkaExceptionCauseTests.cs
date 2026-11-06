@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
@@ -31,11 +32,7 @@ public sealed class KafkaExceptionCauseTests
 {
     private const int UnknownServerErrorCode = -1;
 
-    private const int ConfigErrorCode = -10;
-
     private const string BadBootstrap = "not-a-host-port";
-
-    private const int LocalIllegalArgumentCode = -3;
 
     private const string OuterMessage = "the operation failed";
 
@@ -43,7 +40,7 @@ public sealed class KafkaExceptionCauseTests
 
     private static KafkaException CreateWithBadBootstrap() =>
         Assert.Throws<KafkaException>(
-            () => new KafkaAdminClient(new Dictionary<string, string> { ["bootstrap.servers"] = BadBootstrap }));
+            () => new KafkaAdminClient(new Dictionary<string, object?> { ["bootstrap.servers"] = BadBootstrap }));
 
     [Fact]
     public void AdminClientCreate_BadBootstrap_CarriesTheCoreCauseAsInnerException()
@@ -52,12 +49,9 @@ public sealed class KafkaExceptionCauseTests
 
         Assert.Equal(UnknownServerErrorCode, outer.Code);
         Assert.Equal("Failed to create new KafkaAdminClient", outer.Message);
-        Assert.False(outer.IsRetriable);
 
-        KafkaException inner = Assert.IsType<KafkaException>(outer.InnerException);
-        Assert.Equal(ConfigErrorCode, inner.Code);
+        ConfigException inner = Assert.IsType<ConfigException>(outer.InnerException);
         Assert.Equal("Invalid url in bootstrap.servers: " + BadBootstrap, inner.Message);
-        Assert.False(inner.IsRetriable);
 
         Assert.Null(inner.InnerException);
     }
@@ -65,16 +59,13 @@ public sealed class KafkaExceptionCauseTests
     [Fact]
     public void MessageSourceError_CarriesTheCoreCauseAsInnerException()
     {
-        KafkaException outer = KafkaException.FromHandle(MessageSourceError())!;
+        KafkaException outer = Assert.IsType<KafkaException>(KafkaException.FromFfiError(MessageSourceError(), owned: true));
 
         Assert.Equal(UnknownServerErrorCode, outer.Code);
         Assert.Equal(OuterMessage, outer.Message);
-        Assert.False(outer.IsRetriable);
 
-        KafkaException inner = Assert.IsType<KafkaException>(outer.InnerException);
-        Assert.Equal(LocalIllegalArgumentCode, inner.Code);
+        IllegalArgumentException inner = Assert.IsType<IllegalArgumentException>(outer.InnerException);
         Assert.Equal(CauseMessage, inner.Message);
-        Assert.False(inner.IsRetriable);
 
         Assert.Null(inner.InnerException);
     }

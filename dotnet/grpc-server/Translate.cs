@@ -45,6 +45,17 @@ internal static class Translate
 
     internal static string OffsetKey(string topic, int partition) => $"{topic}-{partition}";
 
+    internal static Dictionary<string, object?> ConfigsFromProto(IReadOnlyDictionary<string, string> config)
+    {
+        var configs = new Dictionary<string, object?>(config.Count);
+        foreach (KeyValuePair<string, string> entry in config)
+        {
+            configs.Add(entry.Key, entry.Value);
+        }
+
+        return configs;
+    }
+
     internal static Proto.CallbackLogPartition CallbackLogPartitionToProto(TopicPartition partition) =>
         new Proto.CallbackLogPartition
         {
@@ -101,28 +112,38 @@ internal static class Translate
     internal static Proto.CurrentLagResponse CurrentLagResponse(long? lag) =>
         lag.HasValue ? new Proto.CurrentLagResponse { Lag = lag.Value } : new Proto.CurrentLagResponse();
 
-    private const int LocalIllegalStateCode = -4;
-
     private const int LocalIllegalArgumentCode = -3;
 
-    private const int LocalTimeoutCode = -5;
-
-    private const int LocalUnsupportedOperationCode = -31;
+    private const int LocalIllegalStateCode = -4;
 
     private const int RequestTimedOutCode = 7;
 
-    // By type, as Python's _kafka_error_to_proto: ArgumentNullException is Python's TypeError,
-    // which has no FFI id, so it takes the server-made -4 fallback rather than -3.
-    internal static Proto.KafkaError ToProto(Exception error) => error switch
+    // As Python's _kafka_error_to_proto sends each class's _ffi_id: a class with an id (a KafkaException,
+    // a Java-named class, CorrelationIdMismatchException) sends it; a .NET-only ArgumentException
+    // precondition -3. Any other exception has no id, Python's TypeError (ArgumentNullException) and the
+    // Java-named classes without one included, and takes the server-made -4 fallback. A future's Get
+    // throws Java's ExecutionException around the failure; the failure is what is sent, as Python's
+    // _unwrapped sends an ExecutionError's cause.
+    internal static Proto.KafkaError ToProto(Exception error)
     {
-        KafkaException ke => Coded(ke.Code, ke),
-        ArgumentNullException => ServerMade(error),
-        ArgumentException => Coded(LocalIllegalArgumentCode, error),
-        InvalidOperationException => Coded(LocalIllegalStateCode, error),
-        System.TimeoutException => Coded(LocalTimeoutCode, error),
-        NotSupportedException => Coded(LocalUnsupportedOperationCode, error),
-        _ => ServerMade(error),
-    };
+        Exception sent = Unwrapped(error);
+        return KafkaException.FfiIdOf(sent) switch
+        {
+            int code => Coded(code, sent),
+            null => sent switch
+            {
+                ArgumentNullException => ServerMade(sent),
+                IndexOutOfBoundsException => ServerMade(sent),
+                ArgumentException => Coded(LocalIllegalArgumentCode, sent),
+                _ => ServerMade(sent),
+            },
+        };
+    }
+
+    // The error behind a future's Get failure: Java's ExecutionException wraps the cause the future
+    // failed with. Any other error is itself.
+    internal static Exception Unwrapped(Exception error) =>
+        error is ExecutionException { InnerException: { } cause } ? cause : error;
 
     private static GroupMembershipOperation GroupMembershipOperationFromName(string name) => name switch
     {
@@ -147,7 +168,6 @@ internal static class Translate
         {
             ArgumentOutOfRangeException e => new ArgumentOutOfRangeException(e.ParamName, e.ActualValue, string.Empty).Message,
             ArgumentException e => new ArgumentException(string.Empty, e.ParamName).Message,
-            ObjectDisposedException e => new ObjectDisposedException(e.ObjectName, string.Empty).Message,
             _ => string.Empty,
         };
 

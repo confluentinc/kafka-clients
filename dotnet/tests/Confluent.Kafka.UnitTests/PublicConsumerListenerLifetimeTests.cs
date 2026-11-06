@@ -146,7 +146,7 @@ public sealed class PublicConsumerListenerLifetimeTests
     private static WeakReference FailToSubscribeAFreshListener(Subject consumer)
     {
         Listener listener = new Listener(failure: null);
-        InvalidOperationException refused = Assert.Throws<InvalidOperationException>(() => consumer.Subscribe(listener));
+        IllegalStateException refused = Assert.Throws<IllegalStateException>(() => consumer.Subscribe(listener));
         Assert.Equal(MutuallyExclusive, refused.Message);
         return new WeakReference(listener);
     }
@@ -291,7 +291,7 @@ public sealed class PublicConsumerListenerLifetimeTests
         private static AsyncMockConsumer<byte[], byte[]> Mock() =>
             new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        private static Dictionary<string, string> Config() => new Dictionary<string, string>
+        private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "127.0.0.1:1",
             ["group.protocol"] = "consumer",

@@ -132,7 +132,7 @@ public sealed class PublicConsumerSeekLagTests
             await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
             Assert.Null(await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
-            InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
                 () => TestTimeout.Run(() => consumer.CurrentLag(unassigned), s_deadline));
             Assert.Equal($"No current assignment for partition {unassigned}", ex.Message);
         }
@@ -154,7 +154,7 @@ public sealed class PublicConsumerSeekLagTests
             consumer.Assign(new[] { tp });
 
             Assert.Null(consumer.CurrentLag(tp));
-            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => consumer.CurrentLag(unassigned));
+            IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.CurrentLag(unassigned));
             Assert.Equal($"No current assignment for partition {unassigned}", ex.Message);
         }
         finally
@@ -208,7 +208,7 @@ public sealed class PublicConsumerSeekLagTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset("unassigned-topic", 0, 2);
 
-        ArgumentException ex = Assert.Throws<ArgumentException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)));
 
         Assert.Equal(PositionNotAssigned, ex.Message);
@@ -221,7 +221,7 @@ public sealed class PublicConsumerSeekLagTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateEndOffset("unassigned-topic", 0, 2);
 
-        ArgumentException ex = await Assert.ThrowsAsync<ArgumentException>(
+        IllegalArgumentException ex = await Assert.ThrowsAsync<IllegalArgumentException>(
             () => TestTimeout.Run(() => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)), s_deadline));
 
         Assert.Equal(PositionNotAssigned, ex.Message);
@@ -241,38 +241,50 @@ public sealed class PublicConsumerSeekLagTests
     }
 
     [Fact]
-    public async Task Seek_UnassignedPartition_ThrowsInvalidOperationException()
+    public async Task Seek_UnassignedPartition_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
         Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }
 
     [Fact]
-    public async Task SeekWithMetadata_UnassignedPartition_ThrowsInvalidOperationException()
+    public async Task SeekWithMetadata_UnassignedPartition_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), new OffsetAndMetadata(0)));
         Assert.Equal("No current assignment for partition unassigned-0", ex.Message);
     }
 
+    // Java's MockConsumer.seek checks no offset: an unassigned partition is refused as unassigned.
     [Fact]
-    public void Seek_NegativeOffset_ThrowsExactJavaMessage()
+    public async Task Seek_NegativeOffset_OnTheMock_UnassignedPartition_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -1); });
+        IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
+            () => consumer.Seek(new TopicPartition("t", 0), offset: -1));
 
-        Assert.Equal("offset", ex.ParamName);
-        Assert.Contains("seek offset must not be a negative number", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("No current assignment for partition t-0", ex.Message);
+    }
+
+    // Java's MockConsumer.seek checks no offset: an assigned partition accepts a negative one.
+    [Fact]
+    public async Task Seek_NegativeOffset_OnTheMock_AssignedPartition_IsAccepted()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition tp = new TopicPartition("t", 0);
+        await consumer.Assign(new[] { tp });
+
+        await consumer.Seek(tp, offset: -1);
     }
 
     [Fact]
@@ -281,16 +293,17 @@ public sealed class PublicConsumerSeekLagTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -2); });
+        Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -2); });
     }
 
     [Fact]
-    public void Seek_NullTopic_ThrowsArgumentNull()
+    public void Seek_NullTopic_ThrowsIllegalStateAtTheCall()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Throws<ArgumentNullException>(() => { _ = consumer.Seek(default, 0L); });
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(default, 0L); });
+        Assert.Equal("No current assignment for partition null-0", ex.Message);
     }
 
     [Fact]
@@ -307,38 +320,37 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void OffsetAndMetadata_NegativeOffset_ThrowsAtConstruction()
     {
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => new OffsetAndMetadata(-1));
-        Assert.Equal("offset", ex.ParamName);
-        Assert.Contains("Invalid negative offset", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("Invalid negative offset", ex.Message);
     }
 
     [Fact]
-    public async Task Seek_AfterDispose_ThrowsObjectDisposed()
+    public async Task Seek_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), 0L); });
+        Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), 0L); });
     }
 
     [Fact]
-    public async Task SeekWithMetadata_AfterDispose_ThrowsObjectDisposed()
+    public async Task SeekWithMetadata_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = consumer.Seek(new TopicPartition("t", 0), new OffsetAndMetadata(0)); });
     }
 
     [Fact]
-    public async Task CurrentLag_AfterDispose_ThrowsObjectDisposed()
+    public async Task CurrentLag_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.CurrentLag(new TopicPartition("t", 0)); });
+        Assert.Throws<IllegalStateException>(() => { _ = consumer.CurrentLag(new TopicPartition("t", 0)); });
     }
 
     [Fact]
@@ -357,7 +369,7 @@ public sealed class PublicConsumerSeekLagTests
         Assert.NotNull(lag);
     }
 
-    private static Dictionary<string, string> RealConfig() => new Dictionary<string, string>
+    private static Dictionary<string, object?> RealConfig() => new Dictionary<string, object?>
     {
         ["bootstrap.servers"] = "127.0.0.1:1",
         ["group.protocol"] = "consumer",

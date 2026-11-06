@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
@@ -38,29 +39,45 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// Creates a real KIP-848 consumer from a configuration map and the two deserializers
     /// (Java <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>). Keys
     /// are the Java dotted names (e.g. <c>bootstrap.servers</c>, <c>group.id</c>,
-    /// <c>group.protocol</c>); values are strings.
+    /// <c>group.protocol</c>).
     /// </summary>
-    /// <param name="config">The consumer configuration.</param>
+    /// <param name="configs">
+    /// The consumer configuration, keyed by Java's dotted names: each value of the type Java's <c>ConfigDef</c>
+    /// accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the
+    /// key's validator refuses <c>null</c>. The deserializer keys (<c>key.deserializer</c>,
+    /// <c>value.deserializer</c>, <c>deserializer.encoding</c>, <c>key.deserializer.encoding</c>,
+    /// <c>value.deserializer.encoding</c>) are ignored: the deserializers are the arguments.
+    /// </param>
     /// <param name="keyDeserializer">Deserializer for record keys.</param>
     /// <param name="valueDeserializer">Deserializer for record values.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="config"/>, <paramref name="keyDeserializer"/>, or
-    /// <paramref name="valueDeserializer"/> is null.
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null: Java then reads the
+    /// <c>key.deserializer</c> / <c>value.deserializer</c> config, which .NET config cannot set.
     /// </exception>
-    /// <exception cref="ArgumentException">A config value is null.</exception>
+    /// <exception cref="ConfigException">
+    /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+    /// <c>null</c>, or the client refuses a value.
+    /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// <c>group.protocol</c> is <c>classic</c>, which this client does not support; <c>classic</c> is
     /// also the default when the key is unset.
     /// </exception>
     public KafkaConsumer(
-        IReadOnlyDictionary<string, string> config,
+        IReadOnlyDictionary<string, object?> configs,
         IDeserializer<TKey> keyDeserializer,
         IDeserializer<TValue> valueDeserializer)
     {
-        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
-        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
-        _native = NativeConsumer.Create(config, withPump: false);
+        // Java copies the config map first, so a null one fails before a missing deserializer.
+        if (configs is null)
+        {
+            throw new ArgumentNullException(nameof(configs));
+        }
+
+        _keyDeserializer = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
+        _valueDeserializer = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
+        _native = NativeConsumer.Create(configs, withPump: false);
     }
 
     /// <inheritdoc/>

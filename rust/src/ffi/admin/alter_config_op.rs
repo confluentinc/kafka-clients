@@ -20,6 +20,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::admin::{AlterConfigOp, OpType};
@@ -47,6 +48,14 @@ pub enum kafka_admin_AlterConfigOp_OpType_e {
     kafka_admin_AlterConfigOp_OpType_SUBTRACT,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_AlterConfigOp_OpType_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_AlterConfigOp_OpType_e {
+    fn fail() -> Self {
+        Self::kafka_admin_AlterConfigOp_OpType_SET
+    }
+}
+
 /// One static instance per value, indexed by
 /// [`kafka_admin_AlterConfigOp_OpType_e`].
 static VARIANTS: [OpType; 4] = [OpType::Set, OpType::Delete, OpType::Append, OpType::Subtract];
@@ -72,12 +81,15 @@ pub(crate) fn op_type_singleton(op_type: OpType) -> *const kafka_admin_AlterConf
 /// # Safety
 ///
 /// `op_type` must be a singleton returned by this module.
-pub(crate) unsafe fn op_type_value_of(op_type: *const kafka_admin_AlterConfigOp_OpType_t) -> OpType {
+pub(crate) unsafe fn op_type_value_of(
+    op_type: *const kafka_admin_AlterConfigOp_OpType_t,
+    param: &'static str,
+) -> OpType {
     // SAFETY: Per this function's `# Safety`, `op_type` is a singleton returned by this module:
     // `op_type_singleton`, the only producer of `kafka_admin_AlterConfigOp_OpType_t` pointers,
     // casts `&VARIANTS[i]` from `*const OpType`, so it points at a live `OpType` in a `static`,
     // which is `Copy` and immutable.
-    unsafe { *(op_type as *const OpType) }
+    *unsafe { require_ref::<_, OpType>(op_type, param) }
 }
 
 /// Returns `OpType.SET`, a static singleton never freed.
@@ -110,21 +122,17 @@ pub extern "C" fn kafka_admin_AlterConfigOp_OpType_subtract() -> *const kafka_ad
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_AlterConfigOp_OpType_SET`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_AlterConfigOp_OpType_e::kafka_admin_AlterConfigOp_OpType_SET)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
     self_: *const kafka_admin_AlterConfigOp_OpType_t,
 ) -> kafka_admin_AlterConfigOp_OpType_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `op_type_value_of` requires.
-    enum_of(unsafe { op_type_value_of(self_) })
+    enum_of(unsafe { op_type_value_of(self_, "self_") })
 }
 
 /// Returns the Java constant name, as `OpType.toString()`.
@@ -140,23 +148,20 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `op_type_value_of` requires.
-    into_c_string(&unsafe { op_type_value_of(self_) }.to_string())
+    into_c_string(&unsafe { op_type_value_of(self_, "self_") }.to_string())
 }
 
 /// Returns the wire-protocol byte of the operation, as `OpType.id()`.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte` enum: its 0 is the valid
-/// `SET`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = -1)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_id(self_: *const kafka_admin_AlterConfigOp_OpType_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `op_type_value_of` requires.
-    unsafe { op_type_value_of(self_) }.id()
+    unsafe { op_type_value_of(self_, "self_") }.id()
 }
 
 /// `OpType.forId(byte id)`: the operation type with that wire byte.
@@ -207,12 +212,12 @@ impl AlterConfigOpInner {
 /// # Safety
 ///
 /// `op` must be a valid alter-config-op handle, kept alive for `'a`.
-unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConfigOpInner {
+unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t, param: &'static str) -> &'a AlterConfigOpInner {
     // SAFETY: Per this function's `# Safety`, `op` is a valid alter-config-op handle kept alive for
     // `'a`; every `kafka_admin_AlterConfigOp_t` is the `Box::into_raw` of a
     // `Box<AlterConfigOpInner>` (`box_alter_config_op`, the only producer), so the shared reference
     // is to a live `AlterConfigOpInner`, which no entry point mutates.
-    unsafe { &*(op as *const AlterConfigOpInner) }
+    unsafe { require_ref::<_, AlterConfigOpInner>(op, param) }
 }
 
 /// The operation behind a handle.
@@ -220,10 +225,13 @@ unsafe fn inner_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConf
 /// # Safety
 ///
 /// `op` must be a valid alter-config-op handle, kept alive for `'a`.
-pub(crate) unsafe fn alter_config_op_ref<'a>(op: *const kafka_admin_AlterConfigOp_t) -> &'a AlterConfigOp {
+pub(crate) unsafe fn alter_config_op_ref<'a>(
+    op: *const kafka_admin_AlterConfigOp_t,
+    param: &'static str,
+) -> &'a AlterConfigOp {
     // SAFETY: Per this function's `# Safety`, `op` is a valid alter-config-op handle kept alive for
     // `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(op) }.op
+    &unsafe { inner_ref(op, param) }.op
 }
 
 /// Hands `op` to C as an owned handle, freed with
@@ -252,9 +260,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
     // SAFETY: Per this function's `# Safety`, `config_entry` is a valid config-entry handle, kept
     // alive for this call, as `config_entry_ref` requires (the entry is cloned at once), and
     // `operation_type` an op-type singleton, as `op_type_value_of` requires.
-    box_alter_config_op(AlterConfigOp::new(unsafe { config_entry_ref(config_entry) }.clone(), unsafe {
-        op_type_value_of(operation_type)
-    }))
+    box_alter_config_op(AlterConfigOp::new(
+        unsafe { config_entry_ref(config_entry, "config_entry") }.clone(),
+        unsafe { op_type_value_of(operation_type, "operation_type") },
+    ))
 }
 
 /// Returns the entry to alter, as `configEntry()`.
@@ -272,7 +281,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
     // for this call, as `inner_ref` requires; the returned view points at the `ConfigEntryInner`
     // stored inside the boxed `AlterConfigOpInner`, which does not move and lives until
     // `kafka_admin_AlterConfigOp_destroy`.
-    unsafe { inner_ref(self_) }.config_entry.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.config_entry.as_ptr()
 }
 
 /// Returns the operation type, as `opType()`.
@@ -289,7 +298,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
 ) -> *const kafka_admin_AlterConfigOp_OpType_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
     // for this call, as `alter_config_op_ref` requires.
-    op_type_singleton(unsafe { alter_config_op_ref(self_) }.op_type())
+    op_type_singleton(unsafe { alter_config_op_ref(self_, "self_") }.op_type())
 }
 
 /// Returns the operation's string form, as Java's `toString()`.
@@ -303,7 +312,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka_admin_AlterConfigOp_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alter-config-op handle, kept alive
     // for this call, as `alter_config_op_ref` requires.
-    into_c_string(&unsafe { alter_config_op_ref(self_) }.to_string())
+    into_c_string(&unsafe { alter_config_op_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned operation handle; `NULL` is a no-op.
@@ -349,7 +358,7 @@ mod tests {
             // `kafka_admin_AlterConfigOp_OpType_id`; each string `_to_string` returns is owned
             // and freed once, after it is read.
             unsafe {
-                assert_eq!(op_type_value_of(handle), op_type);
+                assert_eq!(op_type_value_of(handle, "value"), op_type);
                 assert_eq!(kafka_admin_AlterConfigOp_OpType__enum(handle) as usize, index);
                 let name = kafka_admin_AlterConfigOp_OpType_to_string(handle);
                 assert_eq!(CStr::from_ptr(name).to_str().unwrap(), op_type.to_string());
@@ -379,7 +388,7 @@ mod tests {
             let op = kafka_admin_AlterConfigOp_new(entry_handle, kafka_admin_AlterConfigOp_OpType_append());
             kafka_admin_ConfigEntry_destroy(entry_handle);
             let expected = AlterConfigOp::new(entry, OpType::Append);
-            assert_eq!(*alter_config_op_ref(op), expected);
+            assert_eq!(*alter_config_op_ref(op, "op"), expected);
             assert_eq!(kafka_admin_AlterConfigOp_op_type(op), kafka_admin_AlterConfigOp_OpType_append());
             assert_eq!(
                 CStr::from_ptr(kafka_admin_ConfigEntry_name(kafka_admin_AlterConfigOp_config_entry(op)))

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 
+using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 
 using Xunit;
@@ -22,8 +23,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The consumer config map: a valid config builds a consumer, and a bad argument is rejected with a .NET exception
-/// before any native call.
+/// The consumer config map: a valid config builds a consumer; a config the core rejects throws its
+/// <see cref="ConfigException"/> (code -10); a <c>null</c> value its key's validator refuses throws
+/// <see cref="ConfigException"/> before any native call, and one with no validator leaves its key unset; a <c>null</c>
+/// map throws <see cref="ArgumentNullException"/>.
 /// </summary>
 public sealed class ConsumerConfigMarshalTests
 {
@@ -33,7 +36,7 @@ public sealed class ConsumerConfigMarshalTests
     [Fact]
     public void Create_ValidConsumerProtocolConfig_Succeeds()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["group.protocol"] = "consumer",
@@ -50,25 +53,57 @@ public sealed class ConsumerConfigMarshalTests
     [Fact]
     public void Create_NullConfig_ThrowsArgumentNullException()
     {
-        Assert.Throws<ArgumentNullException>(() => NativeConsumer.Create(null!));
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(() => NativeConsumer.Create(null!));
+
+        Assert.Equal("configs", failure.ParamName);
     }
 
     [Fact]
-    public void Create_ConfigWithNullValue_ThrowsArgumentException()
+    public void Create_NullValueItsValidatorRefuses_ThrowsConfigException()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
-            ["group.protocol"] = null!,
+            ["group.protocol"] = null,
         };
 
-        Assert.Throws<ArgumentException>(() => NativeConsumer.Create(config));
+        ConfigException failure = Assert.Throws<ConfigException>(() => NativeConsumer.Create(config));
+
+        Assert.Equal(
+            "Invalid value null for configuration group.protocol: "
+            + "String must be one of (case insensitive): CONSUMER, CLASSIC",
+            failure.Message);
+        Assert.Equal(-10, failure.Code);
     }
 
     [Fact]
-    public void Handle_AfterDispose_ThrowsObjectDisposedException()
+    public void Create_NullValueWithNoValidator_LeavesTheKeyUnset()
     {
-        var config = new Dictionary<string, string>
+        var config = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9092",
+            ["group.protocol"] = "consumer",
+            ["sasl.login.connect.timeout.ms"] = null,
+        };
+
+        NativeConsumer consumer = NativeConsumer.Create(config);
+
+        Assert.False(consumer.Handle.IsInvalid);
+
+        TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
+
+        config["sasl.login.connect.timeout.ms"] = "";
+        ConfigException failure = Assert.Throws<ConfigException>(() => NativeConsumer.Create(config));
+        Assert.Equal(
+            "Invalid value  for configuration sasl.login.connect.timeout.ms: Not a number of type INT",
+            failure.Message);
+        Assert.Equal(-10, failure.Code);
+    }
+
+    [Fact]
+    public void Handle_AfterDispose_ThrowsIllegalState()
+    {
+        var config = new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:9092",
             ["group.protocol"] = "consumer",
@@ -77,6 +112,6 @@ public sealed class ConsumerConfigMarshalTests
         NativeConsumer consumer = NativeConsumer.Create(config);
         TestTimeout.Run(consumer.Dispose, s_disposeDeadline);
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Handle);
+        Assert.Throws<IllegalStateException>(() => consumer.Handle);
     }
 }
