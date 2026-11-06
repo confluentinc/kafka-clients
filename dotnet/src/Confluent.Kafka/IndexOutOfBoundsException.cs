@@ -19,12 +19,12 @@ using System;
 
 using Confluent.Kafka.Internal;
 
-namespace Confluent.Kafka.Java.Lang;
+namespace Confluent.Kafka;
 
 /// <summary>Java's built-in <c>java.lang.IndexOutOfBoundsException</c>.</summary>
-public class IndexOutOfBoundsException : global::System.ArgumentOutOfRangeException, IJavaThrowable
+public class IndexOutOfBoundsException : global::System.ArgumentOutOfRangeException, IExceptionText
 {
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
     /// <summary>Initializes the exception, as Java's <c>IndexOutOfBoundsException()</c>.</summary>
     public IndexOutOfBoundsException()
@@ -41,8 +41,8 @@ public class IndexOutOfBoundsException : global::System.ArgumentOutOfRangeExcept
     internal IndexOutOfBoundsException(CoreError _, string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
-    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 }

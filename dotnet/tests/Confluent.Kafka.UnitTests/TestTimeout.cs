@@ -27,7 +27,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Runs a blocking or async action under a hard deadline, so a hang fails the test with a
-/// <see cref="TimeoutException"/> instead of hanging the run. <see cref="RunOffThisThread"/> starts an async action on
+/// <see cref="System.TimeoutException"/> instead of hanging the run. <see cref="RunOffThisThread"/> starts an async action on
 /// a pool thread, so a call that blocks before it returns its Task is bounded too. The teardown helpers bound a
 /// client's <c>Dispose</c>, <c>DisposeAsync</c> or <c>Close</c> the same way, under <see cref="TeardownBound"/>, and
 /// name the client's type when it hangs; <see cref="Disposal"/> and <see cref="AsyncDisposal"/> stand in for a
@@ -50,7 +50,7 @@ internal static class TestTimeout
             });
         if (!task.Wait(timeout))
         {
-            throw new TimeoutException(TimedOut(timeout, probe));
+            throw new System.TimeoutException(TimedOut(timeout, probe));
         }
 
         task.GetAwaiter().GetResult();
@@ -131,7 +131,7 @@ internal static class TestTimeout
         Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw new TimeoutException(TimedOut(timeout, probe: null));
+            throw new System.TimeoutException(TimedOut(timeout, probe: null));
         }
 
         return await task.ConfigureAwait(false);
@@ -143,7 +143,7 @@ internal static class TestTimeout
         Task winner = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
         if (winner != task)
         {
-            throw new TimeoutException(TimedOut(timeout, probe));
+            throw new System.TimeoutException(TimedOut(timeout, probe));
         }
 
         await task.ConfigureAwait(false);
@@ -153,8 +153,8 @@ internal static class TestTimeout
         $"Operation did not complete within {timeout} — treated as a hang (fail fast). {StartProbe.Describe(probe)}"
         + NativeStacks.Capture(timeout);
 
-    private static TimeoutException Hung(object target, TimeSpan timeout, StartProbe probe) =>
-        new TimeoutException(
+    private static System.TimeoutException Hung(object target, TimeSpan timeout, StartProbe probe) =>
+        new System.TimeoutException(
             $"Teardown of {NameOf(target.GetType())} did not complete within {timeout} — treated as a hang (fail fast). "
             + StartProbe.Describe(probe) + NativeStacks.Capture(timeout));
 

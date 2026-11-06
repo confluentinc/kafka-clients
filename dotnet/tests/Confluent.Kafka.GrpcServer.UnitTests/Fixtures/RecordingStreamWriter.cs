@@ -141,7 +141,7 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
                 TimeSpan remaining = DefaultTimeout - clock.Elapsed;
                 if (remaining <= TimeSpan.Zero)
                 {
-                    throw new TimeoutException(
+                    throw new System.TimeoutException(
                         $"timed out after {DefaultTimeout.TotalSeconds} s waiting for {what}; " +
                         $"{_events.Count} event(s) written: {Describe(_events)}");
                 }
@@ -166,7 +166,7 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
                 TimeSpan remaining = DefaultTimeout - clock.Elapsed;
                 if (remaining <= TimeSpan.Zero)
                 {
-                    throw new TimeoutException($"timed out after {DefaultTimeout.TotalSeconds} s waiting for the response headers");
+                    throw new System.TimeoutException($"timed out after {DefaultTimeout.TotalSeconds} s waiting for the response headers");
                 }
 
                 Monitor.Wait(_lock, remaining);

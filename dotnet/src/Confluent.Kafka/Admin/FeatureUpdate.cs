@@ -15,7 +15,6 @@
 using System;
 using System.Globalization;
 
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 
@@ -117,9 +116,9 @@ public sealed class FeatureUpdate
             CultureInfo.InvariantCulture,
             "FeatureUpdate{{maxVersionLevel:{0}, upgradeType:{1}}}",
             MaxVersionLevel,
-            JavaName(Type));
+            ConstantName(Type));
 
-    private static string JavaName(UpgradeType upgradeType) => upgradeType switch
+    private static string ConstantName(UpgradeType upgradeType) => upgradeType switch
     {
         UpgradeType.UNKNOWN => "UNKNOWN",
         UpgradeType.UPGRADE => "UPGRADE",

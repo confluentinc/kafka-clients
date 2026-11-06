@@ -18,8 +18,6 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Consumer;
-using Confluent.Kafka.Java.Lang;
-using Confluent.Kafka.Java.Util.Concurrent;
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
 

@@ -138,6 +138,6 @@ public sealed class KafkaExceptionCauseConstructorTests
             _text = text;
         }
 
-        internal override string JavaToString() => "OverridingException{" + _text + "}";
+        internal override string TypeAndMessage() => "OverridingException{" + _text + "}";
     }
 }

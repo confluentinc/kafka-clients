@@ -23,12 +23,10 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
-using Confluent.Kafka.Java.Util;
 
 using Xunit;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
@@ -60,7 +58,7 @@ public sealed class FromFfiErrorClassTests
             (NativeMethods.ErrorLocalConcurrentModification, -2, typeof(ConcurrentModificationException)),
         ["local_illegal_argument"] = (NativeMethods.ErrorLocalIllegalArgument, -3, typeof(IllegalArgumentException)),
         ["local_illegal_state"] = (NativeMethods.ErrorLocalIllegalState, -4, typeof(IllegalStateException)),
-        ["local_timeout"] = (NativeMethods.ErrorLocalTimeout, -5, typeof(JavaTimeoutException)),
+        ["local_timeout"] = (NativeMethods.ErrorLocalTimeout, -5, typeof(FutureTimeoutException)),
         ["local_unsupported_operation"] =
             (NativeMethods.ErrorLocalUnsupportedOperation, -31, typeof(UnsupportedOperationException)),
     };

@@ -19,7 +19,6 @@ using System.Threading;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Java.Util.Concurrent;
 
 namespace Confluent.Kafka.Performance.V3;
 

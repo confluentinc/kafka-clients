@@ -25,11 +25,10 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Util;
 
 using Xunit;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
@@ -66,7 +65,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.Null(reported);
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(callback.Calls);
         Assert.Null(offsets);
-        JavaTimeoutException timeout = Assert.IsType<JavaTimeoutException>(exception);
+        FutureTimeoutException timeout = Assert.IsType<FutureTimeoutException>(exception);
         Assert.Equal("commit timed out", timeout.Message);
         Assert.True(registration.IsReleased);
     }
@@ -254,7 +253,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
         Assert.Null(reported);
         (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) = Assert.Single(calls);
         Assert.Null(offsets);
-        Assert.Equal("async commit timed out", Assert.IsType<JavaTimeoutException>(exception).Message);
+        Assert.Equal("async commit timed out", Assert.IsType<FutureTimeoutException>(exception).Message);
         Assert.True(registration.IsReleased);
     }
 

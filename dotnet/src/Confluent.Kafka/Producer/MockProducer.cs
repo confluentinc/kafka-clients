@@ -18,7 +18,6 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 
@@ -132,7 +131,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <summary>
     /// Fails the earliest uncompleted send with <paramref name="exception"/> (Java <c>MockProducer.errorNext</c>); its
     /// delivery callback receives the same instance, and its future's <see cref="KafkaFuture{T}.Get()"/> throws an
-    /// <see cref="Java.Util.Concurrent.ExecutionException"/> around it.
+    /// <see cref="Confluent.Kafka.ExecutionException"/> around it.
     /// </summary>
     /// <param name="exception">
     /// The exception to fail the send with; <see langword="null"/> completes it successfully, as

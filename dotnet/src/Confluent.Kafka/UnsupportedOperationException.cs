@@ -19,12 +19,12 @@ using System;
 
 using Confluent.Kafka.Internal;
 
-namespace Confluent.Kafka.Java.Lang;
+namespace Confluent.Kafka;
 
 /// <summary>Java's built-in <c>java.lang.UnsupportedOperationException</c>.</summary>
-public class UnsupportedOperationException : global::System.NotSupportedException, IJavaThrowable
+public class UnsupportedOperationException : global::System.NotSupportedException, IExceptionText
 {
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
     /// <summary>Initializes the exception, as Java's <c>UnsupportedOperationException()</c>.</summary>
     public UnsupportedOperationException()
@@ -55,8 +55,8 @@ public class UnsupportedOperationException : global::System.NotSupportedExceptio
     internal UnsupportedOperationException(CoreError _, string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
-    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 }

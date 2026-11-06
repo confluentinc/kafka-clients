@@ -22,7 +22,6 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
@@ -131,7 +130,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         Assert.Equal(2, replicationFactor);
         Assert.Equal(topicId, reportedId);
 
-        Assert.Same(created.JavaGetAsync(), Assert.Single(result.Values).Value.Get());
+        Assert.Same(created.GetWrappedAsync(), Assert.Single(result.Values).Value.Get());
         await TestTimeout.Run(() => result.Values["t"].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
@@ -164,7 +163,7 @@ public sealed class PublicAdminTopicResultConstructionTests
 
         KeyValuePair<string, AsyncKafkaFuture> added = Assert.Single(result.Values);
         Assert.Equal("t", added.Key);
-        Assert.Same(pending.JavaGetAsync(), added.Value.Get());
+        Assert.Same(pending.GetWrappedAsync(), added.Value.Get());
         Task all = result.All().Get();
         Task<int> partitions = result.NumPartitions("t").Get();
         Assert.False(all.IsCompleted);
@@ -177,7 +176,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> replacement = KafkaFutureImpl.CompletedFuture(Metadata(5));
         map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(replacement);
 
-        Assert.Same(replacement.JavaGetAsync(), Assert.Single(result.Values).Value.Get());
+        Assert.Same(replacement.GetWrappedAsync(), Assert.Single(result.Values).Value.Get());
         Assert.Equal(5, await TestTimeout.Run(() => result.NumPartitions("t").Get(), s_deadline));
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
@@ -209,14 +208,14 @@ public sealed class PublicAdminTopicResultConstructionTests
         map.Remove("a");
         IReadOnlyDictionary<string, AsyncKafkaFuture> third = result.Values;
 
-        Assert.Same(a.JavaGetAsync(), Assert.Single(first).Value.Get());
+        Assert.Same(a.GetWrappedAsync(), Assert.Single(first).Value.Get());
         Assert.False(first.ContainsKey("b"));
 
         Assert.Equal(2, second.Count);
-        Assert.Same(a.JavaGetAsync(), second["a"].Get());
-        Assert.Same(b.JavaGetAsync(), second["b"].Get());
+        Assert.Same(a.GetWrappedAsync(), second["a"].Get());
+        Assert.Same(b.GetWrappedAsync(), second["b"].Get());
 
-        Assert.Same(b.JavaGetAsync(), Assert.Single(third).Value.Get());
+        Assert.Same(b.GetWrappedAsync(), Assert.Single(third).Value.Get());
         Assert.False(third.ContainsKey("a"));
     }
 
@@ -236,7 +235,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         // Values: ordinal, like Java's HashMap — the stored spelling hits, the other misses.
         KeyValuePair<string, AsyncKafkaFuture> entry = Assert.Single(result.Values);
         Assert.Equal("t", entry.Key);
-        Assert.Same(created.JavaGetAsync(), entry.Value.Get());
+        Assert.Same(created.GetWrappedAsync(), entry.Value.Get());
         Assert.False(result.Values.ContainsKey("T"));
 
         // The typed accessors: the caller's map, like Java's futures.get(topic).

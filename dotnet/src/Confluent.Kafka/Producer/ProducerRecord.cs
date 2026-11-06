@@ -18,7 +18,6 @@ using System.Globalization;
 
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 

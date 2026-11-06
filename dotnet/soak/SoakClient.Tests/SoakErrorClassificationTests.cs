@@ -16,12 +16,9 @@ using System;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Requests;
-using Confluent.Kafka.Java.Lang;
-using Confluent.Kafka.Java.Util;
-using Confluent.Kafka.Java.Util.Concurrent;
 using Xunit;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.Soak.Tests;
 
@@ -60,7 +57,7 @@ public sealed class SoakErrorClassificationTests
     public void ErrorCodeIsReadFromAClassOutsideKafkaException()
     {
         Assert.Equal(-4, SoakClient.ErrorCode(new IllegalStateException("closed")));
-        Assert.Equal(-5, SoakClient.ErrorCode(new JavaTimeoutException("timed out")));
+        Assert.Equal(-5, SoakClient.ErrorCode(new FutureTimeoutException("timed out")));
         Assert.Equal(-24, SoakClient.ErrorCode(new CorrelationIdMismatchException("mismatch", 1, 2)));
         Assert.Null(SoakClient.ErrorCode(new NoSuchElementException("no id")));
     }

@@ -157,13 +157,13 @@ fn pascal(s: &str) -> String {
 }
 
 /// The namespace of a Java package (`dotnet/CLAUDE.md` §2): `org.apache.kafka.` and `clients.`
-/// dropped, each segment PascalCased, under `Confluent.Kafka`; a JDK package under
-/// `Confluent.Kafka.Java`.
+/// dropped, each segment PascalCased, under `Confluent.Kafka`; a JDK package is the root
+/// `Confluent.Kafka` itself, as Python keeps its JDK classes at `confluent_kafka`.
 fn cs_namespace(package: &str) -> anyhow::Result<String> {
     let rest = if let Some(r) = package.strip_prefix("org.apache.kafka.") {
         r.strip_prefix("clients.").unwrap_or(r)
     } else if package.starts_with("java.") {
-        package
+        return Ok("Confluent.Kafka".to_string());
     } else {
         anyhow::bail!("error hierarchy (C#): no folder rule for the Java package `{package}`");
     };
@@ -1109,9 +1109,9 @@ fn render_jdk(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>) 
     usings.insert(NS_SYSTEM);
     usings.insert(NS_INTERNAL);
     let mut lines = class_summary(info);
-    lines.push(format!("public class {simple} : {base}, IJavaThrowable"));
+    lines.push(format!("public class {simple} : {base}, IExceptionText"));
     lines.push("{".into());
-    lines.push("    private readonly string? _javaMessage;".into());
+    lines.push("    private readonly string? _givenMessage;".into());
     lines.push(String::new());
     let mut sigs: Vec<String> = Vec::new();
     for c in &info.java.ctors {
@@ -1153,9 +1153,9 @@ fn render_jdk(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>) 
             "    internal {simple}(CoreError _, string? message, Exception? innerException)"
         )],
         Some("base(message ?? string.Empty, innerException)".into()),
-        &["_javaMessage = message;".to_string()],
+        &["_givenMessage = message;".to_string()],
     );
-    lines.push("    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);".into());
+    lines.push("    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);".into());
     lines.push("}".into());
     Ok(lines)
 }
@@ -1342,7 +1342,7 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
         }
     }
     if info.java.to_string.is_some() {
-        lines.push("    internal override string JavaToString() => JavaText.ThrowableToString(this, Message);".into());
+        lines.push("    internal override string TypeAndMessage() => JavaText.TypeAndMessage(this, Message);".into());
         lines.push(String::new());
     }
     while lines.last().is_some_and(String::is_empty) {
@@ -1585,10 +1585,7 @@ mod tests {
             cs_namespace("org.apache.kafka.clients.consumer").unwrap(),
             "Confluent.Kafka.Consumer"
         );
-        assert_eq!(
-            cs_namespace("java.util.concurrent").unwrap(),
-            "Confluent.Kafka.Java.Util.Concurrent"
-        );
+        assert_eq!(cs_namespace("java.util.concurrent").unwrap(), "Confluent.Kafka");
         assert!(cs_namespace("com.example").is_err());
     }
 
@@ -1693,7 +1690,7 @@ mod tests {
             "\"' violated quota. Actual: \" + JavaText.ValueOf(value) + \", Threshold: \" + JavaText.ValueOf(bound)"
         ));
         assert!(
-            double.contains("internal override string JavaToString() => JavaText.ThrowableToString(this, Message);")
+            double.contains("internal override string TypeAndMessage() => JavaText.TypeAndMessage(this, Message);")
         );
     }
 
@@ -1705,14 +1702,14 @@ mod tests {
             "public class BufferExhaustedException : global::Confluent.Kafka.Common.Errors.TimeoutException"
         ));
         let jdk = render(&c, "java.util.concurrent.TimeoutException");
-        assert!(jdk.contains("public class TimeoutException : global::System.TimeoutException, IJavaThrowable"));
+        assert!(jdk.contains("public class TimeoutException : global::System.TimeoutException, IExceptionText"));
     }
 
     #[test]
     fn a_class_under_a_jdk_base_has_no_ffi_id_member() {
         let c = graph();
         let cs = render(&c, "org.apache.kafka.common.requests.CorrelationIdMismatchException");
-        assert!(cs.contains(": global::Confluent.Kafka.Java.Lang.IllegalStateException"));
+        assert!(cs.contains(": global::Confluent.Kafka.IllegalStateException"));
         assert!(!cs.contains("FfiId"));
     }
 }

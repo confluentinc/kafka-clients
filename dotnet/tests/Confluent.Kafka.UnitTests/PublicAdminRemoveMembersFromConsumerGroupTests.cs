@@ -17,7 +17,6 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

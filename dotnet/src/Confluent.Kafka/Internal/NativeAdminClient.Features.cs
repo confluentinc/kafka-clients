@@ -18,7 +18,6 @@ using System.Collections.Generic;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Internal;
 

@@ -18,7 +18,6 @@ using System.Linq;
 using System.Reflection;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

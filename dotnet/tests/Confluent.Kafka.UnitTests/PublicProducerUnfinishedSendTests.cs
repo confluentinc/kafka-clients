@@ -25,7 +25,7 @@ using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
@@ -64,7 +64,7 @@ public sealed class PublicProducerUnfinishedSendTests
         {
             Assert.Equal(
                 "Timeout after waiting for 0 ms.",
-                Assert.IsType<JavaTimeoutException>(Record(() => future.Get(TimeSpan.Zero))).Message);
+                Assert.IsType<FutureTimeoutException>(Record(() => future.Get(TimeSpan.Zero))).Message);
             Assert.False(future.IsDone);
 
             release();
@@ -182,7 +182,7 @@ public sealed class PublicProducerUnfinishedSendTests
     {
         await WithUnfinishedAsyncSend(async (producer, future, callback) =>
         {
-            JavaTimeoutException timedOut = await Assert.ThrowsAsync<JavaTimeoutException>(() => future.Get(TimeSpan.Zero));
+            FutureTimeoutException timedOut = await Assert.ThrowsAsync<FutureTimeoutException>(() => future.Get(TimeSpan.Zero));
             Assert.Equal("Timeout after waiting for 0 ms.", timedOut.Message);
             Assert.False(future.IsDone);
 

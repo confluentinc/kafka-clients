@@ -22,7 +22,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
-using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -186,7 +185,7 @@ public sealed class PublicSyncProducerTeardownTests
                 future.Get(TimeSpan.FromSeconds(2));
                 return false;
             }
-            catch (TimeoutException)
+            catch (System.TimeoutException)
             {
                 return true;
             }
@@ -208,7 +207,7 @@ public sealed class PublicSyncProducerTeardownTests
         {
             if (sw.Elapsed > s_deadline)
             {
-                throw new TimeoutException(
+                throw new System.TimeoutException(
                     "The blocking send never registered within the deadline — treated as a hang.");
             }
 

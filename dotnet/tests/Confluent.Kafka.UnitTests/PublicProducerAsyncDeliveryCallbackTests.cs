@@ -24,7 +24,6 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -454,7 +453,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
             await Within(first.WhenEnded);
             Assert.Equal(
                 "Timeout after waiting for " + LaterWaitMs + " ms.",
-                Assert.IsType<Confluent.Kafka.Java.Util.Concurrent.TimeoutException>(timedOut).Message);
+                Assert.IsType<Confluent.Kafka.TimeoutException>(timedOut).Message);
             Assert.InRange(waitedMs, LaterWaitMs - 50, (long)Deadline.TotalMilliseconds);
 
             KafkaTimeoutException failure = await FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => Within(futures[1].Get()));

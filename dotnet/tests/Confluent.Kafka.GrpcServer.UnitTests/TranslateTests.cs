@@ -19,15 +19,12 @@ using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Requests;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
-using Confluent.Kafka.Java.Lang;
-using Confluent.Kafka.Java.Util;
-using Confluent.Kafka.Java.Util.Concurrent;
 
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
 using Xunit;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 using Proto = Confluent.Kafka.Test;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests;
@@ -66,7 +63,7 @@ public sealed class TranslateTests
 
     [Fact]
     public void AJavaTimeoutException_IsItsId() =>
-        AssertBare(new JavaTimeoutException("Timeout expired after 500ms"), -5);
+        AssertBare(new FutureTimeoutException("Timeout expired after 500ms"), -5);
 
     [Fact]
     public void ACorrelationIdMismatchException_IsItsId_NotItsParentsId() =>

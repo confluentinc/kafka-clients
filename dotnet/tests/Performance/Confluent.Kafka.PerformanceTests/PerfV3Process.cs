@@ -118,7 +118,7 @@ internal static class PerfV3Process
             output.WriteLine("--- PerfV3 stderr (timed-out run) ---");
             output.WriteLine(timedOutStderr);
 
-            throw new TimeoutException(
+            throw new System.TimeoutException(
                 $"PerfV3 did not exit within its 3-minute timeout ({perfV3Dll}). stderr tail: {Tail(timedOutStderr, StderrTailChars)}");
         }
 

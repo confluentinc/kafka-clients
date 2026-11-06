@@ -16,7 +16,6 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 

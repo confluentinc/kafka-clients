@@ -19,12 +19,12 @@ using System;
 
 using Confluent.Kafka.Internal;
 
-namespace Confluent.Kafka.Java.Util;
+namespace Confluent.Kafka;
 
 /// <summary>Java's built-in <c>java.util.ConcurrentModificationException</c>.</summary>
-public class ConcurrentModificationException : global::System.InvalidOperationException, IJavaThrowable
+public class ConcurrentModificationException : global::System.InvalidOperationException, IExceptionText
 {
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
     /// <summary>Initializes the exception, as Java's <c>ConcurrentModificationException()</c>.</summary>
     public ConcurrentModificationException()
@@ -55,8 +55,8 @@ public class ConcurrentModificationException : global::System.InvalidOperationEx
     internal ConcurrentModificationException(CoreError _, string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
-    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 }

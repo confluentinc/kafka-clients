@@ -18,7 +18,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Producer;
 

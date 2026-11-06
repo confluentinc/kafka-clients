@@ -47,7 +47,7 @@ public sealed class AsyncDeleteConsumerGroupOffsetsResult
     /// A new future that completes when that partition's offset was deleted, and fails with the partition's error, or
     /// with the call's error when the whole request failed.
     /// </returns>
-    /// <exception cref="Java.Lang.IllegalArgumentException">
+    /// <exception cref="Confluent.Kafka.IllegalArgumentException">
     /// <paramref name="partition"/> (one with a null topic included) was not part of the request, as Java throws at
     /// the call.
     /// </exception>

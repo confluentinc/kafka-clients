@@ -17,7 +17,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

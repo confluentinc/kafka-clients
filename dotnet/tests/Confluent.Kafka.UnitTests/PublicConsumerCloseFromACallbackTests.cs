@@ -21,8 +21,6 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
-using Confluent.Kafka.Java.Lang;
-using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -481,7 +479,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();
@@ -507,7 +505,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
 
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the consumer never began to close");
+                throw new System.TimeoutException("the consumer never began to close");
             }
 
             Thread.Yield();

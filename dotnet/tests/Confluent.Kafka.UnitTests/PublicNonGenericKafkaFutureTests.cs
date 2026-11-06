@@ -24,7 +24,7 @@ using Confluent.Kafka.Internal;
 
 using Confluent.Kafka.Producer;
 using Xunit;
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -352,7 +352,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         KafkaFuture future = new KafkaFuture(new KafkaFutureImpl<object?>());
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
-        Assert.IsType<JavaTimeoutException>(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
+        Assert.IsType<FutureTimeoutException>(BlockingCall.RunWait(() => future.Get(TimeSpan.Zero)));
         future.GetNow();
         BlockingCall waiting = BlockingCall.StartWait(() => future.Get(cancellation.Token));
         waiting.AssertBlocked();

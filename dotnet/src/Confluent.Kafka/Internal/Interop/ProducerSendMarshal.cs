@@ -228,7 +228,7 @@ internal static unsafe class ProducerSendMarshal
 
     private static void SetTopic(IntPtr builder, string topic, ref IntPtr outErr)
     {
-        int capacity = Utf8Marshal.JavaUtf8.GetMaxByteCount(topic.Length) + 1;
+        int capacity = Utf8Marshal.QuestionMarkUtf8.GetMaxByteCount(topic.Length) + 1;
         if (capacity <= MaxStackStringBytes)
         {
             byte* buffer = stackalloc byte[capacity];
@@ -253,7 +253,7 @@ internal static unsafe class ProducerSendMarshal
                 ? default
                 : new KafkaBytes(value.Length == 0 ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
             string key = header.Key;
-            int capacity = Utf8Marshal.JavaUtf8.GetMaxByteCount(key.Length) + 1;
+            int capacity = Utf8Marshal.QuestionMarkUtf8.GetMaxByteCount(key.Length) + 1;
             if (capacity <= MaxStackStringBytes)
             {
                 byte* buffer = stackalloc byte[capacity];
@@ -272,7 +272,7 @@ internal static unsafe class ProducerSendMarshal
         int length;
         fixed (char* chars = value)
         {
-            length = Utf8Marshal.JavaUtf8.GetBytes(chars, value.Length, buffer, capacity - 1);
+            length = Utf8Marshal.QuestionMarkUtf8.GetBytes(chars, value.Length, buffer, capacity - 1);
         }
 
         buffer[length] = 0;

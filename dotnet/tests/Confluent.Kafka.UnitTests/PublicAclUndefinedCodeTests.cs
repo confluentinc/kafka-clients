@@ -16,7 +16,6 @@ using System;
 
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Resource;
-using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

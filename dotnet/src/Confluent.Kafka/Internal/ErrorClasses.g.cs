@@ -31,7 +31,7 @@ internal static class ErrorClasses
     internal static IReadOnlyDictionary<int, Func<string?, Exception?, IntPtr, Exception>> Factories { get; } =
         new Dictionary<int, Func<string?, Exception?, IntPtr, Exception>>
         {
-            [-31] = (message, innerException, _) => new global::Confluent.Kafka.Java.Lang.UnsupportedOperationException(default(CoreError), message, innerException),
+            [-31] = (message, innerException, _) => new global::Confluent.Kafka.UnsupportedOperationException(default(CoreError), message, innerException),
             [-29] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.BootstrapResolutionException(default(CoreError), message, innerException),
             [-28] = (message, innerException, _) => new global::Confluent.Kafka.Producer.BufferExhaustedException(default(CoreError), message, innerException),
             [-26] = (message, innerException, error) => ErrorPayloadMarshal.ReadQuotaViolationException(message, innerException, error),
@@ -55,10 +55,10 @@ internal static class ErrorClasses
             [-8] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.AuthorizerNotReadyException(default(CoreError), message, innerException),
             [-7] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.AuthenticationException(default(CoreError), message, innerException),
             [-6] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.ApiException(default(CoreError), message, innerException),
-            [-5] = (message, innerException, _) => new global::Confluent.Kafka.Java.Util.Concurrent.TimeoutException(default(CoreError), message, innerException),
-            [-4] = (message, innerException, _) => new global::Confluent.Kafka.Java.Lang.IllegalStateException(default(CoreError), message, innerException),
-            [-3] = (message, innerException, _) => new global::Confluent.Kafka.Java.Lang.IllegalArgumentException(default(CoreError), message, innerException),
-            [-2] = (message, innerException, _) => new global::Confluent.Kafka.Java.Util.ConcurrentModificationException(default(CoreError), message, innerException),
+            [-5] = (message, innerException, _) => new global::Confluent.Kafka.TimeoutException(default(CoreError), message, innerException),
+            [-4] = (message, innerException, _) => new global::Confluent.Kafka.IllegalStateException(default(CoreError), message, innerException),
+            [-3] = (message, innerException, _) => new global::Confluent.Kafka.IllegalArgumentException(default(CoreError), message, innerException),
+            [-2] = (message, innerException, _) => new global::Confluent.Kafka.ConcurrentModificationException(default(CoreError), message, innerException),
             [1] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.OffsetOutOfRangeException(default(CoreError), message, innerException),
             [2] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.CorruptRecordException(default(CoreError), message, innerException),
             [3] = (message, innerException, _) => new global::Confluent.Kafka.Common.Errors.UnknownTopicOrPartitionException(default(CoreError), message, innerException),
@@ -201,7 +201,7 @@ internal static class ErrorClasses
     internal static IReadOnlyDictionary<Type, int> Ids { get; } =
         new Dictionary<Type, int>
         {
-            [typeof(global::Confluent.Kafka.Java.Lang.UnsupportedOperationException)] = -31,
+            [typeof(global::Confluent.Kafka.UnsupportedOperationException)] = -31,
             [typeof(global::Confluent.Kafka.Common.Errors.BootstrapResolutionException)] = -29,
             [typeof(global::Confluent.Kafka.Producer.BufferExhaustedException)] = -28,
             [typeof(global::Confluent.Kafka.Common.Errors.RecordDeserializationException)] = -27,
@@ -226,10 +226,10 @@ internal static class ErrorClasses
             [typeof(global::Confluent.Kafka.Common.Errors.AuthorizerNotReadyException)] = -8,
             [typeof(global::Confluent.Kafka.Common.Errors.AuthenticationException)] = -7,
             [typeof(global::Confluent.Kafka.Common.Errors.ApiException)] = -6,
-            [typeof(global::Confluent.Kafka.Java.Util.Concurrent.TimeoutException)] = -5,
-            [typeof(global::Confluent.Kafka.Java.Lang.IllegalStateException)] = -4,
-            [typeof(global::Confluent.Kafka.Java.Lang.IllegalArgumentException)] = -3,
-            [typeof(global::Confluent.Kafka.Java.Util.ConcurrentModificationException)] = -2,
+            [typeof(global::Confluent.Kafka.TimeoutException)] = -5,
+            [typeof(global::Confluent.Kafka.IllegalStateException)] = -4,
+            [typeof(global::Confluent.Kafka.IllegalArgumentException)] = -3,
+            [typeof(global::Confluent.Kafka.ConcurrentModificationException)] = -2,
             [typeof(global::Confluent.Kafka.Common.KafkaException)] = -1,
             [typeof(global::Confluent.Kafka.Common.Errors.UnknownServerException)] = -1,
             [typeof(global::Confluent.Kafka.Common.Errors.OffsetOutOfRangeException)] = 1,

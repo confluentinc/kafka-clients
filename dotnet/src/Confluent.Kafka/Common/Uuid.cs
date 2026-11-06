@@ -18,7 +18,6 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Security.Cryptography;
 
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Common;
 

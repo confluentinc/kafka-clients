@@ -19,12 +19,12 @@ using System;
 
 using Confluent.Kafka.Internal;
 
-namespace Confluent.Kafka.Java.Util.Concurrent;
+namespace Confluent.Kafka;
 
 /// <summary>Java's built-in <c>java.util.concurrent.ExecutionException</c>.</summary>
-public class ExecutionException : global::System.Exception, IJavaThrowable
+public class ExecutionException : global::System.Exception, IExceptionText
 {
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
     /// <summary>
     /// Initializes the exception, as Java's <c>ExecutionException(String message, Throwable cause)</c>.
@@ -43,8 +43,8 @@ public class ExecutionException : global::System.Exception, IJavaThrowable
     internal ExecutionException(CoreError _, string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
-    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 }

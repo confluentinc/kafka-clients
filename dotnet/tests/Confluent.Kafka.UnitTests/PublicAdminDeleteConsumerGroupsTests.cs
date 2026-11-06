@@ -21,7 +21,6 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

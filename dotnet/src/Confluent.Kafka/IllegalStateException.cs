@@ -19,44 +19,44 @@ using System;
 
 using Confluent.Kafka.Internal;
 
-namespace Confluent.Kafka.Java.Lang;
+namespace Confluent.Kafka;
 
-/// <summary>Java's built-in <c>java.lang.IllegalArgumentException</c>.</summary>
-public class IllegalArgumentException : global::System.ArgumentException, IJavaThrowable
+/// <summary>Java's built-in <c>java.lang.IllegalStateException</c>.</summary>
+public class IllegalStateException : global::System.InvalidOperationException, IExceptionText
 {
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
-    /// <summary>Initializes the exception, as Java's <c>IllegalArgumentException()</c>.</summary>
-    public IllegalArgumentException()
+    /// <summary>Initializes the exception, as Java's <c>IllegalStateException()</c>.</summary>
+    public IllegalStateException()
         : this(default(CoreError), null, null)
     {
     }
 
-    /// <summary>Initializes the exception, as Java's <c>IllegalArgumentException(String s)</c>.</summary>
-    public IllegalArgumentException(string? message)
+    /// <summary>Initializes the exception, as Java's <c>IllegalStateException(String s)</c>.</summary>
+    public IllegalStateException(string? message)
         : this(default(CoreError), message, null)
     {
     }
 
     /// <summary>
-    /// Initializes the exception, as Java's <c>IllegalArgumentException(String message, Throwable cause)</c>.
+    /// Initializes the exception, as Java's <c>IllegalStateException(String message, Throwable cause)</c>.
     /// </summary>
-    public IllegalArgumentException(string? message, Exception? innerException)
+    public IllegalStateException(string? message, Exception? innerException)
         : this(default(CoreError), message, innerException)
     {
     }
 
-    /// <summary>Initializes the exception, as Java's <c>IllegalArgumentException(Throwable cause)</c>.</summary>
-    public IllegalArgumentException(Exception? innerException)
+    /// <summary>Initializes the exception, as Java's <c>IllegalStateException(Throwable cause)</c>.</summary>
+    public IllegalStateException(Exception? innerException)
         : this(default(CoreError), innerException is null ? null : JavaText.ToString(innerException), innerException)
     {
     }
 
-    internal IllegalArgumentException(CoreError _, string? message, Exception? innerException)
+    internal IllegalStateException(CoreError _, string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
-    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 }

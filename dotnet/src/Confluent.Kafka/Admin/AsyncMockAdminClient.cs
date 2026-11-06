@@ -23,7 +23,6 @@ using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Admin;
 

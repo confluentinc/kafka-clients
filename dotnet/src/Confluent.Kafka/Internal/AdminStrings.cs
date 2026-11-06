@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Internal;
 /// Rejects a string that cannot cross the C ABI unchanged, an admin request string or a producer record's topic or
 /// header key: one containing <c>'\0'</c>, which ends the C string. An unpaired UTF-16 surrogate is not rejected: it
 /// crosses as <c>'?'</c>, as Java's <c>String.getBytes(UTF_8)</c> writes it
-/// (<see cref="Interop.Utf8Marshal.JavaUtf8"/>).
+/// (<see cref="Interop.Utf8Marshal.QuestionMarkUtf8"/>).
 /// </summary>
 /// <remarks>
 /// A recorded deviation: Java sends a NUL whole, with no error. Here the C ABI would cut the string at the NUL, so the

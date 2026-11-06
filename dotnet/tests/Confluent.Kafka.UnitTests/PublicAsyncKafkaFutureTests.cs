@@ -25,7 +25,7 @@ using Confluent.Kafka.Internal;
 using Confluent.Kafka.Producer;
 using Xunit;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
@@ -73,7 +73,7 @@ public sealed class PublicAsyncKafkaFutureTests
         Task<RecordMetadata> first = future.Get();
         Task<RecordMetadata> second = future.Get();
 
-        Assert.Same(delivery.JavaGetAsync(), first);
+        Assert.Same(delivery.GetWrappedAsync(), first);
         Assert.Same(first, second);
         if (state == "completed")
         {
@@ -335,7 +335,7 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.Equal(state != "pending", future.IsDone);
         Assert.False(future.IsCancelled);
         Assert.Equal(state == "faulted" || state == "canceled", future.IsCompletedExceptionally);
-        Assert.Same(delivery.JavaGetAsync(), future.Get());
+        Assert.Same(delivery.GetWrappedAsync(), future.Get());
         Assert.Same(delivery.GetAsync(), future.ToCompletionStage());
         switch (state)
         {
@@ -703,7 +703,7 @@ public sealed class PublicAsyncKafkaFutureTests
 
     private static async Task AssertTimesOut(Task wait)
     {
-        JavaTimeoutException thrown = await Assert.ThrowsAsync<JavaTimeoutException>(
+        FutureTimeoutException thrown = await Assert.ThrowsAsync<FutureTimeoutException>(
             () => TestTimeout.Run(() => wait, BlockingCall.Deadline));
         Assert.Equal(string.Empty, thrown.Message);
     }

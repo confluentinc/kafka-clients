@@ -26,7 +26,6 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

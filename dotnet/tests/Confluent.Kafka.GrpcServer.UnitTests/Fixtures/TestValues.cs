@@ -56,7 +56,7 @@ internal static class TestValues
         Assert.True(producer.ErrorNext(OfClass(code, message)));
         Exception? error = callback.Outcome.Wait(RecordingStreamWriter.DefaultTimeout)
             ? callback.Outcome.Result
-            : throw new TimeoutException("the mock's delivery callback never fired");
+            : throw new System.TimeoutException("the mock's delivery callback never fired");
         producer.Close();
         return error as KafkaException
             ?? throw new InvalidOperationException($"ErrorNext delivered {error?.GetType().Name ?? "a success"}");

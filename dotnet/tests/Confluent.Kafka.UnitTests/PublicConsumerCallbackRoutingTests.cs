@@ -27,8 +27,6 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
-using Confluent.Kafka.Java.Util;
 
 using Xunit;
 
@@ -1339,7 +1337,7 @@ public sealed class PublicConsumerCallbackRoutingTests
 
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the consumer never began to close");
+                throw new System.TimeoutException("the consumer never began to close");
             }
 
             Thread.Yield();

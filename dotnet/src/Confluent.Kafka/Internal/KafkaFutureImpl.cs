@@ -20,17 +20,15 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 
-using ExecutionException = Confluent.Kafka.Java.Util.Concurrent.ExecutionException;
-using TimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
-
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// A <see cref="KafkaFutureImpl{T}"/> seen without its value type, which is how a future of no value (Java's
 /// <c>KafkaFuture&lt;Void&gt;</c>) and <c>AllOf</c> over futures of different types hold one. It also holds the timed
-/// and cancellable waits on a task, which the async futures share. The <c>Java</c> waits are what the public futures
-/// call: they fail as Java's <c>get</c> and <c>getNow</c> do, with an <see cref="ExecutionException"/> around the
-/// future's failure. The other waits rethrow the failure itself, for the binding's own reads of a future.
+/// and cancellable waits on a task, which the async futures share. The wrapped waits (<c>GetWrapped</c>,
+/// <c>GetNowWrapped</c>, <c>WaitWrapped</c>) are what the public futures call: they fail as Java's <c>get</c> and
+/// <c>getNow</c> do, with an <see cref="ExecutionException"/> around the future's failure. The other waits rethrow the
+/// failure itself, for the binding's own reads of a future.
 /// </summary>
 internal abstract class KafkaFutureImpl
 {
@@ -131,19 +129,19 @@ internal abstract class KafkaFutureImpl
 
     internal abstract Task WaitAsync(CancellationToken cancellationToken);
 
-    internal abstract void JavaWait();
+    internal abstract void WaitWrapped();
 
-    internal abstract void JavaWait(TimeSpan timeout);
+    internal abstract void WaitWrapped(TimeSpan timeout);
 
-    internal abstract void JavaWait(CancellationToken cancellationToken);
+    internal abstract void WaitWrapped(CancellationToken cancellationToken);
 
-    internal abstract void JavaGetNow();
+    internal abstract void GetNowWrapped();
 
-    internal abstract Task JavaWaitAsync();
+    internal abstract Task WaitWrappedAsync();
 
-    internal abstract Task JavaWaitAsync(TimeSpan timeout);
+    internal abstract Task WaitWrappedAsync(TimeSpan timeout);
 
-    internal abstract Task JavaWaitAsync(CancellationToken cancellationToken);
+    internal abstract Task WaitWrappedAsync(CancellationToken cancellationToken);
 
     internal abstract KafkaFutureImpl<TResult> ThenApply<TResult>(Func<TResult> function);
 
@@ -208,7 +206,7 @@ internal abstract class KafkaFutureImpl
 /// slices. <c>IsDone</c> and <c>Cancel</c> only ask the source whether it is done, so they settle nothing and run no
 /// listener, and while the future is pending and its source is done <c>Cancel</c> answers false. The
 /// <see cref="Task{TResult}"/> of the async waits is made on the first of them and is the same every time, and so is
-/// the one of the <c>Java</c> async waits. A timed wait that ends first throws Java's <see cref="TimeoutException"/>,
+/// the one of the wrapped async waits. A timed wait that ends first throws Java's <see cref="TimeoutException"/>,
 /// with no message, or for a send's future with the message of Java's <c>FutureRecordMetadata</c>.
 /// </summary>
 internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
@@ -251,7 +249,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
     // The Java Get's task, one field for the send's footprint: its completion source when it was taken while the
     // future was pending, which the completion sets, or else the finished task itself.
-    private object? _java;
+    private object? _wrapped;
 
     internal KafkaFutureImpl(bool mayCancel = true, IFutureValueSource<T>? source = null)
         : this(mayCancel, source, send: false)
@@ -292,7 +290,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     internal bool Complete(T value)
     {
         TaskCompletionSource<T>? task;
-        TaskCompletionSource<T>? java;
+        TaskCompletionSource<T>? wrapped;
         List<Action<KafkaFutureImpl<T>>>? listeners;
         lock (this)
         {
@@ -304,13 +302,13 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             _value = value;
             _state = Succeeded;
             task = _task;
-            java = _java as TaskCompletionSource<T>;
+            wrapped = _wrapped as TaskCompletionSource<T>;
             listeners = _listeners;
             _listeners = null;
             Monitor.PulseAll(this);
         }
 
-        Settled(task, java, listeners);
+        Settled(task, wrapped, listeners);
         return true;
     }
 
@@ -363,41 +361,41 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
         return _state == Pending ? valueIfAbsent : Answer();
     }
 
-    internal T JavaGet()
+    internal T GetWrapped()
     {
         AwaitSettled(Timeout.InfiniteTimeSpan, CancellationToken.None);
-        return JavaAnswer();
+        return WrappedAnswer();
     }
 
-    internal T JavaGet(TimeSpan timeout)
+    internal T GetWrapped(TimeSpan timeout)
     {
         if (!AwaitSettled(timeout, CancellationToken.None))
         {
             throw TimedOut(timeout);
         }
 
-        return JavaAnswer();
+        return WrappedAnswer();
     }
 
-    internal T JavaGet(CancellationToken cancellationToken)
+    internal T GetWrapped(CancellationToken cancellationToken)
     {
         AwaitSettled(cancellationToken);
-        return JavaAnswer();
+        return WrappedAnswer();
     }
 
-    internal T JavaGetNow(T valueIfAbsent)
+    internal T GetNowWrapped(T valueIfAbsent)
     {
         ReadSource();
-        return _state == Pending ? valueIfAbsent : JavaAnswer();
+        return _state == Pending ? valueIfAbsent : WrappedAnswer();
     }
 
-    internal override void JavaWait() => _ = JavaGet();
+    internal override void WaitWrapped() => _ = GetWrapped();
 
-    internal override void JavaWait(TimeSpan timeout) => _ = JavaGet(timeout);
+    internal override void WaitWrapped(TimeSpan timeout) => _ = GetWrapped(timeout);
 
-    internal override void JavaWait(CancellationToken cancellationToken) => _ = JavaGet(cancellationToken);
+    internal override void WaitWrapped(CancellationToken cancellationToken) => _ = GetWrapped(cancellationToken);
 
-    internal override void JavaGetNow() => _ = JavaGetNow(default!);
+    internal override void GetNowWrapped() => _ = GetNowWrapped(default!);
 
     internal override void Wait() => _ = Get();
 
@@ -484,9 +482,9 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     /// it is that outcome at once, the task of <see cref="GetAsync()"/> itself for a value or a cancellation. It is
     /// made on the caller's thread, never the completing one.
     /// </summary>
-    internal Task<T> JavaGetAsync()
+    internal Task<T> GetWrappedAsync()
     {
-        Task<T>? task = JavaTask(Volatile.Read(ref _java));
+        Task<T>? task = WrappedTask(Volatile.Read(ref _wrapped));
         if (task is not null)
         {
             return task;
@@ -495,12 +493,12 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
         ReadSource();
         lock (this)
         {
-            task = JavaTask(_java);
+            task = WrappedTask(_wrapped);
             if (task is null && _state == Pending)
             {
-                var java = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-                Volatile.Write(ref _java, java);
-                return java.Task;
+                var wrapped = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Volatile.Write(ref _wrapped, wrapped);
+                return wrapped.Task;
             }
         }
 
@@ -511,18 +509,18 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
         // Settled: the outcome needs no completion source, and the first of two racing callers wins.
         Task<T> done = _state == Failed ? Task.FromException<T>(new ExecutionException(Failure)) : GetAsync();
-        return JavaTask(Interlocked.CompareExchange(ref _java, done, null)) ?? done;
+        return WrappedTask(Interlocked.CompareExchange(ref _wrapped, done, null)) ?? done;
     }
 
-    internal Task<T> JavaGetAsync(TimeSpan timeout) => WaitFor(JavaGetAsync(), timeout);
+    internal Task<T> GetWrappedAsync(TimeSpan timeout) => WaitFor(GetWrappedAsync(), timeout);
 
-    internal Task<T> JavaGetAsync(CancellationToken cancellationToken) => WaitFor(JavaGetAsync(), cancellationToken);
+    internal Task<T> GetWrappedAsync(CancellationToken cancellationToken) => WaitFor(GetWrappedAsync(), cancellationToken);
 
-    internal override Task JavaWaitAsync() => JavaGetAsync();
+    internal override Task WaitWrappedAsync() => GetWrappedAsync();
 
-    internal override Task JavaWaitAsync(TimeSpan timeout) => JavaGetAsync(timeout);
+    internal override Task WaitWrappedAsync(TimeSpan timeout) => GetWrappedAsync(timeout);
 
-    internal override Task JavaWaitAsync(CancellationToken cancellationToken) => JavaGetAsync(cancellationToken);
+    internal override Task WaitWrappedAsync(CancellationToken cancellationToken) => GetWrappedAsync(cancellationToken);
 
     internal KafkaFutureImpl<TResult> ThenApply<TResult>(Func<T, TResult> function)
     {
@@ -626,10 +624,10 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     // Java's KafkaFutureImpl throws CompletableFuture's TimeoutException, which has no message.
     private Exception TimedOut(TimeSpan timeout) =>
         _send
-            ? new TimeoutException(
+            ? new Confluent.Kafka.TimeoutException(
                 "Timeout after waiting for " +
                 (timeout.Ticks / TimeSpan.TicksPerMillisecond).ToString(CultureInfo.InvariantCulture) + " ms.")
-            : new TimeoutException();
+            : new Confluent.Kafka.TimeoutException();
 
     private static async Task<T> WithCancellation(Task<T> task, CancellationToken cancellationToken)
     {
@@ -644,7 +642,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     {
         var failure = ExceptionDispatchInfo.Capture(error);
         TaskCompletionSource<T>? task;
-        TaskCompletionSource<T>? java;
+        TaskCompletionSource<T>? wrapped;
         List<Action<KafkaFutureImpl<T>>>? listeners;
         lock (this)
         {
@@ -657,27 +655,27 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
             _propagated = propagated;
             _state = state;
             task = _task;
-            java = _java as TaskCompletionSource<T>;
+            wrapped = _wrapped as TaskCompletionSource<T>;
             listeners = _listeners;
             _listeners = null;
             Monitor.PulseAll(this);
         }
 
-        Settled(task, java, listeners);
+        Settled(task, wrapped, listeners);
         return true;
     }
 
     private void Settled(
-        TaskCompletionSource<T>? task, TaskCompletionSource<T>? java, List<Action<KafkaFutureImpl<T>>>? listeners)
+        TaskCompletionSource<T>? task, TaskCompletionSource<T>? wrapped, List<Action<KafkaFutureImpl<T>>>? listeners)
     {
         if (task is not null)
         {
             SetTask(task);
         }
 
-        if (java is not null)
+        if (wrapped is not null)
         {
-            SetJavaTask(java);
+            SetWrappedTask(wrapped);
         }
 
         if (listeners is not null)
@@ -705,19 +703,19 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
         }
     }
 
-    private static Task<T>? JavaTask(object? java) =>
-        java is TaskCompletionSource<T> source ? source.Task : (Task<T>?)java;
+    private static Task<T>? WrappedTask(object? wrapped) =>
+        wrapped is TaskCompletionSource<T> source ? source.Task : (Task<T>?)wrapped;
 
     // The Get task's outcome: a failure inside an ExecutionException, a value or a cancellation as SetTask gives it.
-    private void SetJavaTask(TaskCompletionSource<T> java)
+    private void SetWrappedTask(TaskCompletionSource<T> wrapped)
     {
         if (_state == Failed)
         {
-            java.TrySetException(new ExecutionException(_failure!.SourceException));
+            wrapped.TrySetException(new ExecutionException(_failure!.SourceException));
         }
         else
         {
-            SetTask(java);
+            SetTask(wrapped);
         }
     }
 
@@ -803,7 +801,7 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     // ExecutionException. An OperationCanceledException given as the error of a future that can be cancelled cancels
     // it, so it is thrown as it is, as Java's KafkaFutureImpl throws a stored CancellationException; on a send's
     // future, which cannot be, it is a failure like any other, as Java's FutureRecordMetadata wraps every error.
-    private T JavaAnswer()
+    private T WrappedAnswer()
     {
         if (_state == Failed)
         {

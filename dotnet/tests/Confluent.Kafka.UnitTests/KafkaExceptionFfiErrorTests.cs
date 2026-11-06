@@ -17,7 +17,6 @@ using System.Runtime.CompilerServices;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

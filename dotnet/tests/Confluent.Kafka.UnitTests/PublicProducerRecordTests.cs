@@ -18,7 +18,6 @@ using System.Globalization;
 using System.Text;
 
 using Confluent.Kafka.Common.Header;
-using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 

@@ -26,10 +26,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Each exported type sits in the namespace of its Java class's package, or, for a .NET-only type
-/// (a <c>=</c> row), in that of the type it pairs with, and nests where its Java class nests; every
-/// Java class the table names exists in the Kafka sources, or, for a JDK class, in the error generator's
-/// table. The error classes' rows come from the generator.
+/// Each exported type sits in the namespace of its Java class's package (a JDK class in the root
+/// namespace), or, for a .NET-only type (a <c>=</c> row), in that of the type it pairs with, and nests
+/// where its Java class nests; every Java class the table names exists in the Kafka sources, or, for a
+/// JDK class, in the error generator's table. The error classes' rows come from the generator.
 /// </summary>
 public sealed class PublicNamespaceLayoutTests
 {
@@ -39,6 +39,20 @@ public sealed class PublicNamespaceLayoutTests
     private const string JdkPrefix = "java.";
 
     private static readonly Type[] s_exported = typeof(KafkaException).Assembly.GetExportedTypes();
+
+    // The JDK exception classes, the only public types in the root namespace, as Python keeps them at
+    // confluent_kafka.
+    private static readonly string[] s_jdkClasses =
+    {
+        "ConcurrentModificationException",
+        "ExecutionException",
+        "IllegalArgumentException",
+        "IllegalStateException",
+        "IndexOutOfBoundsException",
+        "NoSuchElementException",
+        "TimeoutException",
+        "UnsupportedOperationException",
+    };
 
     private static IReadOnlyList<(string DotNet, string Java)> JavaCounterparts { get; } =
         HandWrittenRows.Concat(ErrorClassRows.Rows).ToArray();
@@ -357,8 +371,16 @@ public sealed class PublicNamespaceLayoutTests
     }
 
     [Fact]
-    public void NoPublicType_IsInTheRootNamespace() =>
-        Assert.DoesNotContain(s_exported, type => type.Namespace == RootNamespace);
+    public void NoPublicType_IsInTheRootNamespace()
+    {
+        string[] root = s_exported
+            .Where(type => type.Namespace == RootNamespace)
+            .Select(type => type.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(s_jdkClasses.OrderBy(name => name, StringComparer.Ordinal), root);
+    }
 
     [Theory]
     [MemberData(nameof(AllRows))]
@@ -521,9 +543,12 @@ public sealed class PublicNamespaceLayoutTests
 
     internal static string NamespaceOf(string javaPackage)
     {
-        string below = javaPackage.StartsWith(JdkPrefix, StringComparison.Ordinal)
-            ? javaPackage
-            : javaPackage.Substring(JavaPrefix.Length);
+        if (javaPackage.StartsWith(JdkPrefix, StringComparison.Ordinal))
+        {
+            return RootNamespace;
+        }
+
+        string below = javaPackage.Substring(JavaPrefix.Length);
         if (below.StartsWith(ClientsSegment, StringComparison.Ordinal))
         {
             below = below.Substring(ClientsSegment.Length);

@@ -18,7 +18,7 @@ namespace Confluent.Kafka.Internal;
 /// An exception that keeps Java's message, <see langword="null"/> included, and gives Java's
 /// <c>toString()</c> text for it.
 /// </summary>
-internal interface IJavaThrowable
+internal interface IExceptionText
 {
-    string JavaToString();
+    string TypeAndMessage();
 }

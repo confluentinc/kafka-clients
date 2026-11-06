@@ -16,7 +16,6 @@ using System;
 using System.Globalization;
 
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 namespace Confluent.Kafka.Common.Resource;
 

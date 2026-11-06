@@ -23,7 +23,6 @@ using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

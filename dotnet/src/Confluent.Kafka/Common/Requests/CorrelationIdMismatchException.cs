@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Common.Requests;
 /// Raised if the correlationId in a response header does not match the expected value from the request header. Java's
 /// <c>org.apache.kafka.common.requests.CorrelationIdMismatchException</c>.
 /// </summary>
-public class CorrelationIdMismatchException : global::Confluent.Kafka.Java.Lang.IllegalStateException
+public class CorrelationIdMismatchException : global::Confluent.Kafka.IllegalStateException
 {
     /// <summary>
     /// Initializes the exception, as Java's <c>CorrelationIdMismatchException(String message, int requestCorrelationId,

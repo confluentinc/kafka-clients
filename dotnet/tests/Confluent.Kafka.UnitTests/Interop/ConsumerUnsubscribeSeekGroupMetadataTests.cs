@@ -18,7 +18,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

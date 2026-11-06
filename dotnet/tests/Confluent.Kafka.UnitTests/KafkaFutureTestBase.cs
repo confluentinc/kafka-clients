@@ -20,7 +20,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
 
 using Xunit;
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -522,7 +522,7 @@ public abstract class KafkaFutureTestBase
     public async Task TestFutureTimeoutWithZeroWait()
     {
         FutureView<string> future = Wrap(new KafkaFutureImpl<string>());
-        Assert.Equal(string.Empty, Assert.IsType<JavaTimeoutException>(await Thrown(future.Get(TimeSpan.Zero))).Message);
+        Assert.Equal(string.Empty, Assert.IsType<FutureTimeoutException>(await Thrown(future.Get(TimeSpan.Zero))).Message);
     }
 
     [Fact]
@@ -540,7 +540,7 @@ public abstract class KafkaFutureTestBase
         };
         foreach (TimeSpan timeout in timeouts)
         {
-            Exception thrown = Assert.IsType<JavaTimeoutException>(await Thrown(future.Get(timeout)));
+            Exception thrown = Assert.IsType<FutureTimeoutException>(await Thrown(future.Get(timeout)));
             Assert.Equal(string.Empty, thrown.Message);
         }
 

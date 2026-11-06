@@ -28,7 +28,7 @@ internal static class Utf8Marshal
     /// UTF-8 as Java's <c>String.getBytes(UTF_8)</c> writes it: an unpaired surrogate becomes <c>'?'</c>
     /// (<c>0x3F</c>), where <see cref="Encoding.UTF8"/> writes <c>U+FFFD</c>. Decoding is unchanged.
     /// </summary>
-    internal static readonly Encoding JavaUtf8 = CreateJavaUtf8();
+    internal static readonly Encoding QuestionMarkUtf8 = CreateQuestionMarkUtf8();
 
     internal static PinnedUtf8String Pin(string value) => new PinnedUtf8String(value);
 
@@ -81,7 +81,7 @@ internal static class Utf8Marshal
 #endif
     }
 
-    private static Encoding CreateJavaUtf8()
+    private static Encoding CreateQuestionMarkUtf8()
     {
         Encoding encoding = (Encoding)new UTF8Encoding(false, false).Clone();
         encoding.EncoderFallback = new EncoderReplacementFallback("?");
@@ -96,7 +96,7 @@ internal static class Utf8Marshal
 
         internal PinnedUtf8String(string value)
         {
-            byte[] encoded = JavaUtf8.GetBytes(value);
+            byte[] encoded = QuestionMarkUtf8.GetBytes(value);
 
             byte[] buffer = new byte[encoded.Length + 1];
             Array.Copy(encoded, buffer, encoded.Length);

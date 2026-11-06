@@ -24,7 +24,6 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
-using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -221,7 +220,7 @@ public sealed class PublicProducerDeliveryCallbackTests
                 producer.Send(
                     new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), callback).Get();
             }
-            catch (Confluent.Kafka.Java.Util.Concurrent.ExecutionException)
+            catch (Confluent.Kafka.ExecutionException)
             {
                 invokedAtThrow = callback.Completions.Count == 1;
                 threadsAtThrow = callback.Threads;

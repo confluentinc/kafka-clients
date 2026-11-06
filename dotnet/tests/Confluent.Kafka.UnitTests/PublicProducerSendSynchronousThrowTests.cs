@@ -23,7 +23,6 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;

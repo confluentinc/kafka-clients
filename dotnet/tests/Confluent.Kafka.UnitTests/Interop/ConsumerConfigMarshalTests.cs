@@ -17,7 +17,6 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

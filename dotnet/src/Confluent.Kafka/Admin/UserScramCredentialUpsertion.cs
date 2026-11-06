@@ -50,7 +50,7 @@ public sealed class UserScramCredentialUpsertion : UserScramCredentialAlteration
         : this(
             user,
             credentialInfo,
-            Utf8Marshal.JavaUtf8.GetBytes(password ?? throw new ArgumentNullException(nameof(password))))
+            Utf8Marshal.QuestionMarkUtf8.GetBytes(password ?? throw new ArgumentNullException(nameof(password))))
     {
     }
 

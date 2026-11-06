@@ -50,7 +50,7 @@ public sealed class AlterConsumerGroupOffsetsResult
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <paramref name="partition"/> has a topic with a NUL character. One with a null topic was not attempted, so its
-    /// future fails with Java's <see cref="Java.Lang.IllegalArgumentException"/>.
+    /// future fails with Java's <see cref="Confluent.Kafka.IllegalArgumentException"/>.
     /// </exception>
     public KafkaFuture PartitionResult(TopicPartition partition) =>
         new KafkaFuture(NativeAdminClient.AlterConsumerGroupOffsetsPartitionResult(_native, partition));

@@ -19,30 +19,30 @@ using System;
 
 using Confluent.Kafka.Internal;
 
-namespace Confluent.Kafka.Java.Util.Concurrent;
+namespace Confluent.Kafka;
 
-/// <summary>Java's built-in <c>java.util.concurrent.TimeoutException</c>.</summary>
-public class TimeoutException : global::System.TimeoutException, IJavaThrowable
+/// <summary>Java's built-in <c>java.util.NoSuchElementException</c>.</summary>
+public class NoSuchElementException : global::System.InvalidOperationException, IExceptionText
 {
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
-    /// <summary>Initializes the exception, as Java's <c>TimeoutException()</c>.</summary>
-    public TimeoutException()
+    /// <summary>Initializes the exception, as Java's <c>NoSuchElementException()</c>.</summary>
+    public NoSuchElementException()
         : this(default(CoreError), null, null)
     {
     }
 
-    /// <summary>Initializes the exception, as Java's <c>TimeoutException(String message)</c>.</summary>
-    public TimeoutException(string? message)
+    /// <summary>Initializes the exception, as Java's <c>NoSuchElementException(String s)</c>.</summary>
+    public NoSuchElementException(string? message)
         : this(default(CoreError), message, null)
     {
     }
 
-    internal TimeoutException(CoreError _, string? message, Exception? innerException)
+    internal NoSuchElementException(CoreError _, string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
-    string IJavaThrowable.JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    string IExceptionText.TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 }

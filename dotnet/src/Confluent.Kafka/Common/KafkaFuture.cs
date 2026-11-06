@@ -16,7 +16,6 @@ using System;
 using System.Threading;
 
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Util.Concurrent;
 
 namespace Confluent.Kafka.Common;
 
@@ -86,28 +85,28 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     /// cancelled one throws <see cref="OperationCanceledException"/>. Inside a delivery callback, on the record's own
     /// future, it never returns, as in Java.
     /// </summary>
-    public T Get() => Impl.JavaGet();
+    public T Get() => Impl.GetWrapped();
 
     /// <summary>
     /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing Java's
-    /// <see cref="Java.Util.Concurrent.TimeoutException"/> when the future has not completed within
+    /// <see cref="Confluent.Kafka.TimeoutException"/> when the future has not completed within
     /// <paramref name="timeout"/>; a zero or negative timeout checks once, and <see cref="Timeout.InfiniteTimeSpan"/>
     /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public T Get(TimeSpan timeout) => Impl.JavaGet(timeout);
+    public T Get(TimeSpan timeout) => Impl.GetWrapped(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early with <see cref="OperationCanceledException"/> when
     /// <paramref name="cancellationToken"/> fires first; the token ends only this wait, never the future.
     /// </summary>
-    public T Get(CancellationToken cancellationToken) => Impl.JavaGet(cancellationToken);
+    public T Get(CancellationToken cancellationToken) => Impl.GetWrapped(cancellationToken);
 
     /// <summary>
     /// Java's <c>getNow</c>: the future's value when it has completed, else <paramref name="valueIfAbsent"/>; a failed
     /// future throws <see cref="ExecutionException"/> around its failure, and a cancelled one
     /// <see cref="OperationCanceledException"/>. Never blocks.
     /// </summary>
-    public T GetNow(T valueIfAbsent) => Impl.JavaGetNow(valueIfAbsent);
+    public T GetNow(T valueIfAbsent) => Impl.GetNowWrapped(valueIfAbsent);
 
     /// <summary>
     /// Java's <c>isCancelled()</c>: whether the future was cancelled, by <see cref="Cancel"/> or by the cancellation of
@@ -283,28 +282,28 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// failed future throws <see cref="ExecutionException"/>, whose <see cref="Exception.InnerException"/> is the
     /// failure; a cancelled one throws <see cref="OperationCanceledException"/>.
     /// </summary>
-    public void Get() => Impl.JavaWait();
+    public void Get() => Impl.WaitWrapped();
 
     /// <summary>
     /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing Java's
-    /// <see cref="Java.Util.Concurrent.TimeoutException"/> when the future has not completed within
+    /// <see cref="Confluent.Kafka.TimeoutException"/> when the future has not completed within
     /// <paramref name="timeout"/>; a zero or negative timeout checks once, and <see cref="Timeout.InfiniteTimeSpan"/>
     /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public void Get(TimeSpan timeout) => Impl.JavaWait(timeout);
+    public void Get(TimeSpan timeout) => Impl.WaitWrapped(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early with <see cref="OperationCanceledException"/> when
     /// <paramref name="cancellationToken"/> fires first; the token ends only this wait, never the future.
     /// </summary>
-    public void Get(CancellationToken cancellationToken) => Impl.JavaWait(cancellationToken);
+    public void Get(CancellationToken cancellationToken) => Impl.WaitWrapped(cancellationToken);
 
     /// <summary>
     /// Java's <c>getNow(null)</c> on a future of no value: returns when the future is pending or has succeeded; a
     /// failed future throws <see cref="ExecutionException"/> around its failure, and a cancelled one
     /// <see cref="OperationCanceledException"/>. Never blocks.
     /// </summary>
-    public void GetNow() => Impl.JavaGetNow();
+    public void GetNow() => Impl.GetNowWrapped();
 
     /// <summary>
     /// Java's <c>isCancelled()</c>: whether the future was cancelled, by <see cref="Cancel"/> or by the cancellation of

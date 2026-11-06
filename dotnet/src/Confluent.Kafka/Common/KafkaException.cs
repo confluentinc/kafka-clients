@@ -26,17 +26,17 @@ namespace Confluent.Kafka.Common;
 /// <see cref="Exception.InnerException"/> is Java's <c>getCause()</c>.
 /// </summary>
 /// <remarks>
-/// A Java built-in exception is its Java-named class in the <c>Confluent.Kafka.Java</c> namespaces, and a
+/// A Java built-in exception is its Java-named class in the root <c>Confluent.Kafka</c> namespace, and a
 /// .NET-only precondition throws the standard .NET exception.
 /// </remarks>
-public class KafkaException : Exception, IJavaThrowable
+public class KafkaException : Exception, IExceptionText
 {
     private const int UnknownServerError = -1;
 
     private const int LocalNullPointer = -32;
 
     // Java's getMessage(), null included; Message is then empty.
-    private readonly string? _javaMessage;
+    private readonly string? _givenMessage;
 
     /// <summary>
     /// Initializes an exception with no message, so <see cref="Exception.Message"/> is empty.
@@ -53,7 +53,7 @@ public class KafkaException : Exception, IJavaThrowable
     public KafkaException(string? message)
         : base(message ?? string.Empty)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
     /// <summary>
@@ -63,7 +63,7 @@ public class KafkaException : Exception, IJavaThrowable
     public KafkaException(string? message, Exception? innerException)
         : base(message ?? string.Empty, innerException)
     {
-        _javaMessage = message;
+        _givenMessage = message;
     }
 
     /// <summary>
@@ -112,9 +112,9 @@ public class KafkaException : Exception, IJavaThrowable
         return null;
     }
 
-    internal virtual string JavaToString() => JavaText.ThrowableToString(this, _javaMessage);
+    internal virtual string TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 
-    string IJavaThrowable.JavaToString() => JavaToString();
+    string IExceptionText.TypeAndMessage() => TypeAndMessage();
 
     internal static KafkaException WrapAtPoll(Exception cause) => cause as KafkaException ?? new KafkaException(cause);
 

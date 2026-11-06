@@ -21,7 +21,6 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
-using Confluent.Kafka.Java.Util;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -615,7 +614,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
         Thread other = StartThread(() => failure = Record.Exception(action));
         if (!other.Join(s_bound))
         {
-            throw new TimeoutException("the other thread's calls did not return");
+            throw new System.TimeoutException("the other thread's calls did not return");
         }
 
         if (failure is not null)
@@ -631,7 +630,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();

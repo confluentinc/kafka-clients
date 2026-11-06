@@ -22,7 +22,6 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.GrpcServer.Chaos;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

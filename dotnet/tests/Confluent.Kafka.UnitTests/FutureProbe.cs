@@ -16,7 +16,6 @@ using System;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Java.Util.Concurrent;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;

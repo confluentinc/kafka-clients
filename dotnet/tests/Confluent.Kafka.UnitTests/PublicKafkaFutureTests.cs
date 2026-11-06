@@ -132,7 +132,7 @@ public sealed class PublicKafkaFutureTests
                 {
                     if (!start.SignalAndWait(s_deadline))
                     {
-                        throw new TimeoutException("The reader threads did not all start.");
+                        throw new System.TimeoutException("The reader threads did not all start.");
                     }
 
                     for (int call = 0; call < CallsPerThread; call++)

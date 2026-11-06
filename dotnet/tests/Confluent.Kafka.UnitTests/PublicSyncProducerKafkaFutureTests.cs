@@ -22,13 +22,12 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Java.Lang;
 
 using Confluent.Kafka.Producer;
 using Xunit;
 using Xunit.Abstractions;
 using Xunit.Sdk;
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -131,7 +130,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
                 {
                     if (!start.SignalAndWait(s_deadline))
                     {
-                        throw new TimeoutException("the sender threads did not all start");
+                        throw new System.TimeoutException("the sender threads did not all start");
                     }
 
                     KafkaFuture<RecordMetadata>[] futures = new KafkaFuture<RecordMetadata>[SendsPerThread];
@@ -264,7 +263,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         TestTimeout.Run(producer.Close, s_deadline);
 
-        JavaTimeoutException timedOut = Assert.Throws<JavaTimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(200)));
+        FutureTimeoutException timedOut = Assert.Throws<FutureTimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(200)));
         Assert.Equal("Timeout after waiting for 200 ms.", timedOut.Message);
         Assert.False(future.IsDone);
         Assert.Equal(0, callback.Count);
@@ -416,7 +415,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     {
         if (!start.SignalAndWait(s_deadline))
         {
-            throw new TimeoutException("the racing threads did not both start");
+            throw new System.TimeoutException("the racing threads did not both start");
         }
     }
 

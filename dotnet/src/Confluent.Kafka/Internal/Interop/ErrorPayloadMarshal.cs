@@ -182,8 +182,8 @@ internal static class ErrorPayloadMarshal
         KafkaMetric metric = new KafkaMetric(name, value);
 
         // Java's constructor builds the message from the metric, the value and the bound, as Python's does.
-        string javaMessage = new QuotaViolationException(metric, value, bound).Message;
-        return new QuotaViolationException(default(CoreError), javaMessage, innerException, metric, value, bound);
+        string builtMessage = new QuotaViolationException(metric, value, bound).Message;
+        return new QuotaViolationException(default(CoreError), builtMessage, innerException, metric, value, bound);
     }
 
     internal static Exception ReadOffsetOutOfRangeException(string? message, Exception? innerException, IntPtr error) =>

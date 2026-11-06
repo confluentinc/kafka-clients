@@ -58,5 +58,5 @@ public class QuotaViolationException : global::Confluent.Kafka.Common.KafkaExcep
 
     internal override int FfiId => -26;
 
-    internal override string JavaToString() => JavaText.ThrowableToString(this, Message);
+    internal override string TypeAndMessage() => JavaText.TypeAndMessage(this, Message);
 }

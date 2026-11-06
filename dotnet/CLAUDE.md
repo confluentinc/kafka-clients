@@ -107,8 +107,8 @@ each remaining segment, and prefix `Confluent.Kafka.`, as the Rust core names it
 `Confluent.Kafka.Producer.KafkaProducer` in `Producer/KafkaProducer.cs`,
 `org.apache.kafka.common.acl.AclBinding` is `Confluent.Kafka.Common.Acl.AclBinding` in
 `Common/Acl/AclBinding.cs`, and `org.apache.kafka.common.security.token.delegation.DelegationToken`
-is `Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken`. No public type is declared in
-`Confluent.Kafka` itself. IDE0130 (`.editorconfig`) makes a namespace that does not match its folder
+is `Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken`. The only public types declared in
+`Confluent.Kafka` itself are the eight JDK exception classes (below). IDE0130 (`.editorconfig`) makes a namespace that does not match its folder
 a build error, and `PublicNamespaceLayoutTests` checks every exported type against its Java
 package, read from `kafka/`. There is no inner `src/` inside the project: the outer top-level
 `src/` *is* the library project's parent.
@@ -147,14 +147,32 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   (`CorrelationIdMismatchException`). Two Java classes of one name stay apart in their two
   namespaces, as Java's do: `Confluent.Kafka.Consumer.OffsetOutOfRangeException` and
   `Confluent.Kafka.Common.Errors.OffsetOutOfRangeException`, and likewise `InvalidOffsetException`;
-  code that needs both qualifies one. The Java built-in exceptions get Java-named classes the same
-  way (§3, the `KafkaException` hierarchy row): `java.lang` → `Confluent.Kafka.Java.Lang`,
-  `java.util` → `Confluent.Kafka.Java.Util`, `java.util.concurrent` →
-  `Confluent.Kafka.Java.Util.Concurrent`. None is at the root, unlike Python's: a type in the
-  enclosing `Confluent.Kafka` would silently replace the `System` type of its name in every
-  binding file, where a `using` only makes a visible CS0104. An error named like a `System` type
-  (`TimeoutException`) is ambiguous in a file that also imports `System` (CS0104): qualify it, or
-  alias it (`using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;`).
+  code that needs both qualifies one. The Java built-in exceptions get Java-named classes too (§3,
+  the `KafkaException` hierarchy row), in the root `Confluent.Kafka` namespace, as Python keeps
+  them at `confluent_kafka`: each one's package (`java.lang`, `java.util`, `java.util.concurrent`)
+  maps to the root itself. Each derives from the .NET built-in that stands in for Java's chain:
+
+  | JDK class | .NET parent |
+  |---|---|
+  | `IllegalArgumentException` | `ArgumentException` |
+  | `IllegalStateException` | `InvalidOperationException` |
+  | `IndexOutOfBoundsException` | `ArgumentOutOfRangeException` |
+  | `UnsupportedOperationException` | `NotSupportedException` |
+  | `ConcurrentModificationException` | `InvalidOperationException` |
+  | `NoSuchElementException` | `InvalidOperationException` |
+  | `ExecutionException` | `Exception` |
+  | `TimeoutException` | `System.TimeoutException` |
+
+  Inside any `Confluent.Kafka.*` namespace a simple name finds a type of the enclosing
+  `Confluent.Kafka` before any `using`, so a bare `TimeoutException` there silently means the root
+  class, never `System`'s (in `Confluent.Kafka.Common.Errors` it means Kafka's own). Library code
+  therefore names every `TimeoutException` in full: `Confluent.Kafka.TimeoutException`,
+  `Common.Errors.TimeoutException` or `global::System.TimeoutException`;
+  `TimeoutExceptionNameTests` fails on a bare one in `src/Confluent.Kafka`. User code outside
+  `Confluent.Kafka` that imports both `System` and `Confluent.Kafka` gets CS0104 for
+  `TimeoutException`, and qualifies or aliases it
+  (`using FutureTimeoutException = Confluent.Kafka.TimeoutException;`,
+  `using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;`).
 - **Names that are also namespaces.** A type may share its name with a namespace, as Java's class
   and package do (`Confluent.Kafka.Common.Header.Header`). Inside any `Confluent.Kafka.Common.*`
   namespace the simple name `Header` means the namespace `Confluent.Kafka.Common.Header` (CS0118),
@@ -164,7 +182,8 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
 - **`using` lines.** A file imports each namespace it uses with one `using` line outside its
   namespace (IDE0065), in `dotnet format`'s order; there is no `global using`. Code in a
   `Confluent.Kafka.*` namespace (the tests, the gRPC server, soak, perf) imports them like user code
-  does: no public type is reachable through the enclosing `Confluent.Kafka` namespace.
+  does; only the eight JDK exception classes are reachable through the enclosing `Confluent.Kafka`
+  namespace (above).
 
 - **public folders** (`src/Confluent.Kafka/Producer/`, `Consumer/`, `Admin/`, `Common/` and its
   subfolders) — **all public API**, whatever the C# kind: the client types *and* the supporting
@@ -638,7 +657,7 @@ its C# realization, and where the enforcing rule lives.
 | `send` — **blocks** *and* returns `Future<RecordMetadata>` | `ValueTask<AsyncKafkaFuture<RecordMetadata>>` on `IAsyncProducer`; the outer stage is the block (it completes at the core's handover `cb`; no thread parked), the inner `AsyncKafkaFuture` is the `Future` (`await future.Get()` = Java's `future.get()`); on `IProducer` it is `KafkaFuture<RecordMetadata>` — `Send` is the block (the blocking `send_with_callback`, ≤ `max.block.ms`), `future.Get()` is the `Future` (M11/P4.2) | M11/P3.5, M11/P3.6, M11/P4.2, ffi §A1 |
 | **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`pause`/`resume`/`unsubscribe`) | `Task`/`Task<T>` on the **async** interface (`IAsyncProducer`/`IAsyncConsumer`) + `CancellationToken`; method name **mirrors Java** (no `Async` suffix) | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7. `seek` and `currentLag` block in Java too: a `Task` on `IAsyncConsumer` over `seek_*_cb` / `current_lag_cb`, a blocking member on `IConsumer` (decision 22, ledger 103) |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close, then join the client's drain thread, wait for the in-flight uses, and destroy on the closing thread — §4 **Close/Dispose**; ffi §A7, §B2 |
-| `KafkaException` hierarchy | Every core error is the class of its id: one generated class per Java exception class, with Java's parent (§2), `KafkaException` the root of the Kafka ones. There is no `IsRetriable` and no `IsFatal`: the class is the category (`catch (RetriableException)`), as in Java and Python. `Code` is internal, the class's C id (§7.6). The Java built-ins map to Java-named classes (§2), each derived from the .NET built-in that stands in for Java's chain: `IllegalStateException`, `ConcurrentModificationException`, `NoSuchElementException` : `InvalidOperationException`; `IllegalArgumentException` : `ArgumentException`; `UnsupportedOperationException` : `NotSupportedException`; `TimeoutException` : `System.TimeoutException`; `ExecutionException` : `Exception`; `IndexOutOfBoundsException` : `ArgumentOutOfRangeException`. `CorrelationIdMismatchException` extends `IllegalStateException`, as Java's does. A managed exception that went through the core as a `local_callback` error comes back as the same instance. | ffi §A5 |
+| `KafkaException` hierarchy | Every core error is the class of its id: one generated class per Java exception class, with Java's parent (§2), `KafkaException` the root of the Kafka ones. There is no `IsRetriable` and no `IsFatal`: the class is the category (`catch (RetriableException)`), as in Java and Python. `Code` is internal, the class's C id (§7.6). The Java built-ins map to Java-named classes in the root `Confluent.Kafka` namespace (§2), each derived from the .NET built-in that stands in for Java's chain: `IllegalStateException`, `ConcurrentModificationException`, `NoSuchElementException` : `InvalidOperationException`; `IllegalArgumentException` : `ArgumentException`; `UnsupportedOperationException` : `NotSupportedException`; `TimeoutException` : `System.TimeoutException`; `ExecutionException` : `Exception`; `IndexOutOfBoundsException` : `ArgumentOutOfRangeException`. `CorrelationIdMismatchException` extends `IllegalStateException`, as Java's does. A managed exception that went through the core as a `local_callback` error comes back as the same instance. | ffi §A5 |
 | `IllegalArgumentException` / `IllegalStateException` | The Java-named classes, with Java's message, for the binding's own checks too, so a check and the core's error for one condition have one class. A closed client throws `IllegalStateException` with its Java message: "Cannot perform operation after producer has been closed", "This consumer has already been closed.", "Cannot accept new calls when AdminClient is closing." The admin client throws it at the call *(deviation, as Python's: Java's `KafkaAdminClient` returns the Result and fails its futures with it; the native handle is gone after `Close`, so the call has no Result to return; ffi §C1)*. A .NET-only precondition (Java throws `NullPointerException` or nothing) keeps `ArgumentNullException` / `ArgumentOutOfRangeException`, except a negative timeout on a consumer lookup Java does not check (`Committed`, `PartitionsFor`, `ListTopics`, `OffsetsForTimes`, `BeginningOffsets`, `EndOffsets`): it throws `IllegalArgumentException` with the core's "Timeout must not be negative", the error the core's `_with_timeout` forms return (ffi §B5). A disposed `ConsumerHandle` keeps `ObjectDisposedException`. | validate **before** the FFI call — ffi §A5 |
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws `WakeupException` (**one-shot**), as Java's | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `ConcurrentModificationException`, sync and async, with Java's `acquire()` message, from the binding's owner check and the core's -2 alike (decision 17). | ffi §B5 |
@@ -778,7 +797,7 @@ not transfer). **If you cannot check, assume it blocks.** (Since M19/P1 `seek` a
 
 **Futures (M19/P1, decision 32).** As in Java and Python, a failed future's `Get()`,
 `Get(TimeSpan)`, `Get(CancellationToken)` and `GetNow` throw
-`Confluent.Kafka.Java.Util.Concurrent.ExecutionException`, and the async `Get` tasks fault with
+`Confluent.Kafka.ExecutionException`, and the async `Get` tasks fault with
 it: its `InnerException` is the stored failure and its message the failure's Java `toString()`
 (`<class>: <message>`, the class alone when there is no message). This replaces the earlier
 rethrow-unchanged deviation (decision 18). An `OperationCanceledException` given as the error of
@@ -805,7 +824,7 @@ Java's `KafkaFutureImpl` format. `BaseFunction` and `BiConsumer` are delegates n
   which faults with the `ExecutionException`. The sync structs hand out no `Task`. *(Q13 = (a),
   ledger 45.)*
 - The async `Get` forms return a `Task`; no struct has a `GetAwaiter`.
-- A timeout throws Java's `TimeoutException` (`Confluent.Kafka.Java.Util.Concurrent`, a
+- A timeout throws Java's `TimeoutException` (`Confluent.Kafka.TimeoutException`, a
   `System.TimeoutException`): with no message, as `CompletableFuture.get`, and for a send's
   future with `FutureRecordMetadata`'s "Timeout after waiting for <ms> ms.", the milliseconds
   truncated. A negative or zero timeout checks once, as Java;

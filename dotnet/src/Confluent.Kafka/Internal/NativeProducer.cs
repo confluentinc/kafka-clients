@@ -22,7 +22,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.Internal;

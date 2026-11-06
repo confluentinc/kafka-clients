@@ -768,7 +768,7 @@ call and raise the class Java raises there — never `KafkaException`.
     fatal export.
   - **The error table:** -2, -3, -4, -5 and -31 → `ConcurrentModificationException`,
     `IllegalArgumentException`, `IllegalStateException`, `TimeoutException`
-    (`Confluent.Kafka.Java.Util.Concurrent`) and `UnsupportedOperationException`; -24 →
+    (`Confluent.Kafka`) and `UnsupportedOperationException`; -24 →
     `CorrelationIdMismatchException`; every other id → its class through the generated
     registry, its fields read from the error's payload view; an id the registry does not know
     (a newer native library) → a bare `KafkaException`. -1 is two classes, told apart as Python
@@ -1056,7 +1056,7 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
         at `851c8d95`). It then throws Kafka's `TimeoutException`
         (`Confluent.Kafka.Common.Errors`, id 7; ledger 79 5d; Python's `KafkaTimeoutError`,
         `python/confluent_kafka/producer/_base.py:470-472`), not the
-        `Confluent.Kafka.Java.Util.Concurrent.TimeoutException` of the core's -5. The message is
+        `Confluent.Kafka.TimeoutException` of the core's -5. The message is
         Python's: from a sync callback
         "Timeout expired after {ms}ms while awaiting {operation} from a send() callback, which
         blocks the producer's completion thread" (`_base.py:130-134`); from an async callback
@@ -2044,7 +2044,7 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     (`rust/src/ffi/consumer/consumer_handle.rs:37-46` at `3f8a5bc6`).
   - **The core's local codes map by the error table (§A5).** -2 →
     `ConcurrentModificationException`, -3 → `IllegalArgumentException`, -4 →
-    `IllegalStateException`, -5 → `TimeoutException` (`Confluent.Kafka.Java.Util.Concurrent`),
+    `IllegalStateException`, -5 → `TimeoutException` (`Confluent.Kafka`),
     -24 → `CorrelationIdMismatchException`, -31 → `UnsupportedOperationException`, each with
     the core's message; a `local_callback` error → the carried instance; every other id → its
     class through the generated registry (-1 by `is_api_error`). This holds on every

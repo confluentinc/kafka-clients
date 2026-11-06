@@ -68,9 +68,9 @@ internal static class JavaText
     };
 
     internal static string ToString(Exception exception) =>
-        exception is IJavaThrowable java ? java.JavaToString() : ThrowableToString(exception, exception.Message);
+        exception is IExceptionText text ? text.TypeAndMessage() : TypeAndMessage(exception, exception.Message);
 
-    internal static string ThrowableToString(Exception exception, string? message)
+    internal static string TypeAndMessage(Exception exception, string? message)
     {
         Type type = exception.GetType();
         string name = type.FullName ?? type.Name;

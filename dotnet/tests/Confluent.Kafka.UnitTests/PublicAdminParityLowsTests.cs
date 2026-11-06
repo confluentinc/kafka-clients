@@ -58,7 +58,7 @@ public sealed class PublicAdminParityLowsTests
         AsyncDescribeClientQuotasResult result = new AsyncDescribeClientQuotasResult(
             new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities));
 
-        Assert.Same(entities.JavaGetAsync(), result.Entities().Get());
+        Assert.Same(entities.GetWrappedAsync(), result.Entities().Get());
         Assert.Same(quotas, await TestTimeout.Run(() => result.Entities().Get(), s_deadline));
 
         ArgumentNullException thrown =

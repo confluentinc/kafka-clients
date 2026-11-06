@@ -19,7 +19,6 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 

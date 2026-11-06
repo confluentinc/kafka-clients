@@ -16,11 +16,10 @@ using System;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
-using Confluent.Kafka.Java.Lang;
 
 using Xunit;
 
-using JavaTimeoutException = Confluent.Kafka.Java.Util.Concurrent.TimeoutException;
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -78,7 +77,7 @@ public sealed class KafkaExceptionReadTests
         for (int i = 0; i < 1000; i++)
         {
             Exception read = KafkaException.FromFfiError(Build(NativeMethods.ErrorLocalTimeout, NonAsciiMessage), owned: true)!;
-            Assert.IsType<JavaTimeoutException>(read);
+            Assert.IsType<FutureTimeoutException>(read);
         }
     }
 
