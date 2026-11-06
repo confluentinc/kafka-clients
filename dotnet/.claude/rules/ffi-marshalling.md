@@ -768,7 +768,9 @@ call and raise the class Java raises there — never `KafkaException`.
     fatal export.
   - **The error table:** -2, -3, -4, -5 and -31 → `ConcurrentModificationException`,
     `IllegalArgumentException`, `IllegalStateException`, `TimeoutException`
-    (`Confluent.Kafka`) and `UnsupportedOperationException`; -24 →
+    (`Confluent.Kafka`) and `UnsupportedOperationException`; -32 (`LocalNullPointerError`, Java's
+    `NullPointerException`, which has no class) → `ArgumentNullException` with the core's message
+    and no `ParamName`; -24 →
     `CorrelationIdMismatchException`; every other id → its class through the generated
     registry, its fields read from the error's payload view; an id the registry does not know
     (a newer native library) → a bare `KafkaException`. -1 is two classes, told apart as Python
@@ -793,8 +795,10 @@ call and raise the class Java raises there — never `KafkaException`.
     binding must reject it —, a negative timeout ("The timeout cannot be negative."). A .NET-only
     precondition, where Java throws `NullPointerException` or nothing, keeps
     `ArgumentNullException` (null record/config) or `ArgumentOutOfRangeException`.
-    **Mandatory**, not optional: the ABI doesn't validate preconditions (CLAUDE.md §3) and
-    some functions `assert!`/panic on violation — a panic across FFI is UB.
+    **Mandatory**, not optional: the core reports a `NULL` mandatory pointer as -32 "<param> must
+    not be null" (→ `ArgumentNullException`, without the binding's `ParamName`) and any other
+    panic as -4 (→ `IllegalStateException`), neither of them Java's error; the binding's own
+    check throws Java's.
   - **Configuration errors are not preconditions.** A value of a type its key does not accept, a
     `null` its key's validator refuses, or a `null` key throws `ConfigException`
     (`Confluent.Kafka.Common.Config`, code −10) with Java's message, before any P/Invoke; the core's
@@ -1958,12 +1962,13 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     or nothing, keeps `ArgumentNullException` (a null `PartitionsFor` topic; a null
     `Pause` / `Resume`, `Committed`, `BeginningOffsets` or `EndOffsets` collection or
     `OffsetsForTimes` map; a null config) or `ArgumentOutOfRangeException`. **Mandatory**, not
-    optional: the ABI doesn't validate preconditions (CLAUDE.md §3), and a `NULL` where the
-    header asks for a live handle is undefined behavior. A panic in the core does not
-    cross the boundary: the `_err` twin stores it as -4 with a message beginning "Rust
+    optional: a `NULL` where the header asks for a mandatory pointer comes back as -32
+    "<param> must not be null" (`LocalNullPointerError`), which the error table maps to
+    `ArgumentNullException` with the core's message and no `ParamName`. Any other panic in
+    the core does not cross the boundary either: the `_err` twin stores it as -4 with a message beginning "Rust
     panic caught at the FFI boundary in <function>" (`rust/ffi-macros/src/lib.rs:87-88`
     at `3f8a5bc6`), which the error table maps to `IllegalStateException`, not to
-    Java's error; so a check the binding skips surfaces as that panic. The core's getters
+    Java's error; so a check the binding skips surfaces as one of those two errors. The core's getters
     panic on a closed consumer
     (`rust/src/consumer/internals/async_kafka_consumer.rs:3928-3931` at `3f8a5bc6`),
     which the closed check keeps from reaching C.
@@ -2045,7 +2050,8 @@ the binding *before* the FFI call and raise the class Java raises there — neve
   - **The core's local codes map by the error table (§A5).** -2 →
     `ConcurrentModificationException`, -3 → `IllegalArgumentException`, -4 →
     `IllegalStateException`, -5 → `TimeoutException` (`Confluent.Kafka`),
-    -24 → `CorrelationIdMismatchException`, -31 → `UnsupportedOperationException`, each with
+    -24 → `CorrelationIdMismatchException`, -31 → `UnsupportedOperationException`,
+    -32 → `ArgumentNullException` (no `ParamName`), each with
     the core's message; a `local_callback` error → the carried instance; every other id → its
     class through the generated registry (-1 by `is_api_error`). This holds on every
     surface, the `ConsumerHandle` included, so a handle op and the same consumer op throw the same type
@@ -2071,7 +2077,7 @@ outcomes — Java raises `IllegalArgument`/`IllegalState`, Python its Java-named
 (`IllegalArgumentError`, `IllegalStateError`) and `TypeError` for Java's `NullPointerException`
 (root `CLAUDE.md`, Python Binding Conventions: Types, the `Objects.requireNonNull` row, and
 Implementation over the FFI, exception 4), all before the native call; ours must too, *and must* because
-the ABI would otherwise reach undefined behavior or a core panic. A check the binding makes in
+the ABI would otherwise answer with its own -32 or -4 error instead of Java's. A check the binding makes in
 the core's place throws the core's class. The wakeup shape keeps Java's once-only semantics on
 Java's class. Concurrent use is refused by the binding's owner check, as Java's `acquire()` and
 Python's use table refuse it, and behind it by the core (ledger 136); every rejection is the

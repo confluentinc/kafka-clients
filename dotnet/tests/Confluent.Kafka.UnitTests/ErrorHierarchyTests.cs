@@ -33,7 +33,8 @@ namespace Confluent.Kafka.UnitTests;
 /// The error classes are Java's: each extends the class of its Java parent, read from the Kafka sources (a JDK class
 /// extends the .NET built-in that stands for Java's chain), every error class is a Java class, a class is abstract
 /// where Java's is, a catch by class catches what Java's catches, and each class's id is the C enum's value for it,
-/// read from the C header, so every enum id but <c>NONE</c> and <c>LOCAL_CALLBACK</c> has a class.
+/// read from the C header, so every enum id but <c>NONE</c> and the core's own <c>LOCAL_CALLBACK</c> and
+/// <c>LOCAL_NULL_POINTER</c> has a class.
 /// </summary>
 public sealed class ErrorHierarchyTests
 {
@@ -42,6 +43,10 @@ public sealed class ErrorHierarchyTests
     private const string JavaRuntimeException = "java.lang.RuntimeException";
 
     private const string EnumEnd = "} kafka_common_Error_e;";
+
+    // The generator's RUST_ONLY_IDS: the carried managed exception, and Java's NullPointerException, which has no class
+    // (an ArgumentNullException here, as Python's TypeError).
+    private static readonly HashSet<string> s_rustOnlyIds = new(StringComparer.Ordinal) { "LOCAL_CALLBACK", "LOCAL_NULL_POINTER" };
 
     /// <summary>
     /// The .NET base of each JDK class: the built-in .NET mapped the class to before it had one, standing for Java's
@@ -220,18 +225,19 @@ public sealed class ErrorHierarchyTests
     }
 
     [Fact]
-    public void EveryCEnumId_ButNoneAndLocalCallback_HasAClass_AndAllButMinusOneAndMinus27_ARegistryEntry()
+    public void EveryCEnumId_ButNoneAndTheRustOnlyIds_HasAClass_AndAllButMinusOneAndMinus27_ARegistryEntry()
     {
         IReadOnlyDictionary<string, int> cEnum = CEnum();
-        int[] classIds = cEnum.Where(entry => entry.Key != "NONE" && entry.Key != "LOCAL_CALLBACK")
+        int[] classIds = cEnum.Where(entry => entry.Key != "NONE" && !s_rustOnlyIds.Contains(entry.Key))
             .Select(entry => entry.Value)
             .OrderBy(id => id)
             .ToArray();
 
         Assert.Equal(0, cEnum["NONE"]);
         Assert.Equal(-30, cEnum["LOCAL_CALLBACK"]);
+        Assert.Equal(-32, cEnum["LOCAL_NULL_POINTER"]);
         Assert.Equal(
-            cEnum.Keys.Where(name => name != "NONE" && name != "LOCAL_CALLBACK").OrderBy(name => name, StringComparer.Ordinal),
+            cEnum.Keys.Where(name => name != "NONE" && !s_rustOnlyIds.Contains(name)).OrderBy(name => name, StringComparer.Ordinal),
             Bridge().Keys.OrderBy(name => name, StringComparer.Ordinal));
         Assert.Equal(classIds, ErrorClasses.Ids.Values.Distinct().OrderBy(id => id));
         Assert.Equal(
@@ -422,7 +428,7 @@ public sealed class ErrorHierarchyTests
             .Matches(header.Substring(start, end - start), @"kafka_common_Error_([A-Z0-9_]+)\s*=\s*(-?\d+)")
             .Cast<Match>()
             .ToDictionary(match => match.Groups[1].Value, match => int.Parse(match.Groups[2].Value), StringComparer.Ordinal);
-        Assert.Equal(168, values.Count);
+        Assert.Equal(169, values.Count);
         return values;
     }
 
