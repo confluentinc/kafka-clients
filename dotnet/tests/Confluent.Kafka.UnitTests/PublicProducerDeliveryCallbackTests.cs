@@ -529,7 +529,7 @@ public sealed class PublicProducerDeliveryCallbackTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => WithTimeout(wait));
         Assert.Equal(cts.Token, canceled.CancellationToken);
         Assert.Empty(callback.Completions);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
 
         Assert.True(producer.CompleteNext());
 

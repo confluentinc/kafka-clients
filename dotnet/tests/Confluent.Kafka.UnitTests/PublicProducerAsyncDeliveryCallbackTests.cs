@@ -87,7 +87,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
                 await Task.Delay(Settle);
                 Assert.Equal(NativeProducer.PumpThreadName, callback.StartThread);
                 Assert.Equal(1, callback.Calls);
-                Assert.False(future.IsDone);
+                Assert.False(future.IsDone());
 
                 gate.SetResult(true);
                 KafkaTimeoutException failure = await FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => Within(future.Get()));
@@ -169,8 +169,8 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
                 await Task.Delay(Settle);
                 Assert.Equal(2, Waiting(producer));
-                Assert.False(futures[1].IsDone);
-                Assert.False(futures[2].IsDone);
+                Assert.False(futures[1].IsDone());
+                Assert.False(futures[2].IsDone());
                 Assert.Equal(0, second.Calls);
                 Assert.Empty(Snapshot(events));
 
@@ -225,7 +225,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
             KafkaTimeoutException failure = await FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => Within(future.Get()));
             Assert.Equal(7, failure.Code);
             Assert.Equal(MetadataTimeout(topic, MaxBlockMs), failure.Message);
-            Assert.False(future.IsCancelled);
+            Assert.False(future.IsCancelled());
             if (probe is not null)
             {
                 Assert.Same(failure, probe.Delivered);
@@ -260,13 +260,13 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
                 await Task.Delay(Settle);
                 Assert.False(flush.IsCompleted, "Flush returned while the async callback ran");
-                Assert.False(futures[0].IsDone);
-                Assert.False(futures[1].IsDone);
+                Assert.False(futures[0].IsDone());
+                Assert.False(futures[1].IsDone());
 
                 gate.SetResult(true);
                 await Within(flush);
-                Assert.True(futures[0].IsDone, "Flush returned before the async callback's record completed");
-                Assert.True(futures[1].IsDone, "Flush returned before the record queued behind it completed");
+                Assert.True(futures[0].IsDone(), "Flush returned before the async callback's record completed");
+                Assert.True(futures[1].IsDone(), "Flush returned before the record queued behind it completed");
                 Assert.True(first.Ended);
             },
             gate);
@@ -398,12 +398,12 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
                 await Task.Delay(Settle);
                 Assert.False(closing.IsCompleted, $"{how} returned while the async callback ran");
-                Assert.False(future.IsDone);
+                Assert.False(future.IsDone());
                 Assert.Empty(destroys.Destroys());
 
                 gate.SetResult(true);
                 await Within(closing);
-                Assert.True(future.IsDone, $"{how} returned before the async callback's record completed");
+                Assert.True(future.IsDone(), $"{how} returned before the async callback's record completed");
                 Assert.Single(destroys.Destroys());
                 Assert.True(endedAtTheDestroy, "the teardown ran before the callback's task ended");
             },
@@ -489,8 +489,8 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
 
                 await Task.Delay(Settle);
                 Assert.False(callback.Ended, "the token ended the async callback");
-                Assert.False(future.IsDone);
-                Assert.False(future.IsCancelled);
+                Assert.False(future.IsDone());
+                Assert.False(future.IsCancelled());
 
                 gate.SetResult(true);
                 KafkaTimeoutException failure = await FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => Within(future.Get()));
@@ -577,7 +577,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
             await Within(callback.WhenStarted);
             Assert.Equal(NativeProducer.PumpThreadName, callback.StartThread);
             await Task.Delay(Settle);
-            Assert.False(future.IsDone);
+            Assert.False(future.IsDone());
 
             gate.SetResult(true);
             RecordMetadata metadata = await Within(future.Get());

@@ -232,12 +232,12 @@ public sealed class PublicAdminTransactionsTests
             }
         }
 
-        Assert.True(producers.All().IsDone);
-        Assert.True(transactions.All().IsDone);
-        Assert.True(abort.All().IsDone);
-        Assert.True(asyncProducers.All().IsDone);
-        Assert.True(asyncTransactions.All().IsDone);
-        Assert.True(asyncAbort.All().IsDone);
+        Assert.True(producers.All().IsDone());
+        Assert.True(transactions.All().IsDone());
+        Assert.True(abort.All().IsDone());
+        Assert.True(asyncProducers.All().IsDone());
+        Assert.True(asyncTransactions.All().IsDone());
+        Assert.True(asyncAbort.All().IsDone());
     }
 
     [Fact]

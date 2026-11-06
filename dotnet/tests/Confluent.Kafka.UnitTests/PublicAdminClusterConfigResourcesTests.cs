@@ -167,15 +167,15 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             KafkaFuture<IReadOnlyCollection<ConfigResource>> stored =
                 StoredFuture<KafkaFuture<IReadOnlyCollection<ConfigResource>>>(result);
             KafkaFuture<IReadOnlyCollection<ConfigResource>> after = result.All();
             Assert.NotEqual(cancelled, after);
-            Assert.False(stored.IsCancelled);
-            Assert.False(stored.IsDone);
-            Assert.False(before.IsDone);
-            Assert.False(after.IsDone);
+            Assert.False(stored.IsCancelled());
+            Assert.False(stored.IsDone());
+            Assert.False(before.IsDone());
+            Assert.False(after.IsDone());
 
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
 
@@ -203,15 +203,15 @@ public sealed class PublicAdminClusterConfigResourcesTests
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> stored =
                 StoredFuture<AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>>>(result);
             AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> after = result.All();
             Assert.NotEqual(cancelled, after);
-            Assert.False(stored.IsCancelled);
-            Assert.False(stored.IsDone);
-            Assert.False(before.IsDone);
-            Assert.False(after.IsDone);
+            Assert.False(stored.IsCancelled());
+            Assert.False(stored.IsDone());
+            Assert.False(before.IsDone());
+            Assert.False(after.IsDone());
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
 

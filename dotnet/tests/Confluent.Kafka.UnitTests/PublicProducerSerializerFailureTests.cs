@@ -151,7 +151,7 @@ public sealed class PublicProducerSerializerFailureTests
         Assert.Equal(1, callback.Calls);
         Assert.Same(value.LastThrown, callback.Exception);
         AssertPlaceholder(callback.Metadata!, partition: 1);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
 
         release.SetResult(true);
 
@@ -183,7 +183,7 @@ public sealed class PublicProducerSerializerFailureTests
         release.SetResult(true);
 
         await TestTimeout.Run(() => flush, s_deadline);
-        Assert.True(future.IsDone);
+        Assert.True(future.IsDone());
     }
 
     // A nested serializer-failure callback must not clear the outer callback's in-callback flag, or the outer

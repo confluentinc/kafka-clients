@@ -162,7 +162,7 @@ public sealed class KafkaFutureWrappedWaitTests
 
         Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => future.Get(s_deadline)));
         Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => future.GetNow(null!)));
-        Assert.False(future.IsCancelled);
+        Assert.False(future.IsCancelled());
         Assert.Same(cancellation, callback.Exception);
     }
 
@@ -190,7 +190,7 @@ public sealed class KafkaFutureWrappedWaitTests
         Task<RecordMetadata> takenAfter = after.Get();
         Assert.True(takenAfter.IsFaulted);
         Assert.Same(cancellation, await FutureAssert.ThrowsAsync<OperationCanceledException>(() => takenAfter));
-        Assert.False(after.IsCancelled);
+        Assert.False(after.IsCancelled());
     }
 
     [Fact]

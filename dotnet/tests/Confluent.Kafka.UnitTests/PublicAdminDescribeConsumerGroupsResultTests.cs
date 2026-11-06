@@ -195,8 +195,8 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
             });
         KafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> all = result.All();
         AsyncKafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> asyncAll = asyncResult.All();
-        Assert.False(all.IsDone);
-        Assert.False(asyncAll.IsDone);
+        Assert.False(all.IsDone());
+        Assert.False(asyncAll.IsDone());
 
         stillRunning.Complete(Description("still-running"));
 

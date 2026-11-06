@@ -212,8 +212,8 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
             });
         KafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>> all = result.All();
         AsyncKafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>> asyncAll = asyncResult.All();
-        Assert.False(all.IsDone);
-        Assert.False(asyncAll.IsDone);
+        Assert.False(all.IsDone());
+        Assert.False(asyncAll.IsDone());
 
         stillRunning.Complete(Description("still-running"));
 

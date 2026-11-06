@@ -125,7 +125,7 @@ public sealed class PublicAdminListTopicsTests
         try
         {
             AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions().ListInternal(true));
-            Assert.False(result.NamesToListings().IsDone);
+            Assert.False(result.NamesToListings().IsDone());
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
 
@@ -225,7 +225,7 @@ public sealed class PublicAdminListTopicsTests
                     listenedOn = Thread.CurrentThread.Name;
                 });
 
-                Assert.True(future.IsDone);
+                Assert.True(future.IsDone());
                 Assert.False(ImplOf(future).IsSettled);
                 Assert.Equal(0, Volatile.Read(ref listened));
 
@@ -321,7 +321,7 @@ public sealed class PublicAdminListTopicsTests
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
             await TestTimeout.DisposeAsync(admin);
 
-            Assert.True(result.NamesToListings().IsCompletedExceptionally);
+            Assert.True(result.NamesToListings().IsCompletedExceptionally());
             AssertThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => result.Names().Get(), BlockingCall.Deadline)));
         }
         else
@@ -335,7 +335,7 @@ public sealed class PublicAdminListTopicsTests
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
             TestTimeout.Dispose(admin);
 
-            Assert.True(result.NamesToListings().IsCompletedExceptionally);
+            Assert.True(result.NamesToListings().IsCompletedExceptionally());
             BlockingCall.AssertThrew(BlockingCall.RunGet(() => result.Names().Get()), 7, ThreadExited);
         }
 

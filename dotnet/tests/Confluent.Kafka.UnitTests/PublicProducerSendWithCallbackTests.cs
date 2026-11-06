@@ -438,7 +438,7 @@ public sealed class PublicProducerSendWithCallbackTests
                 return;
             }
 
-            DoneInsideTheCallback = _future.IsDone;
+            DoneInsideTheCallback = _future.IsDone();
             GetReturnedInsideTheCallback = Volatile.Read(ref GetReturned);
         }
     }
