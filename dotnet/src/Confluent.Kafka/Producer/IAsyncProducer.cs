@@ -168,7 +168,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <param name="cancellationToken">Ends the wait, never the operation.</param>
     /// <returns>A task that completes when the coordinator has acknowledged the offsets.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
-    /// could not be null").</exception>
+    /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
@@ -176,6 +176,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// producer.</exception>
     /// <exception cref="Common.Errors.TimeoutException">The combined time taken for resolving topic metadata and
     /// sending the offsets has surpassed <c>max.block.ms</c>.</exception>
+    /// <exception cref="BootstrapResolutionException">DNS resolution of the bootstrap servers fails within
+    /// <c>bootstrap.resolve.timeout.ms</c>.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
     /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
     /// other unexpected error.</exception>
