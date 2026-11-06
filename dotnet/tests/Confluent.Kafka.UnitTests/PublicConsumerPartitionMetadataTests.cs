@@ -194,21 +194,21 @@ public sealed class PublicConsumerPartitionMetadataTests
     }
 
     [Fact]
-    public async Task PartitionsFor_AfterDispose_ThrowsObjectDisposed()
+    public async Task PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.PartitionsFor(Topic));
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.PartitionsFor(Topic));
     }
 
     [Fact]
-    public async Task ListTopics_AfterDispose_ThrowsObjectDisposed()
+    public async Task ListTopics_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.ListTopics());
+        await Assert.ThrowsAsync<IllegalStateException>(() => consumer.ListTopics());
     }
 
     [Fact]

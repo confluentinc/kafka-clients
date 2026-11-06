@@ -29,11 +29,11 @@ namespace Confluent.Kafka.Consumer;
 /// <para>
 /// There is no cancellation token, as in Java: <see cref="IConsumerCommon.Wakeup"/> from another thread makes a
 /// blocked <see cref="Poll"/>, <c>Commit</c>, <c>Position</c>, <c>Committed</c>, <c>PartitionsFor</c> or
-/// <c>ListTopics</c> throw a <see cref="KafkaException"/> with the Wakeup code, once.
+/// <c>ListTopics</c> throw a <see cref="WakeupException"/>, once.
 /// </para>
 /// <para>
 /// The consumer has one owner at a time, as Java's does. A call from another thread while a call is in progress
-/// throws <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for multi-threaded access.");
+/// throws <see cref="ConcurrentModificationException"/> ("KafkaConsumer is not safe for multi-threaded access.");
 /// <see cref="MockConsumer{TKey, TValue}"/> makes it wait instead. <see cref="IConsumerCommon.Wakeup"/> and
 /// <see cref="IConsumerCommon.Handle"/> may be called from any thread, and a <see cref="IDisposable.Dispose"/> from
 /// another thread wakes the call in progress, waits for it, and closes the consumer.
@@ -55,8 +55,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
     /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a poll failure (or a <see cref="IConsumerCommon.Wakeup"/> interrupted it).</exception>
     /// <exception cref="RecordDeserializationException">
     /// The first record of the batch failed to deserialize. A record that fails after others is not thrown: the
@@ -69,9 +69,17 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// Subscribes to <paramref name="topics"/> (Java <c>subscribe(Collection)</c>).
     /// </summary>
     /// <param name="topics">The topics to subscribe to.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
-    /// <exception cref="ArgumentException">A topic name is null.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null or holds a null or empty
+    /// topic, with Java's message.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// </exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     void Subscribe(IReadOnlyCollection<string> topics);
 
     /// <summary>
@@ -88,16 +96,24 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </remarks>
     /// <param name="topics">The topics to subscribe to.</param>
     /// <param name="listener">The rebalance listener to register.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
-    /// <exception cref="ArgumentException">A topic name is null.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="listener"/> is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>,
+    /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// </exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
     void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener);
 
     /// <summary>
     /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>).
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     void Unsubscribe();
 
     /// <summary>
@@ -108,10 +124,17 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// rejected.
     /// </remarks>
     /// <param name="partitions">The topic-partitions to assign (an empty collection clears the assignment).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null or holds a partition
+    /// with a null or empty topic, with Java's message.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, an element topic is null.
+    /// </exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an assignment failure.</exception>
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -122,12 +145,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to pause.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or a partition is not assigned to the consumer.
+    /// </exception>
     /// <exception cref="KafkaException">The core reported a pause failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
@@ -139,12 +161,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to resume.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or a partition is not assigned to the consumer.
+    /// </exception>
     /// <exception cref="KafkaException">The core reported a resume failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Resume(IReadOnlyCollection<TopicPartition> partitions);
@@ -155,12 +176,17 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to seek to the beginning.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null ("Partitions collection
+    /// cannot be null").
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
+    /// </exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions);
@@ -171,12 +197,17 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <remarks>An empty collection does nothing.</remarks>
     /// <param name="partitions">The topic-partitions to seek to the end.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="IllegalArgumentException">
+    /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null ("Partitions collection
+    /// cannot be null").
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
+    /// </exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions);
@@ -187,12 +218,16 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="partition">The topic-partition whose position to read.</param>
     /// <returns>The current offset position of <paramref name="partition"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
-    /// <exception cref="ArgumentException"><paramref name="partition"/> is not assigned to the consumer.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or <paramref name="partition"/> is not assigned to a
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="partition"/> is not assigned to a <see cref="MockConsumer{TKey, TValue}"/>, as Java's mock
+    /// reports it.
+    /// </exception>
     /// <exception cref="KafkaException">The core reported a position failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     long Position(TopicPartition partition);
@@ -204,18 +239,19 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="partition">The topic-partition whose position to read.</param>
     /// <param name="timeout">The maximum time to block.</param>
     /// <returns>The current offset position of <paramref name="partition"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="partition"/>'s partition is negative, or <paramref name="timeout"/> is negative
-    /// ("Invalid negative timeout &lt;ms&gt;").
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;"), or <paramref name="partition"/>
+    /// is not assigned to a <see cref="MockConsumer{TKey, TValue}"/>, as Java's mock reports it.
     /// </exception>
-    /// <exception cref="ArgumentException"><paramref name="partition"/> is not assigned to the consumer.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or <paramref name="partition"/> is not assigned to a
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
     /// <exception cref="KafkaException">
-    /// The position could not be determined within <paramref name="timeout"/> (code 7), or the core reported another
-    /// position failure.
+    /// The position could not be determined within <paramref name="timeout"/> (a
+    /// <see cref="Common.Errors.TimeoutException"/>), or the core reported another position failure.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     long Position(TopicPartition partition, TimeSpan timeout);
@@ -224,7 +260,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// Commits the current fetch positions for all assigned partitions and waits for the commit (Java
     /// <c>commitSync()</c>). <see cref="CommitAsync()"/> is Java's <c>commitAsync()</c>, which does not wait.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit failure.</exception>
     void Commit();
 
@@ -233,14 +269,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <paramref name="timeout"/> (Java <c>commitSync(Duration)</c>).
     /// </summary>
     /// <param name="timeout">The maximum time to block.</param>
-    /// <exception cref="ArgumentOutOfRangeException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The commit did not complete within <paramref name="timeout"/> (code 7), or the core reported another commit
-    /// failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports code 24
-    /// (<c>INVALID_GROUP_ID</c>) for a negative <paramref name="timeout"/>, before the timeout check.
+    /// The commit did not complete within <paramref name="timeout"/> (a <see cref="Common.Errors.TimeoutException"/>),
+    /// or the core reported another commit failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c>
+    /// reports an <see cref="InvalidGroupIdException"/> for a negative <paramref name="timeout"/>, before the timeout
+    /// check.
     /// </exception>
     void Commit(TimeSpan timeout);
 
@@ -252,8 +289,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit failure.</exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
 
@@ -265,14 +301,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="timeout">The maximum time to block.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// A key partition is negative, or <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The commit did not complete within <paramref name="timeout"/> (code 7), or the core reported another commit
-    /// failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports code 24
-    /// (<c>INVALID_GROUP_ID</c>) for a negative <paramref name="timeout"/>, before the timeout check.
+    /// The commit did not complete within <paramref name="timeout"/> (a <see cref="Common.Errors.TimeoutException"/>),
+    /// or the core reported another commit failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c>
+    /// reports an <see cref="InvalidGroupIdException"/> for a negative <paramref name="timeout"/>, before the timeout
+    /// check.
     /// </exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout);
 
@@ -280,8 +317,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// Commits the current fetch positions without waiting for the commit (Java <c>commitAsync()</c>):
     /// returns once the commit is started.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     /// <exception cref="KafkaException">The core could not start the commit.</exception>
     void CommitAsync();
 
@@ -297,8 +334,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </remarks>
     /// <param name="callback">The callback that receives the commit's outcome.</param>
     /// <exception cref="ArgumentNullException"><paramref name="callback"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     /// <exception cref="KafkaException">The core could not start the commit.</exception>
     void CommitAsync(IOffsetCommitCallback callback);
 
@@ -317,9 +354,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="callback">The callback that receives the commit's outcome, or <see langword="null"/> for none.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     /// <exception cref="KafkaException">The core could not start the commit.</exception>
     void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
@@ -331,12 +367,12 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="partition">The topic-partition to seek.</param>
     /// <param name="offset">The offset to seek to.</param>
-    /// <exception cref="ArgumentOutOfRangeException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="offset"/> is negative ("seek offset must not be a negative number").
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
+    /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Seek(TopicPartition partition, long offset);
@@ -349,9 +385,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="partition">The topic-partition to seek.</param>
     /// <param name="offsetAndMetadata">The offset to seek to.</param>
     /// <exception cref="ArgumentNullException"><paramref name="offsetAndMetadata"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
+    /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
@@ -362,8 +398,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="partition">The topic-partition whose lag to read.</param>
     /// <returns>The current lag, or <see langword="null"/> when it is not known.</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="InvalidOperationException">Another thread is using the consumer.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or <paramref name="partition"/> is not assigned to a
+    /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     long? CurrentLag(TopicPartition partition);
 
     /// <summary>
@@ -376,14 +415,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The committed offset (and metadata) of each partition, <see langword="null"/> where it has none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The core reported a committed-query failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without
-    /// <c>group.id</c> reports code 24 (<c>INVALID_GROUP_ID</c>) for a null <paramref name="partitions"/>, before the
-    /// null check.
+    /// The core reported a committed-query failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c>
+    /// reports an <see cref="InvalidGroupIdException"/> for a null <paramref name="partitions"/>, before the null
+    /// check.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions);
@@ -397,14 +435,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The committed offset (and metadata) of each partition, <see langword="null"/> where it has none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative, or <paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
-    /// A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports code 24 (<c>INVALID_GROUP_ID</c>)
-    /// for a negative <paramref name="timeout"/> or a null <paramref name="partitions"/>, before those checks.
+    /// The query did not complete within <paramref name="timeout"/> (a <see cref="Common.Errors.TimeoutException"/>),
+    /// or the core reported another failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c>
+    /// reports an <see cref="InvalidGroupIdException"/> for a negative <paramref name="timeout"/> or a null
+    /// <paramref name="partitions"/>, before those checks.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
@@ -420,10 +459,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an offsets-for-times failure.</exception>
-    /// <exception cref="NotSupportedException">The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.</exception>
+    /// <exception cref="UnsupportedOperationException">
+    /// The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch);
 
@@ -437,12 +477,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative, or <paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// The query did not complete within <paramref name="timeout"/> (a <see cref="Common.Errors.TimeoutException"/>),
+    /// or the core reported another failure.
     /// </exception>
-    /// <exception cref="NotSupportedException">The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.</exception>
+    /// <exception cref="UnsupportedOperationException">
+    /// The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout);
 
@@ -454,10 +497,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The earliest available offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a beginning-offsets failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions);
@@ -471,12 +513,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The earliest available offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative, or <paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// The query did not complete within <paramref name="timeout"/> (a <see cref="Common.Errors.TimeoutException"/>),
+    /// or the core reported another failure.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
@@ -489,10 +532,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The latest offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an end-offsets failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions);
@@ -506,12 +548,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The latest offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative, or <paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// The query did not complete within <paramref name="timeout"/> (a <see cref="Common.Errors.TimeoutException"/>),
+    /// or the core reported another failure.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
@@ -527,9 +570,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="topic">The topic whose partition metadata to read.</param>
     /// <returns>The partition metadata for the topic.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a partitions-for failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
@@ -545,14 +588,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <paramref name="topic"/> is null, unless the consumer is a <see cref="KafkaConsumer{TKey, TValue}"/> and
     /// <paramref name="timeout"/> is zero.
     /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The metadata was not available within <paramref name="timeout"/> (code 7), or the core reported another
-    /// failure. On a <see cref="KafkaConsumer{TKey, TValue}"/> a null <paramref name="topic"/> with a zero
-    /// <paramref name="timeout"/> times out at once: code 7, with an empty message.
+    /// The metadata was not available within <paramref name="timeout"/> (a
+    /// <see cref="Common.Errors.TimeoutException"/>), or the core reported another failure. On a
+    /// <see cref="KafkaConsumer{TKey, TValue}"/> a null <paramref name="topic"/> with a zero <paramref name="timeout"/>
+    /// times out at once, with an empty message.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout);
@@ -562,9 +606,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <c>listTopics()</c>), keyed by topic name; an empty dictionary when no topic is known.
     /// </summary>
     /// <returns>The partition metadata for every visible topic, keyed by topic.</returns>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a list-topics failure.</exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics();
@@ -575,13 +619,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="timeout">The maximum time to block.</param>
     /// <returns>The partition metadata for every visible topic, keyed by topic.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
-    /// The metadata was not available within <paramref name="timeout"/> (code 7), or the core reported another
-    /// failure.
+    /// The metadata was not available within <paramref name="timeout"/> (a
+    /// <see cref="Common.Errors.TimeoutException"/>), or the core reported another failure.
     /// </exception>
-    /// <exception cref="NotSupportedException">
+    /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout);
@@ -594,10 +638,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// The close waits at most 30 seconds, the bound of Java's <c>close()</c>. Java's deprecated
     /// <c>close(Duration)</c> is not translated; <see cref="Close(CloseOptions)"/> sets the bound. Inside a callback
     /// of this consumer (a rebalance listener or a commit callback), <see cref="IDisposable.Dispose"/> throws
-    /// <see cref="InvalidOperationException"/> as this method does, and both return without effect once a close has
-    /// begun.
+    /// <see cref="ConcurrentModificationException"/> as this method does, and both return without effect once a
+    /// close has begun.
     /// </remarks>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, or the call is made inside a callback of this consumer;
     /// the consumer stays open.
     /// </exception>
@@ -610,10 +654,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="option">The close options.</param>
     /// <exception cref="ArgumentNullException"><paramref name="option"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">
+    /// <exception cref="IllegalArgumentException">
     /// The timeout of <paramref name="option"/> is negative ("The timeout cannot be negative.").
     /// </exception>
-    /// <exception cref="InvalidOperationException">
+    /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, or the call is made inside a callback of this consumer;
     /// the consumer stays open.
     /// </exception>

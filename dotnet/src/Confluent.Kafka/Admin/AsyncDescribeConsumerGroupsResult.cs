@@ -73,7 +73,7 @@ public sealed class AsyncDescribeConsumerGroupsResult
             Dictionary<string, ConsumerGroupDescription> descriptions = new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;

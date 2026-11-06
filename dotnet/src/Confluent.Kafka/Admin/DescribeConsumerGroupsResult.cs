@@ -82,7 +82,7 @@ public sealed class DescribeConsumerGroupsResult
             Dictionary<string, ConsumerGroupDescription> descriptions = new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;

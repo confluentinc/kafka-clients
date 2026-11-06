@@ -19,6 +19,7 @@ using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Xunit;
 
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 using Proto = Confluent.Kafka.Test;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests;
@@ -88,7 +89,7 @@ public sealed class ProducerServiceTests
 
         Task<Proto.SendResponse> send = SendOnAnotherThread(server, producerId);
         await WaitUntil(() => server.PendingHistoryCount() == 1);
-        Assert.True(server.ErrorPendingNext(new TimeoutException("the core timed out")));
+        Assert.True(server.ErrorPendingNext(new FutureTimeoutException("the core timed out")));
         Proto.SendResponse response = await send.WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.Equal(-5, response.Error.Code);

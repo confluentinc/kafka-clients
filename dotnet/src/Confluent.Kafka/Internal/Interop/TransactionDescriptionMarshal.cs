@@ -25,11 +25,12 @@ namespace Confluent.Kafka.Internal.Interop;
 /// </summary>
 internal static class TransactionDescriptionMarshal
 {
-    internal static TransactionDescription CopyOut(IntPtr description)
+    internal static TransactionDescription? CopyOut(IntPtr description)
     {
         if (description == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no transaction description.");
+            // Python's binding reads a missing description as None, so the future completes with null.
+            return null;
         }
 
         IntPtr outErr = IntPtr.Zero;
@@ -64,7 +65,7 @@ internal static class TransactionDescriptionMarshal
     {
         if (state == IntPtr.Zero)
         {
-            throw new KafkaException("The admin result produced no transaction state.");
+            throw new InvalidOperationException("The admin result produced no transaction state.");
         }
 
         IntPtr outErr = IntPtr.Zero;

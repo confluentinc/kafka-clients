@@ -91,7 +91,7 @@ public sealed class PublicProducerFlushDrainTests
     }
 
     [Fact]
-    public async Task Flush_AfterDispose_ThrowsObjectDisposed()
+    public async Task Flush_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer =
             new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -104,7 +104,7 @@ public sealed class PublicProducerFlushDrainTests
         }
 
         Func<object> flush = () => producer.Flush();
-        Assert.Throws<ObjectDisposedException>(flush);
+        Assert.Throws<IllegalStateException>(flush);
     }
 
     private static Task<RecordMetadata>[] Fire(AsyncMockProducer<byte[], byte[]> producer)

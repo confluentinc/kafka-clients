@@ -85,7 +85,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Assert.True(seen.Elapsed < s_quickly, $"Dispose took {seen.Elapsed.TotalMilliseconds} ms");
         Assert.Equal(0, seen.PendingCallsAtReturn);
         Assert.True(seen.PendingCompleted, "the pending send did not complete");
-        Assert.IsType<ObjectDisposedException>(seen.AfterClose);
+        Assert.IsType<IllegalStateException>(seen.AfterClose);
         await Task.Delay(Settle);
         Assert.Equal(1, seen.FlushingCalls);
         Assert.Equal(1, seen.PendingCalls());

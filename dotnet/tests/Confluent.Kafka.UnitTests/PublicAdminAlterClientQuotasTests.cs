@@ -54,7 +54,7 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         foreach (AsyncKafkaFuture perEntity in new[] { result.Values[Entity("valid")], result.Values[empty] })
         {
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => perEntity.Get(), s_deadline));
 
             // The core mock's own per-entity wording, typo included, not the whole-call rejection.
@@ -77,7 +77,7 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.Equal(EmptyEntity(), Assert.Single(result.Values).Key);
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[EmptyEntity()].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -93,11 +93,11 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.Equal(Entity("dup"), Assert.Single(result.Values).Key);
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[Entity("dup")].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
-        NotSupportedException all = await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        UnsupportedOperationException all = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, all.Message);
     }
 
@@ -114,7 +114,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
         Assert.True(result.Values.ContainsKey(lookup));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -140,7 +140,7 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.NotEqual(Entity(null), Entity(string.Empty));
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -178,9 +178,9 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
-        await Assert.ThrowsAsync<NotSupportedException>(
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
@@ -194,12 +194,12 @@ public sealed class PublicAdminAlterClientQuotasTests
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("solo-first", 1d), Alteration("solo-second", 2d) });
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -211,7 +211,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("all-a", 1d), Alteration("all-b", 2d) });
 
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -242,7 +242,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal("用户-café", key.Entries[ClientQuotaEntity.USER]);
         Assert.Equal(Entity("用户-café"), key);
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -295,7 +295,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.AlterClientQuotas(new[] { Alteration("gone", 1d) }));
     }
 

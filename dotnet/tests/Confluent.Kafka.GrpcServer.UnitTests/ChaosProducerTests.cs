@@ -140,11 +140,10 @@ public sealed class ChaosProducerTests
         foreach (Proto.WorkloadEvent failure in failures)
         {
             Exception thrown = harness.Producer.SendThrew[failure.SendFailed.Index];
-            ObjectDisposedException disposed = Assert.IsType<ObjectDisposedException>(thrown);
-            string withoutObjectName = new ObjectDisposedException((string?)null).Message;
-            Assert.StartsWith(withoutObjectName, disposed.Message, StringComparison.Ordinal);
+            IllegalStateException closed = Assert.IsType<IllegalStateException>(thrown);
+            Assert.Equal("MockProducer is already closed.", closed.Message);
             Assert.Equal(-4, failure.SendFailed.Error.Code);
-            Assert.Equal(withoutObjectName, failure.SendFailed.Error.Message);
+            Assert.Equal("MockProducer is already closed.", failure.SendFailed.Error.Message);
         }
 
         // The healthy records' callbacks fired once each; a throwing Send's never did.

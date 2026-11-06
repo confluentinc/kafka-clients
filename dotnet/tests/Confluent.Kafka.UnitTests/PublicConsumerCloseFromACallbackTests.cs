@@ -58,11 +58,11 @@ public sealed class PublicConsumerCloseFromACallbackTests
 
             TestTimeout.Run(() => consumer.Rebalance(new[] { s_partition }), s_deadline);
 
-            InvalidOperationException rejected = Assert.IsType<InvalidOperationException>(inside);
+            ConcurrentModificationException rejected = Assert.IsType<ConcurrentModificationException>(inside);
             Assert.Equal(ConcurrentMessage, rejected.Message);
             Assert.Equal(new[] { s_partition }, consumer.Assignment());
             TestTimeout.Teardown(consumer, () => consumer.Close());
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -81,11 +81,11 @@ public sealed class PublicConsumerCloseFromACallbackTests
 
             TestTimeout.Run(() => consumer.Rebalance(new[] { s_partition }), s_deadline);
 
-            InvalidOperationException rejected = Assert.IsType<InvalidOperationException>(inside);
+            ConcurrentModificationException rejected = Assert.IsType<ConcurrentModificationException>(inside);
             Assert.Equal(ConcurrentMessage, rejected.Message);
             Assert.Equal(new[] { s_partition }, consumer.Assignment());
             TestTimeout.Dispose(consumer);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -128,7 +128,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
         await TestTimeout.Run(() => rebalance, s_deadline);
         await TestTimeout.Run(() => disposing, s_deadline);
         Assert.Null(inside);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -196,7 +196,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
             Assert.Null(unexpected);
             Assert.True(returned == 0, $"{returned} of {calls} closes inside the listener returned without closing");
             Assert.Null(outside);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {
@@ -306,7 +306,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
             await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
         }
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Theory]
@@ -340,7 +340,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
             await TestTimeout.Run(() => consumer.DisposeAsync().AsTask(), s_deadline);
         }
 
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -376,7 +376,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
         await TestTimeout.Run(() => rebalance, s_deadline);
         await TestTimeout.Run(() => disposing, s_deadline);
         Assert.Null(inside);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     [Fact]
@@ -461,7 +461,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
 
     private static async Task AssertRejected(Task closing)
     {
-        InvalidOperationException rejected = await Assert.ThrowsAsync<InvalidOperationException>(() => closing);
+        ConcurrentModificationException rejected = await Assert.ThrowsAsync<ConcurrentModificationException>(() => closing);
         Assert.Equal(ConcurrentMessage, rejected.Message);
     }
 
@@ -469,7 +469,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
     {
         Assert.Equal(new[] { s_partition }, consumer.Assignment());
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
-        Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+        Assert.Throws<IllegalStateException>(() => consumer.Assignment());
     }
 
     private static void SpinUntilWaitingOrEnded(Thread thread, Func<bool> calling, Func<bool> ended)
@@ -479,7 +479,7 @@ public sealed class PublicConsumerCloseFromACallbackTests
         {
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the other thread's call neither waited nor ended");
+                throw new System.TimeoutException("the other thread's call neither waited nor ended");
             }
 
             Thread.Yield();
@@ -495,17 +495,17 @@ public sealed class PublicConsumerCloseFromACallbackTests
             {
                 consumer.Assignment();
             }
-            catch (ObjectDisposedException)
+            catch (IllegalStateException)
             {
                 return;
             }
-            catch (InvalidOperationException)
+            catch (ConcurrentModificationException)
             {
             }
 
             if (elapsed.Elapsed > s_deadline)
             {
-                throw new TimeoutException("the consumer never began to close");
+                throw new System.TimeoutException("the consumer never began to close");
             }
 
             Thread.Yield();

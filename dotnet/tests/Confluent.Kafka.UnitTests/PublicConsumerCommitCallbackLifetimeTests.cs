@@ -22,6 +22,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Xunit;
@@ -251,9 +252,9 @@ public sealed class PublicConsumerCommitCallbackLifetimeTests
                 return;
             }
 
-            KafkaException refused = _sync is not null
-                ? Assert.Throws<KafkaException>(() => _sync.CommitAsync(Offsets(1), (IOffsetCommitCallback)callback))
-                : Assert.Throws<KafkaException>(() => Await(() => CommitAsync(Offsets(1), callback)));
+            InvalidGroupIdException refused = _sync is not null
+                ? Assert.Throws<InvalidGroupIdException>(() => _sync.CommitAsync(Offsets(1), (IOffsetCommitCallback)callback))
+                : Assert.Throws<InvalidGroupIdException>(() => Await(() => CommitAsync(Offsets(1), callback)));
             Assert.Equal(InvalidGroupIdCode, refused.Code);
             Assert.Equal(NoGroupId, refused.Message);
         }
@@ -318,8 +319,8 @@ public sealed class PublicConsumerCommitCallbackLifetimeTests
             Await(() => rebalance);
             foreach (Task refusal in _refusals)
             {
-                InvalidOperationException concurrent =
-                    Assert.Throws<InvalidOperationException>(() => Await(() => refusal));
+                ConcurrentModificationException concurrent =
+                    Assert.Throws<ConcurrentModificationException>(() => Await(() => refusal));
                 Assert.Equal(ConcurrentMessage, concurrent.Message);
             }
 

@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -46,13 +47,13 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.DeletedGroups)
         {
-            NotSupportedException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => entry.Value.Get()), s_deadline);
+            UnsupportedOperationException thrown = await TestTimeout.Run(
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => entry.Value.Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
 
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -65,8 +66,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b", "p5-group-a" });
 
         Assert.Equal(new[] { "p5-group-a", "p5-group-b" }, result.DeletedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
-        NotSupportedException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException fromAll = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -76,7 +77,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroups(new[] { "p5-disposed" }));
+        Assert.Throws<IllegalStateException>(() => admin.DeleteConsumerGroups(new[] { "p5-disposed" }));
     }
 
     [Fact]
@@ -91,7 +92,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
     [Fact]
     public async Task DeletedGroups_EachEntryIsIndependentlyFaultable()
     {
-        KafkaException error = new KafkaException(11, "group failure", isRetriable: false);
+        KafkaException error = new Common.Errors.ControllerMovedException("group failure");
 
         Dictionary<string, AsyncKafkaFuture> sources = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
@@ -103,15 +104,15 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         await TestTimeout.Run(() => result.DeletedGroups["good"].Get(), s_deadline);
 
-        KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.DeletedGroups["bad"].Get()), s_deadline);
+        ControllerMovedException thrown = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<ControllerMovedException>(() => result.DeletedGroups["bad"].Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 
     [Fact]
     public async Task All_FaultsWithTheFirstFailure_WhenAnyGroupFailed()
     {
-        KafkaException error = new KafkaException(11, "group failure", isRetriable: false);
+        KafkaException error = new Common.Errors.ControllerMovedException("group failure");
 
         Dictionary<string, AsyncKafkaFuture> sources = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
@@ -121,8 +122,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         AsyncDeleteConsumerGroupsResult mixed = new AsyncDeleteConsumerGroupsResult(sources);
 
-        KafkaException thrown = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => mixed.All().Get()), s_deadline);
+        ControllerMovedException thrown = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<ControllerMovedException>(() => mixed.All().Get()), s_deadline);
         Assert.Same(error, thrown);
 
         AsyncDeleteConsumerGroupsResult clean = new AsyncDeleteConsumerGroupsResult(

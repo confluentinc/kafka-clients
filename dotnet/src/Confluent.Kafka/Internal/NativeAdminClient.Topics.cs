@@ -834,7 +834,7 @@ internal sealed partial class NativeAdminClient
                 }
 
             default:
-                throw new ArgumentException(
+                throw new IllegalArgumentException(
                     "The TopicCollection: null provided did not match any supported classes for " + operation + ".");
         }
     }

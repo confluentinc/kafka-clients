@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Internal;
@@ -60,7 +61,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(bindings.Length, result.Values.Count);
         foreach (AclBinding binding in bindings)
         {
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Values[binding].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -81,7 +82,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, result.Values.Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
         {
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Values[entity].Get(), s_deadline));
 
             // The core mock's own wording, typo included.
@@ -107,7 +108,7 @@ public sealed class AdminP9PerKeyStage5Tests
 
         foreach (Uuid id in new[] { first, second })
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
                 () => TestTimeout.Run(() => values[id].Get(), s_deadline));
             Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
             Assert.Equal($"Topic {id} does not exist.", failure.Message);
@@ -137,12 +138,12 @@ public sealed class AdminP9PerKeyStage5Tests
 
         Assert.Equal(2, result.Values.Count);
 
-        KafkaException zeroFailure = await Assert.ThrowsAsync<KafkaException>(
+        KafkaStorageException zeroFailure = await FutureAssert.ThrowsAsync<KafkaStorageException>(
             () => TestTimeout.Run(() => result.Values[zero].Get(), s_deadline));
         Assert.Equal(KafkaStorageErrorCode, zeroFailure.Code);
         Assert.Equal("Log directory /cp6-offline-zero is offline", zeroFailure.Message);
 
-        KafkaException oneFailure = await Assert.ThrowsAsync<KafkaException>(
+        KafkaStorageException oneFailure = await FutureAssert.ThrowsAsync<KafkaStorageException>(
             () => TestTimeout.Run(() => result.Values[one].Get(), s_deadline));
         Assert.Equal("Log directory /cp6-offline-one is offline", oneFailure.Message);
     }
@@ -170,7 +171,7 @@ public sealed class AdminP9PerKeyStage5Tests
 
         await TestTimeout.Run(() => result.Values[inRange].Get(), s_deadline);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
             () => TestTimeout.Run(() => result.Values[outOfRange].Get(), s_deadline));
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
     }
@@ -187,7 +188,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, groups.DeletedGroups.Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
         {
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => groups.DeletedGroups[group].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -211,7 +212,7 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, result.Values.Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })
         {
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Values[user].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }

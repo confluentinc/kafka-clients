@@ -53,12 +53,12 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
-    public void Seek_UnassignedPartition_ThrowsInvalidOperationException()
+    public void Seek_UnassignedPartition_ThrowsIllegalState()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => consumer.Seek("proof-topic", 0, 0L));
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.Seek("proof-topic", 0, 0L));
 
         Assert.Equal("No current assignment for partition proof-topic-0", ex.Message);
     }
@@ -71,7 +71,7 @@ public sealed class ConsumerCompletionBridgeTests
 
         for (int i = 0; i < 50; i++)
         {
-            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() => consumer.Seek("proof-topic", 0, 0L));
+            IllegalStateException ex = Assert.Throws<IllegalStateException>(() => consumer.Seek("proof-topic", 0, 0L));
             Assert.Equal("No current assignment for partition proof-topic-0", ex.Message);
         }
     }

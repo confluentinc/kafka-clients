@@ -21,12 +21,15 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -94,17 +97,17 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         try
         {
             Task plain = consumer.CommitAsync();
-            KafkaException e = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => plain, s_deadline));
+            InvalidGroupIdException e = await Assert.ThrowsAsync<InvalidGroupIdException>(() => TestTimeout.Run(() => plain, s_deadline));
             Assert.Equal(InvalidGroupIdCode, e.Code);
             Assert.Equal(NoGroupId, e.Message);
 
             Task withAsyncCallback = consumer.CommitAsync(Offsets(1), new AsyncDelegateCallback((_, _) => Task.CompletedTask));
-            e = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => withAsyncCallback, s_deadline));
+            e = await Assert.ThrowsAsync<InvalidGroupIdException>(() => TestTimeout.Run(() => withAsyncCallback, s_deadline));
             Assert.Equal(InvalidGroupIdCode, e.Code);
             Assert.Equal(NoGroupId, e.Message);
 
             Task withCallback = consumer.CommitAsync(Offsets(1), new DelegateCallback((_, _) => { }));
-            e = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => withCallback, s_deadline));
+            e = await Assert.ThrowsAsync<InvalidGroupIdException>(() => TestTimeout.Run(() => withCallback, s_deadline));
             Assert.Equal(InvalidGroupIdCode, e.Code);
             Assert.Equal(NoGroupId, e.Message);
 
@@ -249,7 +252,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
 
             consumer.Wakeup();
 
-            KafkaException woken = await Assert.ThrowsAsync<KafkaException>(
+            WakeupException woken = await Assert.ThrowsAsync<WakeupException>(
                 () => TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
@@ -271,7 +274,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             using ConsumerHandle handle = consumer.Handle();
             handle.Wakeup();
 
-            KafkaException woken = await Assert.ThrowsAsync<KafkaException>(
+            WakeupException woken = await Assert.ThrowsAsync<WakeupException>(
                 () => TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
@@ -314,9 +317,9 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
                 s_deadline);
             await TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline);
 
-            KafkaException timeout = Assert.IsType<KafkaException>(await TestTimeout.Run(() => raised.Task, s_deadline));
+            KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(await TestTimeout.Run(() => raised.Task, s_deadline));
             Assert.Equal(7, timeout.Code);
-            Assert.True(timeout.IsRetriable);
+            Assert.IsAssignableFrom<Common.Errors.RetriableException>(timeout);
             TimedOutMessage.AssertCallerOrReaper(HandleTimeoutMessage(call), timeout.Message);
 
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
@@ -335,7 +338,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             await CancelACommitAwaitingTheAsyncCallbackItDelivered(consumer, afterTheOwnWake: consumer.Wakeup);
 
-            KafkaException woken = await Assert.ThrowsAsync<KafkaException>(
+            WakeupException woken = await Assert.ThrowsAsync<WakeupException>(
                 () => TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
@@ -355,7 +358,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             consumer.Wakeup();
             await TestTimeout.Run(() => consumer.Commit(Empty()), s_deadline);
 
-            KafkaException woken = await Assert.ThrowsAsync<KafkaException>(
+            WakeupException woken = await Assert.ThrowsAsync<WakeupException>(
                 () => TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
             Assert.Equal(WakeupCode, woken.Code);
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
@@ -553,7 +556,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
 
             Assert.Equal(new[] { "start", "end", "returned" }, Snapshot(events));
             await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(5))), s_deadline);
-            Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+            Assert.Throws<IllegalStateException>(() => consumer.Assignment());
         }
         finally
         {

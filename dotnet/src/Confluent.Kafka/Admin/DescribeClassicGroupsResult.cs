@@ -82,7 +82,7 @@ public sealed class DescribeClassicGroupsResult
             Dictionary<string, ClassicGroupDescription> descriptions = new Dictionary<string, ClassicGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<ClassicGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
             }
 
             return descriptions;
