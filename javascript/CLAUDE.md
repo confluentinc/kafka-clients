@@ -2,8 +2,9 @@
 
 The Node.js client in `javascript/` is built only on the C FFI of root
 `CLAUDE.md` §4, like the Python client. It is a Node-API addon written in plain
-C against `node_api.h` (`src/`), built with node-gyp, under a thin CommonJS
-layer (`lib/`) whose TypeScript declarations are generated from its JSDoc.
+C against `node_api.h` (`src/`), built with node-gyp, under a thin layer
+written in TypeScript (`lib/`), which tsc compiles into CommonJS with its
+declarations (`dist/`, the package's entry points).
 This file holds the rules the Actor and the Critic apply to it; root
 `CLAUDE.md` still applies wherever this file is silent. The approved design is
 `design/current/javascript-producer/PLAN.md`.
@@ -94,7 +95,7 @@ These decide every question, in this order:
    returns, so a caller that awaits each `send()` meets the FFI's "wait for
    the hand-over before the next send" contract. Sends not awaited one by one
    are concurrent, like Java sends on several threads; this is documented on
-   `send`, in its generated declaration and in the README. The binding never
+   `send`, in its compiled declaration and in the README. The binding never
    holds records back itself.
 8. **Zero extra copies of key and value** (PLAN D9). A `Buffer` /
    `Uint8Array` crosses as a `kafka_Bytes_t` over its own memory; the addon
@@ -106,7 +107,7 @@ These decide every question, in this order:
    the equivalent of Java's `StringSerializer`, so it is unaffected. Header
    values are copied by the core during the call.
 9. **Ownership follows the signature.** Errors from `out_err` and from `_cb`
-   completions are owned: copied into a JS error (`lib/_errors.js`), then destroyed. The
+   completions are owned: copied into a JS error (`lib/_errors.ts`), then destroyed. The
    error and metadata a delivery callback receives are borrowed: copied, never
    destroyed. If a send fails at hand-over, its per-record context stays on the
    producer's orphan list until after destroy (the delivery callback may still
@@ -144,6 +145,12 @@ These decide every question, in this order:
 
 ## Java shape, JS idiom
 
+- Supported import forms: `require`, named imports, `import * as`, and an ES
+  module's default import under Node's own loader. A default import through an
+  interop helper (`esModuleInterop`, Babel) is not supported: every public
+  `index.ts` declares `export declare const __esModule: true;` (tsc emits the
+  marker itself, the declaration no JS), so TypeScript rejects it (TS1192)
+  rather than letting it read a missing `default` (`test/typing` pins this).
 - Class and member names follow Java (`KafkaProducer`, `ProducerRecord`,
   `RecordMetadata`, `send`, `flush`, `close`); methods are camelCase.
 - Java getters are read-only properties named by Python's rule: a leading `get`
@@ -176,7 +183,7 @@ These decide every question, in this order:
   AuthenticationError extends ApiError extends KafkaError`), in the folder of
   its Java package (`common/errors/`, `java.*` at the root). Every
   `kafka_common_Error_t` becomes an instance of the class of its FFI id
-  (`lib/_errors.js` `fromNative`, Python's `_errors.py` `_build`: an unknown
+  (`lib/_errors.ts` `fromNative`, Python's `_errors.py` `_build`: an unknown
   id is the base `KafkaError`, and `UNKNOWN_SERVER_ERROR` without
   `is_api_error` is the bare `KafkaError`, not `UnknownServerError`). `name` is
   the class name (JavaScript's convention); `code` (the `kafka_common_Error_e`
@@ -205,9 +212,9 @@ These decide every question, in this order:
   before anything else: such a close changes nothing, and an open producer
   stays usable.
 - Configuration is a plain object (or a `Map`) of Java's config keys, checked
-  as Python's `_config.py` checks it (`lib/_config.js`): a value of a key
+  as Python's `_config.py` checks it (`lib/_config.ts`): a value of a key
   Java's `ProducerConfig` defines must have a JS type its `ConfigDef` type
-  takes (the generated `lib/_config_types.js`; a string is always accepted
+  takes (the generated `lib/_config_types.ts`; a string is always accepted
   but for `STRING` / `PASSWORD`, which must be strings), else `ConfigError`
   with Java's `parseType` message, a `PASSWORD` value shown as `[hidden]`; a
   `null` for a key whose validator rejects `null` throws that validator's
@@ -227,48 +234,65 @@ These decide every question, in this order:
   (each client embeds a `CallbackQueue` and passes its own
   `__execute_callbacks`); `error.c`, `record.c` (`ProducerRecord` and
   headers), `producer.c` (the `KafkaProducer` handle).
-- `lib/`: one public Java type per file, snake_case names, `_` prefix for
-  private files (never exported, never declared). Every folder is a module:
-  its `index.js` only requires its public modules and its child folders (as
-  namespaces, `common.errors`) and has one `module.exports` literal
-  (re-exported types are JSDoc `@typedef`s there); the root `index.js`
-  exports the namespaces (`producer`, `common`, `consumer`) and the root's
-  own modules, the Java built-in errors (Java's `java.*` packages map to the
-  root, as in the Python client). The
-  addon is loaded, and its one-time setup done, in `lib/_native.js`, never in
-  an `index.js`. Java getters stay properties.
-- Types are JSDoc in the `.js`; the `.d.ts` beside every public `.js` is
-  generated by `make types` (tsc: allowJs, declaration, emitDeclarationOnly)
-  and committed; `test/typing` checks it is up to date and type-checks
-  `test/typing/usage.ts` under `--strict`. A `_` member another class calls is
-  `@private` in its JSDoc, so it is declared private.
-- `package.json`: an `exports` entry (`types` + `default`) per module folder,
-  `"gypfile": false`, no install scripts, `files` without the build inputs,
-  the tests and the gRPC harness.
+- `lib/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one public
+  Java type per file, snake_case names, `_` prefix for private files (never
+  exported, never declared). Every folder is a module: its `index.ts` only
+  re-exports, `export { A } from './a'` (`export type { ... }` for a type) for
+  its public modules and `export * as errors from './errors'` for its child
+  folders (the namespaces, `common.errors`), plus the one
+  `export declare const __esModule: true;` (above); the root `index.ts` exports the
+  namespaces (`producer`, `common`, `consumer`) and the root's own modules,
+  the Java built-in errors (Java's `java.*` packages map to the root, as in the
+  Python client). The addon is loaded, and its one-time setup done, in
+  `lib/_native.ts`, never in an `index.ts`. Java getters stay properties.
+- Types are TypeScript, under `strict` (`tsconfig.json`); the prose docs are
+  TSDoc comments (`@param name -`, `@returns`, `@throws` with the error class in
+  backquotes), with no JSDoc type annotations. `make build` (`build-ts`)
+  compiles `lib/` into `dist/` (`.js`, `.d.ts`, both with maps): CommonJS
+  (`module: node16`, the package having no `"type"`), so `require` loads it and
+  an ES module `import`s it through Node's CommonJS interop, ES2022 for
+  Node >= 18. `dist/` is git-ignored and is what `package.json` points at and
+  publishes; a private module's `.d.ts` is removed after compiling. A `_`
+  member another class calls is TypeScript `private` and called with bracket
+  access (`record['_toNative']()`), which TypeScript's `private` allows, so it
+  is declared `private`; a private constructor the native layer calls
+  (`RecordMetadata`) is reached through a cast in `lib/_native.ts`.
+  `test/typing` type-checks `test/typing/usage.ts` against `dist/`'s
+  declarations under `--strict` and checks no public declaration refers to a
+  private module.
+- `package.json`: `main`, `types`, an `exports` entry (`types` + `default`) per
+  module folder and its `typesVersions` all point into `dist/`;
+  `"gypfile": false`, no install scripts, `files` the compiled `dist/` (not
+  `lib/`, the build inputs, the tests or the gRPC harness).
 - Tests: `test/static` (no build),
   `test/unit/<module>/<file>.test.js` for a Java test class, named after the
-  `lib/<module>/<file>.js` it tests: the Java test class without its `Test`
+  `lib/<module>/<file>.ts` it tests: the Java test class without its `Test`
   suffix, snake_cased (`KafkaProducerTest` -> `producer/kafka_producer.test.js`;
   `test/static/layout.test.js` checks it), other unit tests
   named after what they test, `test/typing`,
-  `test/integration` (broker-backed). Tests and examples import the package by
-  its own name (`require('@confluentinc/kafka-javascript/producer')`, Node's
-  self-reference), so no install is needed; tests of private helpers require
-  `lib/_*.js` directly.
+  `test/integration` (broker-backed). The tests, the example and the gRPC
+  server stay JavaScript and run against the compiled package (every target
+  that runs them builds it first; `test/static` reads the sources and needs no
+  build): they import the package by its own name
+  (`require('@confluentinc/kafka-javascript/producer')`, Node's
+  self-reference), so no install is needed; tests of private helpers, and the
+  gRPC server, require `dist/_*.js` directly.
 
 ## Generated files
 
 `cargo xtask generate-error-codes` generates, from the Java sources and the
 FFI enum (the Python client's generators, `rust/xtask/src/javascript_gen.rs`):
-the error classes and `lib/_error_registry.js`, the config classes'
+the error classes and `lib/_error_registry.ts`, the config classes'
 constants (`ProducerConfig`, `SslConfigs`, `SaslConfigs`, `SecurityConfig`)
-and `lib/_config_types.js`; `make types` then their `.d.ts`. A generated file
-carries `GENERATED, DO NOT EDIT` naming its generator, and is never edited by
-hand; `cargo xtask check-generated` fails on a stale, missing or orphaned one.
-A folder holding only generated modules has a generated `index.js`; in a
-hand-written one (`lib/`, `common/`, `common/config/`, `producer/`) the
-generator owns the `BEGIN GENERATED REQUIRES` / `BEGIN GENERATED EXPORTS`
-blocks.
+and `lib/_config_types.ts`, all TypeScript (typed: a config constant's type is
+written out, `static readonly X: string = '...'`), which `make build` compiles
+with the rest. A generated file carries the license and `GENERATED, DO NOT
+EDIT` naming its generator, and is never edited by hand;
+`cargo xtask check-generated` fails on a stale, missing or orphaned one (a
+`.ts`, or a generated `.js` left in `lib/`). A folder holding only generated
+modules has a generated `index.ts`; in a hand-written one (`lib/`, `common/`,
+`common/config/`, `producer/`) the generator owns the
+`BEGIN GENERATED EXPORTS` / `END GENERATED EXPORTS` block.
 
 ## Files and process
 

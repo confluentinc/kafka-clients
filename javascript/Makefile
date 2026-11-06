@@ -36,9 +36,12 @@ NODE_GYP ?= $(or $(shell command -v node-gyp 2>/dev/null),$(if $(NPM_NODE_GYP),$
 NODE_PREFIX ?= $(realpath $(dir $(realpath $(shell command -v $(NODE))))..)
 NODEDIR_FLAG = $(if $(wildcard $(NODE_PREFIX)/include/node/node_api.h),--nodedir=$(NODE_PREFIX),)
 
-# TypeScript (a devDependency): `make types` generates the committed .d.ts
-# files from lib/'s JSDoc, and test-typing checks them. TSC is the command that
-# runs tsc, TS_TYPE_ROOTS the directory holding @types/node.
+# TypeScript (a devDependency, with @types/node: `npm ci` installs them). The
+# library is written in TypeScript, lib/**/*.ts, and `build` compiles it into
+# dist/ (tsconfig.json), the package's entry points; test-typing type-checks
+# test/typing/usage.ts against dist/'s declarations. TSC is the command that
+# runs tsc, TS_TYPE_ROOTS the directory holding @types/node for the typing
+# test's consumer projects.
 TSC ?= node_modules/.bin/tsc
 TS_TYPE_ROOTS ?= node_modules/@types
 export TSC TS_TYPE_ROOTS
@@ -69,14 +72,26 @@ GRPC_NATIVE_DIR ?= $(RUST_PROJECT_ROOT)/target/grpc-native/javascript
 GRPC_NPM_PACKAGES = $(shell $(NODE) -p "Object.entries(require('./package.json').devDependencies) \
 	.filter(([n]) => n.startsWith('@grpc/')).map(([n, v]) => n + '@' + v).join(' ')")
 
-.PHONY: build types test test-static test-unit test-typing test-integration \
+.PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
 	grpc-image grpc-native test-integration-grpc clean
 
-build:
+# The addon and the compiled library: the package cannot run without either.
+build: build-addon build-ts
+
+build-addon:
 	$(NODE_GYP) rebuild $(NODEDIR_FLAG)
 
-types:
-	$(NODE) scripts/gen_types.js --write
+# lib/**/*.ts -> dist/ (.js, .d.ts and their maps), from a clean dist/ so a
+# removed source leaves no stale output. The private modules (lib/_*.ts) are
+# never declared: their .d.ts are removed, so nothing can type against them
+# (test/typing checks no public declaration refers to one).
+build-ts:
+	@$(TSC) --version >/dev/null 2>&1 || { \
+	  echo "javascript: cannot run tsc ($(TSC)): run \`npm ci\` in javascript/ to install the devDependencies (typescript, @types/node), or set TSC" >&2; \
+	  exit 1; }
+	rm -rf dist
+	$(TSC) -p tsconfig.json
+	find dist \( -name '_*.d.ts' -o -name '_*.d.ts.map' \) -delete
 
 # Then the container gRPC arm of the Rust multilanguage suite, as python/'s and
 # c/'s `test` end with theirs: a recipe line, so it runs after the broker-backed
@@ -93,9 +108,9 @@ test-static:
 test-unit: build
 	$(NODE) --test $(UNIT_TESTS)
 
-# The committed .d.ts are up to date and type-check under --strict; skipped,
-# with a visible message, when $(TSC) cannot be run.
-test-typing:
+# The compiled declarations (dist/) type-check under --strict in a consumer's
+# configurations; needs only the compiled library, not the addon.
+test-typing: build-ts
 	$(NODE) --test $(TYPING_TESTS)
 
 # Against KAFKA_BOOTSTRAP_SERVERS when set; otherwise against a scratch broker
@@ -171,4 +186,4 @@ test-integration-grpc:
 	fi
 
 clean:
-	rm -rf build
+	rm -rf build dist

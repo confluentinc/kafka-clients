@@ -14,11 +14,13 @@
 
 'use strict';
 
-// Runs the TypeScript compiler for `make types` (scripts/gen_types.js) and the
-// typing tests. The compiler is a devDependency: `TSC` names the command
-// (default node_modules/.bin/tsc) and `TS_TYPE_ROOTS` the directory holding
-// @types/node (default node_modules/@types). The tsconfig files are written
-// under build/, which is git-ignored.
+// Runs the TypeScript compiler for the typing tests (test/typing), which
+// type-check a consumer's code against the compiled declarations in dist/ in
+// several consumer configurations. The compiler is a devDependency: `TSC`
+// names the command (default node_modules/.bin/tsc) and `TS_TYPE_ROOTS` the
+// directory holding @types/node (default node_modules/@types). The tsconfig
+// files are written under build/, which is git-ignored. (The library build
+// itself is `make build-ts`, with javascript/tsconfig.json.)
 
 const fs = require('node:fs');
 const path = require('node:path');

@@ -111,8 +111,9 @@ verify-commit-checks: submodules
 # The Node.js client (javascript/): standalone for now, not part of `build`,
 # `test` or `verify`, so those need no Node.js. CI runs its own jobs for it
 # (verify-javascript and verify-javascript-macos-docker, in .semaphore/semaphore.yml).
-# javascript/Makefile expects the Rust library already built, so these targets
-# build it first.
+# Its build is the addon and the TypeScript library, which needs `npm ci` in
+# javascript/ first (typescript is a devDependency). javascript/Makefile expects
+# the Rust library already built, so these targets build it first.
 build-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript build
@@ -129,8 +130,8 @@ build-grpc-images-javascript:
 # against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
 # when set), then the container gRPC multilanguage arm (Linux only; see
 # test-integration-javascript), as python/'s and c/'s `test` end with theirs. The
-# typing tests need the devDependencies (`npm ci` in javascript/) and skip, with
-# a message, without them.
+# build needs the devDependencies (`npm ci` in javascript/): typescript compiles
+# the library (javascript/lib/*.ts -> javascript/dist/).
 test-javascript: build-javascript
 	$(MAKE) -C javascript test
 

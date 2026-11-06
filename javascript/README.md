@@ -3,9 +3,10 @@
 A Node.js client for Apache Kafka built on the C FFI of the Confluent Kafka
 Rust client, in the same way as the Python client in `../python`. It is a
 Node-API addon written in plain C (`src/`), so one build works on every Node
-release supporting Node-API version 8, under a thin CommonJS layer (`lib/`)
-with TypeScript declarations (a `.d.ts` beside every public module, generated
-from its JSDoc).
+release supporting Node-API version 8, under a thin layer written in
+TypeScript (`lib/`), compiled into CommonJS with its type declarations
+(`dist/`), so it is used from CommonJS (`require`), from ES modules (`import`)
+and from TypeScript alike (see "Layout" for the import forms).
 
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
 `RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
@@ -23,7 +24,13 @@ publishing under the shared name needs the agreement of the team that owns it.
 - Node.js 18 or newer, with its headers (official tarballs, Homebrew and Nix
   installs ship them under `<prefix>/include/node`).
 - A C compiler and Python 3 (for node-gyp). node-gyp itself is the copy npm
-  bundles; no registry access is needed.
+  bundles.
+- The devDependencies, from `package-lock.json` (TypeScript and `@types/node`
+  compile the library; the gRPC packages serve the multilanguage suite below):
+
+  ```bash
+  (cd javascript && npm ci)
+  ```
 - The Rust library and its bindings header:
 
   ```bash
@@ -34,22 +41,25 @@ publishing under the shared name needs the agreement of the team that owns it.
 ## Build and test
 
 ```bash
-make -C javascript build             # or, from the repository root: make build-javascript
+(cd javascript && npm ci)            # once: typescript, @types/node and the gRPC packages
+make -C javascript build             # the addon (node-gyp) and the library (tsc, lib/ -> dist/);
+                                     # or, from the repository root: make build-javascript
 make -C javascript test-static       # header conformance and package layout, no build needed
 make -C javascript test-unit         # no broker needed
-make -C javascript test-typing       # the .d.ts are up to date and type-check (needs tsc)
+make -C javascript test-typing       # dist/'s declarations type-check under --strict
 make -C javascript test-integration  # starts a scratch broker with docker, or uses
                                      # KAFKA_BOOTSTRAP_SERVERS when it is set
-make -C javascript types             # regenerate lib/**/*.d.ts from the JSDoc (needs tsc)
 ```
 
 `make test` runs all four, then, on Linux, the container arm of the Rust
-multilanguage suite (below; it is skipped with a message elsewhere). TypeScript
-and `@types/node` are devDependencies (`npm ci` installs them from
-`package-lock.json`); `TSC` (default `node_modules/.bin/tsc`) and
-`TS_TYPE_ROOTS` (default `node_modules/@types`) point at other copies, e.g.
-`make -C javascript types TSC="node /path/to/typescript/bin/tsc" TS_TYPE_ROOTS=/path/to/@types`.
-Without a runnable `tsc`, `test-typing` is skipped with a message.
+multilanguage suite (below; it is skipped with a message elsewhere). Every
+target that runs tests but `test-static` builds first: the tests, the example
+and the gRPC server are JavaScript run against the compiled `dist/`.
+`make build-addon` and `make build-ts` build either half. `TSC` (default
+`node_modules/.bin/tsc`) points at another TypeScript compiler, and
+`TS_TYPE_ROOTS` (default `node_modules/@types`) at the `@types/node` the typing
+tests use; without a runnable `tsc` the build fails, telling you to run
+`npm ci`.
 
 `CONFLUENT_KAFKA_LIB_DIR` (default `../rust/target/release`) and
 `CONFLUENT_KAFKA_INCLUDE_DIR` (default `../rust/target/include`) select the
@@ -88,8 +98,24 @@ const { SaslAuthenticationError } = require('@confluentinc/kafka-javascript/comm
 const { SslConfigs, SaslConfigs } = require('@confluentinc/kafka-javascript/common/config');
 ```
 
+The supported import forms are `require` (above), named imports and a
+namespace import, from an ES module or from TypeScript, and an ES module's
+default import under Node's own loader (`.mjs`, `.mts`, `"type": "module"`):
+
+```js
+import { producer, common } from '@confluentinc/kafka-javascript';
+import { KafkaProducer } from '@confluentinc/kafka-javascript/producer';
+import * as kafka from '@confluentinc/kafka-javascript';
 ```
-lib/index.js           the namespaces { producer, common, consumer } and the Java built-in
+
+A default import compiled to CommonJS by an interop helper (TypeScript's
+`esModuleInterop`, Babel, a bundler's interop) does not work: the compiled
+package sets `__esModule`, so the helper reads a `default` export it does not
+have. TypeScript rejects such an import (TS1192, "has no default export");
+import by name or as a namespace instead.
+
+```
+lib/index.ts           the namespaces { producer, common, consumer } and the Java built-in
                        errors (IllegalStateError, IllegalArgumentError, ...)
 lib/producer/          KafkaProducer, ProducerRecord, RecordMetadata, Callback (a type),
                        ProducerConfig, BufferExhaustedError
@@ -97,13 +123,16 @@ lib/common/            KafkaError, KafkaFuture; errors/ (Java's common.errors), 
                        (SslConfigs, SaslConfigs, SecurityConfig, SslClientAuth, ConfigError),
                        security/auth/ (SecurityProtocol), ...
 lib/consumer/          the consumer's errors only (no consumer yet)
-lib/_*.js              private helpers (not exported)
+lib/_*.ts              private helpers (not exported, not declared)
+dist/                  lib/ compiled by tsc (tsconfig.json): .js, .d.ts and maps, the
+                       package's entry points (git-ignored)
 src/                   the addon: util.h, addon.c, callback_queue.c, error.c, record.c, producer.c
 test/static|unit|typing|integration
 ```
 
-The addon builds as `build/Release/confluent-kafka-javascript.node`; installing the
-package runs no build (`"gypfile": false`, no install scripts).
+The addon builds as `build/Release/confluent-kafka-javascript.node`, beside
+`dist/`, which loads it; installing the package runs no build
+(`"gypfile": false`, no install scripts).
 
 ## Example
 

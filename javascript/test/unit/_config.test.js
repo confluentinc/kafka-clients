@@ -14,7 +14,7 @@
 
 'use strict';
 
-// lib/_config.js, as python/test/unit/test_config.py, test_config_matrix.py
+// lib/_config.ts, as python/test/unit/test_config.py, test_config_matrix.py
 // and test_config_null.py check python/confluent_kafka/_config.py: every key of
 // the generated producer table with a value of its ConfigDef type and of a
 // wrong one, null against the key's validator, and the security checks the
@@ -25,8 +25,8 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { configEntries } = require('../../lib/_config');
-const { PRODUCER, PRODUCER_NULL } = require('../../lib/_config_types');
+const { configEntries } = require('../../dist/_config');
+const { PRODUCER, PRODUCER_NULL } = require('../../dist/_config_types');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
