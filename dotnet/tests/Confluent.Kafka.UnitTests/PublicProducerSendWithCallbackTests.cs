@@ -346,10 +346,10 @@ public sealed class PublicProducerSendWithCallbackTests
         };
 
     private static KafkaProducer<byte[], byte[]> SyncUnreachable(int maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncKafkaProducer<byte[], byte[]> AsyncUnreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Exception Capture(Action action)
     {

@@ -577,7 +577,7 @@ public sealed class ErrorPayloadReaderTests
     {
         TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "none");
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "none");
         consumer.Assign(new[] { tp });
 
         NoOffsetForPartitionException e =
@@ -592,7 +592,7 @@ public sealed class ErrorPayloadReaderTests
     {
         TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Assign(new[] { tp });
         consumer.UpdateBeginningOffset(NonAsciiTopic, 0, 5);
         consumer.Seek(tp, 2);

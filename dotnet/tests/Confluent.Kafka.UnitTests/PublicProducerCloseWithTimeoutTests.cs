@@ -128,7 +128,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         string topic = Topic("mock-negative-close");
         if (flavor == SyncFlavor)
         {
-            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             Assert.Equal(0L, producer.Send(Record(topic)).Get(Deadline).Offset());
 
@@ -139,7 +139,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         else
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => producer.Send(Record(topic)).AsTask(), Deadline);
             Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset());

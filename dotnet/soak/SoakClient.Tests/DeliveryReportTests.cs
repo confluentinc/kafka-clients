@@ -42,7 +42,7 @@ public sealed class DeliveryReportTests
             new ProcessResourceSampler(),
             new CancellationTokenSource(),
             producer,
-            new AsyncMockConsumer<byte[], SoakRecord>(Serdes.ByteArray, new SoakRecordDeserializer()),
+            new AsyncMockConsumer<byte[], SoakRecord>(Serdes.ByteArray(), new SoakRecordDeserializer()),
             "h",
             0,
             0);
@@ -55,7 +55,7 @@ public sealed class DeliveryReportTests
     {
         var sink = new CapturingSink();
         using SoakClient client = NewClient(
-            new AsyncMockProducer<byte[], SoakRecord>(Serdes.ByteArray, new SoakRecordSerializer(50)),
+            new AsyncMockProducer<byte[], SoakRecord>(Serdes.ByteArray(), new SoakRecordSerializer(50)),
             sink);
 
         await client.ProduceRecordAsync();
@@ -71,7 +71,7 @@ public sealed class DeliveryReportTests
     {
         var sink = new CapturingSink();
         var producer = new AsyncMockProducer<byte[], SoakRecord>(
-            Serdes.ByteArray, new SoakRecordSerializer(50), autoComplete: false);
+            Serdes.ByteArray(), new SoakRecordSerializer(50), autoComplete: false);
         using SoakClient client = NewClient(producer, sink);
 
         await client.ProduceRecordAsync();

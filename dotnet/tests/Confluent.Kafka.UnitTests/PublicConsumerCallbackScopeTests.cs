@@ -294,10 +294,10 @@ public sealed class PublicConsumerCallbackScopeTests
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {
@@ -308,10 +308,10 @@ public sealed class PublicConsumerCallbackScopeTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray(), Serdes.ByteArray());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
     private sealed class SyncListener : IConsumerRebalanceListener

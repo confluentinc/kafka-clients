@@ -65,7 +65,7 @@ internal static class ChaosEvents
         return value;
     }
 
-    // Serdes.ByteArray keeps absent and empty apart: null is an absent key or value, an empty array
+    // Serdes.ByteArray() keeps absent and empty apart: null is an absent key or value, an empty array
     // a present empty one.
     internal static bool TryCheckRecord(byte[]? key, byte[]? value, uint msgSize, out ulong index, out string? detail)
     {

@@ -48,7 +48,7 @@ public sealed class ProducerRecord<TKey, TValue>
     /// <param name="topic">The destination topic (required, non-null).</param>
     /// <param name="value">
     /// The record value, or <see langword="null"/> for a tombstone (subject to the serializer). An empty value
-    /// differs from a null one only if the serializer keeps the difference, as <see cref="Serdes.ByteArray"/> does.
+    /// differs from a null one only if the serializer keeps the difference, as <see cref="Serdes.ByteArray()"/> does.
     /// </param>
     /// <param name="key">
     /// The record key, or <see langword="null"/> for no key (subject to the serializer).

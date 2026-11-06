@@ -74,7 +74,7 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
         byte[] value = new byte[valueSize];
 
         MockConsumer<byte[], int> consumer =
-            new MockConsumer<byte[], int>(Serdes.ByteArray, valueDeserializer);
+            new MockConsumer<byte[], int>(Serdes.ByteArray(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);

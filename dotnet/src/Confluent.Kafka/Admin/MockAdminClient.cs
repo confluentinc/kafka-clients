@@ -44,7 +44,7 @@ public sealed class MockAdminClient : IAdmin
     /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
     /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    public static IReadOnlyList<string> DEFAULT_LOG_DIRS { get; } = new ReadOnlyCollection<string>(new[] { "/tmp/kafka-logs" });
+    public static readonly IReadOnlyList<string> DEFAULT_LOG_DIRS = new ReadOnlyCollection<string>(new[] { "/tmp/kafka-logs" });
 
     private readonly NativeAdminClient _native;
 

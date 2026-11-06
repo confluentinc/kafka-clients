@@ -99,7 +99,7 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 
     internal V3SyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
     }
 
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
@@ -128,7 +128,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 
     internal V3AsyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
     }
 
     public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
@@ -189,7 +189,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
 
     internal V3SyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
     {
-        _consumer = new KafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _consumer = new KafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
     }
 
@@ -241,7 +241,7 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
 
     internal V3AsyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
     {
-        _consumer = new AsyncKafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _consumer = new AsyncKafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
     }
 

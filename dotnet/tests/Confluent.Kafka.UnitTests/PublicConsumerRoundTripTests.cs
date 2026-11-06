@@ -43,7 +43,7 @@ public sealed class PublicConsumerRoundTripTests
 
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyToPoll(string topic = Topic, int partition = Partition)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(new TopicPartition(topic, partition), offset: 0), s_deadline);

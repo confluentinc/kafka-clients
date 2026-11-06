@@ -37,7 +37,7 @@ public sealed class ResourcePatternFilter
     private readonly PatternType _patternType;
 
     /// <summary>A filter matching every resource pattern — Java's <c>ANY</c>.</summary>
-    public static ResourcePatternFilter ANY { get; } =
+    public static readonly ResourcePatternFilter ANY =
         new ResourcePatternFilter(Resource.ResourceType.ANY, null, Resource.PatternType.ANY);
 
     /// <summary>

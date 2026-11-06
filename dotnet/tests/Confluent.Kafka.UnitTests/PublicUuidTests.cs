@@ -211,15 +211,17 @@ public sealed class PublicUuidTests
 
         foreach ((string name, Type type) in new[]
         {
+            (nameof(Uuid.ZERO_UUID), typeof(Uuid)),
             (nameof(Uuid.ONE_UUID), typeof(Uuid)),
             (nameof(Uuid.METADATA_TOPIC_ID), typeof(Uuid)),
             (nameof(Uuid.RESERVED), typeof(IReadOnlyCollection<Uuid>)),
         })
         {
-            PropertyInfo property = typeof(Uuid).GetProperty(name, BindingFlags.Public | BindingFlags.Static)!;
-            Assert.NotNull(property);
-            Assert.Equal(type, property.PropertyType);
-            Assert.Null(property.SetMethod);
+            Assert.Null(typeof(Uuid).GetProperty(name, BindingFlags.Public | BindingFlags.Static));
+            FieldInfo field = typeof(Uuid).GetField(name, BindingFlags.Public | BindingFlags.Static)!;
+            Assert.NotNull(field);
+            Assert.Equal(type, field.FieldType);
+            Assert.True(field.IsInitOnly);
         }
 
         MethodInfo randomUuid = Assert.Single(

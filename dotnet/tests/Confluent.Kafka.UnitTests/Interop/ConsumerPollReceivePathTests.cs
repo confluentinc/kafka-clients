@@ -227,7 +227,7 @@ public sealed class ConsumerPollReceivePathTests
         for (int i = 0; i < 50; i++)
         {
             consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
-            Task<ConsumerRecords<byte[], byte[]>> op = consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+            Task<ConsumerRecords<byte[], byte[]>> op = consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
@@ -254,7 +254,7 @@ public sealed class ConsumerPollReceivePathTests
     }
 
     private static Task<ConsumerRecords<byte[], byte[]>> PollWithCallback(NativeConsumer consumer) =>
-        consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+        consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
 
     private static async Task<ConsumerRecords<byte[], byte[]>> TestTimeoutResult(Task<ConsumerRecords<byte[], byte[]>> op)
     {
