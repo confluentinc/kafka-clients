@@ -33,7 +33,8 @@ namespace Confluent.Kafka.UnitTests.Internal;
 /// Tests <see cref="JavaText"/>: <see cref="JavaText.CoreText"/>, the text the core parses (exact digits, a double as
 /// "G17", the special values as literals, a list joined with commas), and <see cref="JavaText.ValueOf"/>, Java's
 /// <c>String.valueOf</c> for the binding's messages (Java's spellings, <c>Double.toString</c>,
-/// <c>Float.toString</c>, <c>BigDecimal.toString</c>, <c>[a, b]</c> and <c>{k=v}</c>), both in the invariant culture.
+/// <c>Float.toString</c>, <c>BigDecimal.toString</c>, <c>[a, b]</c> and <c>{k=v}</c>), both in the invariant culture, and
+/// <see cref="JavaText.ToUpperRoot"/>, Java's <c>toUpperCase(Locale.ROOT)</c> for the letters whose upper case is ASCII.
 /// </summary>
 public sealed class JavaTextTests
 {
@@ -559,6 +560,82 @@ public sealed class JavaTextTests
         {
             CultureInfo.CurrentCulture = previous;
         }
+    }
+
+    [Theory]
+    [InlineData("\u0131", "I")]
+    [InlineData("\u017F", "S")]
+    [InlineData("\u00DF", "SS")]
+    [InlineData("\uFB00", "FF")]
+    [InlineData("\uFB01", "FI")]
+    [InlineData("\uFB02", "FL")]
+    [InlineData("\uFB03", "FFI")]
+    [InlineData("\uFB04", "FFL")]
+    [InlineData("\uFB05", "ST")]
+    [InlineData("\uFB06", "ST")]
+    public void ToUpperRoot_MapsEachLetterWhoseJavaUpperCaseIsAscii(string letter, string upper)
+    {
+        Assert.Equal(upper, JavaText.ToUpperRoot(letter));
+        Assert.Equal("A" + upper + "B", JavaText.ToUpperRoot("a" + letter + "b"));
+    }
+
+    [Theory]
+    [InlineData('\u0131', "I")]
+    [InlineData('\u017F', "S")]
+    [InlineData('\u00DF', "SS")]
+    [InlineData('\uFB00', "FF")]
+    [InlineData('\uFB01', "FI")]
+    [InlineData('\uFB02', "FL")]
+    [InlineData('\uFB03', "FFI")]
+    [InlineData('\uFB04', "FFL")]
+    [InlineData('\uFB05', "ST")]
+    [InlineData('\uFB06', "ST")]
+    [InlineData('a', null)]
+    public void AsciiUpperSpecial_IsJavasAsciiUpperCaseOfEachLetter(char letter, string? upper) =>
+        Assert.Equal(upper, JavaText.AsciiUpperSpecial(letter));
+
+    [Fact]
+    public void AsciiUpperSpecial_ExpandsExactlyTheLettersTheFastPathLooksFor()
+    {
+        var expanded = new List<char>();
+        for (int c = char.MinValue; c <= char.MaxValue; c++)
+        {
+            if (JavaText.AsciiUpperSpecial((char)c) is not null)
+            {
+                expanded.Add((char)c);
+            }
+        }
+
+        Assert.Equal(10, expanded.Count);
+        Assert.Equal(expanded, JavaText.s_asciiUpperSpecials.OrderBy(c => c));
+    }
+
+    [Fact]
+    public void ToUpperRoot_MapsSeveralLettersInOneName() =>
+        Assert.Equal("FFIISSST_X", JavaText.ToUpperRoot("\uFB03\u0131\u00DF\uFB06_x"));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("sasl_ssl")]
+    [InlineData("SASL_SSL")]
+    [InlineData("caf\u00E9-\u03C9")]
+    [InlineData("\u0149one")]
+    [InlineData("\u1E96")]
+    public void ToUpperRoot_WithoutTheLetters_IsTheInvariantUpperCase(string value) =>
+        Assert.Equal(value.ToUpperInvariant(), JavaText.ToUpperRoot(value));
+
+    [Fact]
+    public void ToUpperRoot_LeavesSurrogatePairsWhole()
+    {
+        const string Emoji = "\uD83D\uDE00";
+        const string DeseretSmallLongI = "\uD801\uDC28";
+
+        Assert.Equal("SS" + Emoji + "I", JavaText.ToUpperRoot("\u00DF" + Emoji + "\u0131"));
+
+        string upper = JavaText.ToUpperRoot("\u00DF" + DeseretSmallLongI);
+        Assert.Equal(("SS" + DeseretSmallLongI).ToUpperInvariant(), upper);
+        Assert.Equal(4, upper.Length);
+        Assert.True(char.IsSurrogatePair(upper, 2));
     }
 
     private static void AssertDoubleToString(string javaText, double value)

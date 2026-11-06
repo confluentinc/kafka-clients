@@ -628,6 +628,11 @@ internal sealed partial class NativeConsumer
 
     public ValueTask DisposeAsync()
     {
+        if (DisposingTheDeserializersOnThisThread)
+        {
+            return default;
+        }
+
         if (_pump is null || _reporter.InCallback)
         {
             Dispose();
@@ -637,9 +642,13 @@ internal sealed partial class NativeConsumer
         return new ValueTask(DisposeOnThePumpAsync());
     }
 
-    private static NativeConsumer Start(SafeConsumerHandle handle, bool groupIdDefined, bool withPump)
+    private static NativeConsumer Start(
+        SafeConsumerHandle handle,
+        bool groupIdDefined,
+        bool withPump,
+        SerdeDisposal? serdes)
     {
-        NativeConsumer consumer = new NativeConsumer(handle, groupIdDefined, withPump);
+        NativeConsumer consumer = new NativeConsumer(handle, groupIdDefined, withPump, serdes);
         try
         {
             if (consumer._pump is not null)
@@ -944,6 +953,11 @@ internal sealed partial class NativeConsumer
         if (cancellationToken.IsCancellationRequested)
         {
             return new ValueTask(Task.FromCanceled(cancellationToken));
+        }
+
+        if (DisposingTheDeserializersOnThisThread)
+        {
+            return default;
         }
 
         if (_pump is null || _reporter.InCallback)
