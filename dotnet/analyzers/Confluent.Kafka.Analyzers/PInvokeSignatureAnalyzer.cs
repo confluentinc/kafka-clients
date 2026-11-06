@@ -57,11 +57,12 @@ public sealed class PInvokeSignatureAnalyzer : DiagnosticAnalyzer
     private static readonly DiagnosticDescriptor s_oneByteBool = new DiagnosticDescriptor(
         DiagnosticIds.OneByteBool,
         title: "A bool crossing a P/Invoke is marshalled as one byte",
-        messageFormat: "{0} of '{1}' is a bool without [MarshalAs(UnmanagedType.I1)]; C's bool is one byte",
+        messageFormat: "{0} of '{1}' is a {2} without {3}; C's bool is one byte",
         category: "Interop",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "By default a bool is marshalled as a four-byte Win32 BOOL, so it reads three bytes too many.");
+        description: "By default a bool, and each element of a bool[], is marshalled as a four-byte Win32 BOOL, so it "
+            + "reads three bytes too many.");
 
     private static readonly DiagnosticDescriptor s_noManagedString = new DiagnosticDescriptor(
         DiagnosticIds.NoManagedString,
@@ -157,9 +158,19 @@ public sealed class PInvokeSignatureAnalyzer : DiagnosticAnalyzer
         ITypeSymbol element = type is IArrayTypeSymbol array ? array.ElementType : type;
         string display = element.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
 
-        if (type.SpecialType == SpecialType.System_Boolean && !IsOneByte(attributes, types.MarshalAs))
+        if (element.SpecialType == SpecialType.System_Boolean)
         {
-            context.ReportDiagnostic(Diagnostic.Create(s_oneByteBool, location, what, method));
+            bool isArray = type is IArrayTypeSymbol;
+            if (isArray ? !IsOneByteArray(attributes, types.MarshalAs) : !IsOneByte(attributes, types.MarshalAs))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    s_oneByteBool,
+                    location,
+                    what,
+                    method,
+                    isArray ? "bool[]" : "bool",
+                    isArray ? "[MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)]" : "[MarshalAs(UnmanagedType.I1)]"));
+            }
         }
 
         if (element.SpecialType == SpecialType.System_String
@@ -187,11 +198,21 @@ public sealed class PInvokeSignatureAnalyzer : DiagnosticAnalyzer
     };
 
     private static bool IsOneByte(ImmutableArray<AttributeData> attributes, INamedTypeSymbol? marshalAs) =>
-        attributes.Any(attribute =>
+        MarshalAs(attributes, marshalAs, UnmanagedType.I1) is not null;
+
+    private static bool IsOneByteArray(ImmutableArray<AttributeData> attributes, INamedTypeSymbol? marshalAs) =>
+        MarshalAs(attributes, marshalAs, UnmanagedType.LPArray) is { } attribute
+        && attribute.NamedArguments.Any(argument =>
+            argument.Key == nameof(MarshalAsAttribute.ArraySubType)
+            && argument.Value.Value is { } subType
+            && Convert.ToInt32(subType, CultureInfo.InvariantCulture) == (int)UnmanagedType.I1);
+
+    private static AttributeData? MarshalAs(ImmutableArray<AttributeData> attributes, INamedTypeSymbol? marshalAs, UnmanagedType kind) =>
+        attributes.FirstOrDefault(attribute =>
             SymbolEqualityComparer.Default.Equals(attribute.AttributeClass, marshalAs)
             && attribute.ConstructorArguments.Length == 1
-            && attribute.ConstructorArguments[0].Value is { } kind
-            && Convert.ToInt32(kind, CultureInfo.InvariantCulture) == (int)UnmanagedType.I1);
+            && attribute.ConstructorArguments[0].Value is { } value
+            && Convert.ToInt32(value, CultureInfo.InvariantCulture) == (int)kind);
 
     private static bool IsCdecl(ITypeSymbol delegateType, INamedTypeSymbol? unmanagedFunctionPointer) =>
         delegateType.GetAttributes().Any(attribute =>

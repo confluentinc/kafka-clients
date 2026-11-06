@@ -35,6 +35,10 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
 {
     private const int MaxForwardingDepth = 3;
 
+    private const string MustWrap = "must wrap its whole body in a try with a catch-all clause";
+
+    private const string Overridable = "is overridable, so native code can reach an override this rule cannot see";
+
     private static readonly DiagnosticDescriptor s_rootedDelegate = new DiagnosticDescriptor(
         DiagnosticIds.RootedCallbackDelegate,
         title: "A delegate passed to native code is a static readonly field",
@@ -51,15 +55,16 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
     private static readonly DiagnosticDescriptor s_noThrowCallback = new DiagnosticDescriptor(
         DiagnosticIds.NoThrowNativeCallback,
         title: "A native callback does not throw into native code",
-        messageFormat: "'{0}' is called from native code through '{1}' and must wrap its whole body in a try with a catch-all clause",
+        messageFormat: "'{0}' is called from native code through '{1}' and {2}",
         category: "Interop",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
         description: "The frame below a native callback is Rust, so a managed exception that leaves the callback is "
             + "undefined behaviour. The body is empty; or one try statement with a catch clause for every exception, "
-            + "whose catch and finally blocks only make calls; or one call. Each call is to a method of the same type "
-            + "whose body is one of these, and passes only parameters, locals, constants, static fields and "
-            + "conversions of them that cannot throw.",
+            + "whose catch and finally blocks only make calls; or one call. Each call is a non-virtual call of a "
+            + "method of the same type whose body is one of these, and passes only parameters, locals, constants, "
+            + "static fields of the BCL's primitive types and conversions of them that cannot throw. A callback is "
+            + "not an overridable method.",
         customTags: WellKnownDiagnosticTags.CompilationEnd);
 
     /// <inheritdoc/>
@@ -125,7 +130,7 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            IOperation value = WithoutConversions(argument.Value);
+            IOperation value = WithoutBuiltInConversions(argument.Value);
             if ((value.ConstantValue.HasValue && value.ConstantValue.Value is null)
                 || value is IFieldReferenceOperation { Field: { IsStatic: true, IsReadOnly: true } }
                 || (value is IParameterReferenceOperation forwarded
@@ -193,12 +198,18 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         switch (creation.Target)
         {
             case IMethodReferenceOperation reference:
-                callbacks.Add(new Callback(reference.Method.OriginalDefinition, lambda: null, Through(creation), creation.Syntax.GetLocation()));
+                callbacks.Add(new Callback(
+                    reference.Method.OriginalDefinition,
+                    lambda: null,
+                    reference.IsVirtual,
+                    Through(creation),
+                    creation.Syntax.GetLocation()));
                 break;
             case IAnonymousFunctionOperation lambda:
                 callbacks.Add(new Callback(
                     method: null,
                     Body.Of(lambda.Body, lambda.Symbol.ContainingType, exception),
+                    overridable: false,
                     Through(creation),
                     lambda.Syntax.GetLocation()));
                 break;
@@ -218,8 +229,12 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             .GroupBy(callback => callback.Method!, SymbolEqualityComparer.Default);
         foreach (IGrouping<ISymbol, Callback> method in methods)
         {
-            Callback first = method.First();
-            if (bodies.TryGetValue(method.Key, out Body? body) && body.CannotThrow(bodies, MaxForwardingDepth))
+            // A virtual method group can dispatch to an override, whose body this rule never sees.
+            Callback first = method.FirstOrDefault(callback => callback.Overridable) ?? method.First();
+            string? reason = first.Overridable ? Overridable
+                : bodies.TryGetValue(method.Key, out Body? body) && body.CannotThrow(bodies, MaxForwardingDepth) ? null
+                : MustWrap;
+            if (reason is null)
             {
                 continue;
             }
@@ -227,7 +242,7 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             Location[] declarations = method.Key.Locations.Where(location => location.IsInSource).ToArray();
             foreach (Location location in declarations.Length > 0 ? declarations : new[] { first.Creation })
             {
-                context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, location, method.Key.Name, first.Through));
+                context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, location, method.Key.Name, first.Through, reason));
             }
         }
 
@@ -235,7 +250,7 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         {
             if (!lambda.Lambda!.CannotThrow(bodies, MaxForwardingDepth))
             {
-                context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, lambda.Creation, "The lambda", lambda.Through));
+                context.ReportDiagnostic(Diagnostic.Create(s_noThrowCallback, lambda.Creation, "The lambda", lambda.Through, MustWrap));
             }
         }
     }
@@ -267,9 +282,10 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         && type.TypeKind == TypeKind.Delegate
         && type.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, unmanagedFunctionPointer));
 
-    private static IOperation WithoutConversions(IOperation operation)
+    // A user-defined conversion stays: it can build a new delegate on each call, which nothing roots.
+    private static IOperation WithoutBuiltInConversions(IOperation operation)
     {
-        while (operation is IConversionOperation conversion)
+        while (operation is IConversionOperation { Conversion.IsUserDefined: false } conversion)
         {
             operation = conversion.Operand;
         }
@@ -280,10 +296,11 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
     /// <summary>A method or lambda converted to a native callback type, and the name it reaches native code under.</summary>
     private sealed class Callback
     {
-        internal Callback(ISymbol? method, Body? lambda, string through, Location creation)
+        internal Callback(ISymbol? method, Body? lambda, bool overridable, string through, Location creation)
         {
             Method = method;
             Lambda = lambda;
+            Overridable = overridable;
             Through = through;
             Creation = creation;
         }
@@ -291,6 +308,8 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         internal ISymbol? Method { get; }
 
         internal Body? Lambda { get; }
+
+        internal bool Overridable { get; }
 
         internal string Through { get; }
 
@@ -361,8 +380,9 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             && (clause.ExceptionType.SpecialType == SpecialType.System_Object
                 || SymbolEqualityComparer.Default.Equals(clause.ExceptionType, exception));
 
-        // The method a statement calls when the statement is only that call, to a method of the owner type on no
-        // receiver or this, with arguments that cannot throw; null otherwise.
+        // The method a statement calls when the statement is only that call, a non-virtual call of a method of the
+        // owner type on no receiver or this, with arguments that cannot throw; null otherwise. A virtual call can
+        // reach an override whose body this rule never sees.
         private static ISymbol? Call(IOperation statement, INamedTypeSymbol owner)
         {
             IOperation? expression = statement switch
@@ -377,6 +397,7 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             }
 
             if (expression is not IInvocationOperation call
+                || call.IsVirtual
                 || !SymbolEqualityComparer.Default.Equals(call.TargetMethod.ContainingType.OriginalDefinition, owner.OriginalDefinition)
                 || call.Instance is not (null or IInstanceReferenceOperation)
                 || !call.Arguments.All(argument => ArgumentCannotThrow(argument.Value)))
@@ -388,12 +409,16 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         }
 
         // Evaluating an argument runs before the called method's try begins, so it must run no code that can throw:
-        // no property getter, call, user-defined conversion, cast that can fail, or checked narrowing.
+        // no property getter, call, user-defined conversion, cast that can fail, or checked narrowing. A static field's
+        // first read runs its type's static constructor, which can throw; the BCL's primitive types (IntPtr.Zero,
+        // string.Empty) have none that does.
         private static bool ArgumentCannotThrow(IOperation value) => value switch
         {
             { ConstantValue.HasValue: true } => true,
             IParameterReferenceOperation or ILocalReferenceOperation or IInstanceReferenceOperation or IDefaultValueOperation => true,
-            IFieldReferenceOperation field => field.Field.IsStatic || field.Instance is IInstanceReferenceOperation,
+            IFieldReferenceOperation field => field.Field.IsStatic
+                ? field.Field.ContainingType.SpecialType != SpecialType.None
+                : field.Instance is IInstanceReferenceOperation,
             IConversionOperation conversion => ConversionCannotThrow(conversion) && ArgumentCannotThrow(conversion.Operand),
             _ => false,
         };

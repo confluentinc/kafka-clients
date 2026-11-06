@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Threading.Tasks;
 
 using Microsoft.CodeAnalysis.Testing;
@@ -28,6 +29,10 @@ namespace Confluent.Kafka.Analyzers.UnitTests;
 /// </summary>
 public sealed class NativeCallbackAnalyzerTests
 {
+    private const string MustWrap = "must wrap its whole body in a try with a catch-all clause";
+
+    private const string Overridable = "is overridable, so native code can reach an override this rule cannot see";
+
     private const string Native = """
         using System;
         using System.Runtime.InteropServices;
@@ -234,7 +239,7 @@ public sealed class NativeCallbackAnalyzerTests
                     }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback"));
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap));
 
     [Fact]
     public Task ALambdaCallback_IsCheckedToo() =>
@@ -255,7 +260,7 @@ public sealed class NativeCallbackAnalyzerTests
                     private static readonly NativeMethods.Callback s_unguarded = {|#0:opaque => GC.KeepAlive(opaque)|};
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("The lambda", "s_unguarded"));
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("The lambda", "s_unguarded", MustWrap));
 
     [Fact]
     public Task AFieldOfAManagedDelegateType_IsNotACallback() =>
@@ -287,7 +292,7 @@ public sealed class NativeCallbackAnalyzerTests
                     private static void {|#0:OnCallback|}(IntPtr opaque) => GC.KeepAlive(opaque);
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", through));
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", through, MustWrap));
 
     [Fact]
     public Task AGuardedCallbackSetInAStaticConstructor_IsNotReported() =>
@@ -335,7 +340,7 @@ public sealed class NativeCallbackAnalyzerTests
                     {{clauses}}
                 }
                 """),
-            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback"));
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap));
 
     [Fact]
     public Task ACatchAndFinallyThatCallGuardedHelpers_AreNotReported() =>
@@ -389,6 +394,7 @@ public sealed class NativeCallbackAnalyzerTests
     [InlineData("checked((int)s_big)")]
     [InlineData("(string)s_object")]
     [InlineData("s_holder.Field")]
+    [InlineData("Other.Value")]
     public Task AForwardedArgumentThatCanThrow_IsReported(string argument) =>
         Verifier.VerifyAsync(
             Native + $$"""
@@ -427,9 +433,96 @@ public sealed class NativeCallbackAnalyzerTests
                     {
                         internal long Field;
                     }
+
+                    private static class Other
+                    {
+                        internal static readonly long Value = Compute();
+
+                        private static long Compute() => throw new InvalidOperationException();
+                    }
                 }
                 """,
-            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback"));
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap));
+
+    [Fact]
+    public Task ADelegateBuiltByAUserDefinedConversion_IsNotRootedByTheFieldItConvertsFrom() =>
+        Verifier.VerifyAsync(
+            Native + """
+                internal sealed class Holder
+                {
+                    public static implicit operator NativeMethods.Callback(Holder holder) => OnCallback;
+
+                    private static void OnCallback(IntPtr opaque)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+
+                internal static class C
+                {
+                    private static readonly Holder s_holder = new Holder();
+
+                    internal static void Run() => NativeMethods.Submit({|#0:s_holder|}, IntPtr.Zero);
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.RootedCallbackDelegate).WithLocation(0).WithArguments("Submit", "cb"));
+
+    [Fact]
+    public Task AnOverridableCallback_IsReported() =>
+        Verifier.VerifyAsync(
+            Native + """
+                internal class C
+                {
+                    private static readonly C Instance = new C();
+
+                    private static readonly NativeMethods.Callback s_callback = Instance.OnCallback;
+
+                    protected virtual void {|#0:OnCallback|}(IntPtr opaque)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", Overridable));
+
+    [Theory]
+    [InlineData("protected virtual", true)]
+    [InlineData("private", false)]
+    public Task ACallbackThatForwardsToAnOverridableHelper_IsReported(string modifiers, bool reported) =>
+        Verifier.VerifyAsync(
+            Native + $$"""
+                internal class C
+                {
+                    private static readonly C Instance = new C();
+
+                    private static readonly NativeMethods.Callback s_callback = Instance.OnCallback;
+
+                    private void {{(reported ? "{|#0:OnCallback|}" : "OnCallback")}}(IntPtr opaque) => Deliver(opaque);
+
+                    {{modifiers}} void Deliver(IntPtr opaque)
+                    {
+                        try
+                        {
+                        }
+                        catch (Exception)
+                        {
+                        }
+                    }
+                }
+                """,
+            reported
+                ? new[] { Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap) }
+                : Array.Empty<DiagnosticResult>());
 
     [Fact]
     public Task TheForwardedArgumentsTheBindingUses_AreNotReported_OnNet80() =>

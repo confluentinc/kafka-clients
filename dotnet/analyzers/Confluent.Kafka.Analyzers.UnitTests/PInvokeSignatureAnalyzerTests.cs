@@ -40,7 +40,8 @@ public sealed class PInvokeSignatureAnalyzerTests
             [return: MarshalAs(UnmanagedType.I1)]
             internal static extern bool Call(
                 [MarshalAs(UnmanagedType.I1)] bool flag, int count, long size, sbyte present, IntPtr handle,
-                ref IntPtr outErr, Callback cb, IntPtr[] handles);
+                ref IntPtr outErr, Callback cb, IntPtr[] handles,
+                [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)] bool[] flags);
             """));
 
     [Theory]
@@ -68,7 +69,19 @@ public sealed class PInvokeSignatureAnalyzerTests
     public Task ABoolReturnWithoutI1_IsReported() =>
         Verifier.VerifyAsync(
             Native($"{Import} internal static extern bool {{|#0:Call|}}();"),
-            Verifier.Diagnostic(DiagnosticIds.OneByteBool).WithLocation(0).WithArguments("The return value", "Call"));
+            Verifier.Diagnostic(DiagnosticIds.OneByteBool).WithLocation(0)
+                .WithArguments("The return value", "Call", "bool", "[MarshalAs(UnmanagedType.I1)]"));
+
+    [Theory]
+    [InlineData("bool[] {|#0:flags|}")]
+    [InlineData("[MarshalAs(UnmanagedType.LPArray)] bool[] {|#0:flags|}")]
+    [InlineData("[MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.Bool)] bool[] {|#0:flags|}")]
+    [InlineData("[MarshalAs(UnmanagedType.I1)] bool[] {|#0:flags|}")]
+    public Task ABoolArrayWithoutOneByteElements_IsReported(string parameter) =>
+        Verifier.VerifyAsync(
+            Native($"{Import} internal static extern void Call({parameter});"),
+            Verifier.Diagnostic(DiagnosticIds.OneByteBool).WithLocation(0)
+                .WithMessage("Parameter 'flags' of 'Call' is a bool[] without [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.I1)]; C's bool is one byte"));
 
     [Theory]
     [InlineData("string {|#0:topic|}", "string")]

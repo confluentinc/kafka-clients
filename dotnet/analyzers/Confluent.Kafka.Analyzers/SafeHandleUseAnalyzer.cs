@@ -17,6 +17,7 @@ using System.Collections.Immutable;
 using System.Linq;
 
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
@@ -42,18 +43,20 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
         description: "An operation P/Invoke takes a client's SafeHandle, so the marshaller holds a reference for the "
-            + "call and a closed handle throws ObjectDisposedException. ReleaseHandle is exempt.");
+            + "call and a closed handle throws ObjectDisposedException. A local that holds the raw pointer is followed "
+            + "back to its DangerousGetHandle. ReleaseHandle is exempt.");
 
     private static readonly DiagnosticDescriptor s_addRefReleased = new DiagnosticDescriptor(
         DiagnosticIds.AddRefReleasedInFinally,
-        title: "DangerousAddRef is taken inside a try whose finally block releases it",
-        messageFormat: "'{0}.{1}' is not inside a try whose finally block calls '{0}.DangerousRelease()'",
+        title: "DangerousAddRef is taken inside a try whose finally block releases it when it succeeded",
+        messageFormat: "'{0}.{1}' is not inside a try whose finally block calls '{0}.DangerousRelease()' under 'if ({2})'",
         category: "Reliability",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
         description: "A reference is call-scoped: it is taken inside a try statement, or one of its catch blocks, and "
-            + "released in that try's finally block on the same thread, so no exception can leak it. A method named "
-            + "like AddRef that takes a ref bool hands its reference to its caller, whose own release this rule checks.");
+            + "released in that try's finally block under 'if' on the flag the AddRef sets, on the same thread. So no "
+            + "exception can leak it, and a failed AddRef is not released. A method named like AddRef that takes a ref "
+            + "bool hands its reference to its caller, whose own release this rule checks.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
@@ -114,10 +117,15 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         }
 
         string receiver = Receiver(syntax.Expression);
-        if (!IsReleasedInAFinally(syntax, onSafeHandle ? receiver : null))
+        string? flag = SuccessFlag(syntax);
+        if (flag is null || !IsReleasedInAFinally(syntax, onSafeHandle ? receiver : null, flag))
         {
             context.ReportDiagnostic(Diagnostic.Create(
-                s_addRefReleased, syntax.GetLocation(), receiver.Length == 0 ? "this" : receiver, invocation.TargetMethod.Name));
+                s_addRefReleased,
+                syntax.GetLocation(),
+                receiver.Length == 0 ? "this" : receiver,
+                invocation.TargetMethod.Name,
+                flag ?? "success"));
         }
     }
 
@@ -143,14 +151,13 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
 
         foreach (IArgumentOperation argument in invocation.Arguments)
         {
-            IOperation value = argument.Value;
-            while (value is IConversionOperation conversion)
+            IOperation value = WithoutConversions(argument.Value);
+            if (value is ILocalReferenceOperation local)
             {
-                value = conversion.Operand;
+                value = RawPointerStoredIn(local.Local, invocation, clientHandles) ?? value;
             }
 
-            if (value is IInvocationOperation { TargetMethod.Name: "DangerousGetHandle", Instance: { } instance }
-                && clientHandles.Any(handle => DerivesFrom(instance.Type, handle)))
+            if (RawClientPointer(value, clientHandles) is { } instance)
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     s_rawClientHandle, argument.Syntax.GetLocation(), invocation.TargetMethod.Name, instance.Syntax.ToString()));
@@ -158,9 +165,67 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    // The AddRef sits in a try, or one of its catch blocks, whose finally block releases it, with no lambda or local
-    // function between them: then the release runs whatever happens after the reference is taken.
-    private static bool IsReleasedInAFinally(InvocationExpressionSyntax addRef, string? receiver)
+    // The DangerousGetHandle of a client handle that the method stores in the local, by its initializer or by an
+    // assignment anywhere in the method.
+    private static IOperation? RawPointerStoredIn(
+        ILocalSymbol local,
+        IOperation use,
+        ImmutableArray<INamedTypeSymbol> clientHandles)
+    {
+        IOperation root = use;
+        while (root.Parent is not null)
+        {
+            root = root.Parent;
+        }
+
+        foreach (IOperation operation in root.Descendants())
+        {
+            IOperation? stored = operation switch
+            {
+                IVariableDeclaratorOperation declarator when SymbolEqualityComparer.Default.Equals(declarator.Symbol, local) =>
+                    declarator.GetVariableInitializer()?.Value,
+                ISimpleAssignmentOperation { Target: ILocalReferenceOperation target } assignment
+                    when SymbolEqualityComparer.Default.Equals(target.Local, local) => assignment.Value,
+                _ => null,
+            };
+            if (stored is not null && RawClientPointer(WithoutConversions(stored), clientHandles) is not null)
+            {
+                return WithoutConversions(stored);
+            }
+        }
+
+        return null;
+    }
+
+    // The client handle whose DangerousGetHandle the value is; null for anything else.
+    private static IOperation? RawClientPointer(IOperation value, ImmutableArray<INamedTypeSymbol> clientHandles) =>
+        value is IInvocationOperation { TargetMethod.Name: "DangerousGetHandle", Instance: { } instance }
+        && clientHandles.Any(handle => DerivesFrom(instance.Type, handle))
+            ? instance
+            : null;
+
+    private static IOperation WithoutConversions(IOperation operation)
+    {
+        while (operation is IConversionOperation conversion)
+        {
+            operation = conversion.Operand;
+        }
+
+        return operation;
+    }
+
+    // The ref bool the AddRef sets when it took a reference, as written.
+    private static string? SuccessFlag(InvocationExpressionSyntax addRef) =>
+        addRef.ArgumentList.Arguments
+            .FirstOrDefault(argument => argument.RefKindKeyword.IsKind(SyntaxKind.RefKeyword))
+            ?.Expression is { } flag
+            ? WithoutThis(flag.WithoutTrivia().ToString())
+            : null;
+
+    // The AddRef sits in a try, or one of its catch blocks, whose finally block releases it under 'if (flag)', with no
+    // lambda or local function between them: then the release runs whatever happens after the reference is taken,
+    // and only when it was taken.
+    private static bool IsReleasedInAFinally(InvocationExpressionSyntax addRef, string? receiver, string flag)
     {
         foreach (SyntaxNode ancestor in addRef.Ancestors())
         {
@@ -174,13 +239,43 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
                 && @finally.Block.DescendantNodes(node => !IsFunction(node))
                     .OfType<InvocationExpressionSyntax>()
                     .Any(release => Name(release.Expression) == "DangerousRelease"
-                        && (receiver is null || Receiver(release.Expression) == receiver)))
+                        && (receiver is null || Receiver(release.Expression) == receiver)
+                        && IsGuardedBy(release, @finally.Block, flag)))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    // The release is a statement of its own, reached from the finally block only through blocks and 'if (flag)'
+    // branches, at least one of them; an else branch, another condition, a loop or a switch does not count.
+    private static bool IsGuardedBy(InvocationExpressionSyntax release, BlockSyntax finallyBlock, string flag)
+    {
+        if (release.Parent is not ExpressionStatementSyntax statement)
+        {
+            return false;
+        }
+
+        bool guarded = false;
+        SyntaxNode child = statement;
+        for (SyntaxNode? node = statement.Parent; node is not null && node != finallyBlock; child = node, node = node.Parent)
+        {
+            switch (node)
+            {
+                case BlockSyntax:
+                    break;
+                case IfStatementSyntax branch
+                    when branch.Statement == child && WithoutThis(branch.Condition.WithoutTrivia().ToString()) == flag:
+                    guarded = true;
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        return guarded;
     }
 
     private static bool IsFunction(SyntaxNode node) =>
@@ -204,9 +299,11 @@ public sealed class SafeHandleUseAnalyzer : DiagnosticAnalyzer
             return string.Empty;
         }
 
-        string receiver = member.Expression.ToString();
-        return receiver.StartsWith("this.", StringComparison.Ordinal) ? receiver.Substring("this.".Length) : receiver;
+        return WithoutThis(member.Expression.ToString());
     }
+
+    private static string WithoutThis(string expression) =>
+        expression.StartsWith("this.", StringComparison.Ordinal) ? expression.Substring("this.".Length) : expression;
 
     private static bool DerivesFrom(ITypeSymbol? type, INamedTypeSymbol baseType)
     {
