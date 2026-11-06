@@ -20,7 +20,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{constants_of, simple, Kind, Reader, Value, DEPRECATED_LIST, SPECS};
-use crate::javascript_gen::{header, js_str, jsdoc, JsModule};
+use crate::javascript_gen::{header, js_str, tsdoc, JsModule};
 
 type Res<T> = anyhow::Result<T>;
 
@@ -51,7 +51,7 @@ const NOTES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// A constant's JavaScript value and its JSDoc type.
+/// A constant's TypeScript value and its type.
 fn js_value(v: &Value) -> Res<(String, String)> {
     Ok(match v {
         Value::Str(s) => (js_str(s), "string".into()),
@@ -144,25 +144,23 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         about.push_str(&format!("\n\nJava: `{}`.", spec.java));
         let mut text = header(&format!("Java's `{}`", spec.java));
         text.push('\n');
-        text.push_str(&jsdoc(&about, ""));
-        text.push_str(&format!("\nclass {name} {{\n"));
+        text.push_str(&tsdoc(&about, ""));
+        text.push_str(&format!("\nexport class {name} {{\n"));
         for (n, v) in &consts {
             let (val, ty) = js_value(v)?;
             let note = NOTES.iter().find(|(c, k, _)| c == java && k == n).map(|(_, _, t)| *t);
-            match note {
-                Some(t) => {
-                    let doc = jsdoc(&format!("{t}\n\n@readonly @type {{{ty}}}"), "  ");
-                    text.push_str(&doc.replace(" * @readonly @type", " * @readonly\n   * @type"));
-                    text.push('\n');
-                },
-                None => text.push_str(&format!("  /** @readonly @type {{{ty}}} */\n")),
+            if let Some(t) = note {
+                text.push_str(&tsdoc(t, "  "));
+                text.push('\n');
             }
-            text.push_str(&format!("  static {n} = {val};\n"));
+            // The type is written out: a `static readonly` with a literal
+            // initializer would otherwise be typed as that literal.
+            text.push_str(&format!("  static readonly {n}: {ty} = {val};\n"));
         }
         if spec.kind == Kind::ConstantsOnly {
             text.push_str(&format!(
-                "\n  /**\n   * Not instantiable: throws `TypeError`.\n   *\n   * @param {{...unknown}} args\n   */\n  \
-                 constructor(...args) {{\n    void args;\n    throw new TypeError('{name} is not instantiable: its ConfigDef machinery is not ' +\n      \
+                "\n  /**\n   * Not instantiable: throws `TypeError`.\n   */\n  \
+                 constructor(...args: unknown[]) {{\n    void args;\n    throw new TypeError('{name} is not instantiable: its ConfigDef machinery is not ' +\n      \
                  'translated; a configuration is a plain object of its keys');\n  }}\n"
             ));
         }
@@ -171,7 +169,7 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
                 anyhow::bail!("config constants: the note on `{c}.{k}` names no constant");
             }
         }
-        text.push_str(&format!("}}\n\nmodule.exports = {{ {name} }};\n"));
+        text.push_str("}\n");
         let stem = crate::error_hierarchy::snake(name);
         out.push(JsModule { dir: (*dir).to_string(), stem, name: name.to_string(), content: text });
     }
@@ -197,24 +195,34 @@ mod tests {
         let modules = modules(&repo_root()).unwrap();
         let ssl = modules.iter().find(|m| m.name == "SslConfigs").unwrap();
         assert_eq!((ssl.dir.as_str(), ssl.stem.as_str()), ("common/config", "ssl_configs"));
-        assert!(ssl.content.contains("  static SSL_PROTOCOL_CONFIG = 'ssl.protocol';\n"));
-        assert!(ssl.content.contains("  static DEFAULT_SSL_KEYSTORE_TYPE = 'JKS';\n"));
+        assert!(ssl.content.contains("export class SslConfigs {\n"));
+        assert!(ssl
+            .content
+            .contains("  static readonly SSL_PROTOCOL_CONFIG: string = 'ssl.protocol';\n"));
+        assert!(ssl
+            .content
+            .contains("  static readonly DEFAULT_SSL_KEYSTORE_TYPE: string = 'JKS';\n"));
+        assert!(!ssl.content.contains("@type"));
+        assert!(!ssl.content.contains("module.exports"));
         assert!(ssl
             .content
             .contains("   * Translation note: Java's value. The Rust core's default `ssl.keystore.type`\n"));
-        assert!(ssl
-            .content
-            .contains("  static RECONFIGURABLE_CONFIGS = Object.freeze(['ssl.keystore.type',"));
+        assert!(ssl.content.contains(
+            "  static readonly RECONFIGURABLE_CONFIGS: ReadonlyArray<string> = Object.freeze(['ssl.keystore.type',"
+        ));
         let producer = modules.iter().find(|m| m.name == "ProducerConfig").unwrap();
         assert_eq!((producer.dir.as_str(), producer.stem.as_str()), ("producer", "producer_config"));
         assert!(producer
             .content
-            .contains("  static CONFIG_PROVIDERS_CONFIG = 'config.providers';\n"));
+            .contains("  static readonly CONFIG_PROVIDERS_CONFIG: string = 'config.providers';\n"));
         assert!(!producer.content.contains("PARTITIONER_ADPATIVE_PARTITIONING_ENABLE_CONFIG"));
         assert!(producer
             .content
             .contains("throw new TypeError('ProducerConfig is not instantiable"));
+        assert!(producer.content.contains("  constructor(...args: unknown[]) {\n"));
         let sasl = modules.iter().find(|m| m.name == "SaslConfigs").unwrap();
-        assert!(sasl.content.contains("  static DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR = 0.8;\n"));
+        assert!(sasl
+            .content
+            .contains("  static readonly DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR: number = 0.8;\n"));
     }
 }
