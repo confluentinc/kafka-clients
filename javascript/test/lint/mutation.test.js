@@ -387,6 +387,12 @@ MUTATIONS.push(
       edit(root, 'src/record.c', '    out->bytes.len = (int32_t)length;', '    out->bytes.len = (int32_t)length;\n    memcpy((void*)out->bytes.data, data, length);'),
   },
   {
+    rule: 'check-zero-copy',
+    what: 'a Uint8Array key copied by Buffer.from in lib/',
+    apply: (root) =>
+      edit(root, 'lib/producer/producer_record.ts', "Buffer.from(value, 'utf8') : value;", "Buffer.from(value, 'utf8') : Buffer.from(value);"),
+  },
+  {
     rule: 'check-no-binding-queue',
     what: 'a mutex in producer.c',
     apply: (root) => edit(root, 'src/producer.c', 'typedef struct SendCtx SendCtx;', 'static pthread_mutex_t producer_lock = PTHREAD_MUTEX_INITIALIZER;\n\ntypedef struct SendCtx SendCtx;'),
