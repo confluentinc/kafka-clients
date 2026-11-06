@@ -639,6 +639,11 @@ internal sealed partial class NativeConsumer
             return default;
         }
 
+        if (ClosingOnAnotherThread)
+        {
+            return default;
+        }
+
         return new ValueTask(DisposeOnThePumpAsync());
     }
 
@@ -1378,6 +1383,7 @@ internal sealed partial class NativeConsumer
         {
             await _closeGate.WaitAsync().ConfigureAwait(false);
             bool destroyedBefore = _destroyed;
+            bool closer = false;
             try
             {
                 if (!TryBeginExplicitClose(thread))
@@ -1385,6 +1391,7 @@ internal sealed partial class NativeConsumer
                     return;
                 }
 
+                closer = TryBecomeTheCloser(AsyncCloser);
                 Exception? kept = _reporter.TakeKeptForTheNextCall();
                 try
                 {
@@ -1412,6 +1419,7 @@ internal sealed partial class NativeConsumer
             finally
             {
                 ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+                StopBeingTheCloser(closer, AsyncCloser);
             }
         }
         finally
@@ -1424,6 +1432,7 @@ internal sealed partial class NativeConsumer
     {
         await _closeGate.WaitAsync().ConfigureAwait(false);
         bool destroyedBefore = _destroyed;
+        bool closer = false;
         try
         {
             if (!TryBeginClose())
@@ -1431,6 +1440,7 @@ internal sealed partial class NativeConsumer
                 return;
             }
 
+            closer = TryBecomeTheCloser(AsyncCloser);
             try
             {
                 WakeForTheDispose(waking: true);
@@ -1463,6 +1473,7 @@ internal sealed partial class NativeConsumer
         finally
         {
             ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+            StopBeingTheCloser(closer, AsyncCloser);
         }
     }
 

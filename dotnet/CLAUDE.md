@@ -1169,7 +1169,8 @@ thread that makes it, and a call while another thread holds a use throws
 reaches the core, as Java's `acquire()` and Python's use table do (ledger 136;
 `ffi-marshalling.md` §B1). So:
 - `Dispose` from another thread during an op does not throw. It runs: wakeup, wait for the
-  in-flight uses, close, join the drain thread (async consumer), destroy. This is a deviation:
+  in-flight uses, close, join the drain thread (async consumer), destroy. While another thread is already closing the
+  consumer, it returns at once, and that close finishes the teardown (ledger 399). This is a deviation:
   Java and Python reject the second thread, but .NET code expects `Dispose` not to throw.
 - An explicit `Close` from another thread during an op throws `ConcurrentModificationException` at
   once and leaves the consumer open, as Java and Python. Call `Wakeup()` first.

@@ -70,6 +70,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const int ClosePending = 2;
 
+    private const int AsyncCloser = -1;
+
     private const string GroupIdNotDefinedMessage =
         "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer " +
         "configuration.";
@@ -103,6 +105,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private int _ownerUses;
 
     private int _closingThread;
+
+    // The thread of the Close or Dispose that is closing the consumer, AsyncCloser for an async one, or 0. While
+    // another thread closes it, a Dispose returns at once and leaves the teardown to that close, so a callback the
+    // close runs may wait for that Dispose.
+    private int _closerThread;
 
     // An AsyncMockConsumer's Rebalance or LosePartitions refuses other threads for its whole use, as Python's mock does.
     private int _refusingUses;
@@ -1441,50 +1448,61 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             return;
         }
 
-        if (TryEnterUse(out int owner))
-        {
-            try
-            {
-                ExecuteCallbacks();
-            }
-            finally
-            {
-                ExitUse(owner);
-            }
-        }
-
-        _closeGate.Wait();
-        bool destroyedBefore = _destroyed;
+        int thread = Environment.CurrentManagedThreadId;
+        bool closer = false;
         try
         {
-            if (!TryBeginExplicitClose(Environment.CurrentManagedThreadId))
+            if (TryEnterUse(out int owner))
             {
-                return;
+                try
+                {
+                    closer = TryBecomeTheCloser(thread);
+                    ExecuteCallbacks();
+                }
+                finally
+                {
+                    ExitUse(owner);
+                }
             }
 
+            _closeGate.Wait();
+            bool destroyedBefore = _destroyed;
             try
             {
-                IntPtr outErr = IntPtr.Zero;
-                if (options == IntPtr.Zero)
+                if (!TryBeginExplicitClose(thread))
                 {
-                    NativeMethods.ConsumerClose(_handle, ref outErr);
-                }
-                else
-                {
-                    NativeMethods.ConsumerCloseWithOptions(_handle, options, ref outErr);
+                    return;
                 }
 
-                ReopenIfRefused(ref outErr);
-                TearDownThenThrow(ref outErr);
+                closer = closer || TryBecomeTheCloser(thread);
+                try
+                {
+                    IntPtr outErr = IntPtr.Zero;
+                    if (options == IntPtr.Zero)
+                    {
+                        NativeMethods.ConsumerClose(_handle, ref outErr);
+                    }
+                    else
+                    {
+                        NativeMethods.ConsumerCloseWithOptions(_handle, options, ref outErr);
+                    }
+
+                    ReopenIfRefused(ref outErr);
+                    TearDownThenThrow(ref outErr);
+                }
+                finally
+                {
+                    EndExplicitClose();
+                }
             }
             finally
             {
-                EndExplicitClose();
+                ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
             }
         }
         finally
         {
-            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+            StopBeingTheCloser(closer, thread);
         }
     }
 
@@ -1692,6 +1710,25 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
     // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
     // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread.
+    private bool ClosingOnAnotherThread
+    {
+        get
+        {
+            int closer = Volatile.Read(ref _closerThread);
+            return closer != 0 && closer != Environment.CurrentManagedThreadId;
+        }
+    }
+
+    private bool TryBecomeTheCloser(int closer) => Interlocked.CompareExchange(ref _closerThread, closer, 0) == 0;
+
+    private void StopBeingTheCloser(bool closer, int thread)
+    {
+        if (closer)
+        {
+            _ = Interlocked.CompareExchange(ref _closerThread, 0, thread);
+        }
+    }
+
     private void ReleaseTheGateThenDisposeTheDeserializers(bool destroyedBefore)
     {
         _closeGate.Release();
@@ -2011,6 +2048,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             return;
         }
 
+        if (ClosingOnAnotherThread)
+        {
+            return;
+        }
+
+        int thread = Environment.CurrentManagedThreadId;
+        bool closer = false;
         _closeGate.Wait();
         bool destroyedBefore = _destroyed;
         try
@@ -2020,6 +2064,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 return;
             }
 
+            closer = TryBecomeTheCloser(thread);
             try
             {
                 WakeUpThenCloseAfterTheUses();
@@ -2042,6 +2087,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         finally
         {
             ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+            StopBeingTheCloser(closer, thread);
         }
     }
 

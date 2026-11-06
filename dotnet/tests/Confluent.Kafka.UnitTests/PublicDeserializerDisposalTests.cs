@@ -545,11 +545,8 @@ public sealed class PublicDeserializerDisposalTests
     }
 
     [Theory]
-    [InlineData(SyncFlavor, DisposeHow)]
     [InlineData(SyncFlavor, CloseHow)]
-    [InlineData(AsyncFlavor, DisposeHow)]
     [InlineData(AsyncFlavor, CloseHow)]
-    [InlineData(AsyncFlavor, DisposeAsyncHow)]
     public async Task ADeserializerWhoseDisposeWaitsForACloseParkedBeforeTheDestroy_BothReturn(string flavor, string otherHow)
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
@@ -587,6 +584,100 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Null(other.Failure);
         Assert.Equal(1, key.Disposals);
         Assert.Equal(1, value.Disposals);
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow)]
+    public async Task ADisposeFromAnotherThreadWhileAnotherThreadsDisposeTearsDown_ReturnsAtOnce(string flavor, string otherHow)
+    {
+        DisposableDeserializer key = new DisposableDeserializer("key");
+        DisposableDeserializer value = new DisposableDeserializer("value");
+        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        SemaphoreSlim gate = CloseGateOf(consumer);
+        DestroyLog destroys = WatchDestroy(consumer);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+        RunningPoll? poll = null;
+        try
+        {
+            poll = await StartAPollHeldInsideItsCommitCallback(consumer, release);
+            Task<int> disposing = CloseBy(consumer, DisposeHow);
+            Assert.True(SpinWait.SpinUntil(() => gate.CurrentCount == 0, Deadline), "the Dispose never took the close gate");
+
+            GatedClose other = GatedClose.Start(consumer, otherHow);
+
+            Assert.True(other.WaitReturned(s_otherThreadWait), "a " + otherHow + " during another thread's Dispose waited for it");
+            Assert.Null(other.Failure);
+            Assert.False(disposing.IsCompleted, "the first Dispose ended before the poll's callback was released");
+            Assert.Equal(0, key.Disposals);
+
+            release.Set();
+            int disposingThread = await disposing;
+
+            Assert.Equal(WakeupCode, Assert.IsType<WakeupException>(await poll.Outcome()).Code);
+            Assert.Equal(1, key.Disposals);
+            Assert.Equal(1, value.Disposals);
+            (int destroyThread, string? _) = Assert.Single(destroys.Destroys());
+            Assert.Equal(destroyThread, key.ThreadId);
+            Assert.Equal(disposingThread, key.ThreadId);
+        }
+        finally
+        {
+            release.Set();
+            poll?.End();
+            await DisposeBounded(consumer);
+        }
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, CloseHow, DisposeHow)]
+    [InlineData(SyncFlavor, CloseWithOptionsHow, DisposeHow)]
+    [InlineData(SyncFlavor, DisposeHow, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow, DisposeAsyncHow)]
+    [InlineData(AsyncFlavor, CloseWithOptionsHow, DisposeAsyncHow)]
+    [InlineData(AsyncFlavor, DisposeHow, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeHow, DisposeAsyncHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow, DisposeAsyncHow)]
+    public async Task ACommitCallbackTheCloseRunsWaitsForAnotherThreadsDispose_ItReturnsBeforeTheCloseEnds(
+        string flavor, string how, string otherHow)
+    {
+        DisposableDeserializer key = new DisposableDeserializer("key");
+        DisposableDeserializer value = new DisposableDeserializer("value");
+        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        DestroyLog destroys = WatchDestroy(consumer);
+        OtherThreadClose other = new OtherThreadClose(consumer, otherHow);
+        int disposalsWhenItReturned = -1;
+        bool delivered = false;
+        try
+        {
+            await Assign(consumer);
+            await QueueCommitCallback(consumer, new DelegateCallback(() =>
+            {
+                delivered = true;
+                other.RunAndWait();
+                disposalsWhenItReturned = key.Disposals + value.Disposals;
+            }));
+
+            _ = await CloseBy(consumer, how);
+        }
+        finally
+        {
+            await DisposeBounded(consumer);
+        }
+
+        Assert.True(delivered, "the close did not deliver the commit callback");
+        Assert.True(other.Returned, "a " + otherHow + " that a commit callback the " + how + " ran waited for did not return");
+        Assert.Null(other.Failure);
+        Assert.Equal(0, disposalsWhenItReturned);
+        Assert.Equal(ClosedMessage, Assert.Throws<IllegalStateException>(() => consumer.Assignment()).Message);
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+        (int destroyThread, string? _) = Assert.Single(destroys.Destroys());
+        Assert.Equal(destroyThread, key.ThreadId);
+        Assert.Equal(destroyThread, value.ThreadId);
     }
 
     [Theory]
