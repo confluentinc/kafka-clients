@@ -43,7 +43,7 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         NativeAdminClient admin = NativeAdminClient.Create(s_unreachable, asyncFlavour ? AdminFlavour.Async : AdminFlavour.Sync);
         try
         {
-            ArgumentException thrown = Assert.Throws<ArgumentException>(
+            IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
                 () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(), options: null));
 
             Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
@@ -64,7 +64,7 @@ public sealed class AdminUpdateFeaturesSubmitErrorTests
         NativeAdminClient admin = NativeAdminClient.Create(s_unreachable, asyncFlavour ? AdminFlavour.Async : AdminFlavour.Sync);
         try
         {
-            ArgumentException thrown = Assert.Throws<ArgumentException>(() => admin.UpdateFeatures(
+            IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(() => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>
                 {
                     ["metadata.version"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),

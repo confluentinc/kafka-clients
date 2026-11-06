@@ -28,8 +28,10 @@ namespace Confluent.Kafka.Producer;
 /// <b>Thread.</b> It runs on the producer's completion thread, on both surfaces, as Java's runs on the
 /// producer's I/O thread: one producer's callbacks never overlap, and a slow callback delays every other
 /// completion of that producer. A callback still pending when the producer closes runs on the thread that
-/// closes it. An instance shared across producers can run on several threads at once, so it must be
-/// thread-safe.
+/// closes it. On <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, for a record whose serializer threw an
+/// <see cref="Common.Errors.ApiException"/>, it runs inside <c>Send</c>, on the caller's thread, as Java's
+/// <c>doSend</c> runs it; the mocks rethrow that exception from <c>Send</c>, as Java's <c>MockProducer</c> does. An
+/// instance shared across producers can run on several threads at once, so it must be thread-safe.
 /// </para>
 /// <para>
 /// <b>Order.</b> It runs before the record's future completes, as in Java.
@@ -40,8 +42,10 @@ namespace Confluent.Kafka.Producer;
 /// a record whose batch a produce response did not complete, still in flight when a graceful <c>Close</c>
 /// ends, is dropped by the producer without a delivery, so it fires nothing and its future never completes.
 /// A record refused before it was appended fires nothing: the synchronous <c>Send</c> throws, and the
-/// asynchronous <c>Send</c>'s first stage faults. An error from <c>Send</c> does not prove that the
-/// callback will not fire: a record that reached the accumulator before the send failed (a transactional
+/// asynchronous <c>Send</c>'s first stage faults; the one exception is a serializer's
+/// <see cref="Common.Errors.ApiException"/> on <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, which fires it
+/// once inside <c>Send</c> and fails the future. An error from <c>Send</c> does not prove that the callback will
+/// not fire: a record that reached the accumulator before the send failed (a transactional
 /// producer's send outside a transaction) still fires it once. A record that <c>Close</c> fails while it
 /// waits for metadata or buffer memory ("Producer closed while send in progress") fires nothing, as in
 /// Java.
@@ -56,7 +60,8 @@ namespace Confluent.Kafka.Producer;
 /// </para>
 /// <para>
 /// <b>Throwing.</b> An exception it throws is reported to the producer, which logs it, and is written once
-/// to <see cref="System.Diagnostics.Trace"/>. It changes neither the record's outcome nor any other record.
+/// to <see cref="System.Diagnostics.Trace"/>. It changes neither the record's outcome nor any other record. A
+/// throw from the call inside <c>Send</c> leaves <c>Send</c>, as in Java.
 /// </para>
 /// </remarks>
 public interface IDeliveryCallback

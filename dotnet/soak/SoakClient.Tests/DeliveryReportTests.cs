@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -76,7 +77,7 @@ public sealed class DeliveryReportTests
         await client.ProduceRecordAsync();
         Assert.Equal((0L, 0L, 1L, 1L), client.ProducerCounts);
 
-        Assert.True(producer.ErrorNext(SoakTestSupport.KafkaError(16, "x")));
+        Assert.True(producer.ErrorNext(new NotCoordinatorException("x")));
         await AwaitTheDeliveryReport(client);
 
         Assert.Equal((0L, 1L, 0L, 0L), client.ProducerCounts);

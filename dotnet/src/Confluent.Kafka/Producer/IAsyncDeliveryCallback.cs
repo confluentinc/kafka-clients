@@ -24,7 +24,10 @@ namespace Confluent.Kafka.Producer;
 public interface IAsyncDeliveryCallback
 {
     /// <summary>
-    /// Called on the producer's pump thread when the record's delivery completes.
+    /// Called on the producer's pump thread when the record's delivery completes, or, on
+    /// <c>AsyncKafkaProducer</c>, inside <c>Send</c>, on the caller's thread, when a serializer threw an
+    /// <see cref="Common.Errors.ApiException"/>; only the record's future then waits for the task.
+    /// <c>AsyncMockProducer</c> rethrows that exception from <c>Send</c> instead, as Java's <c>MockProducer</c> does.
     /// </summary>
     /// <param name="metadata">The record's metadata; on failure, the placeholder with offset -1.</param>
     /// <param name="exception">The failure, or <c>null</c> when the record was delivered.</param>

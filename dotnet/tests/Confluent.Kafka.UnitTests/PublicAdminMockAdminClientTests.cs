@@ -21,6 +21,7 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -170,8 +171,8 @@ public sealed class PublicAdminMockAdminClientTests
     [Fact]
     public void Builder_ControllerOutOfRange_ThrowsAtTheSetter_OnBothMocks()
     {
-        ArgumentException sync = Assert.Throws<ArgumentException>(() => MockAdminClient.Create().Controller(5));
-        ArgumentException async = Assert.Throws<ArgumentException>(() => AsyncMockAdminClient.Create().Controller(5));
+        IllegalArgumentException sync = Assert.Throws<IllegalArgumentException>(() => MockAdminClient.Create().Controller(5));
+        IllegalArgumentException async = Assert.Throws<IllegalArgumentException>(() => AsyncMockAdminClient.Create().Controller(5));
 
         Assert.Equal("Index 5 out of bounds for length 1", sync.Message);
         Assert.Equal("Index 5 out of bounds for length 1", async.Message);
@@ -216,10 +217,10 @@ public sealed class PublicAdminMockAdminClientTests
     public void AsyncMock_Builder_RejectsNoBrokerAtBuild_AndANegativeCountAtTheSetter()
     {
         AsyncMockAdminClient.Builder builder = AsyncMockAdminClient.Create().NumBrokers(0);
-        ArgumentException noBroker = Assert.Throws<ArgumentException>(() => builder.Build());
+        IllegalArgumentException noBroker = Assert.Throws<IllegalArgumentException>(() => builder.Build());
         Assert.Equal("Index 0 out of bounds for length 0", noBroker.Message);
 
-        ArgumentException negative = Assert.Throws<ArgumentException>(() => AsyncMockAdminClient.Create().NumBrokers(-1));
+        IllegalArgumentException negative = Assert.Throws<IllegalArgumentException>(() => AsyncMockAdminClient.Create().NumBrokers(-1));
         Assert.Equal("fromIndex(0) > toIndex(-1)", negative.Message);
     }
 
@@ -289,8 +290,8 @@ public sealed class PublicAdminMockAdminClientTests
     [Fact]
     public void BrokersControllerConstructor_RejectsAControllerNotInTheBrokers_OnBothMocks()
     {
-        ArgumentException sync = Assert.Throws<ArgumentException>(() => new MockAdminClient(new[] { Seeded(0) }, Seeded(1)));
-        ArgumentException async = Assert.Throws<ArgumentException>(() => new AsyncMockAdminClient(new[] { Seeded(0) }, Seeded(1)));
+        IllegalArgumentException sync = Assert.Throws<IllegalArgumentException>(() => new MockAdminClient(new[] { Seeded(0) }, Seeded(1)));
+        IllegalArgumentException async = Assert.Throws<IllegalArgumentException>(() => new AsyncMockAdminClient(new[] { Seeded(0) }, Seeded(1)));
 
         Assert.Equal(ControllerNotABroker, sync.Message);
         Assert.Equal(ControllerNotABroker, async.Message);
@@ -299,13 +300,11 @@ public sealed class PublicAdminMockAdminClientTests
     [Fact]
     public void BrokersControllerConstructor_RejectsANullController_AsANodeNotInTheBrokers_OnBothMocks()
     {
-        ArgumentException sync = Assert.Throws<ArgumentException>(() => new MockAdminClient(new[] { Seeded(0) }, null!));
-        ArgumentException async = Assert.Throws<ArgumentException>(() => new AsyncMockAdminClient(new[] { Seeded(0) }, null!));
+        IllegalArgumentException sync = Assert.Throws<IllegalArgumentException>(() => new MockAdminClient(new[] { Seeded(0) }, null!));
+        IllegalArgumentException async = Assert.Throws<IllegalArgumentException>(() => new AsyncMockAdminClient(new[] { Seeded(0) }, null!));
 
-        Assert.StartsWith(ControllerNotABroker, sync.Message);
-        Assert.Equal("controller", sync.ParamName);
-        Assert.StartsWith(ControllerNotABroker, async.Message);
-        Assert.Equal("controller", async.ParamName);
+        Assert.Equal(ControllerNotABroker, sync.Message);
+        Assert.Equal(ControllerNotABroker, async.Message);
     }
 
     [Fact]
@@ -385,14 +384,14 @@ public sealed class PublicAdminMockAdminClientTests
         MockAdminClient sync = Admin();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         sync.AddTopic(false, "topic", partitions, new Dictionary<string, string>());
-        ArgumentException syncFailure = Assert.Throws<ArgumentException>(
+        IllegalArgumentException syncFailure = Assert.Throws<IllegalArgumentException>(
             () => sync.AddTopic(false, "topic", partitions, new Dictionary<string, string>()));
         Assert.Equal("Topic topic was already added.", syncFailure.Message);
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         async.AddTopic(false, "topic", partitions, new Dictionary<string, string>());
-        ArgumentException asyncFailure = Assert.Throws<ArgumentException>(
+        IllegalArgumentException asyncFailure = Assert.Throws<IllegalArgumentException>(
             () => async.AddTopic(false, "topic", partitions, new Dictionary<string, string>()));
         Assert.Equal("Topic topic was already added.", asyncFailure.Message);
     }
@@ -405,17 +404,17 @@ public sealed class PublicAdminMockAdminClientTests
 
         MockAdminClient sync = Admin();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        Assert.Equal("Leader broker unknown", Assert.Throws<ArgumentException>(
+        Assert.Equal("Leader broker unknown", Assert.Throws<IllegalArgumentException>(
             () => sync.AddTopic(false, "topic", unknownLeader, new Dictionary<string, string>())).Message);
-        Assert.Equal("Leader broker unknown", Assert.Throws<ArgumentException>(
+        Assert.Equal("Leader broker unknown", Assert.Throws<IllegalArgumentException>(
             () => sync.AddTopic(false, "other", noLeader, new Dictionary<string, string>())).Message);
         Assert.Empty(sync.ListTopics().Names().Get(s_deadline));
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        Assert.Equal("Leader broker unknown", Assert.Throws<ArgumentException>(
+        Assert.Equal("Leader broker unknown", Assert.Throws<IllegalArgumentException>(
             () => async.AddTopic(false, "topic", unknownLeader, new Dictionary<string, string>())).Message);
-        Assert.Equal("Leader broker unknown", Assert.Throws<ArgumentException>(
+        Assert.Equal("Leader broker unknown", Assert.Throws<IllegalArgumentException>(
             () => async.AddTopic(false, "other", noLeader, new Dictionary<string, string>())).Message);
         Assert.Empty(await TestTimeout.Run(() => async.ListTopics().Names().Get(), s_deadline));
     }
@@ -431,12 +430,12 @@ public sealed class PublicAdminMockAdminClientTests
 
         MockAdminClient sync = Admin();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        Assert.Equal(message, Assert.Throws<ArgumentException>(
+        Assert.Equal(message, Assert.Throws<IllegalArgumentException>(
             () => sync.AddTopic(false, "topic", partitions, new Dictionary<string, string>())).Message);
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        Assert.Equal(message, Assert.Throws<ArgumentException>(
+        Assert.Equal(message, Assert.Throws<IllegalArgumentException>(
             () => async.AddTopic(false, "topic", partitions, new Dictionary<string, string>())).Message);
     }
 
@@ -448,12 +447,12 @@ public sealed class PublicAdminMockAdminClientTests
 
         MockAdminClient sync = MockAdminClient.Create().BrokerLogDirs(noLogDirs).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        Assert.Equal("Broker 0 has no log directories.", Assert.Throws<ArgumentException>(
+        Assert.Equal("Broker 0 has no log directories.", Assert.Throws<IllegalArgumentException>(
             () => sync.AddTopic(false, "topic", partitions, new Dictionary<string, string>())).Message);
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().BrokerLogDirs(noLogDirs).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        Assert.Equal("Broker 0 has no log directories.", Assert.Throws<ArgumentException>(
+        Assert.Equal("Broker 0 has no log directories.", Assert.Throws<IllegalArgumentException>(
             () => async.AddTopic(false, "topic", partitions, new Dictionary<string, string>())).Message);
     }
 
@@ -465,8 +464,8 @@ public sealed class PublicAdminMockAdminClientTests
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        Assert.Equal("Topic nope did not exist.", Assert.Throws<ArgumentException>(() => sync.MarkTopicForDeletion("nope")).Message);
-        Assert.Equal("Topic nope did not exist.", Assert.Throws<ArgumentException>(() => async.MarkTopicForDeletion("nope")).Message);
+        Assert.Equal("Topic nope did not exist.", Assert.Throws<IllegalArgumentException>(() => sync.MarkTopicForDeletion("nope")).Message);
+        Assert.Equal("Topic nope did not exist.", Assert.Throws<IllegalArgumentException>(() => async.MarkTopicForDeletion("nope")).Message);
     }
 
     [Fact]
@@ -481,8 +480,8 @@ public sealed class PublicAdminMockAdminClientTests
         sync.MarkTopicForDeletion("t");
         KafkaFuture<TopicDescription> syncDescribed =
             sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues!["t"];
-        Assert.Equal(UnknownTopicOrPartitionCode, Assert.Throws<KafkaException>(() => syncDescribed.Get(s_deadline)).Code);
-        Assert.Equal("No such topic as x", Assert.Throws<ArgumentException>(() => sync.SetFetchesRemainingUntilVisible("x", 1)).Message);
+        Assert.Equal(UnknownTopicOrPartitionCode, FutureAssert.Throws<UnknownTopicOrPartitionException>(() => syncDescribed.Get(s_deadline)).Code);
+        Assert.Equal("No such topic as x", Assert.Throws<IllegalArgumentException>(() => sync.SetFetchesRemainingUntilVisible("x", 1)).Message);
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
@@ -493,10 +492,10 @@ public sealed class PublicAdminMockAdminClientTests
         async.MarkTopicForDeletion("t");
         AsyncKafkaFuture<TopicDescription> asyncDescribed =
             async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" })).TopicNameValues!["t"];
-        KafkaException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncDescribed.Get()), s_deadline);
+        UnknownTopicOrPartitionException asyncFailure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => asyncDescribed.Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, asyncFailure.Code);
-        Assert.Equal("No such topic as x", Assert.Throws<ArgumentException>(() => async.SetFetchesRemainingUntilVisible("x", 1)).Message);
+        Assert.Equal("No such topic as x", Assert.Throws<IllegalArgumentException>(() => async.SetFetchesRemainingUntilVisible("x", 1)).Message);
     }
 
     [Fact]
@@ -506,20 +505,16 @@ public sealed class PublicAdminMockAdminClientTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         sync.Controller(Seeded(2));
         AssertNode(Seeded(2), sync.DescribeCluster().Controller().Get(s_deadline));
-        Assert.Equal(ControllerNotABroker, Assert.Throws<ArgumentException>(() => sync.Controller(Unknown())).Message);
-        ArgumentException syncNoNode = Assert.Throws<ArgumentException>(() => sync.Controller(null!));
-        Assert.StartsWith(ControllerNotABroker, syncNoNode.Message);
-        Assert.Equal("controller", syncNoNode.ParamName);
+        Assert.Equal(ControllerNotABroker, Assert.Throws<IllegalArgumentException>(() => sync.Controller(Unknown())).Message);
+        Assert.Equal(ControllerNotABroker, Assert.Throws<IllegalArgumentException>(() => sync.Controller(null!)).Message);
         AssertNode(Seeded(2), sync.DescribeCluster().Controller().Get(s_deadline));
 
         AsyncMockAdminClient async = AsyncAdmin();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         async.Controller(Seeded(2));
         AssertNode(Seeded(2), await TestTimeout.Run(() => async.DescribeCluster().Controller().Get(), s_deadline));
-        Assert.Equal(ControllerNotABroker, Assert.Throws<ArgumentException>(() => async.Controller(Unknown())).Message);
-        ArgumentException asyncNoNode = Assert.Throws<ArgumentException>(() => async.Controller(null!));
-        Assert.StartsWith(ControllerNotABroker, asyncNoNode.Message);
-        Assert.Equal("controller", asyncNoNode.ParamName);
+        Assert.Equal(ControllerNotABroker, Assert.Throws<IllegalArgumentException>(() => async.Controller(Unknown())).Message);
+        Assert.Equal(ControllerNotABroker, Assert.Throws<IllegalArgumentException>(() => async.Controller(null!)).Message);
         AssertNode(Seeded(2), await TestTimeout.Run(() => async.DescribeCluster().Controller().Get(), s_deadline));
     }
 
@@ -532,13 +527,13 @@ public sealed class PublicAdminMockAdminClientTests
         MockAdminClient sync = MockAdminClient.Create().Brokers(brokers).BrokerLogDirs(logDirs).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         KafkaFuture syncCreated = sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values["t"];
-        Assert.Equal("Broker 0 has no log directories.", Assert.Throws<ArgumentException>(() => syncCreated.Get(s_deadline)).Message);
+        Assert.Equal("Broker 0 has no log directories.", FutureAssert.Throws<IllegalArgumentException>(() => syncCreated.Get(s_deadline)).Message);
 
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Brokers(brokers).BrokerLogDirs(logDirs).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AsyncKafkaFuture asyncCreated = async.CreateTopics(new[] { new NewTopic("t", 1, 1) }).Values["t"];
-        ArgumentException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<ArgumentException>(() => asyncCreated.Get()), s_deadline);
+        IllegalArgumentException asyncFailure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<IllegalArgumentException>(() => asyncCreated.Get()), s_deadline);
         Assert.Equal("Broker 0 has no log directories.", asyncFailure.Message);
     }
 
@@ -553,7 +548,7 @@ public sealed class PublicAdminMockAdminClientTests
         sync.CreateTopics(new[] { new NewTopic("t", 1, 1) }).All().Get(s_deadline);
         sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/b" }).Values[replica].Get(s_deadline);
         KafkaFuture syncOffline = sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values[replica];
-        KafkaException syncFailure = Assert.Throws<KafkaException>(() => syncOffline.Get(s_deadline));
+        KafkaStorageException syncFailure = FutureAssert.Throws<KafkaStorageException>(() => syncOffline.Get(s_deadline));
         Assert.Equal(KafkaStorageErrorCode, syncFailure.Code);
         Assert.Equal("Log directory /c is offline", syncFailure.Message);
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo syncInfo =
@@ -569,8 +564,8 @@ public sealed class PublicAdminMockAdminClientTests
             s_deadline);
         AsyncKafkaFuture asyncOffline =
             async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = "/c" }).Values[replica];
-        KafkaException asyncFailure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => asyncOffline.Get()), s_deadline);
+        KafkaStorageException asyncFailure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => asyncOffline.Get()), s_deadline);
         Assert.Equal(KafkaStorageErrorCode, asyncFailure.Code);
         Assert.Equal("Log directory /c is offline", asyncFailure.Message);
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo asyncInfo = await TestTimeout.Run(

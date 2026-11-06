@@ -41,7 +41,7 @@ public sealed class AdminP4ResultMarshalTests
     {
         IntPtr error = KafkaError("Election for élection-1 failed.");
 
-        IReadOnlyDictionary<TopicPartition, KafkaException?> copied = CopyOutElection(
+        IReadOnlyDictionary<TopicPartition, Exception?> copied = CopyOutElection(
             new[] { (s_elected, IntPtr.Zero), (s_failed, error) });
 
         Assert.Equal(2, copied.Count);
@@ -52,7 +52,7 @@ public sealed class AdminP4ResultMarshalTests
     }
 
     [Fact]
-    public void ElectLeaders_AnErrorThatIsNotAKafkaError_IsThrown()
+    public void ElectLeaders_AnErrorThatIsNotAKafkaError_IsCopiedOutAsItsClass()
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr error;
@@ -63,9 +63,10 @@ public sealed class AdminP4ResultMarshalTests
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(
-            () => CopyOutElection(new[] { (s_failed, error) }));
-        Assert.Equal("not a Kafka error", thrown.Message);
+        IReadOnlyDictionary<TopicPartition, Exception?> copied = CopyOutElection(new[] { (s_failed, error) });
+
+        IllegalStateException failure = Assert.IsType<IllegalStateException>(copied[s_failed]);
+        Assert.Equal("not a Kafka error", failure.Message);
     }
 
     [Fact]
@@ -145,7 +146,7 @@ public sealed class AdminP4ResultMarshalTests
         Assert.Empty(reassignment.RemovingReplicas);
     }
 
-    private static IReadOnlyDictionary<TopicPartition, KafkaException?> CopyOutElection(
+    private static IReadOnlyDictionary<TopicPartition, Exception?> CopyOutElection(
         IReadOnlyList<(TopicPartition Partition, IntPtr Error)> entries)
     {
         IntPtr outErr = IntPtr.Zero;

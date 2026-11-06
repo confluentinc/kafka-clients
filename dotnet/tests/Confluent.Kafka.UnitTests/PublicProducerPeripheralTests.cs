@@ -80,13 +80,13 @@ public sealed class PublicProducerPeripheralTests
     }
 
     [Fact]
-    public async Task Close_ThenFlush_ThrowsObjectDisposed()
+    public async Task Close_ThenFlush_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => producer.Close(), s_deadline);
 
-        // After Close a call throws ObjectDisposedException, before any native call.
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
+        // After Close a call throws IllegalStateException, before any native call.
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.Flush());
     }
 
     [Fact]
@@ -155,12 +155,12 @@ public sealed class PublicProducerPeripheralTests
     }
 
     [Fact]
-    public async Task PartitionsFor_AfterDispose_ThrowsObjectDisposed()
+    public async Task PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(producer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.PartitionsFor(Topic));
     }
 
     [Fact]
@@ -190,12 +190,12 @@ public sealed class PublicProducerPeripheralTests
     }
 
     [Fact]
-    public async Task Flush_AfterDispose_ThrowsObjectDisposed()
+    public async Task Flush_AfterDispose_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(producer);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.Flush());
     }
 
     private static async Task<IReadOnlyList<PartitionInfo>> PartitionsForOf(IAsyncProducer<byte[], byte[]> producer, string topic)

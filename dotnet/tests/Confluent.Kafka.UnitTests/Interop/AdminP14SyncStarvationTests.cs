@@ -156,7 +156,7 @@ public sealed class AdminP14SyncStarvationTests
 
         pool.AssertReleased();
 
-        Assert.Throws<ObjectDisposedException>(() => sync.ListTopics());
+        Assert.Throws<IllegalStateException>(() => sync.ListTopics());
         TestTimeout.Run(sync.Dispose, s_releaseDeadline);
     }
 

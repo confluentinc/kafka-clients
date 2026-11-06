@@ -223,7 +223,7 @@ public sealed class KafkaAdminClient : IAdmin
     public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
         RemoveMembersFromConsumerGroupResult.OfClient(
-            _native.RemoveMembersFromConsumerGroup(groupId, options));
+            _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>

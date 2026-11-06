@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 
+
 namespace Confluent.Kafka.Common;
 
 /// <summary>
@@ -89,7 +90,7 @@ public static class GroupStateExtensions
     /// </summary>
     /// <param name="type">The group type to tabulate.</param>
     /// <returns>A new collection on each call, as Java's <c>Set.of(…)</c>.</returns>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="type"/> is <see cref="GroupType.UNKNOWN"/> or is not a defined
     /// <see cref="GroupType"/>, with Java's message "Group type not known".
     /// </exception>
@@ -142,7 +143,7 @@ public static class GroupStateExtensions
                 };
 
             default:
-                throw new ArgumentException("Group type not known", nameof(type));
+                throw new IllegalArgumentException("Group type not known");
         }
     }
 }

@@ -29,7 +29,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 public sealed class NativeMethodsPrelinkTests
 {
-    private const int ExpectedImportCount = 935;
+    private const int ExpectedImportCount = 959;
 
     [Fact]
     public void EveryDllImport_ResolvesAgainstTheLoadedNative()

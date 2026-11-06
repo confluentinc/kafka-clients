@@ -116,7 +116,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
                 case "Close":
                     KafkaException wrapped = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => call, s_deadline));
                     AssertCloseWrapped(raised, wrapped);
-                    Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+                    Assert.Throws<IllegalStateException>(() => consumer.Assignment());
                     break;
                 default:
                     Assert.Same(raised, await Assert.ThrowsAsync<CallbackException>(() => TestTimeout.Run(() => call, s_deadline)));
@@ -316,7 +316,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
                     KafkaException closed = await Assert.ThrowsAsync<KafkaException>(
                         () => TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(5))), s_deadline));
                     AssertCloseWrapped(nesting.Raised, closed);
-                    Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
+                    Assert.Throws<IllegalStateException>(() => consumer.Assignment());
                     return;
             }
 
@@ -442,7 +442,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
         Assert.Equal(typeof(CallbackException).FullName + ": bad", wrapped.Message);
         Assert.Same(raised, wrapped.InnerException);
         Assert.Equal(UnknownServerErrorCode, wrapped.Code);
-        Assert.False(wrapped.IsRetriable);
+        Assert.False(wrapped is Common.Errors.RetriableException);
     }
 
     private static void AssertCloseWrapped(CallbackException raised, KafkaException wrapped)
@@ -451,7 +451,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
         Assert.Equal("Failed to close kafka consumer", wrapped.Message);
         Assert.Same(raised, wrapped.InnerException);
         Assert.Equal(UnknownServerErrorCode, wrapped.Code);
-        Assert.False(wrapped.IsRetriable);
+        Assert.False(wrapped is Common.Errors.RetriableException);
     }
 
     private static Task Deliver(IAsyncConsumer<byte[], byte[]> consumer, string call) =>

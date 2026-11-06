@@ -32,11 +32,7 @@ public sealed class KafkaExceptionCauseTests
 {
     private const int UnknownServerErrorCode = -1;
 
-    private const int ConfigErrorCode = -10;
-
     private const string BadBootstrap = "not-a-host-port";
-
-    private const int LocalIllegalArgumentCode = -3;
 
     private const string OuterMessage = "the operation failed";
 
@@ -53,12 +49,9 @@ public sealed class KafkaExceptionCauseTests
 
         Assert.Equal(UnknownServerErrorCode, outer.Code);
         Assert.Equal("Failed to create new KafkaAdminClient", outer.Message);
-        Assert.False(outer.IsRetriable);
 
         ConfigException inner = Assert.IsType<ConfigException>(outer.InnerException);
-        Assert.Equal(ConfigErrorCode, inner.Code);
         Assert.Equal("Invalid url in bootstrap.servers: " + BadBootstrap, inner.Message);
-        Assert.False(inner.IsRetriable);
 
         Assert.Null(inner.InnerException);
     }
@@ -66,16 +59,13 @@ public sealed class KafkaExceptionCauseTests
     [Fact]
     public void MessageSourceError_CarriesTheCoreCauseAsInnerException()
     {
-        KafkaException outer = KafkaException.FromHandle(MessageSourceError())!;
+        KafkaException outer = Assert.IsType<KafkaException>(KafkaException.FromFfiError(MessageSourceError(), owned: true));
 
         Assert.Equal(UnknownServerErrorCode, outer.Code);
         Assert.Equal(OuterMessage, outer.Message);
-        Assert.False(outer.IsRetriable);
 
-        KafkaException inner = Assert.IsType<KafkaException>(outer.InnerException);
-        Assert.Equal(LocalIllegalArgumentCode, inner.Code);
+        IllegalArgumentException inner = Assert.IsType<IllegalArgumentException>(outer.InnerException);
         Assert.Equal(CauseMessage, inner.Message);
-        Assert.False(inner.IsRetriable);
 
         Assert.Null(inner.InnerException);
     }

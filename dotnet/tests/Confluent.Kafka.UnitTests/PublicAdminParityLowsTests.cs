@@ -58,7 +58,7 @@ public sealed class PublicAdminParityLowsTests
         AsyncDescribeClientQuotasResult result = new AsyncDescribeClientQuotasResult(
             new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities));
 
-        Assert.Same(entities.GetAsync(), result.Entities().Get());
+        Assert.Same(entities.GetWrappedAsync(), result.Entities().Get());
         Assert.Same(quotas, await TestTimeout.Run(() => result.Entities().Get(), s_deadline));
 
         ArgumentNullException thrown =
@@ -91,7 +91,7 @@ public sealed class PublicAdminParityLowsTests
 
         futures[bob] = new AsyncKafkaFuture(TestFutures.Failed(failure));
         KafkaException thrown =
-            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+            await FutureAssert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Same(failure, thrown);
 
         Assert.Equal(
@@ -118,7 +118,7 @@ public sealed class PublicAdminParityLowsTests
 
         Assert.Same(futures, result.Values);
         KafkaException thrown =
-            await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+            await FutureAssert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Same(failure, thrown);
 
         Assert.Equal(

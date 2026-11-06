@@ -59,7 +59,7 @@ public sealed class RecordDeserializationExceptionTests
         Assert.Equal(new byte[] { (byte)'1' }, header.Value);
         Assert.Equal("m", e.Message);
         Assert.Same(cause, e.InnerException);
-        Assert.Equal(0, e.Code);
+        Assert.Equal(-27, e.Code);
     }
 
     [Fact]
@@ -112,7 +112,6 @@ public sealed class RecordDeserializationExceptionTests
 
         Assert.IsAssignableFrom<SerializationException>(e);
         Assert.IsAssignableFrom<KafkaException>(e);
-        Assert.False(e.IsRetriable);
     }
 
     [Fact]

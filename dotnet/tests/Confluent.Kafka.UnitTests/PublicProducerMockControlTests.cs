@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -71,9 +72,9 @@ public sealed class PublicProducerMockControlTests
         Task<RecordMetadata> sendTask = producer.Send(
             new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Delivery();
 
-        Assert.True(producer.ErrorNext(new KafkaException(2, "mock-error", isRetriable: true)));
+        Assert.True(producer.ErrorNext(new Common.Errors.CorruptRecordException("mock-error")));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
             async () => await sendTask);
         Assert.Equal(2, failure.Code);
         Assert.Contains("mock-error", failure.Message, StringComparison.Ordinal);
@@ -85,7 +86,7 @@ public sealed class PublicProducerMockControlTests
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        Assert.False(producer.ErrorNext(new KafkaException(2, "nope", isRetriable: true)));
+        Assert.False(producer.ErrorNext(new Common.Errors.CorruptRecordException("nope")));
     }
 
     [Fact]
@@ -123,15 +124,15 @@ public sealed class PublicProducerMockControlTests
     }
 
     [Fact]
-    public async Task Helpers_AfterDispose_ThrowObjectDisposed()
+    public async Task Helpers_AfterDispose_ThrowIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.CompleteNext());
-        Assert.Throws<ObjectDisposedException>(() => producer.ErrorNext(new KafkaException(2, "x", isRetriable: true)));
-        Assert.Throws<ObjectDisposedException>(() => producer.HistoryCount());
-        Assert.Throws<ObjectDisposedException>(() => producer.Clear());
+        Assert.Throws<IllegalStateException>(() => producer.CompleteNext());
+        Assert.Throws<IllegalStateException>(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("x")));
+        Assert.Throws<IllegalStateException>(() => producer.HistoryCount());
+        Assert.Throws<IllegalStateException>(() => producer.Clear());
     }
 
     [Fact]
@@ -159,7 +160,7 @@ public sealed class PublicProducerMockControlTests
                                 _ = producer.HistoryCount();
                                 producer.Clear();
                             }
-                            catch (ObjectDisposedException)
+                            catch (IllegalStateException)
                             {
                                 // Expected once teardown wins, from the closed check or the SafeHandle marshaller.
                                 return;

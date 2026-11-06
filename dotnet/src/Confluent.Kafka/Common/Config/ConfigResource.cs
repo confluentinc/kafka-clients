@@ -83,12 +83,12 @@ public sealed class ConfigResource
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
-        string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", JavaName(Type), Name);
+        string.Format(CultureInfo.InvariantCulture, "ConfigResource(type={0}, name='{1}')", ConstantName(Type), Name);
 
     private static ConfigResourceType DefinedOrUnknown(ConfigResourceType type) =>
         Enum.IsDefined(typeof(ConfigResourceType), type) ? type : ConfigResourceType.UNKNOWN;
 
-    private static string JavaName(ConfigResourceType type) => type switch
+    private static string ConstantName(ConfigResourceType type) => type switch
     {
         ConfigResourceType.UNKNOWN => "UNKNOWN",
         ConfigResourceType.TOPIC => "TOPIC",

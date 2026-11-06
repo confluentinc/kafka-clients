@@ -112,12 +112,12 @@ public sealed class PublicProducerTeardownTests
     }
 
     [Fact]
-    public async Task Flush_AfterDisposeAsync_ThrowsObjectDisposed()
+    public async Task Flush_AfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
+        await Assert.ThrowsAsync<IllegalStateException>(() => producer.Flush());
     }
 
     [Fact]

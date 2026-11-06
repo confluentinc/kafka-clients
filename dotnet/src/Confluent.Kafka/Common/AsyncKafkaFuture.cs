@@ -45,9 +45,11 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     }
 
     /// <summary>
-    /// Java's <c>toCompletionStage</c>: the same task as <see cref="Get()"/>, which user code cannot complete.
+    /// Java's <c>toCompletionStage</c>: a task, the same on every call, which user code cannot complete; it resolves
+    /// with the value, faults with the future's failure itself, as Java's stage completes, or is canceled when the
+    /// future is cancelled.
     /// </summary>
-    public Task<T> ToCompletionStage() => Get();
+    public Task<T> ToCompletionStage() => Impl.GetAsync();
 
     /// <summary>
     /// Java's <c>thenApply</c>: a future completed with <paramref name="function"/> applied to this future's value, or
@@ -89,25 +91,27 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
 
     /// <summary>
     /// The result's task, the same one on every call, to await as Java's <c>future.get()</c>: it resolves with the
-    /// value, faults with the operation's exception, or is canceled when the future is cancelled. Never blocks.
+    /// value, faults with <see cref="ExecutionException"/> around the future's failure, or is canceled when the future
+    /// is cancelled. Never blocks.
     /// </summary>
-    public Task<T> Get() => Impl.GetAsync();
+    public Task<T> Get() => Impl.GetWrappedAsync();
 
     /// <summary>
-    /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with
-    /// <see cref="TimeoutException"/> when the future has not completed within <paramref name="timeout"/>. A zero or
-    /// negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does.
+    /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with Java's
+    /// <see cref="Confluent.Kafka.TimeoutException"/> when the future has not completed within
+    /// <paramref name="timeout"/>. A zero or negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/>
+    /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public Task<T> Get(TimeSpan timeout) => Impl.GetAsync(timeout);
+    public Task<T> Get(TimeSpan timeout) => Impl.GetWrappedAsync(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early by <paramref name="cancellationToken"/>: the returned task is canceled when the
     /// token fires first. The token ends only this wait, never the future.
     /// </summary>
-    public Task<T> Get(CancellationToken cancellationToken) => Impl.GetAsync(cancellationToken);
+    public Task<T> Get(CancellationToken cancellationToken) => Impl.GetWrappedAsync(cancellationToken);
 
     /// <inheritdoc cref="KafkaFuture{T}.GetNow"/>
-    public T GetNow(T valueIfAbsent) => Impl.GetNow(valueIfAbsent);
+    public T GetNow(T valueIfAbsent) => Impl.GetNowWrapped(valueIfAbsent);
 
     /// <inheritdoc cref="KafkaFuture{T}.IsCancelled"/>
     public bool IsCancelled => Impl.IsCancelled;
@@ -220,9 +224,11 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     }
 
     /// <summary>
-    /// Java's <c>toCompletionStage</c>: the same task as <see cref="Get()"/>, which user code cannot complete.
+    /// Java's <c>toCompletionStage</c>: a task, the same on every call, which user code cannot complete; it completes
+    /// when the operation succeeds, faults with the future's failure itself, as Java's stage completes, or is canceled
+    /// when the future is cancelled.
     /// </summary>
-    public Task ToCompletionStage() => Get();
+    public Task ToCompletionStage() => Impl.WaitAsync();
 
     /// <summary>
     /// Java's <c>thenApply</c> on a future of no value: a future completed with what <paramref name="function"/>
@@ -266,25 +272,27 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 
     /// <summary>
     /// The operation's task, the same one on every call, to await as Java's <c>future.get()</c>: it completes when the
-    /// operation succeeds, faults with its exception, or is canceled when the future is cancelled. Never blocks.
+    /// operation succeeds, faults with <see cref="ExecutionException"/> around the future's failure, or is canceled
+    /// when the future is cancelled. Never blocks.
     /// </summary>
-    public Task Get() => Impl.WaitAsync();
+    public Task Get() => Impl.WaitWrappedAsync();
 
     /// <summary>
-    /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with
-    /// <see cref="TimeoutException"/> when the future has not completed within <paramref name="timeout"/>. A zero or
-    /// negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does.
+    /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with Java's
+    /// <see cref="Confluent.Kafka.TimeoutException"/> when the future has not completed within
+    /// <paramref name="timeout"/>. A zero or negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/>
+    /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public Task Get(TimeSpan timeout) => Impl.WaitAsync(timeout);
+    public Task Get(TimeSpan timeout) => Impl.WaitWrappedAsync(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early by <paramref name="cancellationToken"/>: the returned task is canceled when the
     /// token fires first. The token ends only this wait, never the future.
     /// </summary>
-    public Task Get(CancellationToken cancellationToken) => Impl.WaitAsync(cancellationToken);
+    public Task Get(CancellationToken cancellationToken) => Impl.WaitWrappedAsync(cancellationToken);
 
     /// <inheritdoc cref="KafkaFuture.GetNow"/>
-    public void GetNow() => Impl.GetNow();
+    public void GetNow() => Impl.GetNowWrapped();
 
     /// <inheritdoc cref="KafkaFuture.IsCancelled"/>
     public bool IsCancelled => Impl.IsCancelled;

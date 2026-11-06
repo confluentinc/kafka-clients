@@ -14,7 +14,11 @@
 
 using System;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Requests;
 using Xunit;
+
+using FutureTimeoutException = Confluent.Kafka.TimeoutException;
 
 namespace Confluent.Kafka.Soak.Tests;
 
@@ -35,7 +39,27 @@ public sealed class SoakErrorClassificationTests
     [Fact]
     public void ErrorCodeIsReadFromAKafkaException()
     {
-        Assert.NotNull(SoakClient.ErrorCode(new KafkaException("x")));
+        Assert.Equal(-1, SoakClient.ErrorCode(new KafkaException("x")));
+        Assert.Equal(16, SoakClient.ErrorCode(new NotCoordinatorException("coordinator moved")));
+    }
+
+    [Fact]
+    public void FailureOfUnwrapsAnExecutionExceptionOnly()
+    {
+        var cause = new NotCoordinatorException("x");
+        Assert.Same(cause, SoakClient.FailureOf(new ExecutionException(cause)));
+        Assert.Same(cause, SoakClient.FailureOf(cause));
+        var empty = new ExecutionException((Exception?)null);
+        Assert.Same(empty, SoakClient.FailureOf(empty));
+    }
+
+    [Fact]
+    public void ErrorCodeIsReadFromAClassOutsideKafkaException()
+    {
+        Assert.Equal(-4, SoakClient.ErrorCode(new IllegalStateException("closed")));
+        Assert.Equal(-5, SoakClient.ErrorCode(new FutureTimeoutException("timed out")));
+        Assert.Equal(-24, SoakClient.ErrorCode(new CorrelationIdMismatchException("mismatch", 1, 2)));
+        Assert.Null(SoakClient.ErrorCode(new NoSuchElementException("no id")));
     }
 
     [Theory]
@@ -47,10 +71,18 @@ public sealed class SoakErrorClassificationTests
     }
 
     [Fact]
-    public void ErrorIsRetriableIsFalseForANonKafkaException()
+    public void ErrorIsRetriableIsFalseForANonRetriableClass()
     {
         Assert.False(SoakClient.ErrorIsRetriable(new InvalidOperationException("no such property")));
-        Assert.False(SoakClient.ErrorIsRetriable(new KafkaException("not flagged retriable")));
+        Assert.False(SoakClient.ErrorIsRetriable(new KafkaException("not a retriable class")));
+        Assert.False(SoakClient.ErrorIsRetriable(new TopicAuthorizationException("not retriable")));
+    }
+
+    [Fact]
+    public void ErrorIsRetriableIsTrueForARetriableClassAndItsSubclasses()
+    {
+        Assert.True(SoakClient.ErrorIsRetriable(new NetworkException("a disconnect")));
+        Assert.True(SoakClient.ErrorIsRetriable(new NotCoordinatorException("coordinator moved")));
     }
 
     [Theory]

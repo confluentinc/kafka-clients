@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Common.Errors;
 /// <summary>
 /// A fetched record whose key or value failed to deserialize, Java's <c>RecordDeserializationException</c>: the
 /// record's partition, offset, timestamp, bytes and headers, with the deserializer's exception as
-/// <see cref="Exception.InnerException"/>. Its <see cref="KafkaException.Code"/> is 0.
+/// <see cref="Exception.InnerException"/>.
 /// </summary>
 public class RecordDeserializationException : SerializationException
 {
@@ -85,4 +85,6 @@ public class RecordDeserializationException : SerializationException
 
     /// <summary>The record's headers, or <see langword="null"/> when the constructor was given none.</summary>
     public Headers? Headers { get; }
+
+    internal override int FfiId => -27;
 }

@@ -97,9 +97,9 @@ public sealed class AlterConfigOp
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
-            CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", JavaName(OpType), ConfigEntry);
+            CultureInfo.InvariantCulture, "AlterConfigOp{{opType={0}, configEntry={1}}}", ConstantName(OpType), ConfigEntry);
 
-    private static string JavaName(AlterConfigOpType opType) => opType switch
+    private static string ConstantName(AlterConfigOpType opType) => opType switch
     {
         AlterConfigOpType.SET => "SET",
         AlterConfigOpType.DELETE => "DELETE",

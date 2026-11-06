@@ -50,8 +50,8 @@ public sealed class AdminStringsTests
     private static readonly TimeSpan s_releaseBound = TimeSpan.FromSeconds(5);
 
     private const string InvalidStringMessage =
-        "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
-        "surrogate: such a string cannot be passed to the native client unchanged.";
+        "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
+        "client unchanged.";
 
     // Looked up by label, never passed as theory data: the InlineData round trip replaces a lone surrogate with
     // U+FFFD, so the row would test a valid string.
@@ -66,15 +66,8 @@ public sealed class AdminStringsTests
             ["pair-inside"] = "a\uD83C\uDF88b",
             ["two-pairs"] = "\uD83C\uDF88\uD83D\uDE00",
             ["replacement-char"] = "\uFFFD",
-        };
 
-    private static readonly IReadOnlyDictionary<string, string> s_rejected =
-        new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["nul-only"] = "\0",
-            ["nul-last"] = "a\0",
-            ["nul-first"] = "\0a",
-            ["nul-inside"] = "a\0b",
+            // An unpaired surrogate crosses as Java's String.getBytes(UTF_8) encodes it, as '?'.
             ["lone-high"] = "\uD800",
             ["lone-low"] = "\uDC00",
             ["high-at-end"] = "a\uD83C",
@@ -84,6 +77,15 @@ public sealed class AdminStringsTests
             ["high-then-pair"] = "\uD83C\uD83C\uDF88",
         };
 
+    private static readonly IReadOnlyDictionary<string, string> s_rejected =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["nul-only"] = "\0",
+            ["nul-last"] = "a\0",
+            ["nul-first"] = "\0a",
+            ["nul-inside"] = "a\0b",
+        };
+
     public static IEnumerable<object[]> AcceptedLabels() => s_accepted.Keys.Select(label => new object[] { label });
 
     public static IEnumerable<object[]> RejectedLabels() => s_rejected.Keys.Select(label => new object[] { label });
@@ -91,11 +93,11 @@ public sealed class AdminStringsTests
     [Fact]
     public void LabelTables_HoldTheStringsTheirNamesSay()
     {
-        Assert.Equal(11, s_rejected.Count);
-        Assert.Equal(8, s_accepted.Count);
-        Assert.Equal(1, s_rejected["lone-high"].Length);
-        Assert.True(char.IsHighSurrogate(s_rejected["lone-high"][0]));
-        Assert.True(char.IsLowSurrogate(s_rejected["lone-low"][0]));
+        Assert.Equal(4, s_rejected.Count);
+        Assert.Equal(15, s_accepted.Count);
+        Assert.Equal(1, s_accepted["lone-high"]!.Length);
+        Assert.True(char.IsHighSurrogate(s_accepted["lone-high"]![0]));
+        Assert.True(char.IsLowSurrogate(s_accepted["lone-low"]![0]));
         Assert.Equal('\0', s_rejected["nul-only"][0]);
         Assert.True(char.IsSurrogatePair(s_accepted["pair"]![0], s_accepted["pair"]![1]));
     }
@@ -151,7 +153,7 @@ public sealed class AdminStringsTests
                 s_deadline);
 
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DeleteTopics(
-                TopicCollection.OfTopicNames(new[] { "fine", "x\uDC00" }),
+                TopicCollection.OfTopicNames(new[] { "fine", "x\0" }),
                 options: null));
 
             Assert.Equal("topics", rejected.ParamName);
@@ -210,14 +212,14 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
-                () => admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-\uD800" }));
+                () => admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-\0" }));
 
             Assert.Equal("options", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
                 admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.All().Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
         }
@@ -241,7 +243,7 @@ public sealed class AdminStringsTests
 
             AsyncDescribeClientQuotasResult result =
                 AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: null));
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
             Assert.Equal("Not implement yet", failure.Message);
         }
@@ -258,7 +260,7 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DescribeDelegationToken(
-                new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice\uDC00") } }));
+                new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice\0") } }));
 
             Assert.Equal("options", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
@@ -285,12 +287,12 @@ public sealed class AdminStringsTests
             AsyncDescribeUserScramCredentialsResult result =
                 AsyncDescribeUserScramCredentialsResult.OfClient(admin.DescribeUserScramCredentials(new[] { "alice" }, null));
 
-            ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = result.Description("ali\uD800ce"); });
+            ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = result.Description("ali\0ce"); });
 
             Assert.Equal("userName", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
-            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+            UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Description("alice").Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
         }

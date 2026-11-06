@@ -20,6 +20,7 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -84,7 +85,7 @@ public sealed class PublicAdminClientCreateTests
         KafkaAdminClient admin = new KafkaAdminClient(ControllersOnly());
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AssertUnsupportedEndpointType(Assert.Throws<KafkaException>(() => admin.ListTopics().Names().Get(s_deadline)));
+        AssertUnsupportedEndpointType(FutureAssert.Throws<UnsupportedEndpointTypeException>(() => admin.ListTopics().Names().Get(s_deadline)));
     }
 
     [Fact]
@@ -93,7 +94,7 @@ public sealed class PublicAdminClientCreateTests
         AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(ControllersOnly());
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
-        AssertUnsupportedEndpointType(await Assert.ThrowsAsync<KafkaException>(
+        AssertUnsupportedEndpointType(await FutureAssert.ThrowsAsync<UnsupportedEndpointTypeException>(
             () => TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline)));
     }
 
@@ -110,7 +111,6 @@ public sealed class PublicAdminClientCreateTests
         ConfigException cause = Assert.IsType<ConfigException>(outer.InnerException);
         Assert.Equal(ConfigErrorCode, cause.Code);
         Assert.Equal(causeMessage, cause.Message);
-        Assert.False(cause.IsRetriable);
     }
 
     private static object Create(bool async, IReadOnlyDictionary<string, object?> config) =>
@@ -120,6 +120,6 @@ public sealed class PublicAdminClientCreateTests
     {
         Assert.Equal(UnsupportedEndpointTypeCode, failure.Code);
         Assert.Equal(UnsupportedEndpointType, failure.Message);
-        Assert.False(failure.IsRetriable);
+        Assert.False(failure is RetriableException);
     }
 }

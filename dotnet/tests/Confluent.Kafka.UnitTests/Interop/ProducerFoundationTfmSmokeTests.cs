@@ -58,6 +58,6 @@ public sealed class ProducerFoundationTfmSmokeTests
         Assert.False(producer.Handle.IsInvalid);
         await TestTimeout.DisposeAsync(producer);
 
-        Assert.Throws<ObjectDisposedException>(() => producer.Handle);
+        Assert.Throws<IllegalStateException>(() => producer.Handle);
     }
 }
