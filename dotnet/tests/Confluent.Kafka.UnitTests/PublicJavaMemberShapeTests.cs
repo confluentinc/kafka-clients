@@ -20,6 +20,7 @@ using System.Reflection;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Serialization;
@@ -115,6 +116,9 @@ public class PublicJavaMemberShapeTests
             (typeof(ResourcePatternFilter), nameof(ResourcePatternFilter.ANY), typeof(ResourcePatternFilter)),
             (typeof(MockAdminClient), nameof(MockAdminClient.DEFAULT_LOG_DIRS), typeof(IReadOnlyList<string>)),
             (typeof(AsyncMockAdminClient), nameof(AsyncMockAdminClient.DEFAULT_LOG_DIRS), typeof(IReadOnlyList<string>)),
+            (typeof(DisconnectException), nameof(DisconnectException.INSTANCE), typeof(DisconnectException)),
+            (typeof(CoordinatorNotAvailableException), nameof(CoordinatorNotAvailableException.INSTANCE),
+                typeof(CoordinatorNotAvailableException)),
         })
         {
             FieldInfo field = owner.GetField(name, BindingFlags.Public | BindingFlags.Static)!;
@@ -138,5 +142,50 @@ public class PublicJavaMemberShapeTests
         Assert.Same(Uuid.RESERVED, Uuid.RESERVED);
         Assert.Same(MockAdminClient.DEFAULT_LOG_DIRS, MockAdminClient.DEFAULT_LOG_DIRS);
         Assert.Same(MockAdminClient.DEFAULT_LOG_DIRS, AsyncMockAdminClient.DEFAULT_LOG_DIRS);
+        Assert.Same(DisconnectException.INSTANCE, DisconnectException.INSTANCE);
+        Assert.Same(CoordinatorNotAvailableException.INSTANCE, CoordinatorNotAvailableException.INSTANCE);
+    }
+
+    /// <summary>
+    /// Every public static field and const outside an enum, each the <c>public static final</c> field of the same
+    /// name on the Java class it translates (checked against Kafka 4.4), so a new one cannot take a .NET name.
+    /// </summary>
+    private static readonly string[] s_javaConstants =
+    {
+        "Confluent.Kafka.Admin.AsyncMockAdminClient.DEFAULT_CLUSTER_ID",
+        "Confluent.Kafka.Admin.AsyncMockAdminClient.DEFAULT_LOG_DIRS",
+        "Confluent.Kafka.Admin.MockAdminClient.DEFAULT_CLUSTER_ID",
+        "Confluent.Kafka.Admin.MockAdminClient.DEFAULT_LOG_DIRS",
+        "Confluent.Kafka.Common.Acl.AccessControlEntryFilter.ANY",
+        "Confluent.Kafka.Common.Acl.AclBindingFilter.ANY",
+        "Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.INSTANCE",
+        "Confluent.Kafka.Common.Errors.DisconnectException.INSTANCE",
+        "Confluent.Kafka.Common.Quota.ClientQuotaEntity.CLIENT_ID",
+        "Confluent.Kafka.Common.Quota.ClientQuotaEntity.IP",
+        "Confluent.Kafka.Common.Quota.ClientQuotaEntity.USER",
+        "Confluent.Kafka.Common.Resource.ResourcePattern.WILDCARD_RESOURCE",
+        "Confluent.Kafka.Common.Resource.ResourcePatternFilter.ANY",
+        "Confluent.Kafka.Common.Security.Auth.KafkaPrincipal.ANONYMOUS",
+        "Confluent.Kafka.Common.Security.Auth.KafkaPrincipal.USER_TYPE",
+        "Confluent.Kafka.Common.Uuid.METADATA_TOPIC_ID",
+        "Confluent.Kafka.Common.Uuid.ONE_UUID",
+        "Confluent.Kafka.Common.Uuid.RESERVED",
+        "Confluent.Kafka.Common.Uuid.ZERO_UUID",
+        "Confluent.Kafka.Consumer.ConsumerRecord`2.NO_TIMESTAMP",
+        "Confluent.Kafka.Producer.RecordMetadata.UNKNOWN_PARTITION",
+    };
+
+    [Fact]
+    public void ThePublicStaticFields_AreExactlyJavasConstants_AllReadonly()
+    {
+        List<FieldInfo> fields = typeof(Serdes).Assembly.GetExportedTypes()
+            .Where(type => !type.IsEnum)
+            .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly))
+            .ToList();
+
+        Assert.Equal(
+            s_javaConstants,
+            fields.Select(field => $"{field.DeclaringType!.FullName}.{field.Name}").OrderBy(name => name, StringComparer.Ordinal));
+        Assert.All(fields, field => Assert.True(field.IsLiteral || field.IsInitOnly, field.Name));
     }
 }
