@@ -35,7 +35,8 @@ function calledFunctions(file) {
   return calledIn(fs.readFileSync(file, 'utf8'));
 }
 
-const sources = fs.readdirSync(SRC).filter((f) => f.endsWith('.c'));
+// The .h files too: a macro's body makes its calls wherever it is used.
+const sources = fs.readdirSync(SRC).filter((f) => f.endsWith('.c') || f.endsWith('.h'));
 
 test('the addon has C sources to check', () => {
   assert.ok(sources.length >= 4, sources.join(', '));
