@@ -35,7 +35,7 @@ VENV = . venv/bin/activate
 	consumer-perf-test-python producer-perf-test-python \
 	transactional-producer-perf-test-python \
 	producer-perf-test-dotnet consumer-perf-test-dotnet \
-	build-javascript test-javascript verify-javascript \
+	build-javascript test-javascript lint-javascript verify-javascript \
 	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
@@ -430,7 +430,14 @@ test-javascript: build-javascript
 test-javascript-macos-docker: build-javascript
 	$(MAKE) -C javascript $(ROOTS) test-unit
 
-verify-javascript: test-javascript
+# The Node.js client's rule linter (javascript/scripts/lint_rules.js) and its
+# own tests. It reads the bindings header the Rust build writes and the Java
+# index `cargo xtask java-index` makes from the kafka submodule, which needs the
+# Kafka tags pinned in xtask (`cargo xtask fetch-java-refs` on a shallow clone).
+lint-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) lint-rules test-lint
+
+verify-javascript: test-javascript lint-javascript
 
 # macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
 # the gRPC server as a native host process, as verify-python-macos-docker does.
