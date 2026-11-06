@@ -1613,7 +1613,7 @@ const-ness and its header text decide, not the type name:
         before that `cb` ran could still fail with -2. Python counts a waiting call
         the same way, "covering its submission, its wait and its callbacks"
         (`python/confluent_kafka/consumer/_base.py:445-456` at `3f8a5bc6`).
-      - **`Dispose` from another thread while a close runs** (an explicit `Close` or another `Dispose`): returns at once, without waiting or throwing; the close in progress finishes the teardown and disposes the deserializers. A callback that close runs may therefore wait for such a `Dispose` without a hang (ledger 399). Java and Python throw there instead; .NET code expects `Dispose` not to throw.
+      - **`Dispose` while a close runs** (an explicit `Close` or another `Dispose`, on another thread, or the caller's own async `Close` / `DisposeAsync` still in progress): returns at once, without waiting or throwing; the close in progress finishes the teardown and disposes the deserializers. A callback that close runs may therefore wait for such a `Dispose` without a hang (ledger 399). If that close is then refused and the consumer reopens (a racing op refuses its claim, or the core's −2), the `Dispose` that returned is not carried out, and the consumer stays open until it is disposed again. Java and Python throw on another thread instead (Python's `close()` returns at once on the closing thread); .NET code expects `Dispose` not to throw.
       - **An explicit `Close` from another thread while an op runs:** the owner check
         refuses it at once → `ConcurrentModificationException`, before any state changes, so
         nothing is torn down and the consumer stays usable (ledgers 34 (ii), 136), as

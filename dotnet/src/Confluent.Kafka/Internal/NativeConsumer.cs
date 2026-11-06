@@ -106,9 +106,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private int _closingThread;
 
-    // The thread of the Close or Dispose that is closing the consumer, AsyncCloser for an async one, or 0. While
-    // another thread closes it, a Dispose returns at once and leaves the teardown to that close, so a callback the
-    // close runs may wait for that Dispose.
+    // The thread of the Close or Dispose that is closing the consumer, AsyncCloser for an async one, or 0. While a
+    // close runs on another thread, or an async close on any thread, a Dispose returns at once and leaves the teardown
+    // to that close, so a callback the close runs may wait for that Dispose.
     private int _closerThread;
 
     // An AsyncMockConsumer's Rebalance or LosePartitions refuses other threads for its whole use, as Python's mock does.
@@ -1707,9 +1707,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
-    // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
-    // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread.
     private bool ClosingOnAnotherThread
     {
         get
@@ -1729,6 +1726,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
+    // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
+    // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread.
     private void ReleaseTheGateThenDisposeTheDeserializers(bool destroyedBefore)
     {
         _closeGate.Release();
