@@ -153,7 +153,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <param name="offsets">The offsets to commit with the transaction.</param>
     /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
-    /// could not be null").</exception>
+    /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
     /// <exception cref="ArgumentException">A key of <paramref name="offsets"/> has a null topic, or a value is
     /// null.</exception>
@@ -178,6 +178,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// (see <see cref="CommitTransaction"/>).</exception>
     /// <exception cref="Common.Errors.TimeoutException">The combined time taken for resolving topic metadata and
     /// sending the offsets has surpassed <c>max.block.ms</c>.</exception>
+    /// <exception cref="BootstrapResolutionException">DNS resolution of the bootstrap servers fails within
+    /// <c>bootstrap.resolve.timeout.ms</c>.</exception>
     /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
     /// other unexpected error.</exception>
     void SendOffsetsToTransaction(
