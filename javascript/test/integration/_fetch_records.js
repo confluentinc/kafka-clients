@@ -111,8 +111,10 @@ class Reader {
   }
 }
 
-// The records of an uncompressed record set: [{offset, key, value, headers}],
-// `headers` an array of {key, value}.
+// The records of an uncompressed record set: [{offset, timestamp, key, value,
+// headers}], `headers` an array of {key, value} and `timestamp` the batch's base
+// timestamp plus the record's delta (the record's CreateTime on a CreateTime
+// topic).
 function parseRecords(buf) {
   const out = [];
   const r = new Reader(buf);
@@ -128,7 +130,7 @@ function parseRecords(buf) {
     const attributes = r.i16();
     if ((attributes & 0x7) !== 0) throw new Error('compressed batches are not supported');
     r.i32(); // last offset delta
-    r.i64(); // base timestamp
+    const baseTimestamp = r.i64();
     r.i64(); // max timestamp
     r.i64(); // producer id
     r.i16(); // producer epoch
@@ -138,7 +140,7 @@ function parseRecords(buf) {
     for (let i = 0; i < count; i++) {
       r.varlong(); // record length
       r.i8(); // attributes
-      r.varlong(); // timestamp delta
+      const timestampDelta = r.varlong();
       const offsetDelta = r.varlong();
       const key = r.nullableVarBytes();
       const value = r.nullableVarBytes();
@@ -148,7 +150,9 @@ function parseRecords(buf) {
         const headerKey = r.bytes(r.varlong()).toString('utf8');
         headers.push({ key: headerKey, value: r.nullableVarBytes() });
       }
-      if (!control) out.push({ offset: baseOffset + offsetDelta, key, value, headers });
+      if (!control) {
+        out.push({ offset: baseOffset + offsetDelta, timestamp: baseTimestamp + timestampDelta, key, value, headers });
+      }
     }
     r.pos = end;
   }
@@ -216,7 +220,8 @@ async function connect(host, port) {
 
 /**
  * Reads partition `partition` of `topic` from offset 0 up to its high
- * watermark: `{highWatermark, records: [{offset, key, value, headers}]}`.
+ * watermark: `{highWatermark, records: [{offset, timestamp, key, value,
+ * headers}]}`.
  */
 async function fetchRecords(bootstrap, topic, partition) {
   const [host, port] = bootstrap.split(',')[0].split(':');
