@@ -306,6 +306,26 @@ MUTATIONS.push(
     apply: (root) => edit(root, 'src/producer.c', '    p->close_error = error;\n', '    p->close_error = error;\n    producer_destroy(env, p);\n'),
   },
   {
+    rule: 'check-single-drainer',
+    what: 'the producer destroyed in its executor',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer.c',
+        '    return kafka_producer_Producer__execute_callbacks_err(((Producer*)client)->view, out_err);',
+        '    Producer* p = (Producer*)client;\n    int32_t ran = kafka_producer_Producer__execute_callbacks_err(p->view, out_err);\n' +
+          '    if (p->destroy_requested && !p->destroying) producer_destroy(p->env, p);\n    return ran;',
+      ),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: "the queue's after_drain moved inside the drain loop",
+    apply: (root) => {
+      edit(root, 'src/callback_queue.c', '    if (q->after_drain != NULL) q->after_drain(env, q->client);\n', '');
+      edit(root, 'src/callback_queue.c', '        if (ran <= 0) break;\n', '        if (ran <= 0) break;\n        if (q->after_drain != NULL) q->after_drain(env, q->client);\n');
+    },
+  },
+  {
     rule: 'check-tsdoc-tags',
     what: 'a @param dropped',
     apply: (root) => edit(root, 'lib/producer/kafka_producer.ts', '   * @param record - The record to send\n', ''),
