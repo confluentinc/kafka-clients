@@ -628,7 +628,7 @@ internal sealed partial class NativeConsumer
 
     public ValueTask DisposeAsync()
     {
-        if (DisposingTheDeserializersOnThisThread)
+        if (_destroyed)
         {
             return default;
         }
@@ -955,7 +955,7 @@ internal sealed partial class NativeConsumer
             return new ValueTask(Task.FromCanceled(cancellationToken));
         }
 
-        if (DisposingTheDeserializersOnThisThread)
+        if (_destroyed)
         {
             return default;
         }

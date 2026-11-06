@@ -80,7 +80,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly bool _groupIdDefined;
     private readonly SerdeDisposal? _serdes;
 
-    private int _serdeDisposalThread;
+    // Set once the destroy has returned, before the deserializers are disposed, and never cleared: from then on a
+    // Close or Dispose from any thread returns at once, as Python's does, since the teardown holds the close gate
+    // while a deserializer's Dispose may wait for a thread that closes the consumer.
+    private volatile bool _destroyed;
     private readonly List<IntPtr> _recordBytes = new List<IntPtr>();
     private int _recordsHeld;
     private bool _recordBytesReleasable;
@@ -1428,7 +1431,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void CloseSync(IntPtr options)
     {
-        if (DisposingTheDeserializersOnThisThread)
+        if (_destroyed)
         {
             return;
         }
@@ -1657,6 +1660,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The deserializers the consumer was given are disposed after the destroy, on the thread that destroyed.
     private void AfterDestroy()
     {
+        _destroyed = true;
         _reporter.MarkDestroyed();
         lock (_callbackHandleGate)
         {
@@ -1685,24 +1689,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
         }
 
-        if (_serdes is not null)
-        {
-            Volatile.Write(ref _serdeDisposalThread, Environment.CurrentManagedThreadId);
-            try
-            {
-                _serdes.DisposeOnce();
-            }
-            finally
-            {
-                Volatile.Write(ref _serdeDisposalThread, 0);
-            }
-        }
+        _serdes?.DisposeOnce();
     }
-
-    // A deserializer whose Dispose closes or disposes its consumer finds it torn down: the call returns at once
-    // instead of waiting for the teardown that runs it.
-    private bool DisposingTheDeserializersOnThisThread =>
-        Volatile.Read(ref _serdeDisposalThread) == Environment.CurrentManagedThreadId;
 
     private void HoldRecords()
     {
@@ -2003,7 +1991,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     public void Dispose()
     {
-        if (DisposingTheDeserializersOnThisThread)
+        if (_destroyed)
         {
             return;
         }

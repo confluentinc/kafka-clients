@@ -61,6 +61,8 @@ public sealed class PublicDeserializerDisposalTests
 
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromSeconds(60);
 
+    private static readonly TimeSpan s_otherThreadWait = TimeSpan.FromSeconds(10);
+
     private static readonly TopicPartition[] s_partitions = { new TopicPartition("deserializer-disposal-topic", 0) };
 
     [Theory]
@@ -505,6 +507,41 @@ public sealed class PublicDeserializerDisposalTests
     }
 
     [Theory]
+    [InlineData(SyncFlavor, CloseHow, DisposeHow)]
+    [InlineData(SyncFlavor, CloseHow, CloseHow)]
+    [InlineData(SyncFlavor, DisposeHow, DisposeHow)]
+    [InlineData(SyncFlavor, DisposeHow, CloseHow)]
+    [InlineData(AsyncFlavor, CloseHow, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow, CloseHow)]
+    [InlineData(AsyncFlavor, DisposeHow, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeHow, CloseHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow, CloseHow)]
+    public async Task ADeserializerWhoseDisposeWaitsForAnotherThreadThatClosesItsConsumer_BothReturn(
+        string flavor, string how, string otherHow)
+    {
+        DisposableDeserializer key = new DisposableDeserializer("key");
+        DisposableDeserializer value = new DisposableDeserializer("value");
+        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        OtherThreadClose other = new OtherThreadClose(consumer, otherHow);
+        key.OnDispose = other.RunAndWait;
+        try
+        {
+            _ = await CloseBy(consumer, how);
+        }
+        finally
+        {
+            await DisposeBounded(consumer);
+        }
+
+        Assert.True(other.Returned, "a " + otherHow + " on another thread, waited for by a deserializer's Dispose, did not return");
+        Assert.Null(other.Failure);
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+        Assert.Equal(ClosedMessage, Assert.Throws<IllegalStateException>(() => consumer.Assignment()).Message);
+    }
+
+    [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
     public void AConfigurationValueTheBindingRefuses_DisposesNothing(string flavor)
@@ -849,6 +886,52 @@ public sealed class PublicDeserializerDisposalTests
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Empty() =>
         new Dictionary<TopicPartition, OffsetAndMetadata>();
+
+    /// <summary>A deserializer's Dispose that closes or disposes its consumer on another thread and waits for it.</summary>
+    private sealed class OtherThreadClose
+    {
+        private readonly IConsumerCommon _consumer;
+        private readonly string _how;
+
+        internal OtherThreadClose(IConsumerCommon consumer, string how)
+        {
+            _consumer = consumer;
+            _how = how;
+        }
+
+        internal bool Returned { get; private set; }
+
+        internal Exception? Failure { get; private set; }
+
+        internal void RunAndWait()
+        {
+            Task closing = Task.Run(() =>
+            {
+                if (_how == DisposeHow)
+                {
+                    ((IDisposable)_consumer).Dispose();
+                    return Task.CompletedTask;
+                }
+
+                if (_consumer is IConsumer<byte[], byte[]> sync)
+                {
+                    sync.Close();
+                    return Task.CompletedTask;
+                }
+
+                return ((IAsyncConsumer<byte[], byte[]>)_consumer).Close();
+            });
+            try
+            {
+                Returned = closing.Wait(s_otherThreadWait);
+            }
+            catch (AggregateException failure)
+            {
+                Returned = true;
+                Failure = failure.InnerException;
+            }
+        }
+    }
 
     /// <summary>A <c>Poll</c> made on a thread of its own, which stays alive until <see cref="End"/>.</summary>
     private sealed class RunningPoll
