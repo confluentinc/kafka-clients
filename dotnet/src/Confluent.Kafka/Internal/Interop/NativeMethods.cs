@@ -1011,6 +1011,51 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_error_next_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern sbyte MockProducerErrorNext(IntPtr self, IntPtr error, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_fence_producer", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerFenceProducer(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_initialized_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionInitialized(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_in_flight_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionInFlight(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_committed_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionCommitted(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_transaction_aborted_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerTransactionAborted(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_flushed_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerFlushed(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_sent_offsets_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockProducerSentOffsets(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_commit_count_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long MockProducerCommitCount(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_consumer_group_offsets_history_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockProducerConsumerGroupOffsetsHistory(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_uncommitted_offsets_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockProducerUncommittedOffsets(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_init_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetInitTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_begin_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetBeginTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_send_offsets_to_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetSendOffsetsToTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_commit_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetCommitTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_abort_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetAbortTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_handle_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern SafeConsumerReentrancyHandle ConsumerGetHandle(SafeConsumerHandle self, ref IntPtr outErr);
 
