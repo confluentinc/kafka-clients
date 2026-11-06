@@ -27,6 +27,7 @@ MACOS_P99_LIMIT_MS ?= 150
 CARGO_TEST = cargo xtask selected-cargo-test --section rust --
 CARGO_TEST_GRPC_PYTHON = cargo xtask selected-cargo-test --section python.grpc --
 CARGO_TEST_GRPC_C = cargo xtask selected-cargo-test --section c.integration --
+CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc --
 
 .PHONY: build build-integration-tests build-all-features \
 	devel-build devel-build-integration-tests devel-build-all-features \
@@ -267,12 +268,12 @@ DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_com
 	--skip test_ml_pattern_listener_logs_assigned_and_revoked
 
 test-integration-grpc-dotnet:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+	$(CARGO_TEST_GRPC_DOTNET) --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
 		$(DOTNET_GRPC_SKIPS)
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
+		$(CARGO_TEST_GRPC_DOTNET) --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \
 		$(DOTNET_GRPC_SKIPS)
 
 # Performance integration tests. Separated from the functional suites because

@@ -478,8 +478,8 @@ check-bindings:
 # test-selection.json on a pull request build, `verify-commit` to its own
 # .test-selection-commit.json, and it can be set by hand
 # (`TEST_SELECTION=test-selection.json make test`). Then every test recipe
-# (`test`, `verify`, the integration and performance targets, in all three
-# languages) runs only the selected tests, and a suite the file leaves out does
+# (`test`, `verify`, the integration and performance targets, in Rust, C,
+# Python and .NET) runs only the selected tests, and a suite the file leaves out does
 # not run at all, but only while the working tree is the one the file was made
 # for: after any other change, every test runs. Without TEST_SELECTION every
 # test runs. A failed `select-tests` removes the previous file rather than

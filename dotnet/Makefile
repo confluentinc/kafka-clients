@@ -28,6 +28,19 @@ DOTNET ?= dotnet
 DOTNET_CONFIG ?= Release
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
+# `$(call selected_run,<options> -- <command>)` runs the command only when the
+# test selection (the file TEST_SELECTION names, see the root's
+# `select-tests`) selects its section (`dotnet.solution`, `dotnet.soak`,
+# `dotnet.performance`, `dotnet.grpc`), and always when none applies. With
+# `--dotnet`, an argument `{}` stands for the `--filter` selecting the tests the
+# section names, and-ed with the `--dotnet-filter` expression, or for that
+# expression alone when the whole suite runs. See `cargo xtask help`
+# (`selected-run`). The subshell keeps the `cd`, which cargo needs to find the
+# toolchain and the `xtask` alias, from leaking into the rest of the recipe;
+# for the same reason an environment variable for the command goes after `--`
+# through `env`.
+selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
+
 .PHONY: grpc-image grpc-image-async grpc-native test-integration build-dotnet test-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	pack-dotnet package-check-dotnet
 
@@ -109,7 +122,7 @@ test-integration:
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
 	else \
-		$(MAKE) grpc-image grpc-image-async && \
+		$(call selected_run,--section dotnet.grpc -- $(MAKE) -C $(CURDIR) grpc-image grpc-image-async) && \
 		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet; \
 	fi
 
@@ -151,13 +164,15 @@ build-dotnet:
 #
 # DOTNET_TEST_FILTER, empty by default, is a `dotnet test --filter` expression for
 # both test lines. The root's test-dotnet-macos-docker sets it to leave the
-# integration tests out, as Python's macOS job runs only its unit tests.
+# integration tests out, as Python's macOS job runs only its unit tests. The
+# test selection's `dotnet.solution` narrows it further. The build and the format
+# check always run.
 DOTNET_TEST_FILTER ?=
 
 test-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
+	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION) {})
+	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION) {})
 	$(MAKE) test-soak-dotnet
 
 # ---------------------------------------------------------------------------
@@ -189,8 +204,8 @@ test-soak-dotnet: build-dotnet
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(SOAK_TESTS)
 	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS)
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS)
+	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOAK_TESTS) {})
+	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOAK_TESTS) {})
 
 # ---------------------------------------------------------------------------
 # The Confluent.Kafka NuGet package.
@@ -293,8 +308,8 @@ CLIENT_VERSION ?= 3
 # instead of silently running nowhere but the Docker target.
 perf-unit-test-dotnet: build-dotnet
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(PERF_TESTS) --filter 'FullyQualifiedName!~PerfV3SmokeTests'
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) --filter 'FullyQualifiedName!~PerfV3SmokeTests'
+	$(call selected_run,--section dotnet.performance --dotnet --dotnet-filter 'FullyQualifiedName!~PerfV3SmokeTests' -- $(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(PERF_TESTS) {})
+	$(call selected_run,--section dotnet.performance --dotnet --dotnet-filter 'FullyQualifiedName!~PerfV3SmokeTests' -- $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) {})
 
 # Env-driven producer/consumer benchmarks (manual; need a reachable broker via
 # BOOTSTRAP_SERVERS). CLIENT_VERSION selects the exe: 3 (default) = PerfV3 (our
@@ -342,4 +357,4 @@ consumer-perf-test-dotnet:
 test-integration-perf-dotnet:
 	$(MAKE) -C $(RUST_PROJECT_ROOT) build
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
-	PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS)
+	$(call selected_run,--section dotnet.performance --dotnet -- env PERF_REQUIRE_DOCKER=True $(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) {})

@@ -30,7 +30,10 @@
 //! - `c.unit`: ctest names; `c.integration`: filters of the `__grpc_c` tests;
 //! - `python.<suite>`: pytest paths or node ids, relative to `python/`;
 //!   `python.typecheck`: `[]` runs mypy; `python.grpc`: filters of the
-//!   `__grpc_python` tests.
+//!   `__grpc_python` tests;
+//! - `dotnet.<suite>`: fully qualified name prefixes of .NET tests (a namespace
+//!   or a class), run as a `dotnet test --filter`; `dotnet.grpc`: filters of
+//!   the `__grpc_dotnet` tests.
 //!
 //! The file records the change it was made for: `merge_base`,
 //! `changed_files`, and `tree`, the git tree of the working tree with the
@@ -73,6 +76,23 @@ const PYTHON_SUITES: &[(&str, &str)] = &[
     ("soak", "soak/test"),
     ("verifiable_clients", "verifiable_clients/test"),
     ("performance", "test/performance"),
+];
+
+/// The `dotnet test` suites of `dotnet/`: section name, what it runs, and the
+/// namespaces its tests live in.
+const DOTNET_SUITES: &[(&str, &str, &[&str])] = &[
+    (
+        "solution",
+        "the tests of Confluent.Kafka.sln: dotnet/tests/Confluent.Kafka.UnitTests (the mock clients, no broker) and \
+         dotnet/tests/Confluent.Kafka.IntegrationTests (a Testcontainers broker)",
+        &["Confluent.Kafka.UnitTests", "Confluent.Kafka.IntegrationTests"],
+    ),
+    ("soak", "dotnet/soak/SoakClient.Tests", &["Confluent.Kafka.Soak.Tests"]),
+    (
+        "performance",
+        "dotnet/tests/Performance/Confluent.Kafka.PerformanceTests",
+        &["Confluent.Kafka.Performance.Tests"],
+    ),
 ];
 
 /// The cargo test options that select targets. Without any, `cargo test` also
@@ -553,17 +573,26 @@ fn prompt(base: &str, merge_base: &str, head: &str, changes: &[String], inventor
         .map(|(name, dir)| format!("  - `{name}`: pytest paths or node ids under python/{dir}\n"))
         .collect();
     let ctest_names = inventory.ctest_names.join(", ");
+    let dotnet_suites: String = DOTNET_SUITES
+        .iter()
+        .map(|(name, what, namespaces)| {
+            let namespaces = namespaces.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(" or ");
+            format!("  - `{name}`: {what}; each entry starts with {namespaces}\n")
+        })
+        .collect();
     format!(
-        "You choose the tests to run for a change to this repository: a Kafka client in Rust (rust/) with C (c/) and \
-         Python (python/) bindings; CLAUDE.md describes the layout. Read the change, the code it touches and the tests \
+        "You choose the tests to run for a change to this repository: a Kafka client in Rust (rust/) with C (c/), \
+         Python (python/) and .NET (dotnet/) bindings; CLAUDE.md describes the layout. Read the change, the code it touches and the tests \
          that exercise that code, then answer with every test the change can affect and no other.
 
 Rules:
 - A test can be affected directly or through another language. The C tests run the Rust core through the C FFI \
-         (rust/src/ffi). The Python tests run it through python/_confluentkafka.c and the FFI. The gRPC arms (c.integration, \
-         python.grpc) run the Rust integration harness (rust/tests/integration) against the C and Python bindings.
+         (rust/src/ffi). The Python tests run it through python/_confluentkafka.c and the FFI. The .NET tests run it through the \
+         P/Invoke declarations of dotnet/src/Confluent.Kafka and the FFI. The gRPC arms (c.integration, python.grpc, \
+         dotnet.grpc) run the Rust integration harness (rust/tests/integration) against the C, Python and .NET bindings \
+         (the .NET gRPC server is dotnet/grpc-server).
 - When in doubt, include the test. A change to build files (Cargo.toml, Cargo.lock, build.rs, Makefiles, CMakeLists.txt, \
-         pyproject.toml, setup.py), the code generator, shared test support, or anything you cannot trace includes every \
+         pyproject.toml, setup.py, *.csproj, *.sln, Directory.Build.props), the code generator, shared test support, or anything you cannot trace includes every \
          suite it can reach.
 - Leave out a suite no change can affect. A change only to documentation or comments affects no test.
 - Do not build or run anything: read files and use git.
@@ -583,6 +612,10 @@ Answer with one JSON object in a ```json block, and nothing after it. Every memb
 - \"python\": an object with
   - \"typecheck\": `[]` to run mypy --strict over python/confluent_kafka
 {python_suites}  - \"grpc\": filters of the `__grpc_python` tests of the `integration` unit
+- \"dotnet\": an object whose lists hold fully qualified name prefixes of .NET tests, a namespace or a class (such as \
+         `Confluent.Kafka.UnitTests.ProducerRecordTests`), each running the tests whose full name contains it:
+{dotnet_suites}  - \"grpc\": filters of the `__grpc_dotnet` tests of the `integration` unit (they also select the \
+         `__grpc_dotnet_async` ones)
 - \"reasons\": an object mapping each member you include (`rust.lib`, `c.unit`, `python.unit`, ...) to one sentence on why.
 "
     )
@@ -647,6 +680,14 @@ fn validate(answer: &Value, inventory: &Inventory) -> anyhow::Result<Map<String,
                     }
                 }
             },
+            "dotnet" => {
+                for (key, entries) in object(value, "dotnet")? {
+                    let entries = string_list(entries, &format!("dotnet.{key}"))?;
+                    if key != "grpc" {
+                        check_dotnet_entries(key, &entries)?;
+                    }
+                }
+            },
             "reasons" => {},
             other => bail!("unknown member {other:?}"),
         }
@@ -679,9 +720,31 @@ fn check_python_entries(python_dir: &Path, suite: &str, entries: &[String]) -> a
     Ok(())
 }
 
+/// Each entry of a `dotnet test` suite is a name prefix inside the suite's
+/// namespaces, made of the characters a .NET name can hold.
+fn check_dotnet_entries(suite: &str, entries: &[String]) -> anyhow::Result<()> {
+    let Some((_, _, namespaces)) = DOTNET_SUITES.iter().find(|(name, ..)| *name == suite) else {
+        bail!("dotnet: unknown suite {suite:?}");
+    };
+    for entry in entries {
+        if !entry.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+            bail!("dotnet.{suite}: {entry:?} is not a namespace or class name");
+        }
+        let inside = namespaces.iter().any(|namespace| {
+            entry
+                .strip_prefix(namespace)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        });
+        if !inside {
+            bail!("dotnet.{suite}: {entry:?} is not in {}", namespaces.join(" or "));
+        }
+    }
+    Ok(())
+}
+
 fn print_summary(selection: &Map<String, Value>) {
     let mut lines = Vec::new();
-    for language in ["rust", "c", "python"] {
+    for language in ["rust", "c", "python", "dotnet"] {
         let Some(Value::Object(sections)) = selection.get(language) else {
             continue;
         };
@@ -1048,17 +1111,22 @@ fn run(command: &mut Command) -> anyhow::Result<()> {
 
 // ── selected-run ───────────────────────────────────────────────────────────
 
-/// `selected-run --section <section> [--default <arg>]... [--ctest] [-C <dir>]
-/// -- <command>`: runs the command in `dir` when the selection selects the
-/// section (or there is no selection). An argument `{}` stands for the
-/// selected entries, or the `--default` arguments when the whole suite is
-/// selected; with `--ctest` it stands for `-R <regex>` matching the selected
-/// names, or for nothing.
+/// `selected-run --section <section> [--default <arg>]... [--ctest]
+/// [--dotnet [--dotnet-filter <expr>]] [-C <dir>] -- <command>`: runs the
+/// command in `dir` when the selection selects the section (or there is no
+/// selection). An argument `{}` stands for the selected entries, or the
+/// `--default` arguments when the whole suite is selected; with `--ctest` it
+/// stands for `-R <regex>` matching the selected names, or for nothing; with
+/// `--dotnet` for `--filter <expr>` selecting the tests whose full name
+/// contains an entry, and-ed with the `--dotnet-filter` expression (which may
+/// be empty), or for that expression alone.
 pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
     let (options, command) = split_at_separator(args);
     let mut section_name = None;
     let mut defaults = Vec::new();
     let mut ctest = false;
+    let mut dotnet = false;
+    let mut dotnet_base = String::new();
     let mut dir = PathBuf::from(".");
     let mut options = options.iter();
     while let Some(option) = options.next() {
@@ -1067,6 +1135,8 @@ pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
             "--section" => section_name = Some(value()?),
             "--default" => defaults.push(value()?),
             "--ctest" => ctest = true,
+            "--dotnet" => dotnet = true,
+            "--dotnet-filter" => dotnet_base = value()?,
             // The last `-C` wins, so a Makefile can append its own.
             "-C" => dir = PathBuf::from(value()?),
             other => bail!("selected-run: unknown argument {other:?}"),
@@ -1090,8 +1160,10 @@ pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
             return Ok(());
         },
         Choice::All if ctest => Vec::new(),
+        Choice::All if dotnet => dotnet_filter(&dotnet_base, None),
         Choice::All => defaults,
         Choice::Only(names) if ctest => vec!["-R".into(), ctest_regex(&names)],
+        Choice::Only(names) if dotnet => dotnet_filter(&dotnet_base, Some(&names)),
         Choice::Only(entries) => entries,
     };
     let mut argv = Vec::new();
@@ -1119,6 +1191,39 @@ fn ctest_regex(names: &[String]) -> String {
             .collect::<String>()
     };
     format!("^({})$", names.iter().map(escape).collect::<Vec<_>>().join("|"))
+}
+
+/// The `dotnet test` arguments running the tests `base` (a `--filter`
+/// expression, possibly empty) selects whose full name contains one of
+/// `names`, or every test `base` selects.
+fn dotnet_filter(base: &str, names: Option<&[String]>) -> Vec<String> {
+    // The characters a `--filter` value gives a meaning to.
+    let escape = |name: &String| {
+        name.chars()
+            .flat_map(|c| {
+                if "\\()&|=!~".contains(c) {
+                    vec!['\\', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect::<String>()
+    };
+    let selected = names.map(|names| {
+        names
+            .iter()
+            .map(|name| format!("FullyQualifiedName~{}", escape(name)))
+            .collect::<Vec<_>>()
+            .join("|")
+    });
+    let base = base.trim();
+    let expression = match (base.is_empty(), selected) {
+        (true, None) => return Vec::new(),
+        (true, Some(selected)) => selected,
+        (false, None) => base.to_string(),
+        (false, Some(selected)) => format!("({base})&({selected})"),
+    };
+    vec!["--filter".into(), expression]
 }
 
 #[cfg(test)]
@@ -1309,6 +1414,25 @@ mod tests {
         assert_eq!(ctest_regex(&strings(&["a.b"])), "^(a\\.b)$");
     }
 
+    #[test]
+    fn test_dotnet_filter() {
+        assert!(dotnet_filter("", None).is_empty());
+        assert!(dotnet_filter("  ", None).is_empty());
+        assert_eq!(dotnet_filter("A!~B", None), strings(&["--filter", "A!~B"]));
+        assert_eq!(
+            dotnet_filter("", Some(&strings(&["N.C", "N.D"]))),
+            strings(&["--filter", "FullyQualifiedName~N.C|FullyQualifiedName~N.D"])
+        );
+        assert_eq!(
+            dotnet_filter("FullyQualifiedName!~N.I", Some(&strings(&["N.C"]))),
+            strings(&["--filter", "(FullyQualifiedName!~N.I)&(FullyQualifiedName~N.C)"])
+        );
+        assert_eq!(
+            dotnet_filter("", Some(&strings(&["a(b)|c"]))),
+            strings(&["--filter", "FullyQualifiedName~a\\(b\\)\\|c"])
+        );
+    }
+
     fn inventory_fixture() -> Inventory {
         Inventory {
             packages: BTreeMap::new(),
@@ -1329,6 +1453,12 @@ mod tests {
             "rust": {"lib": ["producer::"], "admin": []},
             "c": {"unit": ["mock_producer"], "integration": []},
             "python": {"typecheck": [], "unit": ["test/unit"], "grpc": ["producer::"]},
+            "dotnet": {
+                "solution": ["Confluent.Kafka.UnitTests.ProducerRecordTests", "Confluent.Kafka.IntegrationTests"],
+                "soak": [],
+                "performance": ["Confluent.Kafka.Performance.Tests"],
+                "grpc": ["producer::"],
+            },
             "reasons": {"rust.lib": "the producer changed"},
         });
         assert_eq!(Value::Object(validate(&answer, &inventory).unwrap()), answer);
@@ -1354,6 +1484,20 @@ mod tests {
         assert_eq!(
             error(json!({"python": {"typecheck": ["x"]}})),
             "python.typecheck: expected [], got [\"x\"]"
+        );
+        assert_eq!(error(json!({"dotnet": {"unit": []}})), "dotnet: unknown suite \"unit\"");
+        assert_eq!(
+            error(json!({"dotnet": {"soak": ["Confluent.Kafka.UnitTests"]}})),
+            "dotnet.soak: \"Confluent.Kafka.UnitTests\" is not in Confluent.Kafka.Soak.Tests"
+        );
+        assert_eq!(
+            error(json!({"dotnet": {"solution": ["Confluent.Kafka.UnitTestsX"]}})),
+            "dotnet.solution: \"Confluent.Kafka.UnitTestsX\" is not in Confluent.Kafka.UnitTests or \
+             Confluent.Kafka.IntegrationTests"
+        );
+        assert_eq!(
+            error(json!({"dotnet": {"solution": ["Confluent.Kafka.UnitTests|x"]}})),
+            "dotnet.solution: \"Confluent.Kafka.UnitTests|x\" is not a namespace or class name"
         );
         assert_eq!(error(json!({"java": {}})), "unknown member \"java\"");
     }
