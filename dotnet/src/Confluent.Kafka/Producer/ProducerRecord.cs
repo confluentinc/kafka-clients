@@ -34,6 +34,13 @@ namespace Confluent.Kafka.Producer;
 /// <typeparam name="TValue">The value type.</typeparam>
 public sealed class ProducerRecord<TKey, TValue>
 {
+    private readonly string _topic;
+    private readonly int? _partition;
+    private readonly long? _timestamp;
+    private readonly TKey? _key;
+    private readonly TValue? _value;
+    private readonly Headers _headers;
+
     /// <summary>
     /// Initializes a record from the topic and value, as Java's <c>ProducerRecord(topic, value)</c>, and the optional
     /// key, partition, timestamp and headers.
@@ -41,7 +48,7 @@ public sealed class ProducerRecord<TKey, TValue>
     /// <param name="topic">The destination topic (required, non-null).</param>
     /// <param name="value">
     /// The record value, or <see langword="null"/> for a tombstone (subject to the serializer). An empty value
-    /// differs from a null one only if the serializer keeps the difference, as <see cref="Serdes.ByteArray"/> does.
+    /// differs from a null one only if the serializer keeps the difference, as <see cref="Serdes.ByteArray()"/> does.
     /// </param>
     /// <param name="key">
     /// The record key, or <see langword="null"/> for no key (subject to the serializer).
@@ -55,7 +62,7 @@ public sealed class ProducerRecord<TKey, TValue>
     /// producer stamp it. Must be non-negative when specified.
     /// </param>
     /// <param name="headers">
-    /// The headers to include in the record, copied into the record's own <see cref="Headers"/>; a
+    /// The headers to include in the record, copied into the record's own <see cref="Headers()"/>; a
     /// <see langword="null"/> sequence gives no headers.
     /// </param>
     /// <exception cref="ArgumentNullException">
@@ -73,7 +80,7 @@ public sealed class ProducerRecord<TKey, TValue>
         long? timestamp = null,
         IEnumerable<Header>? headers = null)
     {
-        Topic = topic ?? throw new IllegalArgumentException("Topic cannot be null.");
+        _topic = topic ?? throw new IllegalArgumentException("Topic cannot be null.");
 
         if (timestamp is { } t && t < 0)
         {
@@ -93,32 +100,38 @@ public sealed class ProducerRecord<TKey, TValue>
                     p));
         }
 
-        Partition = partition;
-        Timestamp = timestamp;
-        Key = key;
-        Value = value;
-        Headers = new Headers(headers);
+        _partition = partition;
+        _timestamp = timestamp;
+        _key = key;
+        _value = value;
+        _headers = new Headers(headers);
     }
 
     /// <summary>The destination topic.</summary>
-    public string Topic { get; }
+    /// <returns>The destination topic.</returns>
+    public string Topic() => _topic;
 
     /// <summary>
     /// The target partition, or <see langword="null"/> to let the producer choose one.
     /// </summary>
-    public int? Partition { get; }
+    /// <returns>The target partition, or <see langword="null"/> to let the producer choose one.</returns>
+    public int? Partition() => _partition;
 
     /// <summary>
     /// The record timestamp in milliseconds since epoch, or <see langword="null"/> to let the
     /// producer stamp it.
     /// </summary>
-    public long? Timestamp { get; }
+    /// <returns>The record timestamp in milliseconds since epoch, or <see langword="null"/> to let the producer
+    /// stamp it.</returns>
+    public long? Timestamp() => _timestamp;
 
     /// <summary>The record key, or <see langword="null"/> for no key.</summary>
-    public TKey? Key { get; }
+    /// <returns>The record key, or <see langword="null"/> for no key.</returns>
+    public TKey? Key() => _key;
 
     /// <summary>The record value, or <see langword="null"/> for a tombstone.</summary>
-    public TValue? Value { get; }
+    /// <returns>The record value, or <see langword="null"/> for a tombstone.</returns>
+    public TValue? Value() => _value;
 
     /// <summary>
     /// The record's own headers, a writable copy of the constructor's <c>headers</c>, empty when there were none.
@@ -126,7 +139,9 @@ public sealed class ProducerRecord<TKey, TValue>
     /// serialized the record for a send, they are read-only: <c>Add</c> and <c>Remove</c> throw
     /// <see cref="InvalidOperationException"/>. The mock producers leave them writable.
     /// </summary>
-    public Headers Headers { get; }
+    /// <returns>The record's own headers, a writable copy of the constructor's <c>headers</c>, empty when there
+    /// were none.</returns>
+    public Headers Headers() => _headers;
 
     /// <inheritdoc/>
     public override bool Equals(object? obj)
@@ -137,23 +152,23 @@ public sealed class ProducerRecord<TKey, TValue>
         }
 
         return obj is ProducerRecord<TKey, TValue> other
-            && EqualityComparer<TKey?>.Default.Equals(Key, other.Key)
-            && Partition == other.Partition
-            && string.Equals(Topic, other.Topic, StringComparison.Ordinal)
-            && Headers.Equals(other.Headers)
-            && EqualityComparer<TValue?>.Default.Equals(Value, other.Value)
-            && Timestamp == other.Timestamp;
+            && EqualityComparer<TKey?>.Default.Equals(Key(), other.Key())
+            && Partition() == other.Partition()
+            && string.Equals(Topic(), other.Topic(), StringComparison.Ordinal)
+            && Headers().Equals(other.Headers())
+            && EqualityComparer<TValue?>.Default.Equals(Value(), other.Value())
+            && Timestamp() == other.Timestamp();
     }
 
     /// <inheritdoc/>
     public override int GetHashCode()
     {
-        int result = StringComparer.Ordinal.GetHashCode(Topic);
-        result = unchecked((31 * result) + (Partition ?? 0));
-        result = unchecked((31 * result) + Headers.GetHashCode());
-        result = unchecked((31 * result) + (Key is null ? 0 : EqualityComparer<TKey>.Default.GetHashCode(Key)));
-        result = unchecked((31 * result) + (Value is null ? 0 : EqualityComparer<TValue>.Default.GetHashCode(Value)));
-        return unchecked((31 * result) + (Timestamp is { } t ? t.GetHashCode() : 0));
+        int result = StringComparer.Ordinal.GetHashCode(_topic);
+        result = unchecked((31 * result) + (_partition ?? 0));
+        result = unchecked((31 * result) + _headers.GetHashCode());
+        result = unchecked((31 * result) + (_key is null ? 0 : EqualityComparer<TKey>.Default.GetHashCode(_key)));
+        result = unchecked((31 * result) + (_value is null ? 0 : EqualityComparer<TValue>.Default.GetHashCode(_value)));
+        return unchecked((31 * result) + (_timestamp is { } t ? t.GetHashCode() : 0));
     }
 
     /// <inheritdoc/>
@@ -161,10 +176,10 @@ public sealed class ProducerRecord<TKey, TValue>
         string.Format(
             CultureInfo.InvariantCulture,
             "ProducerRecord(topic={0}, partition={1}, headers={2}, key={3}, value={4}, timestamp={5})",
-            Topic,
-            Partition is { } p ? p.ToString(CultureInfo.InvariantCulture) : "null",
-            Headers.ToString(),
-            Key?.ToString() ?? "null",
-            Value?.ToString() ?? "null",
-            Timestamp is { } t ? t.ToString(CultureInfo.InvariantCulture) : "null");
+            Topic(),
+            Partition() is { } p ? p.ToString(CultureInfo.InvariantCulture) : "null",
+            Headers().ToString(),
+            Key()?.ToString() ?? "null",
+            Value()?.ToString() ?? "null",
+            Timestamp() is { } t ? t.ToString(CultureInfo.InvariantCulture) : "null");
 }

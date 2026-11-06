@@ -26,6 +26,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class UserScramCredentialsDescription
 {
     private readonly ScramCredentialInfo[] _credentialInfos;
+    private readonly string _name;
 
     /// <summary>Creates a description — Java's constructor.</summary>
     /// <param name="name">The user name.</param>
@@ -34,7 +35,7 @@ public sealed class UserScramCredentialsDescription
     public UserScramCredentialsDescription(
         string name, IEnumerable<ScramCredentialInfo> credentialInfos)
     {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
+        _name = name ?? throw new ArgumentNullException(nameof(name));
         if (credentialInfos is null)
         {
             throw new ArgumentNullException(nameof(credentialInfos));
@@ -44,17 +45,19 @@ public sealed class UserScramCredentialsDescription
     }
 
     /// <summary>The user name — Java's <c>name()</c>.</summary>
-    public string Name { get; }
+    /// <returns>The user name.</returns>
+    public string Name() => _name;
 
     /// <summary>The user's credential descriptions — Java's <c>credentialInfos()</c>.</summary>
-    public IReadOnlyList<ScramCredentialInfo> CredentialInfos => _credentialInfos;
+    /// <returns>The user's credential descriptions.</returns>
+    public IReadOnlyList<ScramCredentialInfo> CredentialInfos() => _credentialInfos;
 
     /// <summary>Value equality over both fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same user's credentials.</returns>
     public override bool Equals(object? obj) =>
         obj is UserScramCredentialsDescription other
-        && string.Equals(Name, other.Name, StringComparison.Ordinal)
+        && string.Equals(Name(), other.Name(), StringComparison.Ordinal)
         && _credentialInfos.SequenceEqual(other._credentialInfos);
 
     /// <summary>The hash of both fields — Java's <c>hashCode</c>.</summary>
@@ -63,7 +66,7 @@ public sealed class UserScramCredentialsDescription
     {
         unchecked
         {
-            int hash = StringComparer.Ordinal.GetHashCode(Name);
+            int hash = StringComparer.Ordinal.GetHashCode(Name());
             foreach (ScramCredentialInfo info in _credentialInfos)
             {
                 hash = (hash * 31) + info.GetHashCode();
@@ -81,6 +84,6 @@ public sealed class UserScramCredentialsDescription
         string.Format(
             CultureInfo.InvariantCulture,
             "UserScramCredentialsDescription{{name='{0}', credentialInfos=[{1}]}}",
-            Name,
+            Name(),
             string.Join(", ", _credentialInfos.Select(info => info.ToString())));
 }

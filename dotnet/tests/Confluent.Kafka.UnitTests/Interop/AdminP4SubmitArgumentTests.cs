@@ -54,42 +54,40 @@ public sealed class AdminP4SubmitArgumentTests
     [Fact]
     public void TheTimeoutSetter_ReachesTheCOptions_AndItsLastValueWins()
     {
-        Assert.Equal(0, ReadBack(new ElectLeadersOptions { TimeoutMs = -5 }));
-        ElectLeadersOptions elect = new ElectLeadersOptions { TimeoutMs = 10 };
-        elect.TimeoutMs = 20;
+        Assert.Equal(0, ReadBack(new ElectLeadersOptions().TimeoutMs(-5)));
+        ElectLeadersOptions elect = new ElectLeadersOptions().TimeoutMs(10);
+        elect.TimeoutMs(20);
         Assert.Equal(20, ReadBack(elect));
-        elect.TimeoutMs = null;
+        elect.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(elect));
 
-        Assert.Equal((0, true), ReadBack(new AlterPartitionReassignmentsOptions { TimeoutMs = -5 }));
-        AlterPartitionReassignmentsOptions alter = new AlterPartitionReassignmentsOptions { TimeoutMs = 10 };
-        alter.TimeoutMs = 30;
+        Assert.Equal((0, true), ReadBack(new AlterPartitionReassignmentsOptions().TimeoutMs(-5)));
+        AlterPartitionReassignmentsOptions alter = new AlterPartitionReassignmentsOptions().TimeoutMs(10);
+        alter.TimeoutMs(30);
         Assert.Equal((30, true), ReadBack(alter));
-        alter.TimeoutMs = null;
+        alter.TimeoutMs(null);
         Assert.Equal((-1, true), ReadBack(alter));
 
-        Assert.Equal(0, ReadBack(new ListPartitionReassignmentsOptions { TimeoutMs = -5 }));
-        ListPartitionReassignmentsOptions list = new ListPartitionReassignmentsOptions { TimeoutMs = 0 };
-        list.TimeoutMs = 40;
+        Assert.Equal(0, ReadBack(new ListPartitionReassignmentsOptions().TimeoutMs(-5)));
+        ListPartitionReassignmentsOptions list = new ListPartitionReassignmentsOptions().TimeoutMs(0);
+        list.TimeoutMs(40);
         Assert.Equal(40, ReadBack(list));
-        list.TimeoutMs = null;
+        list.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(list));
     }
 
     [Fact]
     public void AllowReplicationFactorChange_ReachesTheCOptions_BothWays()
     {
-        Assert.Equal((-1, false), ReadBack(new AlterPartitionReassignmentsOptions { AllowReplicationFactorChange = false }));
+        Assert.Equal((-1, false), ReadBack(new AlterPartitionReassignmentsOptions().AllowReplicationFactorChange(false)));
 
-        AlterPartitionReassignmentsOptions options = new AlterPartitionReassignmentsOptions
-        {
-            AllowReplicationFactorChange = false,
-        };
-        options.AllowReplicationFactorChange = true;
+        AlterPartitionReassignmentsOptions options = new AlterPartitionReassignmentsOptions()
+            .AllowReplicationFactorChange(false);
+        options.AllowReplicationFactorChange(true);
         Assert.Equal((-1, true), ReadBack(options));
 
-        options.TimeoutMs = 50;
-        options.AllowReplicationFactorChange = false;
+        options.TimeoutMs(50);
+        options.AllowReplicationFactorChange(false);
         Assert.Equal((50, false), ReadBack(options));
     }
 
@@ -185,13 +183,13 @@ public sealed class AdminP4SubmitArgumentTests
 
         AlterPartitionReassignmentsResult altered =
             AlterPartitionReassignmentsResult.OfClient(admin.AlterPartitionReassignments(request, options: null));
-        Assert.Single(altered.Values);
+        Assert.Single(altered.Values());
         altered.All().Get(s_deadline);
 
         PartitionReassignment reassignment = Assert.Single(List(admin, new[] { first })).Value;
-        Assert.Equal(new[] { 0 }, reassignment.Replicas);
-        Assert.Equal(new[] { 1 }, reassignment.AddingReplicas);
-        Assert.Empty(reassignment.RemovingReplicas);
+        Assert.Equal(new[] { 0 }, reassignment.Replicas());
+        Assert.Equal(new[] { 1 }, reassignment.AddingReplicas());
+        Assert.Empty(reassignment.RemovingReplicas());
     }
 
     [Fact]

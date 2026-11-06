@@ -115,7 +115,7 @@ internal static unsafe class ProducerSendMarshal
 
         for (int i = 0; i < entries.Count; i++)
         {
-            AdminStrings.Validate(entries[i].Key, AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
+            AdminStrings.Validate(entries[i].Key(), AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
         }
     }
 
@@ -245,14 +245,14 @@ internal static unsafe class ProducerSendMarshal
     // crosses as a non-null pointer: fixed over an empty array yields NULL, which the ABI reads as a null value.
     private static void AddHeader(IntPtr view, Header header, ref IntPtr outErr)
     {
-        byte[]? value = header.Value;
+        byte[]? value = header.Value();
         byte empty = 0;
         fixed (byte* valueData = value)
         {
             KafkaBytes valueBytes = value is null
                 ? default
                 : new KafkaBytes(value.Length == 0 ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
-            string key = header.Key;
+            string key = header.Key();
             int capacity = Utf8Marshal.QuestionMarkUtf8.GetMaxByteCount(key.Length) + 1;
             if (capacity <= MaxStackStringBytes)
             {

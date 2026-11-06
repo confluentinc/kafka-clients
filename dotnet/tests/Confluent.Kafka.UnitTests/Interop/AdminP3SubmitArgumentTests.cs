@@ -48,11 +48,9 @@ public sealed class AdminP3SubmitArgumentTests
     public void DescribeCluster_BothBools_ReachTheCOptionsIndependently(
         bool includeAuthorizedOperations, bool includeFencedBrokers)
     {
-        (int _, sbyte authorized, sbyte fenced) = ReadBack(new DescribeClusterOptions
-        {
-            IncludeAuthorizedOperations = includeAuthorizedOperations,
-            IncludeFencedBrokers = includeFencedBrokers,
-        });
+        (int _, sbyte authorized, sbyte fenced) = ReadBack(new DescribeClusterOptions()
+            .IncludeAuthorizedOperations(includeAuthorizedOperations)
+            .IncludeFencedBrokers(includeFencedBrokers));
 
         Assert.Equal(includeAuthorizedOperations ? 1 : 0, authorized);
         Assert.Equal(includeFencedBrokers ? 1 : 0, fenced);
@@ -64,20 +62,18 @@ public sealed class AdminP3SubmitArgumentTests
     [InlineData(-1, 0)]
     [InlineData(int.MinValue, 0)]
     public void DescribeCluster_TimeoutMs_ReachesTheCOptions_NegativeAsZero(int timeoutMs, int expected) =>
-        Assert.Equal((expected, (sbyte)0, (sbyte)0), ReadBack(new DescribeClusterOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal((expected, (sbyte)0, (sbyte)0), ReadBack(new DescribeClusterOptions().TimeoutMs(timeoutMs)));
 
     [Fact]
     public void DescribeCluster_ASetterRunTwice_SendsItsLastValue()
     {
-        DescribeClusterOptions options = new DescribeClusterOptions
-        {
-            TimeoutMs = 10,
-            IncludeAuthorizedOperations = true,
-            IncludeFencedBrokers = false,
-        };
-        options.TimeoutMs = null;
-        options.IncludeAuthorizedOperations = false;
-        options.IncludeFencedBrokers = true;
+        DescribeClusterOptions options = new DescribeClusterOptions()
+            .TimeoutMs(10)
+            .IncludeAuthorizedOperations(true)
+            .IncludeFencedBrokers(false);
+        options.TimeoutMs(null);
+        options.IncludeAuthorizedOperations(false);
+        options.IncludeFencedBrokers(true);
 
         Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(options));
     }
@@ -87,7 +83,7 @@ public sealed class AdminP3SubmitArgumentTests
     {
         Assert.Equal(-1, ReadBack((ListConfigResourcesOptions?)null));
         Assert.Equal(-1, ReadBack(new ListConfigResourcesOptions()));
-        Assert.Equal(-1, ReadBack(new ListConfigResourcesOptions { TimeoutMs = null }));
+        Assert.Equal(-1, ReadBack(new ListConfigResourcesOptions().TimeoutMs(null)));
     }
 
     [Theory]
@@ -96,15 +92,15 @@ public sealed class AdminP3SubmitArgumentTests
     [InlineData(-1, 0)]
     [InlineData(int.MinValue, 0)]
     public void ListConfigResources_TimeoutMs_ReachesTheCOptions_NegativeAsZero(int timeoutMs, int expected) =>
-        Assert.Equal(expected, ReadBack(new ListConfigResourcesOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, ReadBack(new ListConfigResourcesOptions().TimeoutMs(timeoutMs)));
 
     [Fact]
     public void ListConfigResources_ASetterRunTwice_SendsItsLastValue()
     {
-        ListConfigResourcesOptions options = new ListConfigResourcesOptions { TimeoutMs = 10 };
-        options.TimeoutMs = 30;
+        ListConfigResourcesOptions options = new ListConfigResourcesOptions().TimeoutMs(10);
+        options.TimeoutMs(30);
         Assert.Equal(30, ReadBack(options));
-        options.TimeoutMs = null;
+        options.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(options));
     }
 

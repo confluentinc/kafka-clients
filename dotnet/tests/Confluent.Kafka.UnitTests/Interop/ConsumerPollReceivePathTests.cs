@@ -60,14 +60,14 @@ public sealed class ConsumerPollReceivePathTests
         ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(Topic, record.Topic);
-        Assert.Equal(Partition, record.Partition);
-        Assert.Equal(42, record.Offset);
-        Assert.NotNull(record.Key);
-        Assert.NotNull(record.Value);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
-        Assert.Empty(record.Headers);
+        Assert.Equal(Topic, record.Topic());
+        Assert.Equal(Partition, record.Partition());
+        Assert.Equal(42, record.Offset());
+        Assert.NotNull(record.Key());
+        Assert.NotNull(record.Value());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
+        Assert.Empty(record.Headers());
     }
 
     [Fact]
@@ -83,9 +83,9 @@ public sealed class ConsumerPollReceivePathTests
         ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(nonAsciiTopic, record.Topic);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
+        Assert.Equal(nonAsciiTopic, record.Topic());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
     }
 
     [Fact]
@@ -98,8 +98,8 @@ public sealed class ConsumerPollReceivePathTests
         ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Null(record.Key);
-        Assert.Null(record.Value);
+        Assert.Null(record.Key());
+        Assert.Null(record.Value());
     }
 
     [Fact]
@@ -112,10 +112,10 @@ public sealed class ConsumerPollReceivePathTests
         ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.NotNull(record.Key);
-        Assert.NotNull(record.Value);
-        Assert.Empty(record.Key!);
-        Assert.Empty(record.Value!);
+        Assert.NotNull(record.Key());
+        Assert.NotNull(record.Value());
+        Assert.Empty(record.Key()!);
+        Assert.Empty(record.Value()!);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public sealed class ConsumerPollReceivePathTests
         ConsumerRecords<byte[], byte[]> records = await PollWithCallback(consumer);
 
         Assert.Equal(5, records.Count);
-        long[] offsets = records.Select(r => r.Offset).ToArray();
+        long[] offsets = records.Select(r => r.Offset()).ToArray();
         Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, offsets);
     }
 
@@ -227,7 +227,7 @@ public sealed class ConsumerPollReceivePathTests
         for (int i = 0; i < 50; i++)
         {
             consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
-            Task<ConsumerRecords<byte[], byte[]>> op = consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+            Task<ConsumerRecords<byte[], byte[]>> op = consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
@@ -249,12 +249,12 @@ public sealed class ConsumerPollReceivePathTests
         GC.WaitForPendingFinalizers();
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(value, record.Value);
-        Assert.Equal(Topic, record.Topic);
+        Assert.Equal(value, record.Value());
+        Assert.Equal(Topic, record.Topic());
     }
 
     private static Task<ConsumerRecords<byte[], byte[]>> PollWithCallback(NativeConsumer consumer) =>
-        consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
+        consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray(), Serdes.ByteArray());
 
     private static async Task<ConsumerRecords<byte[], byte[]>> TestTimeoutResult(Task<ConsumerRecords<byte[], byte[]>> op)
     {

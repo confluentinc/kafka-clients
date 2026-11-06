@@ -174,13 +174,13 @@ internal sealed partial class NativeAdminClient : IDisposable
         HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         foreach (TopicPartition partition in partitions)
         {
-            if (partition.Topic is null)
+            if (partition.Topic() is null)
             {
                 throw new ArgumentException(
                     "The partitions must not contain a topic partition with a null topic.", parameterName);
             }
 
-            AdminStrings.Validate(partition.Topic, parameterName);
+            AdminStrings.Validate(partition.Topic(), parameterName);
 
             if (seen.Add(partition))
             {
@@ -479,15 +479,15 @@ internal sealed partial class NativeAdminClient : IDisposable
         {
             TopicPartitionInfo partition = partitions[i]
                 ?? throw new ArgumentException("The partitions must not contain a null element.", nameof(partitions));
-            if (partition.Leader is not null)
+            if (partition.Leader() is { } leader)
             {
-                ValidateNode(partition.Leader, nameof(partitions));
+                ValidateNode(leader, nameof(partitions));
             }
 
-            ValidateNodes(partition.Replicas, nameof(partitions));
-            ValidateNodes(partition.InSyncReplicas, nameof(partitions));
-            ValidateNodes(partition.Elr, nameof(partitions));
-            ValidateNodes(partition.LastKnownElr, nameof(partitions));
+            ValidateNodes(partition.Replicas(), nameof(partitions));
+            ValidateNodes(partition.Isr(), nameof(partitions));
+            ValidateNodes(partition.Elr(), nameof(partitions));
+            ValidateNodes(partition.LastKnownElr(), nameof(partitions));
             partitionSnapshot[i] = partition;
         }
 
@@ -585,8 +585,8 @@ internal sealed partial class NativeAdminClient : IDisposable
 
     private static void ValidateNode(Node node, string parameterName)
     {
-        AdminStrings.Validate(node.Host, parameterName);
-        AdminStrings.Validate(node.Rack, parameterName);
+        AdminStrings.Validate(node.Host(), parameterName);
+        AdminStrings.Validate(node.Rack(), parameterName);
     }
 
     private static void ValidateNodes(IReadOnlyList<Node>? nodes, string parameterName)
@@ -622,15 +622,15 @@ internal sealed partial class NativeAdminClient : IDisposable
         int index = 0;
         foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
         {
-            if (entry.Key.Topic is null)
+            if (entry.Key.Topic() is null)
             {
                 throw new ArgumentException(
                     "The offsets map must not contain a topic partition with a null topic.", nameof(newOffsets));
             }
 
-            AdminStrings.Validate(entry.Key.Topic, nameof(newOffsets));
-            topics[index] = entry.Key.Topic;
-            partitions[index] = entry.Key.Partition;
+            AdminStrings.Validate(entry.Key.Topic(), nameof(newOffsets));
+            topics[index] = entry.Key.Topic();
+            partitions[index] = entry.Key.Partition();
             values[index] = entry.Value;
             index++;
         }

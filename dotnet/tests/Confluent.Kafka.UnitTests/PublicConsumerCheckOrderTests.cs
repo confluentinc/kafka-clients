@@ -182,7 +182,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public async Task OnTheAsyncMock_WhileARebalanceRefusesOtherThreads_ANullArgument_IsReportedAfterTheRefusal()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         try
         {
             Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -453,7 +453,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public void InsideACallback_WithoutAGroupId_GroupMetadataAndCommitted_ReportTheGroupIdBeforeTheRoute()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(Config(groupId: false), Serdes.ByteArray, Serdes.ByteArray);
+        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(Config(groupId: false), Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable disposal = TestTimeout.Disposal(consumer);
         ConsumerCallbackReporter reporter = Reporter(consumer);
         Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -626,10 +626,10 @@ public sealed class PublicConsumerCheckOrderTests
 
     private static object Create(string kind, bool groupId) => kind switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray, Serdes.ByteArray),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray, Serdes.ByteArray),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray),
-        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray),
+        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
+        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
+        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)

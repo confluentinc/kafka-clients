@@ -29,7 +29,7 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Serves <c>ProducerService</c> over the sync <see cref="KafkaProducer{TKey, TValue}"/> and
-/// <see cref="MockProducer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>),
+/// <see cref="MockProducer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>),
 /// the C# port of the producer half of Python's <c>grpc_server.py</c>. The producer is thread-safe,
 /// so the servicer keeps only an id map and takes no per-id lock.
 /// </summary>
@@ -72,11 +72,11 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             // An empty or all-blank config selects a MockProducer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             }
             else
             {
-                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray, Serdes.ByteArray);
+                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray(), Serdes.ByteArray());
             }
         }
         catch (Exception ex)
@@ -110,7 +110,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             RecordMetadata metadata = future.Value.Get(_sendTimeout);
             return Task.FromResult(new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) });
         }
-        catch (System.TimeoutException) when (future is { IsDone: false })
+        catch (System.TimeoutException) when (future is { } pending && !pending.IsDone())
         {
             // Only the server's own bound is code 7: a future that failed with a TimeoutException
             // (the core's -5) is done, and goes out through ToProto.

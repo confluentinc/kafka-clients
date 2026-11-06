@@ -25,29 +25,34 @@ public sealed class RenewDelegationTokenOptions
     private int? _timeoutMs;
     private long _renewTimePeriodMs = -1L;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public RenewDelegationTokenOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// How much longer the token should live, in milliseconds, or <c>-1</c>, the default, for
     /// the server default — Java's <c>renewTimePeriodMs()</c>.
     /// </summary>
-    public long RenewTimePeriodMs
+    /// <returns>How much longer the token should live, in milliseconds, or <c>-1</c>, the default, for the server
+    /// default.</returns>
+    public long RenewTimePeriodMs() => _renewTimePeriodMs;
+
+    /// <summary>Sets how long the renewal extends the token's life.</summary>
+    /// <param name="renewTimePeriodMs">The renew time period in milliseconds, or <c>-1</c>, the default, for the
+    /// server's.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public RenewDelegationTokenOptions RenewTimePeriodMs(long renewTimePeriodMs)
     {
-        get => _renewTimePeriodMs;
-        set
-        {
-            _renewTimePeriodMs = value;
-            Setters.Ran(nameof(RenewTimePeriodMs));
-        }
+        _renewTimePeriodMs = renewTimePeriodMs;
+        Setters.Ran(nameof(RenewTimePeriodMs));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

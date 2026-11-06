@@ -187,7 +187,7 @@ public sealed class AdminStringsTests
             Assert.Equal("configs", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
             Config before = await TestTimeout.Run(
-                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values[topic].Get(),
+                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values()[topic].Get(),
                 s_deadline);
             Assert.Null(before.Get("retention.ms"));
 
@@ -195,9 +195,9 @@ public sealed class AdminStringsTests
                 () => AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(SetOp(topic, "retention.ms", "1000"), null)).All().Get(),
                 s_deadline);
             Config config = await TestTimeout.Run(
-                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values[topic].Get(),
+                () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, null)).Values()[topic].Get(),
                 s_deadline);
-            Assert.Equal("1000", config.Get("retention.ms")!.Value);
+            Assert.Equal("1000", config.Get("retention.ms")!.Value());
         }
         finally
         {
@@ -212,13 +212,13 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
-                () => admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-\0" }));
+                () => admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern("txn-\0")));
 
             Assert.Equal("options", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
-                admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
+                admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern("txn-.*")));
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.All().Get(), s_deadline));
             Assert.Equal("Not implemented yet", failure.Message);
@@ -260,14 +260,14 @@ public sealed class AdminStringsTests
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DescribeDelegationToken(
-                new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice\0") } }));
+                new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", "alice\0") })));
 
             Assert.Equal("options", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncDescribeDelegationTokenResult result = AsyncDescribeDelegationTokenResult.OfClient(
                 admin.DescribeDelegationToken(
-                    new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", "alice") } }));
+                    new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", "alice") })));
             IReadOnlyList<DelegationToken> tokens = Array.Empty<DelegationToken>();
             await TestTimeout.Run(async () => tokens = await result.DelegationTokens().Get(), s_deadline);
             Assert.Empty(tokens);
@@ -335,7 +335,7 @@ public sealed class AdminStringsTests
     private static Task<long> EarliestOffset(NativeAdminClient admin, TopicPartition partition) =>
         Task.FromResult(admin
             .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, null)
-            .Futures[partition].Get(s_deadline).Offset);
+            .Futures[partition].Get(s_deadline).Offset());
 
     private static SafeAdminClientHandle HandleOf(NativeAdminClient native) =>
         (SafeAdminClientHandle)typeof(NativeAdminClient)

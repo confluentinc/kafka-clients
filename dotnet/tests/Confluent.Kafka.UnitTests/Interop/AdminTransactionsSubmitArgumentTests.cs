@@ -58,51 +58,51 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [Fact]
     public void TheTimeoutSetter_ReachesTheCOptions_AndItsLastValueWins()
     {
-        Assert.Equal((4321, -1), ReadBack(new DescribeProducersOptions { TimeoutMs = 4321 }));
-        Assert.Equal((0, -1), ReadBack(new DescribeProducersOptions { TimeoutMs = 0 }));
-        Assert.Equal((0, -1), ReadBack(new DescribeProducersOptions { TimeoutMs = -5 }));
-        DescribeProducersOptions producers = new DescribeProducersOptions { TimeoutMs = 10 };
-        producers.TimeoutMs = 20;
+        Assert.Equal((4321, -1), ReadBack(new DescribeProducersOptions().TimeoutMs(4321)));
+        Assert.Equal((0, -1), ReadBack(new DescribeProducersOptions().TimeoutMs(0)));
+        Assert.Equal((0, -1), ReadBack(new DescribeProducersOptions().TimeoutMs(-5)));
+        DescribeProducersOptions producers = new DescribeProducersOptions().TimeoutMs(10);
+        producers.TimeoutMs(20);
         Assert.Equal((20, -1), ReadBack(producers));
-        producers.TimeoutMs = null;
+        producers.TimeoutMs(null);
         Assert.Equal((-1, -1), ReadBack(producers));
 
-        Assert.Equal(4321, ReadBack(new DescribeTransactionsOptions { TimeoutMs = 4321 }));
-        Assert.Equal(0, ReadBack(new DescribeTransactionsOptions { TimeoutMs = 0 }));
-        Assert.Equal(0, ReadBack(new DescribeTransactionsOptions { TimeoutMs = -5 }));
-        DescribeTransactionsOptions transactions = new DescribeTransactionsOptions { TimeoutMs = 10 };
-        transactions.TimeoutMs = 30;
+        Assert.Equal(4321, ReadBack(new DescribeTransactionsOptions().TimeoutMs(4321)));
+        Assert.Equal(0, ReadBack(new DescribeTransactionsOptions().TimeoutMs(0)));
+        Assert.Equal(0, ReadBack(new DescribeTransactionsOptions().TimeoutMs(-5)));
+        DescribeTransactionsOptions transactions = new DescribeTransactionsOptions().TimeoutMs(10);
+        transactions.TimeoutMs(30);
         Assert.Equal(30, ReadBack(transactions));
-        transactions.TimeoutMs = null;
+        transactions.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(transactions));
 
-        Assert.Equal(4321, ReadBack(new AbortTransactionOptions { TimeoutMs = 4321 }));
-        Assert.Equal(0, ReadBack(new AbortTransactionOptions { TimeoutMs = 0 }));
-        Assert.Equal(0, ReadBack(new AbortTransactionOptions { TimeoutMs = -5 }));
-        AbortTransactionOptions abort = new AbortTransactionOptions { TimeoutMs = 10 };
-        abort.TimeoutMs = 40;
+        Assert.Equal(4321, ReadBack(new AbortTransactionOptions().TimeoutMs(4321)));
+        Assert.Equal(0, ReadBack(new AbortTransactionOptions().TimeoutMs(0)));
+        Assert.Equal(0, ReadBack(new AbortTransactionOptions().TimeoutMs(-5)));
+        AbortTransactionOptions abort = new AbortTransactionOptions().TimeoutMs(10);
+        abort.TimeoutMs(40);
         Assert.Equal(40, ReadBack(abort));
-        abort.TimeoutMs = null;
+        abort.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(abort));
 
-        Assert.Equal(4321, ReadBack(new FenceProducersOptions { TimeoutMs = 4321 }));
-        Assert.Equal(0, ReadBack(new FenceProducersOptions { TimeoutMs = 0 }));
-        Assert.Equal(0, ReadBack(new FenceProducersOptions { TimeoutMs = -5 }));
-        FenceProducersOptions fence = new FenceProducersOptions { TimeoutMs = 10 };
-        fence.TimeoutMs = 50;
+        Assert.Equal(4321, ReadBack(new FenceProducersOptions().TimeoutMs(4321)));
+        Assert.Equal(0, ReadBack(new FenceProducersOptions().TimeoutMs(0)));
+        Assert.Equal(0, ReadBack(new FenceProducersOptions().TimeoutMs(-5)));
+        FenceProducersOptions fence = new FenceProducersOptions().TimeoutMs(10);
+        fence.TimeoutMs(50);
         Assert.Equal(50, ReadBack(fence));
         Assert.Equal(new[] { nameof(FenceProducersOptions.TimeoutMs) }, fence.Setters.InOrder);
-        fence.TimeoutMs = null;
+        fence.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(fence));
 
-        Assert.Equal(4321, ReadBack(new TerminateTransactionOptions { TimeoutMs = 4321 }));
-        Assert.Equal(0, ReadBack(new TerminateTransactionOptions { TimeoutMs = 0 }));
-        Assert.Equal(0, ReadBack(new TerminateTransactionOptions { TimeoutMs = -5 }));
-        TerminateTransactionOptions terminate = new TerminateTransactionOptions { TimeoutMs = 10 };
-        terminate.TimeoutMs = 60;
+        Assert.Equal(4321, ReadBack(new TerminateTransactionOptions().TimeoutMs(4321)));
+        Assert.Equal(0, ReadBack(new TerminateTransactionOptions().TimeoutMs(0)));
+        Assert.Equal(0, ReadBack(new TerminateTransactionOptions().TimeoutMs(-5)));
+        TerminateTransactionOptions terminate = new TerminateTransactionOptions().TimeoutMs(10);
+        terminate.TimeoutMs(60);
         Assert.Equal(60, ReadBack(terminate));
         Assert.Equal(new[] { nameof(TerminateTransactionOptions.TimeoutMs) }, terminate.Setters.InOrder);
-        terminate.TimeoutMs = null;
+        terminate.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(terminate));
     }
 
@@ -112,7 +112,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [InlineData(int.MaxValue)]
     public void TheBrokerIdSetter_ReachesTheCOptions(int brokerId)
     {
-        DescribeProducersOptions options = new DescribeProducersOptions { BrokerId = brokerId };
+        DescribeProducersOptions options = new DescribeProducersOptions().BrokerId(brokerId);
 
         Assert.Equal((-1, brokerId), ReadBack(options));
         Assert.Equal(new[] { nameof(DescribeProducersOptions.BrokerId) }, options.Setters.InOrder);
@@ -123,14 +123,14 @@ public sealed class AdminTransactionsSubmitArgumentTests
     {
         DescribeProducersOptions unset = new DescribeProducersOptions();
 
-        Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => unset.BrokerId = null).ParamName);
-        Assert.Null(unset.BrokerId);
+        Assert.Equal("brokerId", Assert.Throws<ArgumentNullException>(() => unset.BrokerId(null)).ParamName);
+        Assert.Null(unset.BrokerId());
         Assert.Empty(unset.Setters.InOrder);
         Assert.Equal((-1, -1), ReadBack(unset));
 
-        DescribeProducersOptions set = new DescribeProducersOptions { BrokerId = 3 };
-        Assert.Throws<ArgumentNullException>(() => set.BrokerId = null);
-        Assert.Equal(3, set.BrokerId);
+        DescribeProducersOptions set = new DescribeProducersOptions().BrokerId(3);
+        Assert.Throws<ArgumentNullException>(() => set.BrokerId(null));
+        Assert.Equal(3, set.BrokerId());
         Assert.Equal(new[] { nameof(DescribeProducersOptions.BrokerId) }, set.Setters.InOrder);
         Assert.Equal((-1, 3), ReadBack(set));
     }
@@ -138,8 +138,8 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [Fact]
     public void TheSetters_AreReplayedInTheOrderTheyLastRan()
     {
-        DescribeProducersOptions options = new DescribeProducersOptions { TimeoutMs = 10, BrokerId = 1 };
-        options.TimeoutMs = 25;
+        DescribeProducersOptions options = new DescribeProducersOptions().TimeoutMs(10).BrokerId(1);
+        options.TimeoutMs(25);
 
         Assert.Equal(
             new[] { nameof(DescribeProducersOptions.BrokerId), nameof(DescribeProducersOptions.TimeoutMs) },
@@ -206,14 +206,12 @@ public sealed class AdminTransactionsSubmitArgumentTests
     public void ListTransactions_EveryFilterReachesTheCOptions()
     {
         ListTransactionsReadBack read = ReadBack(
-            new ListTransactionsOptions
-            {
-                FilteredStates = new[] { TransactionState.PREPARE_ABORT, TransactionState.ONGOING },
-                FilteredProducerIds = new[] { 33L, 11L, 22L },
-                FilteredDuration = 60_000L,
-                FilteredTransactionalIdPattern = "txn-.*",
-                TimeoutMs = 400,
-            });
+            new ListTransactionsOptions()
+                .FilterStates(new[] { TransactionState.PREPARE_ABORT, TransactionState.ONGOING })
+                .FilterProducerIds(new[] { 33L, 11L, 22L })
+                .FilterOnDuration(60_000L)
+                .FilterOnTransactionalIdPattern("txn-.*")
+                .TimeoutMs(400));
 
         Assert.Equal(new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT }, read.States.OrderBy(state => state));
         Assert.Equal(new[] { 11L, 22L, 33L }, read.ProducerIds.OrderBy(id => id));
@@ -227,14 +225,14 @@ public sealed class AdminTransactionsSubmitArgumentTests
     {
         TransactionState[] states = Enum.GetValues(typeof(TransactionState)).Cast<TransactionState>().ToArray();
 
-        Assert.Equal(states, ReadBack(new ListTransactionsOptions { FilteredStates = states }).States.OrderBy(state => state));
+        Assert.Equal(states, ReadBack(new ListTransactionsOptions().FilterStates(states)).States.OrderBy(state => state));
     }
 
     [Theory]
     [InlineData(-1)]
     [InlineData(int.MinValue)]
     public void ListTransactions_NegativeTimeout_IsSentAsZero(int timeoutMs) =>
-        Assert.Equal(0, ReadBack(new ListTransactionsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
+        Assert.Equal(0, ReadBack(new ListTransactionsOptions().TimeoutMs(timeoutMs)).TimeoutMs);
 
     [Theory]
     [InlineData(0L)]
@@ -242,7 +240,7 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [InlineData(-1L)]
     [InlineData(-5L)]
     public void ListTransactions_DurationCrossesUnchanged(long duration) =>
-        Assert.Equal(duration, ReadBack(new ListTransactionsOptions { FilteredDuration = duration }).DurationMs);
+        Assert.Equal(duration, ReadBack(new ListTransactionsOptions().FilterOnDuration(duration)).DurationMs);
 
     [Theory]
     [InlineData(null)]
@@ -250,23 +248,21 @@ public sealed class AdminTransactionsSubmitArgumentTests
     [InlineData("txn-ünïcode-🎉.*")]
     public void ListTransactions_ThePatternCrossesUnchanged(string? pattern)
     {
-        ListTransactionsOptions options = new ListTransactionsOptions { FilteredTransactionalIdPattern = pattern };
+        ListTransactionsOptions options = new ListTransactionsOptions().FilterOnTransactionalIdPattern(pattern);
 
         Assert.Equal(pattern, ReadBack(options).Pattern);
-        Assert.Equal(new[] { nameof(ListTransactionsOptions.FilteredTransactionalIdPattern) }, options.Setters.InOrder);
+        Assert.Equal(new[] { nameof(ListTransactionsOptions.FilterOnTransactionalIdPattern) }, options.Setters.InOrder);
     }
 
     [Fact]
     public void ListTransactions_TheLastValueOfEachSetterWins()
     {
-        ListTransactionsOptions options = new ListTransactionsOptions
-        {
-            FilteredStates = new[] { TransactionState.ONGOING },
-            FilteredProducerIds = new[] { 1L },
-            TimeoutMs = 10,
-        };
-        options.FilteredStates = new[] { TransactionState.EMPTY };
-        options.FilteredProducerIds = Array.Empty<long>();
+        ListTransactionsOptions options = new ListTransactionsOptions()
+            .FilterStates(new[] { TransactionState.ONGOING })
+            .FilterProducerIds(new[] { 1L })
+            .TimeoutMs(10);
+        options.FilterStates(new[] { TransactionState.EMPTY });
+        options.FilterProducerIds(Array.Empty<long>());
 
         ListTransactionsReadBack read = ReadBack(options);
 
@@ -277,8 +273,8 @@ public sealed class AdminTransactionsSubmitArgumentTests
             new[]
             {
                 nameof(ListTransactionsOptions.TimeoutMs),
-                nameof(ListTransactionsOptions.FilteredStates),
-                nameof(ListTransactionsOptions.FilteredProducerIds),
+                nameof(ListTransactionsOptions.FilterStates),
+                nameof(ListTransactionsOptions.FilterProducerIds),
             },
             options.Setters.InOrder);
     }

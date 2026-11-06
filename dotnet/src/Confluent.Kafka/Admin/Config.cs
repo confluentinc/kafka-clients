@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Admin;
 /// <remarks>
 /// It has Java's map semantics: one entry per name, the last occurrence winning, and value
 /// equality over the name → entry mapping regardless of order. Unlike Java's <c>HashMap</c>,
-/// <see cref="Entries"/> keeps the order the entries were supplied in, a replaced duplicate
+/// <see cref="Entries()"/> keeps the order the entries were supplied in, a replaced duplicate
 /// keeping its first occurrence's position.
 /// </remarks>
 public sealed class Config
@@ -42,7 +42,7 @@ public sealed class Config
     /// <param name="entries">
     /// The configuration entries. Two entries with the same name are one entry: the last wins, as
     /// Java's <c>entries.put(entry.name(), entry)</c> does, and it takes the first one's position in
-    /// <see cref="Entries"/>.
+    /// <see cref="Entries()"/>.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="entries"/> is null, or contains a null element.
@@ -64,17 +64,17 @@ public sealed class Config
                 throw new ArgumentNullException(nameof(entries), "Config entries must not contain a null element.");
             }
 
-            if (positions.TryGetValue(entry.Name, out int position))
+            if (positions.TryGetValue(entry.Name(), out int position))
             {
                 ordered[position] = entry;
             }
             else
             {
-                positions.Add(entry.Name, ordered.Count);
+                positions.Add(entry.Name(), ordered.Count);
                 ordered.Add(entry);
             }
 
-            _byName[entry.Name] = entry;
+            _byName[entry.Name()] = entry;
         }
 
         _entries = new ReadOnlyCollection<ConfigEntry>(ordered);
@@ -85,7 +85,9 @@ public sealed class Config
     /// supplied: sorted by name for a configuration the core described. Read-only, as Java's
     /// <c>Collections.unmodifiableCollection(entries.values())</c> is.
     /// </summary>
-    public IReadOnlyCollection<ConfigEntry> Entries => _entries;
+    /// <returns>The configuration entries, one per name, in the order they were supplied:
+    /// sorted by name for a configuration the core described.</returns>
+    public IReadOnlyCollection<ConfigEntry> Entries() => _entries;
 
     /// <summary>
     /// The entry with the given name, or <see langword="null"/> if the configuration
@@ -158,7 +160,7 @@ public sealed class Config
 
     /// <summary>
     /// A diagnostic rendering in Java's layout, <c>Config(entries=[e1, e2])</c>, each entry
-    /// rendered by <see cref="ConfigEntry.ToString"/>, in <see cref="Entries"/> order.
+    /// rendered by <see cref="ConfigEntry.ToString"/>, in <see cref="Entries()"/> order.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()

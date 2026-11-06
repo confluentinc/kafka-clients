@@ -43,7 +43,7 @@ public sealed class PublicConsumerRoundTripTests
 
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyToPoll(string topic = Topic, int partition = Partition)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(new TopicPartition(topic, partition), offset: 0), s_deadline);
@@ -62,14 +62,14 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(Topic, record.Topic);
-        Assert.Equal(Partition, record.Partition);
-        Assert.Equal(42, record.Offset);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
-        Assert.Empty(record.Headers);
+        Assert.Equal(Topic, record.Topic());
+        Assert.Equal(Partition, record.Partition());
+        Assert.Equal(42, record.Offset());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
+        Assert.Empty(record.Headers());
         Assert.True(
-            record.TimestampType is TimestampType.NO_TIMESTAMP_TYPE
+            record.TimestampType() is TimestampType.NO_TIMESTAMP_TYPE
                 or TimestampType.CREATE_TIME
                 or TimestampType.LOG_APPEND_TIME);
     }
@@ -87,9 +87,9 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(nonAsciiTopic, record.Topic);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
+        Assert.Equal(nonAsciiTopic, record.Topic());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
     }
 
     [Fact]
@@ -102,8 +102,8 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Null(record.Key);
-        Assert.Null(record.Value);
+        Assert.Null(record.Key());
+        Assert.Null(record.Value());
     }
 
     [Fact]
@@ -116,10 +116,10 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.NotNull(record.Key);
-        Assert.NotNull(record.Value);
-        Assert.Empty(record.Key!);
-        Assert.Empty(record.Value!);
+        Assert.NotNull(record.Key());
+        Assert.NotNull(record.Value());
+        Assert.Empty(record.Key()!);
+        Assert.Empty(record.Value()!);
     }
 
     [Fact]
@@ -135,7 +135,7 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         Assert.Equal(5, records.Count);
-        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset).ToArray());
+        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset()).ToArray());
     }
 
     [Fact]
@@ -161,12 +161,12 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.NotNull(record.Headers);
-        Assert.Empty(record.Headers);
+        Assert.NotNull(record.Headers());
+        Assert.Empty(record.Headers());
         Header header = new Header("hk", Encoding.UTF8.GetBytes("hv"));
-        Assert.Equal("hk", header.Key);
-        Assert.Equal(Encoding.UTF8.GetBytes("hv"), header.Value);
-        Assert.Null(new Header("null-valued", null).Value);
+        Assert.Equal("hk", header.Key());
+        Assert.Equal(Encoding.UTF8.GetBytes("hv"), header.Value());
+        Assert.Null(new Header("null-valued", null).Value());
     }
 
     [Fact]
@@ -256,7 +256,7 @@ public sealed class PublicConsumerRoundTripTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 0, null, Encoding.UTF8.GetBytes("v"));
         ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
-        Assert.True(Enum.IsDefined(typeof(TimestampType), record.TimestampType));
+        Assert.True(Enum.IsDefined(typeof(TimestampType), record.TimestampType()));
     }
 
     private static async Task<ConsumerRecords<byte[], byte[]>> Poll(IAsyncConsumer<byte[], byte[]> consumer)

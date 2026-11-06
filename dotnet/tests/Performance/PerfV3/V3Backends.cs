@@ -42,7 +42,7 @@ internal sealed class V3Delivery : IDeliveryCallback
     public void OnCompletion(RecordMetadata metadata, Exception? exception) =>
         _callback.OnCompletion(
             _sendStartMs,
-            new PerfRecordMetadata(metadata.Topic, metadata.Partition, metadata.Offset, metadata.Timestamp),
+            new PerfRecordMetadata(metadata.Topic(), metadata.Partition(), metadata.Offset(), metadata.Timestamp()),
             exception);
 }
 
@@ -55,9 +55,9 @@ internal static class V3ProducerMetrics
         {
             foreach (KeyValuePair<MetricName, IMetric> kv in metrics())
             {
-                if (kv.Key.Name == "compression-rate-avg")
+                if (kv.Key.Name() == "compression-rate-avg")
                 {
-                    Console.WriteLine($"[METRIC] compression-rate-avg = {FormatMetricValue(kv.Value.Value)}");
+                    Console.WriteLine($"[METRIC] compression-rate-avg = {FormatMetricValue(kv.Value.MetricValue())}");
                 }
             }
         }
@@ -92,14 +92,14 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
     private static readonly Func<object, PerfRecordMetadata> s_get = static state =>
     {
         RecordMetadata meta = ((KafkaFuture<RecordMetadata>)state).Get();
-        return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
+        return new PerfRecordMetadata(meta.Topic(), meta.Partition(), meta.Offset(), meta.Timestamp());
     };
 
     private readonly KafkaProducer<byte[], byte[]> _producer;
 
     internal V3SyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
     }
 
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
@@ -128,7 +128,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 
     internal V3AsyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
     }
 
     public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
@@ -147,7 +147,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
     private static async Task<PerfRecordMetadata> Deliver(Task<RecordMetadata> delivery)
     {
         RecordMetadata meta = await delivery.ConfigureAwait(false);
-        return new PerfRecordMetadata(meta.Topic, meta.Partition, meta.Offset, meta.Timestamp);
+        return new PerfRecordMetadata(meta.Topic(), meta.Partition(), meta.Offset(), meta.Timestamp());
     }
 
     public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
@@ -189,7 +189,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
 
     internal V3SyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
     {
-        _consumer = new KafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _consumer = new KafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
     }
 
@@ -213,7 +213,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
         var list = new List<PolledRecord>(records.Count);
         foreach (ConsumerRecord<byte[], byte[]> r in records)
         {
-            list.Add(new PolledRecord(r.Timestamp, PolledRecordBytes(r)));
+            list.Add(new PolledRecord(r.Timestamp(), PolledRecordBytes(r)));
         }
 
         return list;
@@ -227,7 +227,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
     public void Dispose() => _consumer.Dispose();
 
     internal static int PolledRecordBytes(ConsumerRecord<byte[], byte[]> r) =>
-        (r.Value?.Length ?? 0) + (r.Key?.Length ?? 0);
+        (r.Value()?.Length ?? 0) + (r.Key()?.Length ?? 0);
 }
 
 /// <summary>
@@ -241,7 +241,7 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
 
     internal V3AsyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
     {
-        _consumer = new AsyncKafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray, Serdes.ByteArray);
+        _consumer = new AsyncKafkaConsumer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray(), Serdes.ByteArray());
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
     }
 
@@ -265,7 +265,7 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
         var list = new List<PolledRecord>(records.Count);
         foreach (ConsumerRecord<byte[], byte[]> r in records)
         {
-            list.Add(new PolledRecord(r.Timestamp, V3SyncConsumerBackend.PolledRecordBytes(r)));
+            list.Add(new PolledRecord(r.Timestamp(), V3SyncConsumerBackend.PolledRecordBytes(r)));
         }
 
         return list;

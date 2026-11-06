@@ -78,7 +78,7 @@ public sealed class CommittedNullEntryTests
     public void MockConsumer_Committed_ReportsOnlyCommittedPartitions_AndZeroWhenUnassigned()
     {
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0, s_tp1 });
         consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(4) });
@@ -94,7 +94,7 @@ public sealed class CommittedNullEntryTests
     public async Task AsyncMockConsumer_Committed_ReportsOnlyCommittedPartitions_AndZeroWhenUnassigned()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0, s_tp1 }), s_deadline);

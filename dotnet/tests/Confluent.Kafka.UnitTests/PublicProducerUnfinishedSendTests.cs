@@ -45,13 +45,13 @@ public sealed class PublicProducerUnfinishedSendTests
         WithUnfinishedSend((future, callback, release) =>
         {
             Assert.False(future.Cancel(true));
-            Assert.False(future.IsCancelled);
-            Assert.False(future.IsDone);
+            Assert.False(future.IsCancelled());
+            Assert.False(future.IsDone());
 
             release();
             KafkaTimeoutException failure = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline));
             Assert.Equal(7, failure.Code);
-            Assert.False(future.IsCancelled);
+            Assert.False(future.IsCancelled());
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Same(failure, callback.Delivered);
         });
@@ -65,7 +65,7 @@ public sealed class PublicProducerUnfinishedSendTests
             Assert.Equal(
                 "Timeout after waiting for 0 ms.",
                 Assert.IsType<FutureTimeoutException>(Record(() => future.Get(TimeSpan.Zero))).Message);
-            Assert.False(future.IsDone);
+            Assert.False(future.IsDone());
 
             release();
             KafkaTimeoutException failure = FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline));
@@ -82,7 +82,7 @@ public sealed class PublicProducerUnfinishedSendTests
         {
             string? appliedOn = null;
             using ManualResetEventSlim applied = new ManualResetEventSlim();
-            KafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset);
+            KafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) =>
             {
                 appliedOn = Thread.CurrentThread.Name;
@@ -115,8 +115,8 @@ public sealed class PublicProducerUnfinishedSendTests
             Assert.True(wait.Wait(Deadline), "Get(token) did not end when its token fired");
             OperationCanceledException canceled = Assert.IsAssignableFrom<OperationCanceledException>(wait.Result);
             Assert.Equal(cts.Token, canceled.CancellationToken);
-            Assert.False(future.IsDone);
-            Assert.False(future.IsCancelled);
+            Assert.False(future.IsDone());
+            Assert.False(future.IsCancelled());
 
             release();
             Assert.Equal(7, FutureAssert.Throws<KafkaTimeoutException>(() => future.Get(Deadline)).Code);
@@ -150,7 +150,7 @@ public sealed class PublicProducerUnfinishedSendTests
             },
             () =>
             {
-                doneInCallback = probed.IsDone;
+                doneInCallback = probed.IsDone();
                 getReturnedInCallback = blockedGet!.IsCompleted;
             });
 
@@ -164,13 +164,13 @@ public sealed class PublicProducerUnfinishedSendTests
         await WithUnfinishedAsyncSend(async (producer, future, callback) =>
         {
             Assert.False(future.Cancel(true));
-            Assert.False(future.IsCancelled);
-            Assert.False(future.IsDone);
+            Assert.False(future.IsCancelled());
+            Assert.False(future.IsDone());
 
             Assert.True(producer.CompleteNext());
             RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), Deadline);
-            Assert.Equal(0L, metadata.Offset);
-            Assert.False(future.IsCancelled);
+            Assert.Equal(0L, metadata.Offset());
+            Assert.False(future.IsCancelled());
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Equal(1, callback.Calls);
             Assert.Null(callback.Delivered);
@@ -184,11 +184,11 @@ public sealed class PublicProducerUnfinishedSendTests
         {
             FutureTimeoutException timedOut = await Assert.ThrowsAsync<FutureTimeoutException>(() => future.Get(TimeSpan.Zero));
             Assert.Equal("Timeout after waiting for 0 ms.", timedOut.Message);
-            Assert.False(future.IsDone);
+            Assert.False(future.IsDone());
 
             Assert.True(producer.CompleteNext());
             RecordMetadata metadata = await TestTimeout.Run(() => future.Get(), Deadline);
-            Assert.Equal(0L, metadata.Offset);
+            Assert.Equal(0L, metadata.Offset());
             Assert.True(callback.WaitDone(Deadline), "the delivery callback never ran");
             Assert.Equal(1, callback.Calls);
         });
@@ -205,9 +205,9 @@ public sealed class PublicProducerUnfinishedSendTests
         if (flavor == SyncFlavor)
         {
             MockProducer<byte[], byte[]> producer =
-                new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+                new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
-            KafkaFuture<long> offset = producer.Send(UnreachableProducers.Record(topic)).ThenApply(metadata => metadata.Offset);
+            KafkaFuture<long> offset = producer.Send(UnreachableProducers.Record(topic)).ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
             Assert.False(appliedOn.Task.IsCompleted);
 
@@ -218,11 +218,11 @@ public sealed class PublicProducerUnfinishedSendTests
         else
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future =
                 await TestTimeout.Run(() => producer.Send(UnreachableProducers.Record(topic)).AsTask(), Deadline);
-            AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset);
+            AsyncKafkaFuture<long> offset = future.ThenApply(metadata => metadata.Offset());
             _ = offset.WhenComplete((_, _) => appliedOn.TrySetResult(Thread.CurrentThread.Name));
             Assert.False(appliedOn.Task.IsCompleted);
 
@@ -253,7 +253,7 @@ public sealed class PublicProducerUnfinishedSendTests
             },
             () =>
             {
-                doneInCallback = probed.IsDone;
+                doneInCallback = probed.IsDone();
                 getReturnedInCallback = pendingGet!.IsCompleted;
             });
 
@@ -279,12 +279,12 @@ public sealed class PublicProducerUnfinishedSendTests
         Action? inCallback = null)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback?.Invoke());
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
             () => producer.Send(UnreachableProducers.Record(Topic("unfinished-async-send")), callback).AsTask(), Deadline);
-        Assert.False(future.IsDone, "the manual mock completed the send before CompleteNext");
+        Assert.False(future.IsDone(), "the manual mock completed the send before CompleteNext");
         await test(producer, future, callback);
         Assert.Null(callback.BodyFailure);
     }
@@ -303,7 +303,7 @@ public sealed class PublicProducerUnfinishedSendTests
             Assert.True(hold.WaitEntered(Deadline), "the holding callback never ran");
 
             KafkaFuture<RecordMetadata> future = producer.Send(UnreachableProducers.Record(Topic("unfinished-send")), callback);
-            Assert.False(future.IsDone, "the send's future completed while the completion thread was held");
+            Assert.False(future.IsDone(), "the send's future completed while the completion thread was held");
             test(future, callback, hold.Release);
             Assert.Null(callback.BodyFailure);
         }

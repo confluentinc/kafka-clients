@@ -148,10 +148,10 @@ public sealed class AdminListTransactionsBrokerListingsTests
         private IntPtr ListingOf(int broker)
         {
             TransactionListing expected = Expected(broker);
-            using Utf8Marshal.PinnedUtf8String id = Utf8Marshal.Pin(expected.TransactionalId);
+            using Utf8Marshal.PinnedUtf8String id = Utf8Marshal.Pin(expected.TransactionalId());
             IntPtr outErr = IntPtr.Zero;
             IntPtr listing = Native.TransactionListingNew(
-                id.Pointer, expected.ProducerId, TransactionMarshal.Singleton(expected.State), ref outErr);
+                id.Pointer, expected.ProducerId(), TransactionMarshal.Singleton(expected.State()), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             _listings.Add(listing);
             return listing;

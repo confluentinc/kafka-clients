@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Common.Acl;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A null <see cref="Principal"/> or <see cref="Host"/> matches any; <c>""</c> filters on the
+/// A null <see cref="Principal()"/> or <see cref="Host()"/> matches any; <c>""</c> filters on the
 /// literal empty value.
 /// </para>
 /// <para>
@@ -34,14 +34,19 @@ namespace Confluent.Kafka.Common.Acl;
 /// behaviour and lives in the core.
 /// </para>
 /// <para>
-/// <see cref="Operation"/> and <see cref="PermissionType"/> only ever hold a defined member, as a
+/// <see cref="Operation()"/> and <see cref="PermissionType()"/> only ever hold a defined member, as a
 /// Java filter does.
 /// </para>
 /// </remarks>
 public sealed class AccessControlEntryFilter
 {
+    private readonly string? _principal;
+    private readonly string? _host;
+    private readonly AclOperation _operation;
+    private readonly AclPermissionType _permissionType;
+
     /// <summary>A filter matching every access control entry — Java's <c>ANY</c>.</summary>
-    public static AccessControlEntryFilter ANY { get; } =
+    public static readonly AccessControlEntryFilter ANY =
         new AccessControlEntryFilter(null, null, AclOperation.ANY, AclPermissionType.ANY);
 
     /// <summary>
@@ -70,30 +75,35 @@ public sealed class AccessControlEntryFilter
         AclOperation operation,
         AclPermissionType permissionType)
     {
-        Principal = principal;
-        Host = host;
+        _principal = principal;
+        _host = host;
 
-        Operation = AclEnumCodes.DefinedOrUnknown(operation);
-        PermissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
+        _operation = AclEnumCodes.DefinedOrUnknown(operation);
+        _permissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
     }
 
     /// <summary>The principal, or <c>null</c> to match any — Java's <c>principal()</c>.</summary>
-    public string? Principal { get; }
+    /// <returns>The principal, or <c>null</c> to match any.</returns>
+    public string? Principal() => _principal;
 
     /// <summary>The host, or <c>null</c> to match any — Java's <c>host()</c>.</summary>
-    public string? Host { get; }
+    /// <returns>The host, or <c>null</c> to match any.</returns>
+    public string? Host() => _host;
 
     /// <summary>The operation — Java's <c>operation()</c>.</summary>
-    public AclOperation Operation { get; }
+    /// <returns>The operation.</returns>
+    public AclOperation Operation() => _operation;
 
     /// <summary>The permission type — Java's <c>permissionType()</c>.</summary>
-    public AclPermissionType PermissionType { get; }
+    /// <returns>The permission type.</returns>
+    public AclPermissionType PermissionType() => _permissionType;
 
     /// <summary>
     /// Whether the operation or permission type is <c>UNKNOWN</c> — Java's <c>isUnknown()</c>.
     /// </summary>
-    public bool IsUnknown =>
-        Operation == AclOperation.UNKNOWN || PermissionType == AclPermissionType.UNKNOWN;
+    /// <returns>Whether the operation or permission type is <c>UNKNOWN</c>.</returns>
+    public bool IsUnknown() =>
+        Operation() == AclOperation.UNKNOWN || PermissionType() == AclPermissionType.UNKNOWN;
 
     /// <summary>Value equality over all four components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
@@ -102,10 +112,10 @@ public sealed class AccessControlEntryFilter
     /// </returns>
     public override bool Equals(object? obj) =>
         obj is AccessControlEntryFilter other
-        && string.Equals(Principal, other.Principal, StringComparison.Ordinal)
-        && string.Equals(Host, other.Host, StringComparison.Ordinal)
-        && Operation == other.Operation
-        && PermissionType == other.PermissionType;
+        && string.Equals(Principal(), other.Principal(), StringComparison.Ordinal)
+        && string.Equals(Host(), other.Host(), StringComparison.Ordinal)
+        && Operation() == other.Operation()
+        && PermissionType() == other.PermissionType();
 
     /// <summary>The hash of all four components — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -114,10 +124,10 @@ public sealed class AccessControlEntryFilter
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + (Principal is null ? 0 : StringComparer.Ordinal.GetHashCode(Principal));
-            hash = (hash * 31) + (Host is null ? 0 : StringComparer.Ordinal.GetHashCode(Host));
-            hash = (hash * 31) + ((int)Operation).GetHashCode();
-            hash = (hash * 31) + ((int)PermissionType).GetHashCode();
+            hash = (hash * 31) + (_principal is null ? 0 : StringComparer.Ordinal.GetHashCode(_principal));
+            hash = (hash * 31) + (_host is null ? 0 : StringComparer.Ordinal.GetHashCode(_host));
+            hash = (hash * 31) + ((int)_operation).GetHashCode();
+            hash = (hash * 31) + ((int)_permissionType).GetHashCode();
             return hash;
         }
     }
@@ -131,8 +141,8 @@ public sealed class AccessControlEntryFilter
         string.Format(
             CultureInfo.InvariantCulture,
             "(principal={0}, host={1}, operation={2}, permissionType={3})",
-            Principal ?? "<any>",
-            Host ?? "<any>",
-            Operation,
-            PermissionType);
+            Principal() ?? "<any>",
+            Host() ?? "<any>",
+            Operation(),
+            PermissionType());
 }

@@ -29,15 +29,15 @@ public sealed class AlterPartitionReassignmentsOptions
     private int? _timeoutMs;
     private bool _allowReplicationFactorChange = true;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public AlterPartitionReassignmentsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -45,19 +45,28 @@ public sealed class AlterPartitionReassignmentsOptions
     /// <c>allowReplicationFactorChange(boolean)</c> /
     /// <c>allowReplicationFactorChange()</c>. Defaults to <b><see langword="true"/></b>, as Java's field does.
     /// </summary>
+    /// <returns>Allow the call to change a partition's replication factor — Java's
+    /// <c>allowReplicationFactorChange(boolean)</c> / <c>allowReplicationFactorChange()</c>. Defaults to
+    /// <b><see langword="true"/></b>, as Java's field does.</returns>
     /// <remarks>
     /// When <see langword="false"/>, a reassignment that would change the replication factor fails with
     /// <c>InvalidReplicationFactorException</c>, and a broker too old for the option fails with
     /// <c>UnsupportedVersionException</c>, each as a <see cref="KafkaException"/> on that partition's future.
     /// </remarks>
-    public bool AllowReplicationFactorChange
+    public bool AllowReplicationFactorChange() => _allowReplicationFactorChange;
+
+    /// <summary>
+    /// Set the option indicating if the alter partition reassignments call should be allowed to alter the replication
+    /// factor of a partition. In cases where it is not allowed, any replication factor change will result in an
+    /// exception thrown by the API.
+    /// </summary>
+    /// <param name="allow">Whether a replication factor change is allowed. Defaults to <see langword="true"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public AlterPartitionReassignmentsOptions AllowReplicationFactorChange(bool allow)
     {
-        get => _allowReplicationFactorChange;
-        set
-        {
-            _allowReplicationFactorChange = value;
-            Setters.Ran(nameof(AllowReplicationFactorChange));
-        }
+        _allowReplicationFactorChange = allow;
+        Setters.Ran(nameof(AllowReplicationFactorChange));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

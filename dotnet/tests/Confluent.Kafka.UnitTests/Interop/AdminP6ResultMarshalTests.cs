@@ -60,12 +60,12 @@ public sealed class AdminP6ResultMarshalTests
         AclBindingFilter fromNulls = RoundTrip(nulls);
         AclBindingFilter fromEmpties = RoundTrip(empties);
 
-        Assert.Null(fromNulls.PatternFilter.Name);
-        Assert.Null(fromNulls.EntryFilter.Principal);
-        Assert.Null(fromNulls.EntryFilter.Host);
-        Assert.Equal(string.Empty, fromEmpties.PatternFilter.Name);
-        Assert.Equal(string.Empty, fromEmpties.EntryFilter.Principal);
-        Assert.Equal(string.Empty, fromEmpties.EntryFilter.Host);
+        Assert.Null(fromNulls.PatternFilter().Name());
+        Assert.Null(fromNulls.EntryFilter().Principal());
+        Assert.Null(fromNulls.EntryFilter().Host());
+        Assert.Equal(string.Empty, fromEmpties.PatternFilter().Name());
+        Assert.Equal(string.Empty, fromEmpties.EntryFilter().Principal());
+        Assert.Equal(string.Empty, fromEmpties.EntryFilter().Host());
         Assert.Equal(nulls, fromNulls);
         Assert.Equal(empties, fromEmpties);
         Assert.NotEqual(fromNulls, fromEmpties);
@@ -80,13 +80,13 @@ public sealed class AdminP6ResultMarshalTests
 
         AclBindingFilter copied = RoundTrip(filter);
 
-        Assert.Equal(ResourceType.GROUP, copied.PatternFilter.ResourceType);
-        Assert.Equal("grüppe-ü", copied.PatternFilter.Name);
-        Assert.Equal(PatternType.PREFIXED, copied.PatternFilter.PatternType);
-        Assert.Equal("User:bjørn", copied.EntryFilter.Principal);
-        Assert.Equal("10.0.0.1", copied.EntryFilter.Host);
-        Assert.Equal(AclOperation.DESCRIBE, copied.EntryFilter.Operation);
-        Assert.Equal(AclPermissionType.DENY, copied.EntryFilter.PermissionType);
+        Assert.Equal(ResourceType.GROUP, copied.PatternFilter().ResourceType());
+        Assert.Equal("grüppe-ü", copied.PatternFilter().Name());
+        Assert.Equal(PatternType.PREFIXED, copied.PatternFilter().PatternType());
+        Assert.Equal("User:bjørn", copied.EntryFilter().Principal());
+        Assert.Equal("10.0.0.1", copied.EntryFilter().Host());
+        Assert.Equal(AclOperation.DESCRIBE, copied.EntryFilter().Operation());
+        Assert.Equal(AclPermissionType.DENY, copied.EntryFilter().PermissionType());
         Assert.Equal(filter, copied);
     }
 
@@ -96,7 +96,7 @@ public sealed class AdminP6ResultMarshalTests
         Assert.Equal(
             resourceType,
             RoundTrip(Filter(resourceType, PatternType.ANY, AclOperation.ANY, AclPermissionType.ANY))
-                .PatternFilter.ResourceType);
+                .PatternFilter().ResourceType());
 
     [Theory]
     [MemberData(nameof(PatternTypes))]
@@ -104,7 +104,7 @@ public sealed class AdminP6ResultMarshalTests
         Assert.Equal(
             patternType,
             RoundTrip(Filter(ResourceType.ANY, patternType, AclOperation.ANY, AclPermissionType.ANY))
-                .PatternFilter.PatternType);
+                .PatternFilter().PatternType());
 
     [Theory]
     [MemberData(nameof(Operations))]
@@ -112,7 +112,7 @@ public sealed class AdminP6ResultMarshalTests
         Assert.Equal(
             operation,
             RoundTrip(Filter(ResourceType.ANY, PatternType.ANY, operation, AclPermissionType.ANY))
-                .EntryFilter.Operation);
+                .EntryFilter().Operation());
 
     [Theory]
     [MemberData(nameof(PermissionTypes))]
@@ -120,7 +120,7 @@ public sealed class AdminP6ResultMarshalTests
         Assert.Equal(
             permissionType,
             RoundTrip(Filter(ResourceType.ANY, PatternType.ANY, AclOperation.ANY, permissionType))
-                .EntryFilter.PermissionType);
+                .EntryFilter().PermissionType());
 
     [Fact]
     public void CopyOutBinding_RestoresEverySlot()
@@ -131,13 +131,13 @@ public sealed class AdminP6ResultMarshalTests
 
         AclBinding copied = RoundTrip(binding);
 
-        Assert.Equal(ResourceType.TRANSACTIONAL_ID, copied.Pattern.ResourceType);
-        Assert.Equal("tx-ünï", copied.Pattern.Name);
-        Assert.Equal(PatternType.LITERAL, copied.Pattern.PatternType);
-        Assert.Equal("User:ålice", copied.Entry.Principal);
-        Assert.Equal("*", copied.Entry.Host);
-        Assert.Equal(AclOperation.WRITE, copied.Entry.Operation);
-        Assert.Equal(AclPermissionType.ALLOW, copied.Entry.PermissionType);
+        Assert.Equal(ResourceType.TRANSACTIONAL_ID, copied.Pattern().ResourceType());
+        Assert.Equal("tx-ünï", copied.Pattern().Name());
+        Assert.Equal(PatternType.LITERAL, copied.Pattern().PatternType());
+        Assert.Equal("User:ålice", copied.Entry().Principal());
+        Assert.Equal("*", copied.Entry().Host());
+        Assert.Equal(AclOperation.WRITE, copied.Entry().Operation());
+        Assert.Equal(AclPermissionType.ALLOW, copied.Entry().PermissionType());
         Assert.Equal(binding, copied);
     }
 
@@ -161,9 +161,9 @@ public sealed class AdminP6ResultMarshalTests
         ClientQuotaEntity fromEmpty = RoundTrip(Entity(("user", string.Empty)));
         ClientQuotaEntity fromReal = RoundTrip(Entity(("user", "x")));
 
-        Assert.Null(Assert.Single(fromNull.Entries).Value);
-        Assert.Equal(string.Empty, Assert.Single(fromEmpty.Entries).Value);
-        Assert.Equal("x", Assert.Single(fromReal.Entries).Value);
+        Assert.Null(Assert.Single(fromNull.Entries()).Value);
+        Assert.Equal(string.Empty, Assert.Single(fromEmpty.Entries()).Value);
+        Assert.Equal("x", Assert.Single(fromReal.Entries()).Value);
         Assert.Equal(3, new HashSet<ClientQuotaEntity> { fromNull, fromEmpty, fromReal }.Count);
     }
 
@@ -174,15 +174,15 @@ public sealed class AdminP6ResultMarshalTests
 
         ClientQuotaEntity copied = RoundTrip(entity);
 
-        Assert.Equal(3, copied.Entries.Count);
-        Assert.Equal("svc-ü", copied.Entries["client-id"]);
-        Assert.Null(copied.Entries["user"]);
-        Assert.Equal("10.0.0.1", copied.Entries["ip"]);
+        Assert.Equal(3, copied.Entries().Count);
+        Assert.Equal("svc-ü", copied.Entries()["client-id"]);
+        Assert.Null(copied.Entries()["user"]);
+        Assert.Equal("10.0.0.1", copied.Entries()["ip"]);
         Assert.Equal(entity, copied);
     }
 
     [Fact]
-    public void CopyOutEntity_AnEmptyEntity_HasNoEntries() => Assert.Empty(RoundTrip(Entity()).Entries);
+    public void CopyOutEntity_AnEmptyEntity_HasNoEntries() => Assert.Empty(RoundTrip(Entity()).Entries());
 
     [Fact]
     public void CopyOutEntities_ZeroAndNegativeValues_AreValues()

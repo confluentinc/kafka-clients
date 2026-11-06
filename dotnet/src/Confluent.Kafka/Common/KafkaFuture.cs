@@ -112,18 +112,18 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     /// Java's <c>isCancelled()</c>: whether the future was cancelled, by <see cref="Cancel"/> or by the cancellation of
     /// the future it depends on. Never blocks.
     /// </summary>
-    public bool IsCancelled => Impl.IsCancelled;
+    public bool IsCancelled() => Impl.IsCancelled;
 
     /// <summary>
     /// Java's <c>isCompletedExceptionally()</c>: whether the future failed or was cancelled. Never blocks.
     /// </summary>
-    public bool IsCompletedExceptionally => Impl.IsCompletedExceptionally;
+    public bool IsCompletedExceptionally() => Impl.IsCompletedExceptionally;
 
     /// <summary>
     /// Java <c>Future.isDone()</c>: whether the operation has completed, successfully or not. Never blocks, and runs no
     /// dependant or <c>WhenComplete</c> action.
     /// </summary>
-    public bool IsDone => Impl.IsDone;
+    public bool IsDone() => Impl.IsDone;
 
     /// <inheritdoc/>
     public override string ToString() =>
@@ -309,18 +309,18 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     /// Java's <c>isCancelled()</c>: whether the future was cancelled, by <see cref="Cancel"/> or by the cancellation of
     /// the future it depends on. Never blocks.
     /// </summary>
-    public bool IsCancelled => Impl.IsCancelled;
+    public bool IsCancelled() => Impl.IsCancelled;
 
     /// <summary>
     /// Java's <c>isCompletedExceptionally()</c>: whether the future failed or was cancelled. Never blocks.
     /// </summary>
-    public bool IsCompletedExceptionally => Impl.IsCompletedExceptionally;
+    public bool IsCompletedExceptionally() => Impl.IsCompletedExceptionally;
 
     /// <summary>
     /// Java <c>Future.isDone()</c>: whether the operation has completed, successfully or not. Never blocks, and runs no
     /// dependant or <c>WhenComplete</c> action.
     /// </summary>
-    public bool IsDone => Impl.IsDone;
+    public bool IsDone() => Impl.IsDone;
 
     /// <inheritdoc/>
     public override string ToString() =>

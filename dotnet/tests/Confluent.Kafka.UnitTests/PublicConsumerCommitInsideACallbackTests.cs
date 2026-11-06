@@ -122,7 +122,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
             }));
 
             Assert.Equal(new[] { "first", "nested " + Topic + "-0@2", "first end" }, Snapshot(events));
-            Assert.Equal(2, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset);
+            Assert.Equal(2, consumer.Committed(new[] { s_tp0 })[s_tp0]!.Offset());
         }
         finally
         {
@@ -196,7 +196,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
             Assert.Equal(new[] { "first", "nested", "first end" }, Snapshot(events));
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
                 await TestTimeout.Run(() => consumer.Committed(new[] { s_tp0 }), s_deadline);
-            Assert.Equal(2, committed[s_tp0]!.Offset);
+            Assert.Equal(2, committed[s_tp0]!.Offset());
         }
         finally
         {
@@ -276,12 +276,12 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     }
 
     private static string Format(IReadOnlyCollection<TopicPartition> partitions) =>
-        "[" + string.Join(", ", partitions.Select(tp => tp.Topic + "-" + tp.Partition)) + "]";
+        "[" + string.Join(", ", partitions.Select(tp => tp.Topic() + "-" + tp.Partition())) + "]";
 
     private static string Format(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets) =>
         offsets is null
             ? "null"
-            : string.Join(", ", offsets.Select(entry => entry.Key.Topic + "-" + entry.Key.Partition + "@" + entry.Value.Offset));
+            : string.Join(", ", offsets.Select(entry => entry.Key.Topic() + "-" + entry.Key.Partition() + "@" + entry.Value.Offset()));
 
     private static void Add<T>(List<T> list, T item)
     {
@@ -316,14 +316,14 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer()
     {
         KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Assign(new[] { s_tp0 });
         return consumer;
     }
 
     private static MockConsumer<byte[], byte[]> NewMockConsumer()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
         consumer.Assign(new[] { s_tp0 });
         consumer.UpdateBeginningOffset(Topic, 0, 0);
         return consumer;
@@ -332,7 +332,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }
@@ -340,7 +340,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> NewAsyncMockConsumer()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         consumer.UpdateBeginningOffset(Topic, 0, 0);
         return consumer;

@@ -45,7 +45,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_AfterUpdatePartitions_ReturnsReachableFields()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort);
 
@@ -56,33 +56,33 @@ public sealed class PublicConsumerPartitionMetadataTests
         {
             PartitionInfo info = FindPartition(partitions, p);
 
-            Assert.Equal(Topic, info.Topic);
-            Assert.Equal(p, info.Partition);
+            Assert.Equal(Topic, info.Topic());
+            Assert.Equal(p, info.Partition());
 
-            Assert.NotNull(info.Leader);
-            Node leader = info.Leader!;
-            Assert.Equal(LeaderId, leader.Id);
-            Assert.Equal(LeaderHost, leader.Host);
-            Assert.Equal(LeaderPort, leader.Port);
+            Assert.NotNull(info.Leader());
+            Node leader = info.Leader()!;
+            Assert.Equal(LeaderId, leader.Id());
+            Assert.Equal(LeaderHost, leader.Host());
+            Assert.Equal(LeaderPort, leader.Port());
 
-            Node replica = Assert.Single(info.Replicas);
-            Assert.Equal(LeaderId, replica.Id);
-            Assert.Equal(LeaderHost, replica.Host);
-            Assert.Equal(LeaderPort, replica.Port);
+            Node replica = Assert.Single(info.Replicas());
+            Assert.Equal(LeaderId, replica.Id());
+            Assert.Equal(LeaderHost, replica.Host());
+            Assert.Equal(LeaderPort, replica.Port());
 
-            Node isr = Assert.Single(info.InSyncReplicas);
-            Assert.Equal(LeaderId, isr.Id);
-            Assert.Equal(LeaderHost, isr.Host);
+            Node isr = Assert.Single(info.InSyncReplicas());
+            Assert.Equal(LeaderId, isr.Id());
+            Assert.Equal(LeaderHost, isr.Host());
 
-            Assert.Empty(info.OfflineReplicas);
-            Assert.Null(leader.Rack);
+            Assert.Empty(info.OfflineReplicas());
+            Assert.Null(leader.Rack());
         }
     }
 
     [Fact]
     public async Task PartitionsFor_UnregisteredTopic_ReturnsEmptyList()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, "no-such-topic");
@@ -94,36 +94,36 @@ public sealed class PublicConsumerPartitionMetadataTests
     public async Task PartitionsFor_NonAsciiTopic_RoundTripsThroughNulScanTopicMarshalling()
     {
         const string nonAscii = "topic-grüße-Ω-🎉";
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, nonAscii);
 
         PartitionInfo info = Assert.Single(partitions);
-        Assert.Equal(nonAscii, info.Topic);
+        Assert.Equal(nonAscii, info.Topic());
     }
 
     [Fact]
     public async Task PartitionsFor_NonAsciiLeaderHost_RoundTripsThroughNulScanHostMarshalling()
     {
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
 
         PartitionInfo info = Assert.Single(partitions);
-        Assert.Equal(nonAsciiHost, info.Leader!.Host);
-        Assert.Equal(nonAsciiHost, info.Replicas[0].Host);
+        Assert.Equal(nonAsciiHost, info.Leader()!.Host());
+        Assert.Equal(nonAsciiHost, info.Replicas()[0].Host());
     }
 
     [Fact]
     public async Task PartitionsFor_EmptyTopic_ForwardedNotRejected_ReturnsEmptyList()
     {
         // An empty topic reaches the core, as in Java and Python; only null is rejected.
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, string.Empty);
@@ -134,7 +134,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_AfterUpdatePartitions_ReturnsMapKeyedByTopic()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort);
         consumer.UpdatePartitions("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093);
@@ -145,24 +145,24 @@ public sealed class PublicConsumerPartitionMetadataTests
 
         IReadOnlyList<PartitionInfo> a = map["topic-a"];
         Assert.Equal(2, a.Count);
-        Assert.Equal("topic-a", a[0].Topic);
-        Node aLeader = a[0].Leader!;
-        Assert.Equal(LeaderId, aLeader.Id);
-        Assert.Equal(LeaderHost, aLeader.Host);
+        Assert.Equal("topic-a", a[0].Topic());
+        Node aLeader = a[0].Leader()!;
+        Assert.Equal(LeaderId, aLeader.Id());
+        Assert.Equal(LeaderHost, aLeader.Host());
 
         IReadOnlyList<PartitionInfo> b = map["topic-b"];
         PartitionInfo bInfo = Assert.Single(b);
-        Assert.Equal("topic-b", bInfo.Topic);
-        Node bLeader = bInfo.Leader!;
-        Assert.Equal(9, bLeader.Id);
-        Assert.Equal("broker-2", bLeader.Host);
-        Assert.Equal(9093, bLeader.Port);
+        Assert.Equal("topic-b", bInfo.Topic());
+        Node bLeader = bInfo.Leader()!;
+        Assert.Equal(9, bLeader.Id());
+        Assert.Equal("broker-2", bLeader.Host());
+        Assert.Equal(9093, bLeader.Port());
     }
 
     [Fact]
     public async Task ListTopics_NoTopics_ReturnsEmptyMap()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
@@ -174,20 +174,20 @@ public sealed class PublicConsumerPartitionMetadataTests
     public async Task ListTopics_NonAsciiTopicKey_RoundTripsThroughNulScanTopicMarshalling()
     {
         const string nonAscii = "тема-Ω-🎉";
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
 
         Assert.True(map.ContainsKey(nonAscii));
-        Assert.Equal(nonAscii, map[nonAscii][0].Topic);
+        Assert.Equal(nonAscii, map[nonAscii][0].Topic());
     }
 
     [Fact]
     public async Task PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.PartitionsFor(null!));
@@ -196,7 +196,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
 
         await Assert.ThrowsAsync<IllegalStateException>(() => consumer.PartitionsFor(Topic));
@@ -205,7 +205,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.DisposeAsync(consumer);
 
         await Assert.ThrowsAsync<IllegalStateException>(() => consumer.ListTopics());
@@ -214,7 +214,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -227,7 +227,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_PreCanceledToken_ThrowsOperationCanceled()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -238,7 +238,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_AfterWakeup_StillUsable()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
@@ -251,7 +251,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_AfterFaultedPartitionsFor_StillReturnsData()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
@@ -269,7 +269,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         foreach (PartitionInfo info in partitions)
         {
-            if (info.Partition == partition)
+            if (info.Partition() == partition)
             {
                 return info;
             }

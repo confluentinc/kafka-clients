@@ -24,17 +24,21 @@ namespace Confluent.Kafka.Common.Resource;
 /// <c>org.apache.kafka.common.resource.ResourcePatternFilter</c>.
 /// </summary>
 /// <remarks>
-/// <see cref="Name"/> is nullable, and <c>null</c> is not <c>""</c>: <c>null</c> matches any
+/// <see cref="Name()"/> is nullable, and <c>null</c> is not <c>""</c>: <c>null</c> matches any
 /// resource name, <c>""</c> filters on the literal empty name. Java's matching family
 /// (<c>matches</c>, <c>matchesAtMostOne</c>, <c>findIndefiniteField</c>) is deliberately not
-/// ported: ACL pattern matching lives in the core. <see cref="ResourceType"/> and
-/// <see cref="PatternType"/> only ever hold a defined member, as a Java filter does.
+/// ported: ACL pattern matching lives in the core. <see cref="ResourceType()"/> and
+/// <see cref="PatternType()"/> only ever hold a defined member, as a Java filter does.
 /// </remarks>
 public sealed class ResourcePatternFilter
 {
+    private readonly ResourceType _resourceType;
+    private readonly string? _name;
+    private readonly PatternType _patternType;
+
     /// <summary>A filter matching every resource pattern — Java's <c>ANY</c>.</summary>
-    public static ResourcePatternFilter ANY { get; } =
-        new ResourcePatternFilter(ResourceType.ANY, null, PatternType.ANY);
+    public static readonly ResourcePatternFilter ANY =
+        new ResourcePatternFilter(Resource.ResourceType.ANY, null, Resource.PatternType.ANY);
 
     /// <summary>
     /// Creates a resource pattern filter — Java's constructor. Unlike
@@ -57,31 +61,35 @@ public sealed class ResourcePatternFilter
     /// </param>
     public ResourcePatternFilter(ResourceType resourceType, string? name, PatternType patternType)
     {
-        ResourceType = AclEnumCodes.DefinedOrUnknown(resourceType);
-        Name = name;
-        PatternType = AclEnumCodes.DefinedOrUnknown(patternType);
+        _resourceType = AclEnumCodes.DefinedOrUnknown(resourceType);
+        _name = name;
+        _patternType = AclEnumCodes.DefinedOrUnknown(patternType);
     }
 
     /// <summary>The resource type this filter matches — Java's <c>resourceType()</c>.</summary>
-    public ResourceType ResourceType { get; }
+    /// <returns>The resource type this filter matches.</returns>
+    public ResourceType ResourceType() => _resourceType;
 
     /// <summary>The resource name, or <c>null</c> to match any name — Java's <c>name()</c>.</summary>
-    public string? Name { get; }
+    /// <returns>The resource name, or <c>null</c> to match any name.</returns>
+    public string? Name() => _name;
 
     /// <summary>The pattern type this filter matches — Java's <c>patternType()</c>.</summary>
-    public PatternType PatternType { get; }
+    /// <returns>The pattern type this filter matches.</returns>
+    public PatternType PatternType() => _patternType;
 
     /// <summary>Whether any component is <c>UNKNOWN</c> — Java's <c>isUnknown()</c>.</summary>
-    public bool IsUnknown => ResourceType == ResourceType.UNKNOWN || PatternType == PatternType.UNKNOWN;
+    /// <returns>Whether any component is <c>UNKNOWN</c>.</returns>
+    public bool IsUnknown() => ResourceType() == Resource.ResourceType.UNKNOWN || PatternType() == Resource.PatternType.UNKNOWN;
 
     /// <summary>Value equality over all three components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two are the same filter. A <c>null</c> name never equals <c>""</c>.</returns>
     public override bool Equals(object? obj) =>
         obj is ResourcePatternFilter other
-        && ResourceType == other.ResourceType
-        && string.Equals(Name, other.Name, StringComparison.Ordinal)
-        && PatternType == other.PatternType;
+        && ResourceType() == other.ResourceType()
+        && string.Equals(Name(), other.Name(), StringComparison.Ordinal)
+        && PatternType() == other.PatternType();
 
     /// <summary>
     /// The hash of all three components — Java's <c>hashCode</c>, the same <c>31 *</c> fold as
@@ -93,9 +101,9 @@ public sealed class ResourcePatternFilter
         unchecked
         {
             int hash = 1;
-            hash = (hash * 31) + ((int)ResourceType).GetHashCode();
-            hash = (hash * 31) + (Name is null ? 0 : StringComparer.Ordinal.GetHashCode(Name));
-            hash = (hash * 31) + ((int)PatternType).GetHashCode();
+            hash = (hash * 31) + ((int)_resourceType).GetHashCode();
+            hash = (hash * 31) + (_name is null ? 0 : StringComparer.Ordinal.GetHashCode(_name));
+            hash = (hash * 31) + ((int)_patternType).GetHashCode();
             return hash;
         }
     }
@@ -109,7 +117,7 @@ public sealed class ResourcePatternFilter
         string.Format(
             CultureInfo.InvariantCulture,
             "ResourcePattern(resourceType={0}, name={1}, patternType={2})",
-            ResourceType,
-            Name ?? "<any>",
-            PatternType);
+            ResourceType(),
+            Name() ?? "<any>",
+            PatternType());
 }

@@ -32,7 +32,7 @@ public class CoordinatorNotAvailableException : global::Confluent.Kafka.Common.E
     /// The instance Java's <c>INSTANCE</c> holds. An error the client throws is never this instance, so compare by
     /// type. .NET records a stack trace on every throw, where Java's <c>ApiException</c> records none.
     /// </summary>
-    public static readonly CoordinatorNotAvailableException Instance = new CoordinatorNotAvailableException();
+    public static readonly CoordinatorNotAvailableException INSTANCE = new CoordinatorNotAvailableException();
 
     private CoordinatorNotAvailableException()
     {

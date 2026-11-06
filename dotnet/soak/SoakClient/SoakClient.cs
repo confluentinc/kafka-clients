@@ -255,11 +255,11 @@ internal sealed class SoakClient : IDisposable
             // cannot leave a producer running with no consumer.
             logger.Info("producer: using client.id " + pconf["client.id"]);
             var producer = new AsyncKafkaProducer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(pconf), Serdes.ByteArray, new SoakRecordSerializer(options.PayloadSize));
+                SoakConfig.ClientConfigs(pconf), Serdes.ByteArray(), new SoakRecordSerializer(options.PayloadSize));
 
             logger.Info("consumer: using group.id " + (cconf.TryGetValue("group.id", out string? groupId) ? groupId : "<unset>"));
             var consumer = new AsyncKafkaConsumer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(cconf), Serdes.ByteArray, new SoakRecordDeserializer());
+                SoakConfig.ClientConfigs(cconf), Serdes.ByteArray(), new SoakRecordDeserializer());
 
             var resources = new ProcessResourceSampler();
 
@@ -733,7 +733,7 @@ internal sealed class SoakClient : IDisposable
             latencyMs,
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["partition"] = metadata.Partition.ToString(CultureInfo.InvariantCulture),
+                ["partition"] = metadata.Partition().ToString(CultureInfo.InvariantCulture),
             });
 
         if (delivered % _disprate == 0)
@@ -741,9 +741,9 @@ internal sealed class SoakClient : IDisposable
             _logger.Debug(string.Format(
                 CultureInfo.InvariantCulture,
                 "producer: delivered message to {0} [{1}] at offset {2} in {3:F1} ms",
-                metadata.Topic,
-                metadata.Partition,
-                metadata.Offset,
+                metadata.Topic(),
+                metadata.Partition(),
+                metadata.Offset(),
                 latencyMs));
         }
     }
@@ -943,16 +943,16 @@ internal sealed class SoakClient : IDisposable
     {
         // Both malformed shapes count once: a null value, for which the deserializer is not called,
         // and a record the total deserializer marked malformed.
-        SoakRecord? soakRecord = record.Value;
+        SoakRecord? soakRecord = record.Value();
         if (soakRecord is null || soakRecord.IsMalformed)
         {
             string reason = soakRecord?.MalformedReason ?? SoakRecord.EmptyPayloadReason;
             _logger.Info(string.Format(
                 CultureInfo.InvariantCulture,
                 "consumer: Failed to deserialize message in {0} [{1}] at offset {2}: {3}",
-                record.Topic,
-                record.Partition,
-                record.Offset,
+                record.Topic(),
+                record.Partition(),
+                record.Offset(),
                 reason));
             Interlocked.Increment(ref _msgErrorCount);
             IncrCounter("consumer.msgerr", 1);
@@ -967,10 +967,10 @@ internal sealed class SoakClient : IDisposable
         double latencyMs = SoakMetrics.NowMs() - soakRecord.SendTimeMs;
         var partitionTag = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["partition"] = record.Partition.ToString(CultureInfo.InvariantCulture),
+            ["partition"] = record.Partition().ToString(CultureInfo.InvariantCulture),
         };
         SetGauge("consumer.e2e_latency", latencyMs, partitionTag);
-        _metrics.ObserveMessage(record.SerializedValueSize, latencyMs);
+        _metrics.ObserveMessage(record.SerializedValueSize(), latencyMs);
 
         if (msgCount % _disprate == 0)
         {
@@ -978,24 +978,24 @@ internal sealed class SoakClient : IDisposable
                 CultureInfo.InvariantCulture,
                 "consumer: {0} messages consumed: Message {1} [{2}] at offset {3} (msgid {4}, txcnt {5}, latency {6:F1} ms)",
                 msgCount,
-                record.Topic,
-                record.Partition,
-                record.Offset,
+                record.Topic(),
+                record.Partition(),
+                record.Offset(),
                 soakRecord.MsgId,
                 soakRecord.TxCnt,
                 latencyMs));
         }
 
-        string hwKey = string.Format(CultureInfo.InvariantCulture, "{0}-{1}", record.Topic, record.Partition);
-        (long duplicates, long missed) = hwmarks.Observe(hwKey, record.Offset);
+        string hwKey = string.Format(CultureInfo.InvariantCulture, "{0}-{1}", record.Topic(), record.Partition());
+        (long duplicates, long missed) = hwmarks.Observe(hwKey, record.Offset());
         if (duplicates > 0)
         {
             _logger.Warning(string.Format(
                 CultureInfo.InvariantCulture,
                 "consumer: Old or duplicate message {0} [{1}] at offset {2}: wanted a higher offset ({3} duplicate(s), last committed {4})",
-                record.Topic,
-                record.Partition,
-                record.Offset,
+                record.Topic(),
+                record.Partition(),
+                record.Offset(),
                 duplicates,
                 Volatile.Read(ref _lastCommitted) ?? "None"));
             Interlocked.Add(ref _msgDuplicateCount, duplicates);
@@ -1007,16 +1007,16 @@ internal sealed class SoakClient : IDisposable
             _logger.Warning(string.Format(
                 CultureInfo.InvariantCulture,
                 "consumer: Lost messages, now at {0} [{1}] offset {2}: {3} message(s) missed (last committed {4})",
-                record.Topic,
-                record.Partition,
-                record.Offset,
+                record.Topic(),
+                record.Partition(),
+                record.Offset(),
                 missed,
                 Volatile.Read(ref _lastCommitted) ?? "None"));
             Interlocked.Add(ref _msgMissedCount, missed);
             IncrCounter("consumer.missedmsg", missed);
         }
 
-        pending[new TopicPartition(record.Topic, record.Partition)] = new OffsetAndMetadata(record.Offset + 1);
+        pending[new TopicPartition(record.Topic(), record.Partition())] = new OffsetAndMetadata(record.Offset() + 1);
     }
 
     private HashSet<TopicPartition> CheckAssignment(HashSet<TopicPartition> previous)
@@ -1088,9 +1088,9 @@ internal sealed class SoakClient : IDisposable
             string.Join(", ", offsets.Select(entry => string.Format(
                 CultureInfo.InvariantCulture,
                 "{0}-{1}={2}",
-                entry.Key.Topic,
-                entry.Key.Partition,
-                entry.Value.Offset))));
+                entry.Key.Topic(),
+                entry.Key.Partition(),
+                entry.Value.Offset()))));
         pending.Clear();
     }
 
@@ -1181,7 +1181,7 @@ internal sealed class SoakClient : IDisposable
         IReadOnlyDictionary<string, AsyncKafkaFuture>? created = null;
         try
         {
-            created = admin.CreateTopics(new[] { newTopic }).Values;
+            created = admin.CreateTopics(new[] { newTopic }).Values();
         }
         catch (Exception ex)
         {
@@ -1250,7 +1250,7 @@ internal sealed class SoakClient : IDisposable
         {
             deleted = admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { topic }),
-                new DeleteTopicsOptions { TimeoutMs = 30000 }).TopicNameValues;
+                new DeleteTopicsOptions().TimeoutMs(30000)).TopicNameValues();
         }
         catch (Exception ex)
         {
@@ -1284,7 +1284,7 @@ internal sealed class SoakClient : IDisposable
         IReadOnlyDictionary<string, AsyncKafkaFuture>? created = null;
         try
         {
-            created = admin.CreateTopics(new[] { newTopic }).Values;
+            created = admin.CreateTopics(new[] { newTopic }).Values();
         }
         catch (Exception ex)
         {

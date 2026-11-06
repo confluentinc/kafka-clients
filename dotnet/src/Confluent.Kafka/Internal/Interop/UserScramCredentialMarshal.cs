@@ -62,8 +62,8 @@ internal static unsafe class UserScramCredentialMarshal
 
     internal static IntPtr NewDeletion(UserScramCredentialDeletion deletion)
     {
-        using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(deletion.User);
-        IntPtr mechanism = Mechanism(deletion.Mechanism);
+        using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(deletion.User());
+        IntPtr mechanism = Mechanism(deletion.Mechanism());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.UserScramCredentialDeletionNew(user.Pointer, mechanism, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -75,15 +75,15 @@ internal static unsafe class UserScramCredentialMarshal
 
     internal static IntPtr NewUpsertion(UserScramCredentialUpsertion upsertion)
     {
-        IntPtr mechanism = Mechanism(upsertion.CredentialInfo.Mechanism);
+        IntPtr mechanism = Mechanism(upsertion.CredentialInfo().Mechanism());
         IntPtr outErr = IntPtr.Zero;
-        IntPtr info = NativeMethods.ScramCredentialInfoNew(mechanism, upsertion.CredentialInfo.Iterations, ref outErr);
+        IntPtr info = NativeMethods.ScramCredentialInfoNew(mechanism, upsertion.CredentialInfo().Iterations(), ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         try
         {
-            using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(upsertion.User);
-            byte[] password = upsertion.Password;
-            byte[]? salt = upsertion.Salt;
+            using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(upsertion.User());
+            byte[] password = upsertion.Password();
+            byte[]? salt = upsertion.Salt();
             byte empty = 0;
             fixed (byte* passwordData = password)
             fixed (byte* saltData = salt)

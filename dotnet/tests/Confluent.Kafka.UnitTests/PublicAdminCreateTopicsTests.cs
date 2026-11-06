@@ -64,14 +64,14 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("mixed-bad", 1, 5),
         });
 
-        await TestTimeout.Run(() => result.Values["mixed-ok"].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()["mixed-ok"].Get(), s_deadline);
 
         int numPartitions = 0;
         await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("mixed-ok").Get(), s_deadline);
         Assert.Equal(2, numPartitions);
 
         InvalidReplicationFactorException failure = await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(
-            () => TestTimeout.Run(() => result.Values["mixed-bad"].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()["mixed-bad"].Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
         Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
     }
@@ -88,11 +88,11 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("solo-bad", 1, 9),
         });
 
-        await TestTimeout.Run(() => result.Values["solo-ok"].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()["solo-ok"].Get(), s_deadline);
 
         // Await the failed sibling rather than read its Exception: the futures complete one at a time, so it can still be
         // pending here.
-        await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(() => TestTimeout.Run(() => result.Values["solo-bad"].Get(), s_deadline));
+        await FutureAssert.ThrowsAsync<InvalidReplicationFactorException>(() => TestTimeout.Run(() => result.Values()["solo-bad"].Get(), s_deadline));
     }
 
     [Fact]
@@ -118,7 +118,7 @@ public sealed class PublicAdminCreateTopicsTests
             () => TestTimeout.Run(() => mixed.All().Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
 
-        await TestTimeout.Run(() => mixed.Values["all-c"].Get(), s_deadline);
+        await TestTimeout.Run(() => mixed.Values()["all-c"].Get(), s_deadline);
     }
 
     [Fact]
@@ -133,13 +133,11 @@ public sealed class PublicAdminCreateTopicsTests
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 4, 2)
-            {
-                Configs = new Dictionary<string, string>
+                .Configs(new Dictionary<string, string>
                 {
                     ["cleanup.policy"] = "compact",
                     ["custom.marker"] = ConfigValue,
-                },
-            },
+                }),
         });
 
         int numPartitions = 0;
@@ -158,8 +156,8 @@ public sealed class PublicAdminCreateTopicsTests
 
         Assert.Equal(topicId, Uuid.Parse(topicId.ToString()));
 
-        Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
-        Assert.Equal(ConfigValue, config.Get("custom.marker")!.Value);
+        Assert.Equal("compact", config.Get("cleanup.policy")!.Value());
+        Assert.Equal(ConfigValue, config.Get("custom.marker")!.Value());
         Assert.Null(config.Get("not.set.at.all"));
     }
 
@@ -193,7 +191,7 @@ public sealed class PublicAdminCreateTopicsTests
         CreateTopicsResult syncResult = syncAdmin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
         KafkaFuture<int> unknown = syncResult.NumPartitions("unknown");
         Assert.Equal(Unrequested, FutureAssert.Throws<IllegalArgumentException>(() => unknown.Get()).Message);
-        Assert.True(unknown.IsCompletedExceptionally);
+        Assert.True(unknown.IsCompletedExceptionally());
 
         ArgumentNullException nullTopic =
             Assert.Throws<ArgumentNullException>(() => { _ = result.TopicId(null!); });
@@ -210,18 +208,18 @@ public sealed class PublicAdminCreateTopicsTests
             KafkaFuture<int> numPartitions = result.NumPartitions("linked");
             KafkaFuture<Config> config = result.Config("linked");
             KafkaFuture allBefore = result.All();
-            KafkaFuture cancelled = result.Values["linked"];
+            KafkaFuture cancelled = result.Values()["linked"];
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             KafkaFuture allAfter = result.All();
-            KafkaFuture fresh = result.Values["linked"];
-            Assert.False(numPartitions.IsDone);
-            Assert.False(config.IsDone);
-            Assert.False(allBefore.IsDone);
-            Assert.False(allAfter.IsDone);
-            Assert.False(fresh.IsDone);
+            KafkaFuture fresh = result.Values()["linked"];
+            Assert.False(numPartitions.IsDone());
+            Assert.False(config.IsDone());
+            Assert.False(allBefore.IsDone());
+            Assert.False(allAfter.IsDone());
+            Assert.False(fresh.IsDone());
 
             Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
 
@@ -249,18 +247,18 @@ public sealed class PublicAdminCreateTopicsTests
             AsyncKafkaFuture<int> numPartitions = result.NumPartitions("linked");
             AsyncKafkaFuture<Config> config = result.Config("linked");
             AsyncKafkaFuture allBefore = result.All();
-            AsyncKafkaFuture cancelled = result.Values["linked"];
+            AsyncKafkaFuture cancelled = result.Values()["linked"];
 
             Assert.True(cancelled.Cancel(true));
 
-            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.IsCancelled());
             AsyncKafkaFuture allAfter = result.All();
-            AsyncKafkaFuture fresh = result.Values["linked"];
-            Assert.False(numPartitions.IsDone);
-            Assert.False(config.IsDone);
-            Assert.False(allBefore.IsDone);
-            Assert.False(allAfter.IsDone);
-            Assert.False(fresh.IsDone);
+            AsyncKafkaFuture fresh = result.Values()["linked"];
+            Assert.False(numPartitions.IsDone());
+            Assert.False(config.IsDone());
+            Assert.False(allBefore.IsDone());
+            Assert.False(allAfter.IsDone());
+            Assert.False(fresh.IsDone());
 
             await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
 
@@ -288,20 +286,20 @@ public sealed class PublicAdminCreateTopicsTests
         {
             CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
             AsyncCreateTopicsResult asyncResult = asyncAdmin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
-            KafkaFuture first = result.Values["t"];
-            AsyncKafkaFuture asyncFirst = asyncResult.Values["t"];
+            KafkaFuture first = result.Values()["t"];
+            AsyncKafkaFuture asyncFirst = asyncResult.Values()["t"];
             Assert.True(first.Cancel(true));
             Assert.True(asyncFirst.Cancel(true));
 
-            KafkaFuture fresh = result.Values["t"];
-            AsyncKafkaFuture asyncFresh = asyncResult.Values["t"];
+            KafkaFuture fresh = result.Values()["t"];
+            AsyncKafkaFuture asyncFresh = asyncResult.Values()["t"];
 
             Assert.NotEqual(first, fresh);
             Assert.NotEqual(asyncFirst, asyncFresh);
-            Assert.False(fresh.IsCancelled);
-            Assert.False(asyncFresh.IsCancelled);
-            Assert.False(fresh.IsDone);
-            Assert.False(asyncFresh.IsDone);
+            Assert.False(fresh.IsCancelled());
+            Assert.False(asyncFresh.IsCancelled());
+            Assert.False(fresh.IsDone());
+            Assert.False(asyncFresh.IsDone());
         }
         finally
         {
@@ -358,11 +356,11 @@ public sealed class PublicAdminCreateTopicsTests
         });
 
         TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
-            () => TestTimeout.Run(() => second.Values["dup"].Get(), s_deadline));
+            () => TestTimeout.Run(() => second.Values()["dup"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic dup exists already.", failure.Message);
 
-        await TestTimeout.Run(() => second.Values["fresh"].Get(), s_deadline);
+        await TestTimeout.Run(() => second.Values()["fresh"].Get(), s_deadline);
     }
 
     [Fact]
@@ -376,9 +374,9 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
         AsyncCreateTopicsResult second = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
 
-        Assert.Equal(new[] { Topic }, second.Values.Keys);
+        Assert.Equal(new[] { Topic }, second.Values().Keys);
         TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
-            () => TestTimeout.Run(() => second.Values[Topic].Get(), s_deadline));
+            () => TestTimeout.Run(() => second.Values()[Topic].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal($"Topic {Topic} exists already.", failure.Message);
     }
@@ -395,9 +393,9 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("repeated", 7, 1),
         });
 
-        Assert.Single(result.Values);
+        Assert.Single(result.Values());
         TopicExistsException failure = await FutureAssert.ThrowsAsync<TopicExistsException>(
-            () => TestTimeout.Run(() => result.Values["repeated"].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()["repeated"].Get(), s_deadline));
         Assert.Equal(TopicAlreadyExistsCode, failure.Code);
         Assert.Equal("Topic repeated exists already.", failure.Message);
         await FutureAssert.ThrowsAsync<TopicExistsException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
@@ -415,7 +413,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(Array.Empty<NewTopic>());
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -429,12 +427,12 @@ public sealed class PublicAdminCreateTopicsTests
             "assigned-topic",
             new Dictionary<int, IReadOnlyList<int>> { [0] = new[] { 0 } });
 
-        Assert.Null(assigned.NumPartitions);
-        Assert.Null(assigned.ReplicationFactor);
-        Assert.NotNull(assigned.ReplicasAssignments);
+        Assert.Null(assigned.NumPartitions());
+        Assert.Null(assigned.ReplicationFactor());
+        Assert.NotNull(assigned.ReplicasAssignments());
 
         NewTopic counted = new NewTopic("counted-topic", 1, 1);
-        Assert.Null(counted.ReplicasAssignments);
+        Assert.Null(counted.ReplicasAssignments());
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { assigned });
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -445,9 +443,23 @@ public sealed class PublicAdminCreateTopicsTests
     {
         CreateTopicsOptions options = new CreateTopicsOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.ValidateOnly);
-        Assert.True(options.RetryOnQuotaViolation);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.ShouldValidateOnly());
+        Assert.True(options.ShouldRetryOnQuotaViolation());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(CreateTopicsOptions),
+            getters: new[]
+            {
+                nameof(CreateTopicsOptions.ShouldRetryOnQuotaViolation),
+                nameof(CreateTopicsOptions.ShouldValidateOnly),
+                nameof(CreateTopicsOptions.TimeoutMs),
+            },
+            setters: new[]
+            {
+                nameof(CreateTopicsOptions.RetryOnQuotaViolation),
+                nameof(CreateTopicsOptions.TimeoutMs),
+                nameof(CreateTopicsOptions.ValidateOnly),
+            });
     }
 
     [Theory]
@@ -462,11 +474,9 @@ public sealed class PublicAdminCreateTopicsTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic($"bools-{validateOnly}-{retryOnQuotaViolation}", 1, 1) },
-            new CreateTopicsOptions
-            {
-                ValidateOnly = validateOnly,
-                RetryOnQuotaViolation = retryOnQuotaViolation,
-            });
+            new CreateTopicsOptions()
+                .ValidateOnly(validateOnly)
+                .RetryOnQuotaViolation(retryOnQuotaViolation));
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
@@ -479,7 +489,7 @@ public sealed class PublicAdminCreateTopicsTests
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
             new[] { new NewTopic("timeout-topic", 1, 1) },
-            new CreateTopicsOptions { TimeoutMs = 5_000 });
+            new CreateTopicsOptions().TimeoutMs(5_000));
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
@@ -495,23 +505,21 @@ public sealed class PublicAdminCreateTopicsTests
         AsyncCreateTopicsResult created = admin.CreateTopics(new[]
         {
             new NewTopic(Topic, 1, 1)
-            {
-                Configs = new Dictionary<string, string> { ["cleanup.policy"] = "compact" },
-            },
+                .Configs(new Dictionary<string, string> { ["cleanup.policy"] = "compact" }),
         });
 
         Config config = default!;
         await TestTimeout.Run(async () => config = await created.Config(Topic).Get(), s_deadline);
 
-        ConfigEntry entry = Assert.Single(config.Entries);
+        ConfigEntry entry = Assert.Single(config.Entries());
         Assert.Equal(new ConfigEntry("cleanup.policy", "compact"), entry);
-        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, entry.Source);
-        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, entry.Type);
-        Assert.Null(entry.Documentation);
-        Assert.Empty(entry.Synonyms);
-        Assert.False(entry.IsDefault);
-        Assert.False(entry.IsSensitive);
-        Assert.False(entry.IsReadOnly);
+        Assert.Equal(ConfigEntry.ConfigSource.UNKNOWN, entry.Source());
+        Assert.Equal(ConfigEntry.ConfigType.UNKNOWN, entry.Type());
+        Assert.Null(entry.Documentation());
+        Assert.Empty(entry.Synonyms());
+        Assert.False(entry.IsDefault());
+        Assert.False(entry.IsSensitive());
+        Assert.False(entry.IsReadOnly());
     }
 
     [Fact]
@@ -524,9 +532,7 @@ public sealed class PublicAdminCreateTopicsTests
         {
             new NewTopic("fine", 1, 1),
             new NewTopic("null-config", 1, 1)
-            {
-                Configs = new Dictionary<string, string> { ["retention.ms"] = null!, ["cleanup.policy"] = "compact" },
-            },
+                .Configs(new Dictionary<string, string> { ["retention.ms"] = null!, ["cleanup.policy"] = "compact" }),
         }));
         Assert.Equal("newTopics", failure.ParamName);
         Assert.StartsWith(
@@ -559,7 +565,7 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Null(Record.Exception(
             () => admin.CreateTopics(
                 new[] { new NewTopic("neg", 1, 1) },
-                new CreateTopicsOptions { TimeoutMs = -1 })));
+                new CreateTopicsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -568,19 +574,19 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal("name", Assert.Throws<ArgumentNullException>(() => new NewTopic(null!, 1, 1)).ParamName);
 
         NewTopic viaNonNullable = new NewTopic("t", -1, (short)-1);
-        Assert.Equal(-1, viaNonNullable.NumPartitions);
-        Assert.Equal((short)-1, viaNonNullable.ReplicationFactor);
+        Assert.Equal(-1, viaNonNullable.NumPartitions());
+        Assert.Equal((short)-1, viaNonNullable.ReplicationFactor());
 
         NewTopic viaNullable = new NewTopic("t", (int?)-1, (short?)-1);
-        Assert.Equal(-1, viaNullable.NumPartitions);
-        Assert.Equal((short)-1, viaNullable.ReplicationFactor);
+        Assert.Equal(-1, viaNullable.NumPartitions());
+        Assert.Equal((short)-1, viaNullable.ReplicationFactor());
 
-        Assert.Equal(-1, new NewTopic("t", (int?)-1, (short?)3).NumPartitions);
-        Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor);
+        Assert.Equal(-1, new NewTopic("t", (int?)-1, (short?)3).NumPartitions());
+        Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor());
 
         NewTopic unset = new NewTopic("t", (int?)null, (short?)null);
-        Assert.Null(unset.NumPartitions);
-        Assert.Null(unset.ReplicationFactor);
+        Assert.Null(unset.NumPartitions());
+        Assert.Null(unset.ReplicationFactor());
 
         foreach (Func<NewTopic> belowMinusOne in new Func<NewTopic>[]
         {
@@ -687,19 +693,19 @@ public sealed class PublicAdminCreateTopicsTests
     [InlineData(-5, 0)]
     public void TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
     {
-        Assert.Equal((expected, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal((expected, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions().TimeoutMs(timeoutMs)));
     }
 
     [Fact]
     public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
     {
-        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreateTopicsOptions { ValidateOnly = true }));
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreateTopicsOptions { RetryOnQuotaViolation = false }));
+        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreateTopicsOptions().ValidateOnly(true)));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreateTopicsOptions().RetryOnQuotaViolation(false)));
 
-        CreateTopicsOptions options = new CreateTopicsOptions { ValidateOnly = true, RetryOnQuotaViolation = false, TimeoutMs = 10 };
-        options.ValidateOnly = false;
-        options.RetryOnQuotaViolation = true;
-        options.TimeoutMs = 20;
+        CreateTopicsOptions options = new CreateTopicsOptions().ValidateOnly(true).RetryOnQuotaViolation(false).TimeoutMs(10);
+        options.ValidateOnly(false);
+        options.RetryOnQuotaViolation(true);
+        options.TimeoutMs(20);
         Assert.Equal((20, (sbyte)0, (sbyte)1), ReadBack(options));
     }
 
@@ -707,16 +713,16 @@ public sealed class PublicAdminCreateTopicsTests
     public void OnlyTheSettersThatRan_ReachTheCOptions_InTheOrderTheyLastRan()
     {
         CreateTopicsOptions options = new CreateTopicsOptions();
-        options.RetryOnQuotaViolation = false;
-        options.TimeoutMs = 5;
-        options.RetryOnQuotaViolation = true;
+        options.RetryOnQuotaViolation(false);
+        options.TimeoutMs(5);
+        options.RetryOnQuotaViolation(true);
         Assert.Equal(
             new[] { nameof(CreateTopicsOptions.TimeoutMs), nameof(CreateTopicsOptions.RetryOnQuotaViolation) },
             options.Setters.InOrder);
         Assert.Equal(
             new[] { nameof(CreateTopicsOptions.TimeoutMs), nameof(CreateTopicsOptions.RetryOnQuotaViolation) },
             Built(options));
-        Assert.Equal(new[] { nameof(CreateTopicsOptions.ValidateOnly) }, Built(new CreateTopicsOptions { ValidateOnly = false }));
+        Assert.Equal(new[] { nameof(CreateTopicsOptions.ValidateOnly) }, Built(new CreateTopicsOptions().ValidateOnly(false)));
         Assert.Empty(Built(new CreateTopicsOptions()));
     }
 
@@ -724,9 +730,7 @@ public sealed class PublicAdminCreateTopicsTests
     public void TheNativeTopic_CarriesTheCountsAndTheConfigs()
     {
         NewTopic counted = new NewTopic("counted-é", 3, (short)2)
-        {
-            Configs = new Dictionary<string, string> { ["segment.ms"] = "2", ["cleanup.policy"] = "compact" },
-        };
+            .Configs(new Dictionary<string, string> { ["segment.ms"] = "2", ["cleanup.policy"] = "compact" });
         WithNativeTopic(counted, native =>
         {
             Assert.Equal("counted-é", Utf8Marshal.PtrToString(Read(native, Native.NewTopicName)));

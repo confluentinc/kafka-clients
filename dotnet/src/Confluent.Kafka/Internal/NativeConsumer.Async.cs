@@ -261,17 +261,17 @@ internal sealed partial class NativeConsumer
 
     internal Task SeekWithCallback(TopicPartition partition, long offset, CancellationToken cancellationToken = default)
     {
-        CheckSeekArguments(partition.Topic, partition.Partition, offset);
+        CheckSeekArguments(partition.Topic(), partition.Partition(), offset);
         if (RoutesToTheHandle)
         {
-            return RouteAsync(cancellationToken, handle => handle.Seek(partition.Topic, partition.Partition, offset));
+            return RouteAsync(cancellationToken, handle => handle.Seek(partition.Topic(), partition.Partition(), offset));
         }
 
         return Finish(
             Submit(cancellationToken, s_void, (arguments, opaque) =>
                 NativeMethods.ConsumerSeekWithOffsetCb(
                     _handle,
-                    arguments.TopicPartition(partition.Topic, partition.Partition),
+                    arguments.TopicPartition(partition.Topic(), partition.Partition()),
                     offset,
                     ConsumerCompletion.Void,
                     opaque)),
@@ -284,21 +284,21 @@ internal sealed partial class NativeConsumer
         OffsetAndMetadata offsetAndMetadata,
         CancellationToken cancellationToken = default)
     {
-        CheckSeekArguments(partition.Topic, partition.Partition, offsetAndMetadata);
+        CheckSeekArguments(partition.Topic(), partition.Partition(), offsetAndMetadata);
         if (RoutesToTheHandle)
         {
             return RouteAsync(
                 cancellationToken,
-                handle => handle.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata));
+                handle => handle.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata));
         }
 
         return Finish(
             Submit(cancellationToken, s_void, (arguments, opaque) =>
                 NativeMethods.ConsumerSeekWithOffsetAndMetadataCb(
                     _handle,
-                    arguments.TopicPartition(partition.Topic, partition.Partition),
+                    arguments.TopicPartition(partition.Topic(), partition.Partition()),
                     arguments.OffsetAndMetadata(
-                        offsetAndMetadata.Offset, offsetAndMetadata.LeaderEpoch ?? -1, offsetAndMetadata.Metadata),
+                        offsetAndMetadata.Offset(), offsetAndMetadata.LeaderEpoch() ?? -1, offsetAndMetadata.Metadata()),
                     ConsumerCompletion.Void,
                     opaque)),
             AsyncOperation.Seek,
@@ -307,14 +307,14 @@ internal sealed partial class NativeConsumer
 
     internal Task<long?> CurrentLagWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
     {
-        if (CheckInAUse(() => LagOfANullTopic(partition.Topic, partition.Partition), UseKind.UnownedOnMock))
+        if (CheckInAUse(() => LagOfANullTopic(partition.Topic(), partition.Partition()), UseKind.UnownedOnMock))
         {
             return Task.FromResult<long?>(0);
         }
 
         if (RoutesToTheHandle)
         {
-            return RouteAsync(cancellationToken, handle => handle.CurrentLag(partition.Topic, partition.Partition));
+            return RouteAsync(cancellationToken, handle => handle.CurrentLag(partition.Topic(), partition.Partition()));
         }
 
         return Finish(
@@ -323,7 +323,7 @@ internal sealed partial class NativeConsumer
                 s_lag,
                 (arguments, opaque) => NativeMethods.ConsumerCurrentLagCb(
                     _handle,
-                    arguments.TopicPartition(partition.Topic, partition.Partition),
+                    arguments.TopicPartition(partition.Topic(), partition.Partition()),
                     ConsumerCompletion.OptionalScalar,
                     opaque),
                 kind: UseKind.UnownedOnMock),
@@ -757,11 +757,11 @@ internal sealed partial class NativeConsumer
 
     private Task<long> SubmitPosition(TopicPartition partition, long? timeoutMs, CancellationToken cancellationToken) =>
         RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.Position(partition.Topic, partition.Partition, timeoutMs))
+            ? RouteAsync(cancellationToken, handle => handle.Position(partition.Topic(), partition.Partition(), timeoutMs))
             : Finish(
             Submit(cancellationToken, s_scalar, (arguments, opaque) =>
             {
-                IntPtr topicPartition = arguments.TopicPartition(partition.Topic, partition.Partition);
+                IntPtr topicPartition = arguments.TopicPartition(partition.Topic(), partition.Partition());
                 if (timeoutMs is long ms)
                 {
                     NativeMethods.ConsumerPositionWithTimeoutCb(
@@ -1324,7 +1324,7 @@ internal sealed partial class NativeConsumer
                         s_void,
                         (arguments, opaque) => NativeMethods.ConsumerSeekWithOffsetCb(
                             _handle,
-                            arguments.TopicPartition(position.Key.Topic, position.Key.Partition),
+                            arguments.TopicPartition(position.Key.Topic(), position.Key.Partition()),
                             position.Value,
                             ConsumerCompletion.Void,
                             opaque),

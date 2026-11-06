@@ -52,8 +52,8 @@ public sealed class PublicUuidTests
         Uuid parsed = Uuid.Parse(original.ToString());
 
         Assert.Equal(original, parsed);
-        Assert.Equal(mostSignificant, parsed.MostSignificantBits);
-        Assert.Equal(leastSignificant, parsed.LeastSignificantBits);
+        Assert.Equal(mostSignificant, parsed.GetMostSignificantBits());
+        Assert.Equal(leastSignificant, parsed.GetLeastSignificantBits());
     }
 
     [Fact]
@@ -71,8 +71,8 @@ public sealed class PublicUuidTests
     public void Zero_IsTheAllZeroIdentifier()
     {
         Assert.Equal(new Uuid(0L, 0L), Uuid.ZERO_UUID);
-        Assert.Equal(0L, Uuid.ZERO_UUID.MostSignificantBits);
-        Assert.Equal(0L, Uuid.ZERO_UUID.LeastSignificantBits);
+        Assert.Equal(0L, Uuid.ZERO_UUID.GetMostSignificantBits());
+        Assert.Equal(0L, Uuid.ZERO_UUID.GetLeastSignificantBits());
     }
 
     [Fact]
@@ -211,15 +211,17 @@ public sealed class PublicUuidTests
 
         foreach ((string name, Type type) in new[]
         {
+            (nameof(Uuid.ZERO_UUID), typeof(Uuid)),
             (nameof(Uuid.ONE_UUID), typeof(Uuid)),
             (nameof(Uuid.METADATA_TOPIC_ID), typeof(Uuid)),
             (nameof(Uuid.RESERVED), typeof(IReadOnlyCollection<Uuid>)),
         })
         {
-            PropertyInfo property = typeof(Uuid).GetProperty(name, BindingFlags.Public | BindingFlags.Static)!;
-            Assert.NotNull(property);
-            Assert.Equal(type, property.PropertyType);
-            Assert.Null(property.SetMethod);
+            Assert.Null(typeof(Uuid).GetProperty(name, BindingFlags.Public | BindingFlags.Static));
+            FieldInfo field = typeof(Uuid).GetField(name, BindingFlags.Public | BindingFlags.Static)!;
+            Assert.NotNull(field);
+            Assert.Equal(type, field.FieldType);
+            Assert.True(field.IsInitOnly);
         }
 
         MethodInfo randomUuid = Assert.Single(
@@ -282,8 +284,8 @@ public sealed class PublicUuidTests
 
             Assert.DoesNotContain(uuid, Uuid.RESERVED);
             Assert.DoesNotContain("-", uuid.ToString(), StringComparison.Ordinal);
-            Assert.Equal(4L, (uuid.MostSignificantBits >> 12) & 0xF);
-            Assert.Equal(2UL, (ulong)uuid.LeastSignificantBits >> 62);
+            Assert.Equal(4L, (uuid.GetMostSignificantBits() >> 12) & 0xF);
+            Assert.Equal(2UL, (ulong)uuid.GetLeastSignificantBits() >> 62);
             Assert.True(seen.Add(uuid), "a random 122-bit draw repeated");
         }
     }
@@ -318,11 +320,11 @@ public sealed class PublicUuidTests
     {
         byte[] ones = Enumerable.Repeat((byte)0xFF, 16).ToArray();
         Uuid fromOnes = Uuid.FromVersion4Bytes(ones);
-        Assert.Equal(unchecked((long)0xFFFFFFFFFFFF4FFFUL), fromOnes.MostSignificantBits);
-        Assert.Equal(unchecked((long)0xBFFFFFFFFFFFFFFFUL), fromOnes.LeastSignificantBits);
+        Assert.Equal(unchecked((long)0xFFFFFFFFFFFF4FFFUL), fromOnes.GetMostSignificantBits());
+        Assert.Equal(unchecked((long)0xBFFFFFFFFFFFFFFFUL), fromOnes.GetLeastSignificantBits());
 
         Uuid fromZeros = Uuid.FromVersion4Bytes(new byte[16]);
-        Assert.Equal(0x0000000000004000L, fromZeros.MostSignificantBits);
-        Assert.Equal(long.MinValue, fromZeros.LeastSignificantBits);
+        Assert.Equal(0x0000000000004000L, fromZeros.GetMostSignificantBits());
+        Assert.Equal(long.MinValue, fromZeros.GetLeastSignificantBits());
     }
 }

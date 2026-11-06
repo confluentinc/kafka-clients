@@ -53,12 +53,14 @@ public sealed class AsyncDeleteRecordsResult
     /// One future per requested topic partition, each carrying that partition's own
     /// <see cref="DeletedRecords"/> or its own failure — Java's <c>lowWatermarks()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> LowWatermarks => _futures;
+    /// <returns>One future per requested topic partition, each carrying that partition's own
+    /// <see cref="DeletedRecords"/> or its own failure.</returns>
+    public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> LowWatermarks() => _futures;
 
     /// <summary>
     /// Completes when every partition's deletion has succeeded, and faults with the first failure
     /// to complete if any partition failed — Java's <c>all()</c>, which carries no watermarks: read
-    /// them from <see cref="LowWatermarks"/>.
+    /// them from <see cref="LowWatermarks()"/>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
     public AsyncKafkaFuture All() =>

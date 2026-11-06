@@ -142,7 +142,7 @@ internal static class ConsumerRecordsMarshal
     {
         List<KeyValuePair<TopicPartition, long>> rewind = new List<KeyValuePair<TopicPartition, long>>
         {
-            new KeyValuePair<TopicPartition, long>(error.TopicPartition, error.Offset),
+            new KeyValuePair<TopicPartition, long>(error.TopicPartition(), error.Offset()),
         };
         AppendFirstPositions(records, partitions, failedIndex + 1, rewind);
         return rewind;

@@ -35,19 +35,16 @@ public sealed class PublicAdminDescribeClassicGroupsOptionsTests
     {
         DescribeClassicGroupsOptions options = new DescribeClassicGroupsOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.IncludeAuthorizedOperations);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.IncludeAuthorizedOperations());
     }
 
     [Fact]
     public void PublicShape_IsTheTimeoutPlusJavasOneAccessor()
     {
-        Assert.Equal(
-            new[] { "IncludeAuthorizedOperations", "TimeoutMs" },
-            typeof(DescribeClassicGroupsOptions)
-                .GetProperties()
-                .Select(property => property.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(typeof(DescribeClassicGroupsOptions).GetProperties());
+        Assert.Equal(new[] { "IncludeAuthorizedOperations", "TimeoutMs" }, Getters.NamesOf(typeof(DescribeClassicGroupsOptions)));
+        Assert.Equal(new[] { "IncludeAuthorizedOperations", "TimeoutMs" }, SetterMethods.NamesOf(typeof(DescribeClassicGroupsOptions)));
 
         Assert.Empty(
             typeof(DescribeClassicGroupsOptions)
@@ -56,15 +53,11 @@ public sealed class PublicAdminDescribeClassicGroupsOptionsTests
         ConstructorInfo constructor = Assert.Single(typeof(DescribeClassicGroupsOptions).GetConstructors());
         Assert.Empty(constructor.GetParameters());
 
-        PropertyInfo timeout = typeof(DescribeClassicGroupsOptions).GetProperty(
-            nameof(DescribeClassicGroupsOptions.TimeoutMs))!;
-        Assert.Equal(typeof(int?), timeout.PropertyType);
-        Assert.NotNull(timeout.SetMethod);
+        Assert.Equal(typeof(int?), Getters.Get(typeof(DescribeClassicGroupsOptions), nameof(DescribeClassicGroupsOptions.TimeoutMs)).ReturnType);
+        Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(typeof(DescribeClassicGroupsOptions), nameof(DescribeClassicGroupsOptions.TimeoutMs)));
 
-        PropertyInfo include = typeof(DescribeClassicGroupsOptions).GetProperty(
-            nameof(DescribeClassicGroupsOptions.IncludeAuthorizedOperations))!;
-        Assert.Equal(typeof(bool), include.PropertyType);
-        Assert.NotNull(include.SetMethod);
+        Assert.Equal(typeof(bool), Getters.Get(typeof(DescribeClassicGroupsOptions), nameof(DescribeClassicGroupsOptions.IncludeAuthorizedOperations)).ReturnType);
+        Assert.Equal(typeof(bool), SetterMethods.ParameterTypeOf(typeof(DescribeClassicGroupsOptions), nameof(DescribeClassicGroupsOptions.IncludeAuthorizedOperations)));
     }
 
     [Fact]
@@ -82,28 +75,26 @@ public sealed class PublicAdminDescribeClassicGroupsOptionsTests
     [InlineData(false)]
     public void IncludeAuthorizedOperations_RoundTrips(bool value)
     {
-        DescribeClassicGroupsOptions options = new DescribeClassicGroupsOptions
-        {
-            IncludeAuthorizedOperations = value,
-        };
+        DescribeClassicGroupsOptions options = new DescribeClassicGroupsOptions()
+            .IncludeAuthorizedOperations(value);
 
-        Assert.Equal(value, options.IncludeAuthorizedOperations);
+        Assert.Equal(value, options.IncludeAuthorizedOperations());
 
-        options.IncludeAuthorizedOperations = !value;
-        Assert.Equal(!value, options.IncludeAuthorizedOperations);
+        options.IncludeAuthorizedOperations(!value);
+        Assert.Equal(!value, options.IncludeAuthorizedOperations());
     }
 
     [Fact]
     public void TimeoutMs_RoundTripsIncludingBackToNull()
     {
-        DescribeClassicGroupsOptions options = new DescribeClassicGroupsOptions { TimeoutMs = 0 };
-        Assert.Equal(0, options.TimeoutMs);
+        DescribeClassicGroupsOptions options = new DescribeClassicGroupsOptions().TimeoutMs(0);
+        Assert.Equal(0, options.TimeoutMs());
 
-        options.TimeoutMs = 30_000;
-        Assert.Equal(30_000, options.TimeoutMs);
+        options.TimeoutMs(30_000);
+        Assert.Equal(30_000, options.TimeoutMs());
 
-        options.TimeoutMs = null;
-        Assert.Null(options.TimeoutMs);
+        options.TimeoutMs(null);
+        Assert.Null(options.TimeoutMs());
     }
 
     [Fact]
@@ -111,9 +102,10 @@ public sealed class PublicAdminDescribeClassicGroupsOptionsTests
     {
         Assert.Null(typeof(DescribeClassicGroupsOptions).GetCustomAttribute<ObsoleteAttribute>());
 
-        foreach (PropertyInfo property in typeof(DescribeClassicGroupsOptions).GetProperties())
+        foreach (MemberInfo member in typeof(DescribeClassicGroupsOptions).GetMembers(
+                     BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
         {
-            Assert.Null(property.GetCustomAttribute<ObsoleteAttribute>());
+            Assert.Null(member.GetCustomAttribute<ObsoleteAttribute>());
         }
     }
 }

@@ -25,24 +25,29 @@ namespace Confluent.Kafka.Common.Header;
 /// Java's <c>RecordHeader</c>. The headers of a <see cref="ConsumerRecord{TKey, TValue}"/> are owned copies.
 /// </summary>
 /// <remarks>
-/// <see cref="Value"/> is a <c>byte[]</c>, as Java's <c>Header.value()</c> is, not a
+/// <see cref="Value()"/> is a <c>byte[]</c>, as Java's <c>Header.value()</c> is, not a
 /// <see cref="System.ReadOnlyMemory{T}"/>.
 /// </remarks>
 public sealed class Header
 {
+    private readonly string _key;
+    private readonly byte[]? _value;
+
     /// <summary>Initializes a header with a key and a value, which may be <see langword="null"/>.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="key"/> is <see langword="null"/>.</exception>
     public Header(string key, byte[]? value)
     {
-        Key = key ?? throw new ArgumentNullException(nameof(key), "Null header keys are not permitted");
-        Value = value;
+        _key = key ?? throw new ArgumentNullException(nameof(key), "Null header keys are not permitted");
+        _value = value;
     }
 
     /// <summary>The header key.</summary>
-    public string Key { get; }
+    /// <returns>The header key.</returns>
+    public string Key() => _key;
 
     /// <summary>The header value, or <see langword="null"/> for a null value.</summary>
-    public byte[]? Value { get; }
+    /// <returns>The header value, or <see langword="null"/> for a null value.</returns>
+    public byte[]? Value() => _value;
 
     /// <inheritdoc/>
     public override bool Equals(object? obj)
@@ -53,15 +58,15 @@ public sealed class Header
         }
 
         return obj is Header other
-            && string.Equals(Key, other.Key, StringComparison.Ordinal)
-            && ValueEquals(Value, other.Value);
+            && string.Equals(Key(), other.Key(), StringComparison.Ordinal)
+            && ValueEquals(Value(), other.Value());
     }
 
     /// <inheritdoc/>
-    public override int GetHashCode() => unchecked((31 * StringComparer.Ordinal.GetHashCode(Key)) + ValueHashCode(Value));
+    public override int GetHashCode() => unchecked((31 * StringComparer.Ordinal.GetHashCode(Key())) + ValueHashCode(Value()));
 
     /// <inheritdoc/>
-    public override string ToString() => "RecordHeader(key = " + Key + ", value = " + ValueToString(Value) + ")";
+    public override string ToString() => "RecordHeader(key = " + Key() + ", value = " + ValueToString(Value()) + ")";
 
     private static bool ValueEquals(byte[]? a, byte[]? b)
     {

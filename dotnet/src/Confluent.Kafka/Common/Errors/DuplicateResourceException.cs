@@ -28,6 +28,8 @@ namespace Confluent.Kafka.Common.Errors;
 /// </summary>
 public class DuplicateResourceException : global::Confluent.Kafka.Common.Errors.ApiException
 {
+    private readonly string? _resource;
+
     /// <summary>Initializes the exception, as Java's <c>DuplicateResourceException(String message)</c>.</summary>
     public DuplicateResourceException(string? message)
         : this(null, message)
@@ -48,7 +50,7 @@ public class DuplicateResourceException : global::Confluent.Kafka.Common.Errors.
     public DuplicateResourceException(string? resource, string? message)
         : base(message)
     {
-        Resource = resource;
+        _resource = resource;
     }
 
     /// <summary>
@@ -58,17 +60,18 @@ public class DuplicateResourceException : global::Confluent.Kafka.Common.Errors.
     public DuplicateResourceException(string? resource, string? message, Exception? innerException)
         : base(message, innerException)
     {
-        Resource = resource;
+        _resource = resource;
     }
 
     internal DuplicateResourceException(CoreError _, string? message, Exception? innerException, string? resource)
         : base(_, message, innerException)
     {
-        Resource = resource;
+        _resource = resource;
     }
 
     /// <summary>Java's <c>resource()</c>.</summary>
-    public string? Resource { get; }
+    /// <returns>The resource.</returns>
+    public string? Resource() => _resource;
 
     internal override int FfiId => 92;
 }

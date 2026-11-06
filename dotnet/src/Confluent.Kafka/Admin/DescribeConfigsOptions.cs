@@ -31,47 +31,57 @@ public sealed class DescribeConfigsOptions
 
     private bool _includeDocumentation;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public DescribeConfigsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
     /// Return each entry's synonyms, in precedence order — Java's
     /// <c>includeSynonyms(boolean)</c> / <c>includeSynonyms()</c>. Defaults to
     /// <see langword="false"/>, as Java's does, in which case
-    /// <see cref="ConfigEntry.Synonyms"/> comes back empty.
+    /// <see cref="ConfigEntry.Synonyms()"/> comes back empty.
     /// </summary>
-    public bool IncludeSynonyms
+    /// <returns>Return each entry's synonyms, in precedence order — Java's <c>includeSynonyms(boolean)</c> /
+    /// <c>includeSynonyms()</c>. Defaults to <see langword="false"/>, as Java's does, in which case
+    /// <see cref="ConfigEntry.Synonyms()"/> comes back empty.</returns>
+    public bool IncludeSynonyms() => _includeSynonyms;
+
+    /// <summary>Set to <see langword="true"/> if synonym configs should be returned in the response.</summary>
+    /// <param name="includeSynonyms">Whether to return synonyms. Defaults to <see langword="false"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DescribeConfigsOptions IncludeSynonyms(bool includeSynonyms)
     {
-        get => _includeSynonyms;
-        set
-        {
-            _includeSynonyms = value;
-            Setters.Ran(nameof(IncludeSynonyms));
-        }
+        _includeSynonyms = includeSynonyms;
+        Setters.Ran(nameof(IncludeSynonyms));
+        return this;
     }
 
     /// <summary>
     /// Return each entry's documentation — Java's <c>includeDocumentation(boolean)</c> /
     /// <c>includeDocumentation()</c>. Defaults to <see langword="false"/>, as Java's does,
-    /// in which case <see cref="ConfigEntry.Documentation"/> comes back
+    /// in which case <see cref="ConfigEntry.Documentation()"/> comes back
     /// <see langword="null"/>.
     /// </summary>
-    public bool IncludeDocumentation
+    /// <returns>Return each entry's documentation — Java's <c>includeDocumentation(boolean)</c> /
+    /// <c>includeDocumentation()</c>. Defaults to <see langword="false"/>, as Java's does, in which case
+    /// <see cref="ConfigEntry.Documentation()"/> comes back <see langword="null"/>.</returns>
+    public bool IncludeDocumentation() => _includeDocumentation;
+
+    /// <summary>Set to <see langword="true"/> if config documentation should be returned in the response.</summary>
+    /// <param name="includeDocumentation">Whether to return documentation. Defaults to <see langword="false"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public DescribeConfigsOptions IncludeDocumentation(bool includeDocumentation)
     {
-        get => _includeDocumentation;
-        set
-        {
-            _includeDocumentation = value;
-            Setters.Ran(nameof(IncludeDocumentation));
-        }
+        _includeDocumentation = includeDocumentation;
+        Setters.Ran(nameof(IncludeDocumentation));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

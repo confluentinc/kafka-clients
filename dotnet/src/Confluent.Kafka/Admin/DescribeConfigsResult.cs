@@ -66,7 +66,8 @@ public sealed class DescribeConfigsResult
     /// <summary>
     /// One future per requested resource, keyed by resource — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<ConfigResource, KafkaFuture<Config>> Values => _values;
+    /// <returns>One future per requested resource, keyed by resource.</returns>
+    public IReadOnlyDictionary<ConfigResource, KafkaFuture<Config>> Values() => _values;
 
     /// <summary>
     /// Every resource's configuration in one map, succeeding only if every resource

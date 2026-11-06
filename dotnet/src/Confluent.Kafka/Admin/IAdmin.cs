@@ -76,7 +76,7 @@ public interface IAdmin : IDisposable
     /// <paramref name="newTopics"/> contains a null element, or a topic name, a configuration
     /// name or a configuration value containing a NUL character
     /// (see the <see cref="IAdmin"/> remarks), or a null configuration value, which the native
-    /// client cannot send (see <see cref="NewTopic.Configs"/>). A null topic name is rejected
+    /// client cannot send (see <see cref="NewTopic.Configs()"/>). A null topic name is rejected
     /// by the <see cref="NewTopic"/> constructor.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -94,8 +94,8 @@ public interface IAdmin : IDisposable
     /// with <see cref="TopicCollection.OfTopicNames"/> or
     /// <see cref="TopicCollection.OfTopicIds"/>; the choice selects which of the two ABI
     /// entry points runs, and which of
-    /// <see cref="DeleteTopicsResult.TopicNameValues"/> /
-    /// <see cref="DeleteTopicsResult.TopicIdValues"/> is non-null. A repeated topic yields
+    /// <see cref="DeleteTopicsResult.TopicNameValues()"/> /
+    /// <see cref="DeleteTopicsResult.TopicIdValues()"/> is non-null. A repeated topic yields
     /// one entry, as Java's map-keyed result does.
     /// </param>
     /// <param name="options">
@@ -126,7 +126,7 @@ public interface IAdmin : IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One future per topic, in <see cref="DeleteTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="DeleteTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
     /// A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
@@ -185,7 +185,7 @@ public interface IAdmin : IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One future per topic, in <see cref="DescribeTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="DescribeTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
     /// A lone literal <see langword="null"/> argument matches both <c>DescribeTopics</c>
@@ -209,7 +209,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListTopicsOptions.ListInternal"/> <see langword="false"/>, so internal
+    /// <see cref="ListTopicsOptions.ShouldListInternal()"/> <see langword="false"/>, so internal
     /// topics such as <c>__consumer_offsets</c> are excluded.
     /// </param>
     /// <returns>
@@ -292,7 +292,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="DescribeClusterOptions.IncludeAuthorizedOperations"/>
+    /// <see cref="DescribeClusterOptions.IncludeAuthorizedOperations()"/>
     /// <see langword="false"/>, so <see cref="DescribeClusterResult.AuthorizedOperations"/>
     /// yields <see langword="null"/>.
     /// </param>
@@ -349,10 +349,10 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/> and
-    /// <see cref="DescribeConfigsOptions.IncludeDocumentation"/> both
-    /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms"/> comes back empty and
-    /// <see cref="ConfigEntry.Documentation"/> <see langword="null"/>.
+    /// <see cref="DescribeConfigsOptions.IncludeSynonyms()"/> and
+    /// <see cref="DescribeConfigsOptions.IncludeDocumentation()"/> both
+    /// <see langword="false"/>, so <see cref="ConfigEntry.Synonyms()"/> comes back empty and
+    /// <see cref="ConfigEntry.Documentation()"/> <see langword="null"/>.
     /// </param>
     /// <returns>
     /// One future per resource, each carrying that resource's own <see cref="Config"/>
@@ -379,7 +379,7 @@ public interface IAdmin : IDisposable
     /// <param name="configs">
     /// Resource → the operations to apply to it, in order. ⚠ An
     /// <see cref="AlterConfigOpType.DELETE"/> whose
-    /// <see cref="ConfigEntry.Value"/> is <see langword="null"/> is a <b>real request</b>
+    /// <see cref="ConfigEntry.Value()"/> is <see langword="null"/> is a <b>real request</b>
     /// and the null reaches the broker as a null; it is not the same as an empty string.
     /// </param>
     /// <param name="options">
@@ -421,7 +421,7 @@ public interface IAdmin : IDisposable
     /// <returns>
     /// One future per broker, each yielding that broker's log directories keyed by path.
     /// ⚠ A <b>log directory</b> that is offline does not fail anything — the future
-    /// succeeds and that directory's <see cref="LogDirDescription.Error"/> is non-null.
+    /// succeeds and that directory's <see cref="LogDirDescription.Error()"/> is non-null.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
@@ -536,7 +536,7 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange"/>
+    /// <see cref="AlterPartitionReassignmentsOptions.AllowReplicationFactorChange()"/>
     /// <see langword="true"/>.
     /// </param>
     /// <returns>
@@ -706,7 +706,7 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults — notably
-    /// <see cref="ListOffsetsOptions.IsolationLevel"/>
+    /// <see cref="ListOffsetsOptions.IsolationLevel()"/>
     /// <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>.
     /// </param>
     /// <returns>
@@ -783,9 +783,9 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. Note
-    /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations"/> defaults to
+    /// <see cref="DescribeConsumerGroupsOptions.IncludeAuthorizedOperations()"/> defaults to
     /// <see langword="false"/>, which leaves
-    /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
+    /// <see cref="ConsumerGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
     /// </param>
     /// <returns>
     /// One future per group id, each carrying that group's own
@@ -817,9 +817,9 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults. Note
-    /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations"/> defaults to
+    /// <see cref="DescribeClassicGroupsOptions.IncludeAuthorizedOperations()"/> defaults to
     /// <see langword="false"/>, which leaves
-    /// <see cref="ClassicGroupDescription.AuthorizedOperations"/> <see langword="null"/>.
+    /// <see cref="ClassicGroupDescription.AuthorizedOperations()"/> <see langword="null"/>.
     /// </param>
     /// <returns>
     /// One future per group id, each carrying that group's own
@@ -878,7 +878,7 @@ public interface IAdmin : IDisposable
     /// </remarks>
     /// <param name="groupSpecs">
     /// The groups to query, each with the partitions to restrict its result to. A spec
-    /// whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> is
+    /// whose <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions()"/> is
     /// <see langword="null"/> returns every committed partition of that group; an
     /// <b>empty</b> collection returns nothing for it. The two are distinct.
     /// </param>
@@ -1102,7 +1102,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="entries">
     /// The alterations to apply. An <see cref="ClientQuotaAlteration.Op"/> with a null
-    /// <see cref="ClientQuotaAlteration.Op.Value"/> <em>removes</em> that quota, while
+    /// <see cref="ClientQuotaAlteration.Op.Value()"/> <em>removes</em> that quota, while
     /// <c>0.0</c> sets it to zero. A <b>repeated entity</b> is accepted, as Java accepts it:
     /// every alteration is sent, in order, and the
     /// entity has one future in the result, as Java's per-entity future map collapses it.
@@ -1209,7 +1209,7 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="hmac">
     /// The token's MAC, passed back <b>verbatim</b> from
-    /// <see cref="Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac"/>. ⚠ It may contain interior zero
+    /// <see cref="Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac()"/>. ⚠ It may contain interior zero
     /// bytes, so it must never be treated as a NUL-terminated string.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>

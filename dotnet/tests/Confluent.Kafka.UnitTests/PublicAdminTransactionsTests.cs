@@ -96,7 +96,7 @@ public sealed class PublicAdminTransactionsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AbortTransactionResult result = admin.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 1000 });
+        AbortTransactionResult result = admin.AbortTransaction(s_spec, new AbortTransactionOptions().TimeoutMs(1000));
 
         AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.All().Get(s_deadline)));
     }
@@ -107,12 +107,12 @@ public sealed class PublicAdminTransactionsTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FenceProducersResult result = admin.FenceProducers(s_transactionalIds, new FenceProducersOptions { TimeoutMs = 1000 });
+        FenceProducersResult result = admin.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(1000));
 
-        Assert.Equal(s_transactionalIds.Length, result.FencedProducers.Count);
+        Assert.Equal(s_transactionalIds.Length, result.FencedProducers().Count);
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.FencedProducers[id].Get(s_deadline)));
+            AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.FencedProducers()[id].Get(s_deadline)));
             AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.ProducerId(id).Get(s_deadline)));
             AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.EpochId(id).Get(s_deadline)));
         }
@@ -127,7 +127,7 @@ public sealed class PublicAdminTransactionsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         TerminateTransactionResult result =
-            admin.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 1000 });
+            admin.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions().TimeoutMs(1000));
 
         AssertNotImplemented(FutureAssert.Throws<UnsupportedOperationException>(() => result.Result().Get(s_deadline)));
     }
@@ -139,7 +139,7 @@ public sealed class PublicAdminTransactionsTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeProducersResult producers = admin.DescribeProducers(
-            s_partitions, new DescribeProducersOptions { BrokerId = 1 });
+            s_partitions, new DescribeProducersOptions().BrokerId(1));
         AsyncDescribeTransactionsResult transactions = admin.DescribeTransactions(s_transactionalIds);
         AsyncAbortTransactionResult abort = admin.AbortTransaction(s_spec);
 
@@ -175,7 +175,7 @@ public sealed class PublicAdminTransactionsTests
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.FencedProducers()[id].Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
                 () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fence.ProducerId(id).Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
@@ -232,12 +232,12 @@ public sealed class PublicAdminTransactionsTests
             }
         }
 
-        Assert.True(producers.All().IsDone);
-        Assert.True(transactions.All().IsDone);
-        Assert.True(abort.All().IsDone);
-        Assert.True(asyncProducers.All().IsDone);
-        Assert.True(asyncTransactions.All().IsDone);
-        Assert.True(asyncAbort.All().IsDone);
+        Assert.True(producers.All().IsDone());
+        Assert.True(transactions.All().IsDone());
+        Assert.True(abort.All().IsDone());
+        Assert.True(asyncProducers.All().IsDone());
+        Assert.True(asyncTransactions.All().IsDone());
+        Assert.True(asyncAbort.All().IsDone());
     }
 
     [Fact]
@@ -256,10 +256,10 @@ public sealed class PublicAdminTransactionsTests
         Assert.True(terminate.Result() == terminate.Result());
         Assert.True(asyncTerminate.Result() == asyncTerminate.Result());
 
-        Assert.NotSame(fence.FencedProducers, fence.FencedProducers);
-        Assert.NotSame(asyncFence.FencedProducers, asyncFence.FencedProducers);
-        Assert.False(fence.FencedProducers["txn-a"] == fence.FencedProducers["txn-a"]);
-        Assert.False(asyncFence.FencedProducers["txn-a"] == asyncFence.FencedProducers["txn-a"]);
+        Assert.NotSame(fence.FencedProducers(), fence.FencedProducers());
+        Assert.NotSame(asyncFence.FencedProducers(), asyncFence.FencedProducers());
+        Assert.False(fence.FencedProducers()["txn-a"] == fence.FencedProducers()["txn-a"]);
+        Assert.False(asyncFence.FencedProducers()["txn-a"] == asyncFence.FencedProducers()["txn-a"]);
         Assert.False(fence.ProducerId("txn-a") == fence.ProducerId("txn-a"));
         Assert.False(fence.EpochId("txn-a") == fence.EpochId("txn-a"));
         Assert.False(asyncFence.ProducerId("txn-a") == asyncFence.ProducerId("txn-a"));
@@ -277,16 +277,16 @@ public sealed class PublicAdminTransactionsTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         DescribeProducersResult producers =
-            sync.DescribeProducers(s_partitions, new DescribeProducersOptions { TimeoutMs = 10 });
+            sync.DescribeProducers(s_partitions, new DescribeProducersOptions().TimeoutMs(10));
         DescribeTransactionsResult transactions =
-            sync.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions { TimeoutMs = 10 });
-        AbortTransactionResult abort = sync.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 10 });
+            sync.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions().TimeoutMs(10));
+        AbortTransactionResult abort = sync.AbortTransaction(s_spec, new AbortTransactionOptions().TimeoutMs(10));
         AsyncDescribeProducersResult asyncProducers =
-            async.DescribeProducers(s_partitions, new DescribeProducersOptions { TimeoutMs = 10 });
+            async.DescribeProducers(s_partitions, new DescribeProducersOptions().TimeoutMs(10));
         AsyncDescribeTransactionsResult asyncTransactions =
-            async.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions { TimeoutMs = 10 });
+            async.DescribeTransactions(s_transactionalIds, new DescribeTransactionsOptions().TimeoutMs(10));
         AsyncAbortTransactionResult asyncAbort =
-            async.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 10 });
+            async.AbortTransaction(s_spec, new AbortTransactionOptions().TimeoutMs(10));
 
         AssertTimedOut(ProducersCall, FutureAssert.Throws<KafkaTimeoutException>(() => producers.All().Get(s_deadline)));
         AssertTimedOut(TransactionsCall, FutureAssert.Throws<KafkaTimeoutException>(() => transactions.All().Get(s_deadline)));
@@ -307,21 +307,21 @@ public sealed class PublicAdminTransactionsTests
         AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(Unreachable());
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        FenceProducersResult fence = sync.FenceProducers(s_transactionalIds, new FenceProducersOptions { TimeoutMs = 10 });
+        FenceProducersResult fence = sync.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(10));
         TerminateTransactionResult terminate =
-            sync.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 10 });
+            sync.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions().TimeoutMs(10));
         AsyncFenceProducersResult asyncFence =
-            async.FenceProducers(s_transactionalIds, new FenceProducersOptions { TimeoutMs = 10 });
+            async.FenceProducers(s_transactionalIds, new FenceProducersOptions().TimeoutMs(10));
         AsyncTerminateTransactionResult asyncTerminate =
-            async.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 10 });
+            async.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions().TimeoutMs(10));
 
         foreach (string id in s_transactionalIds)
         {
-            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.FencedProducers[id].Get(s_deadline)));
+            AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.FencedProducers()[id].Get(s_deadline)));
             AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.ProducerId(id).Get(s_deadline)));
             AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.EpochId(id).Get(s_deadline)));
             AssertTimedOut(FenceCall, await TestTimeout.Run(
-                () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers[id].Get()), s_deadline));
+                () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => asyncFence.FencedProducers()[id].Get()), s_deadline));
         }
 
         AssertTimedOut(FenceCall, FutureAssert.Throws<KafkaTimeoutException>(() => fence.All().Get(s_deadline)));

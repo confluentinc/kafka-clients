@@ -198,10 +198,10 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentException("The topics to create must not contain a null element.", nameof(newTopics));
             }
 
-            AdminStrings.Validate(topic.Name, nameof(newTopics));
-            if (topic.Configs is not null)
+            AdminStrings.Validate(topic.Name(), nameof(newTopics));
+            if (topic.Configs() is { } configs)
             {
-                foreach (KeyValuePair<string, string> config in topic.Configs)
+                foreach (KeyValuePair<string, string> config in configs)
                 {
                     AdminStrings.Validate(config.Key, nameof(newTopics));
                     if (config.Value is null)
@@ -224,20 +224,20 @@ internal sealed partial class NativeAdminClient
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(topic.Name))
+        using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(topic.Name()))
         {
-            native = topic.ReplicasAssignments is null
+            native = topic.ReplicasAssignments() is not { } assignments
                 ? NativeMethods.NewTopicWithNumPartitionsReplicationFactor(
-                    name.Pointer, topic.NumPartitions ?? -1, topic.ReplicationFactor ?? (short)-1, ref outErr)
-                : NewAssignedTopic(name.Pointer, topic.ReplicasAssignments, ref outErr);
+                    name.Pointer, topic.NumPartitions() ?? -1, topic.ReplicationFactor() ?? (short)-1, ref outErr)
+                : NewAssignedTopic(name.Pointer, assignments, ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
         try
         {
-            if (topic.Configs is not null)
+            if (topic.Configs() is { } configs)
             {
-                SetConfigs(native, topic.Configs);
+                SetConfigs(native, configs);
             }
         }
         catch
@@ -339,14 +339,14 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(CreateTopicsOptions.TimeoutMs):
-                NativeMethods.CreateTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.CreateTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(CreateTopicsOptions.ValidateOnly):
-                NativeMethods.CreateTopicsOptionsSetValidateOnly(native, options.ValidateOnly ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.CreateTopicsOptionsSetValidateOnly(native, options.ShouldValidateOnly() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(CreateTopicsOptions.RetryOnQuotaViolation):
                 NativeMethods.CreateTopicsOptionsSetRetryOnQuotaViolation(
-                    native, options.RetryOnQuotaViolation ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ShouldRetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("CreateTopicsOptions has no C setter for " + setter + ".");
@@ -485,10 +485,10 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(ListTopicsOptions.TimeoutMs):
-                NativeMethods.ListTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.ListTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(ListTopicsOptions.ListInternal):
-                NativeMethods.ListTopicsOptionsSetListInternal(native, options.ListInternal ? (sbyte)1 : (sbyte)0, ref outErr);
+                NativeMethods.ListTopicsOptionsSetListInternal(native, options.ShouldListInternal() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("ListTopicsOptions has no C setter for " + setter + ".");
@@ -543,15 +543,15 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeClusterOptions.TimeoutMs):
-                NativeMethods.DescribeClusterOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeClusterOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeClusterOptions.IncludeAuthorizedOperations):
                 NativeMethods.DescribeClusterOptionsSetIncludeAuthorizedOperations(
-                    native, options.IncludeAuthorizedOperations ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeAuthorizedOperations() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(DescribeClusterOptions.IncludeFencedBrokers):
                 NativeMethods.DescribeClusterOptionsSetIncludeFencedBrokers(
-                    native, options.IncludeFencedBrokers ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeFencedBrokers() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeClusterOptions has no C setter for " + setter + ".");
@@ -652,11 +652,11 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DeleteTopicsOptions.TimeoutMs):
-                NativeMethods.DeleteTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DeleteTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DeleteTopicsOptions.RetryOnQuotaViolation):
                 NativeMethods.DeleteTopicsOptionsSetRetryOnQuotaViolation(
-                    native, options.RetryOnQuotaViolation ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.ShouldRetryOnQuotaViolation() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DeleteTopicsOptions has no C setter for " + setter + ".");
@@ -743,15 +743,15 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeTopicsOptions.TimeoutMs):
-                NativeMethods.DescribeTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeTopicsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             case nameof(DescribeTopicsOptions.IncludeAuthorizedOperations):
                 NativeMethods.DescribeTopicsOptionsSetIncludeAuthorizedOperations(
-                    native, options.IncludeAuthorizedOperations ? (sbyte)1 : (sbyte)0, ref outErr);
+                    native, options.IncludeAuthorizedOperations() ? (sbyte)1 : (sbyte)0, ref outErr);
                 break;
             case nameof(DescribeTopicsOptions.PartitionSizeLimitPerResponse):
                 NativeMethods.DescribeTopicsOptionsSetPartitionSizeLimitPerResponse(
-                    native, options.PartitionSizeLimitPerResponse, ref outErr);
+                    native, options.PartitionSizeLimitPerResponse(), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeTopicsOptions has no C setter for " + setter + ".");
@@ -813,7 +813,7 @@ internal sealed partial class NativeAdminClient
                         foreach (Uuid id in ids.TopicIds())
                         {
                             IntPtr outErr = IntPtr.Zero;
-                            natives[next++] = NativeMethods.UuidNew(id.MostSignificantBits, id.LeastSignificantBits, ref outErr);
+                            natives[next++] = NativeMethods.UuidNew(id.GetMostSignificantBits(), id.GetLeastSignificantBits(), ref outErr);
                             KafkaException.ThrowIfFfiFailed(ref outErr);
                         }
 
