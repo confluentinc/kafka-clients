@@ -48,8 +48,7 @@ public sealed class DelegationToken
     /// The MAC base64-encoded — Java's <c>hmacAsBase64String()</c>, derived from
     /// <see cref="Hmac()"/>.
     /// </summary>
-    /// <returns>The MAC base64-encoded — Java's <c>hmacAsBase64String()</c>, derived from
-    /// <see cref="Hmac()"/>.</returns>
+    /// <returns>The MAC base64-encoded.</returns>
     public string HmacAsBase64String() => Convert.ToBase64String(_hmac);
 
     /// <summary>

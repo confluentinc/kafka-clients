@@ -55,8 +55,7 @@ public sealed class TransactionListing
     /// The transaction state — Java's <c>state()</c>, named for the accessor, not for Java's
     /// <c>transactionState</c> field.
     /// </summary>
-    /// <returns>The transaction state — Java's <c>state()</c>, named for the accessor, not for Java's
-    /// <c>transactionState</c> field.</returns>
+    /// <returns>The transaction state.</returns>
     public TransactionState State() => _state;
 
     /// <summary>Value equality over all three fields — Java's <c>equals</c>.</summary>

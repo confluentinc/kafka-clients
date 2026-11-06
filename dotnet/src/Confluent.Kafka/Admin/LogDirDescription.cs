@@ -163,7 +163,7 @@ public sealed class LogDirDescription
     /// <c>totalBytes()</c>, an <c>OptionalLong</c>.
     /// </summary>
     /// <returns>The total size in bytes of the volume this directory is on, or <see langword="null"/> when the
-    /// broker did not report it — Java's <c>totalBytes()</c>, an <c>OptionalLong</c>.</returns>
+    /// broker did not report it.</returns>
     /// <remarks>
     /// Java's <c>UNKNOWN_VOLUME_BYTES</c> (<c>-1</c>), which Java's constructor turns into
     /// <c>OptionalLong.empty()</c>, becomes <see langword="null"/>; <c>0</c> is a real size.

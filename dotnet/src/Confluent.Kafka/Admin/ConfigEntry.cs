@@ -137,8 +137,7 @@ public sealed class ConfigEntry
     /// Whether the value is sensitive, in which case the broker redacts it (Java's
     /// <c>isSensitive()</c>).
     /// </summary>
-    /// <returns>Whether the value is sensitive, in which case the broker redacts it (Java's
-    /// <c>isSensitive()</c>).</returns>
+    /// <returns>Whether the value is sensitive, in which case the broker redacts it.</returns>
     public bool IsSensitive() => _isSensitive;
 
     /// <summary>Whether the entry cannot be changed (Java's <c>isReadOnly()</c>).</summary>
@@ -165,8 +164,8 @@ public sealed class ConfigEntry
     /// The documentation for this config, or <see langword="null"/> when the broker did
     /// not report it (Java's <c>documentation()</c>).
     /// </summary>
-    /// <returns>The documentation for this config, or <see langword="null"/> when the broker did not report it
-    ///.</returns>
+    /// <returns>The documentation for this config, or <see langword="null"/> when the broker did not report
+    /// it.</returns>
     public string? Documentation() => _documentation;
 
     /// <summary>

@@ -67,8 +67,7 @@ public sealed class ProducerState
     /// The producer epoch — Java's <c>producerEpoch()</c>, an <see langword="int"/> here as in
     /// Java, unlike <see cref="AbortTransactionSpec.ProducerEpoch()"/>.
     /// </summary>
-    /// <returns>The producer epoch — Java's <c>producerEpoch()</c>, an <see langword="int"/> here as in Java,
-    /// unlike <see cref="AbortTransactionSpec.ProducerEpoch()"/>.</returns>
+    /// <returns>The producer epoch.</returns>
     public int ProducerEpoch() => _producerEpoch;
 
     /// <summary>The last written sequence number — Java's <c>lastSequence()</c>.</summary>
@@ -83,8 +82,8 @@ public sealed class ProducerState
     /// The first offset of the in-progress transaction, or <see langword="null"/> when none is
     /// in progress — Java's <c>currentTransactionStartOffset()</c>.
     /// </summary>
-    /// <returns>The first offset of the in-progress transaction, or <see langword="null"/> when none is in progress
-    ///.</returns>
+    /// <returns>The first offset of the in-progress transaction, or <see langword="null"/> when none is in
+    /// progress.</returns>
     public long? CurrentTransactionStartOffset() => _currentTransactionStartOffset;
 
     /// <summary>

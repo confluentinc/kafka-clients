@@ -123,8 +123,7 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// The record's leader epoch, or <see langword="null"/> when the record format has none (Java's
     /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
     /// </summary>
-    /// <returns>The record's leader epoch, or <see langword="null"/> when the record format has none (Java's
-    /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>).</returns>
+    /// <returns>The record's leader epoch, or <see langword="null"/> when the record format has none.</returns>
     public int? LeaderEpoch() => _leaderEpoch;
 
     /// <summary>
