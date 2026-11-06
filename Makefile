@@ -28,7 +28,7 @@ VENV = . venv/bin/activate
 	test-c test-python test-dotnet test-rust-all-features \
 	test-rust-all-features-ssl test-rust-all-features-sasl-ssl \
 	test-c-macos-docker test-python-macos-docker test-dotnet-macos-docker \
-	pack-dotnet package-check-dotnet \
+	pack-dotnet package-check-dotnet pack-javascript package-check-javascript \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
@@ -396,6 +396,17 @@ pack-dotnet:
 package-check-dotnet:
 	$(MAKE) -C dotnet $(ROOTS) package-check-dotnet
 
+# The npm packages of the Node.js client, with this machine's addon only:
+# pack-javascript packs them into javascript/build/pack, and
+# package-check-javascript packs them, then installs them into a fresh project
+# and runs the smoke program there. See javascript/Makefile; the release
+# packages are built by semaphore.yml's "Release (JavaScript):" blocks.
+pack-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) pack
+
+package-check-javascript: build-rust-all-features
+	$(MAKE) -C javascript $(ROOTS) pack-check
+
 # macOS variant of test-python: Python unit tests (pytest test/unit) only. On
 # macOS the gRPC multilanguage arm runs natively instead (see
 # verify-python-macos-docker).
@@ -502,8 +513,9 @@ check-api-compat:
 audit:
 	$(MAKE) -C rust audit
 
-# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`:
-# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]
+# [JAVASCRIPT_VERSION=...]`: see rust/Makefile. VERSION, PYTHON_VERSION,
+# DOTNET_VERSION and JAVASCRIPT_VERSION reach the
 # sub-make through its environment (make passes command-line variables down);
 # this recipe never pastes them in.
 bump-version:

@@ -235,11 +235,26 @@ test('package.json: no install-time build or scripts, private, Node >= 18', () =
   assert.equal(pkg.engines.node, '>=18');
 });
 
+test('package.json has no dependencies: the published copy alone names the platform packages', () => {
+  // .semaphore/check-npm.py manifest writes the published package.json: this
+  // one without private, devDependencies and scripts, with the platform
+  // packages as optionalDependencies at its exact version.
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies']) {
+    assert.ok(!(field in pkg), `package.json has ${field}`);
+  }
+  assert.deepEqual(pkg.repository, {
+    type: 'git',
+    url: 'git+https://github.com/confluentinc/kafka-clients.git',
+    directory: 'javascript',
+  });
+  assert.equal(pkg.license, 'Apache-2.0');
+});
+
 test('package.json files hold the compiled library, not the build inputs, the tests or the gRPC harness', () => {
   for (const entry of pkg.files) {
     const top = entry.replace(/^\.\//, '').split('/')[0];
     assert.ok(
-      !['binding.gyp', 'src', 'scripts', 'test', 'build', 'examples', 'lib', 'tsconfig.json'].includes(top),
+      !['binding.gyp', 'addon.exports.map', 'src', 'scripts', 'test', 'tools', 'build', 'examples', 'lib', 'tsconfig.json'].includes(top),
       `files includes ${entry}`,
     );
     assert.ok(!/grpc/i.test(entry), `files includes ${entry}`);
@@ -256,16 +271,17 @@ test('only src/util.h includes the bindings header', () => {
 });
 
 test('every source file carries the Apache 2.0 header of Confluent Inc.', () => {
-  const dirs = ['lib', 'src', 'scripts', 'test', 'examples'];
+  const dirs = ['lib', 'src', 'scripts', 'test', 'tools', 'examples'];
   const files = [
     ...dirs.flatMap((d) => walk(path.join(ROOT, d)).map((f) => `${d}/${f}`)),
     'binding.gyp',
+    'addon.exports.map',
     'Makefile',
     'tsconfig.json',
     'grpc_server.js',
     'grpc_translate.js',
     'Dockerfile.grpc',
-  ].filter((f) => /\.(js|ts|c|h)$|^binding\.gyp$|^Makefile$|^tsconfig\.json$|^Dockerfile\.grpc$/.test(f));
+  ].filter((f) => /\.(js|ts|c|h)$|^binding\.gyp$|^addon\.exports\.map$|^Makefile$|^tsconfig\.json$|^Dockerfile\.grpc$/.test(f));
   for (const file of files) {
     const head = fs.readFileSync(path.join(ROOT, file), 'utf8').split('\n').slice(0, 6).join('\n');
     assert.match(head, /Copyright \d{4} Confluent Inc\./, file);
