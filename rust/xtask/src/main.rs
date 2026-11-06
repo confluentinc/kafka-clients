@@ -2835,9 +2835,10 @@ fn print_help() {
                     --section NAME [--default ARG]... [--ctest] [--dotnet [--dotnet-filter EXPR]]
                                      [-C DIR] -- <command>; an argument `{{}}` stands for the
                                      selected entries (the defaults when the whole suite is
-                                     selected); with --ctest for `-R <regex>` of the names; with
-                                     --dotnet for a `dotnet test --filter` on the names, and-ed
-                                     with EXPR
+                                     selected); with --ctest for `-R <regex>` of the programs,
+                                     the entries (`<ctest>` or `<ctest>:<function>`) going to
+                                     them in $C_TEST_FILTER; with --dotnet for a `dotnet test
+                                     --filter` on the names, and-ed with EXPR
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust

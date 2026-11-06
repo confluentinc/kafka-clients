@@ -27,7 +27,9 @@
 //!
 //! - `rust`: test unit (`lib`, `doc`, an integration test target, another
 //!   workspace package) -> libtest name filters;
-//! - `c.unit`: ctest names; `c.integration`: filters of the `__grpc_c` tests;
+//! - `c.unit`: ctest names, or `<name>:<function>` for one test function of a
+//!   program (`c/tests/test_filter.h`); `c.integration`: filters of the
+//!   `__grpc_c` tests;
 //! - `python.<suite>`: pytest paths or node ids, relative to `python/`;
 //!   `python.typecheck`: `[]` runs mypy; `python.grpc`: filters of the
 //!   `__grpc_python` tests;
@@ -339,8 +341,9 @@ struct Inventory {
     rust_units: BTreeMap<String, String>,
     /// The packages with doctests.
     doctest_packages: BTreeSet<String>,
-    /// The ctest names of `c/CMakeLists.txt`.
-    ctest_names: Vec<String>,
+    /// The ctest names of `c/CMakeLists.txt`, each with the test functions its
+    /// program passes to `RUN_TEST`.
+    ctests: BTreeMap<String, BTreeSet<String>>,
     /// The `python/` directory, which pytest entries are relative to.
     python_dir: PathBuf,
 }
@@ -412,21 +415,71 @@ fn inventory() -> anyhow::Result<Inventory> {
         packages.insert(dir, name);
     }
 
-    let cmake = fs::read_to_string(Path::new(REPO_ROOT).join("c/CMakeLists.txt"))?;
-    let ctest_names = cmake
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("add_test(NAME "))
-        .filter_map(|rest| rest.split_whitespace().next())
-        .map(str::to_string)
-        .collect();
+    let c_dir = Path::new(REPO_ROOT).join("c");
+    let ctests = ctests(&fs::read_to_string(c_dir.join("CMakeLists.txt"))?, |source| {
+        fs::read_to_string(c_dir.join(source)).with_context(|| format!("reading c/{source}"))
+    })?;
 
     Ok(Inventory {
         packages,
         rust_units,
         doctest_packages,
-        ctest_names,
+        ctests,
         python_dir: Path::new(REPO_ROOT).join("python"),
     })
+}
+
+/// The ctests of a `CMakeLists.txt`, each with the functions its program's
+/// source, read by `read`, passes to `RUN_TEST`. `c/tests/test_filter.h` names
+/// a program after its source file, so a ctest `<name>` must run the program
+/// built from `test_<name>.c`.
+fn ctests(
+    cmake: &str,
+    read: impl Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<BTreeMap<String, BTreeSet<String>>> {
+    // `add_executable(<exe> <source>)` and `add_test(NAME <name> COMMAND <exe>)`.
+    let call = |line: &str, command: &str| {
+        let rest = line.trim().strip_prefix(command)?.strip_prefix('(')?;
+        let words: Vec<String> = rest.split(')').next()?.split_whitespace().map(str::to_string).collect();
+        Some(words)
+    };
+    let sources: BTreeMap<String, String> = cmake
+        .lines()
+        .filter_map(|line| call(line, "add_executable"))
+        .filter_map(|words| Some((words.first()?.clone(), words.get(1)?.clone())))
+        .collect();
+    let mut ctests = BTreeMap::new();
+    for words in cmake.lines().filter_map(|line| call(line, "add_test")) {
+        let (Some("NAME"), Some(name), Some("COMMAND"), Some(exe)) = (
+            words.first().map(String::as_str),
+            words.get(1),
+            words.get(2).map(String::as_str),
+            words.get(3),
+        ) else {
+            continue;
+        };
+        let source = sources
+            .get(exe)
+            .with_context(|| format!("ctest {name:?}: no add_executable for {exe:?}"))?;
+        let file_name = Path::new(source).file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if file_name != format!("test_{name}.c") {
+            bail!("ctest {name:?} runs {source}, but its source must be test_{name}.c for C_TEST_FILTER");
+        }
+        let functions = read(source)?
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("RUN_TEST("))
+            .filter_map(|rest| {
+                let function: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                (!function.is_empty()).then_some(function)
+            })
+            .collect();
+        ctests.insert(name.clone(), functions);
+    }
+    Ok(ctests)
 }
 
 /// The kind of a cargo target: `lib` for every library crate type.
@@ -572,7 +625,7 @@ fn prompt(base: &str, merge_base: &str, head: &str, changes: &[String], inventor
         .iter()
         .map(|(name, dir)| format!("  - `{name}`: pytest paths or node ids under python/{dir}\n"))
         .collect();
-    let ctest_names = inventory.ctest_names.join(", ");
+    let ctest_names = inventory.ctests.keys().cloned().collect::<Vec<_>>().join(", ");
     let dotnet_suites: String = DOTNET_SUITES
         .iter()
         .map(|(name, what, namespaces)| {
@@ -607,7 +660,8 @@ Answer with one JSON object in a ```json block, and nothing after it. Every memb
 - \"rust\": an object mapping test units to lists of libtest name filters (a filter selects the tests whose full name \
          contains it, such as `producer::` or `common::record::default_record_batch::`). The units:
 {rust_units}- \"c\": an object with
-  - \"unit\": ctest names, among: {ctest_names}
+  - \"unit\": ctest names, among: {ctest_names}; an entry `<name>:<function>` runs only that test function of \
+         the program, one passed to `RUN_TEST` in c/tests/test_<name>.c
   - \"integration\": filters of the `__grpc_c` tests of the `integration` unit (names such as `producer::<case>__grpc_c`)
 - \"python\": an object with
   - \"typecheck\": `[]` to run mypy --strict over python/confluent_kafka
@@ -660,8 +714,17 @@ fn validate(answer: &Value, inventory: &Inventory) -> anyhow::Result<Map<String,
                     let entries = string_list(entries, &format!("c.{key}"))?;
                     match key.as_str() {
                         "unit" => {
-                            if let Some(unknown) = entries.iter().find(|name| !inventory.ctest_names.contains(name)) {
-                                bail!("c.unit: unknown ctest {unknown:?}");
+                            for entry in &entries {
+                                let (name, function) = match entry.split_once(':') {
+                                    Some((name, function)) => (name, Some(function)),
+                                    None => (entry.as_str(), None),
+                                };
+                                let Some(functions) = inventory.ctests.get(name) else {
+                                    bail!("c.unit: unknown ctest {name:?}");
+                                };
+                                if let Some(function) = function.filter(|f| !functions.contains(*f)) {
+                                    bail!("c.unit: ctest {name:?} has no test {function:?}");
+                                }
                             }
                         },
                         "integration" => {},
@@ -1116,7 +1179,8 @@ fn run(command: &mut Command) -> anyhow::Result<()> {
 /// command in `dir` when the selection selects the section (or there is no
 /// selection). An argument `{}` stands for the selected entries, or the
 /// `--default` arguments when the whole suite is selected; with `--ctest` it
-/// stands for `-R <regex>` matching the selected names, or for nothing; with
+/// stands for `-R <regex>` matching the selected programs, the entries going to
+/// the programs in `C_TEST_FILTER` (`c/tests/test_filter.h`), or for nothing; with
 /// `--dotnet` for `--filter <expr>` selecting the tests whose full name
 /// contains an entry, and-ed with the `--dotnet-filter` expression (which may
 /// be empty), or for that expression alone.
@@ -1151,6 +1215,7 @@ pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
         None => Choice::All,
         Some(selection) => choice(section(&selection, &section_name), &section_name)?,
     };
+    let mut c_test_filter = None;
     let selected: Vec<String> = match choice {
         Choice::Skip => {
             eprintln!(
@@ -1162,7 +1227,11 @@ pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
         Choice::All if ctest => Vec::new(),
         Choice::All if dotnet => dotnet_filter(&dotnet_base, None),
         Choice::All => defaults,
-        Choice::Only(names) if ctest => vec!["-R".into(), ctest_regex(&names)],
+        Choice::Only(entries) if ctest => {
+            let (args, filter) = ctest_args(&entries);
+            c_test_filter = Some(filter);
+            args
+        },
         Choice::Only(names) if dotnet => dotnet_filter(&dotnet_base, Some(&names)),
         Choice::Only(entries) => entries,
     };
@@ -1174,7 +1243,26 @@ pub fn selected_run(args: &[String]) -> anyhow::Result<()> {
             argv.push(arg.clone());
         }
     }
-    run(Command::new(program).args(argv).current_dir(dir))
+    let mut command = Command::new(program);
+    command.args(argv).current_dir(dir);
+    if let Some(filter) = c_test_filter {
+        command.env("C_TEST_FILTER", filter);
+    }
+    run(&mut command)
+}
+
+/// The ctest arguments and the `C_TEST_FILTER` value (`c/tests/test_filter.h`)
+/// running these `c.unit` entries: ctest names, or `<name>:<function>` for one
+/// test function of a program.
+fn ctest_args(entries: &[String]) -> (Vec<String>, String) {
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let name = entry.split_once(':').map_or(entry.as_str(), |(name, _)| name);
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    (vec!["-R".into(), ctest_regex(&names)], entries.join(","))
 }
 
 /// A ctest `-R` regex matching exactly these test names.
@@ -1415,6 +1503,65 @@ mod tests {
     }
 
     #[test]
+    fn test_ctest_args() {
+        assert_eq!(
+            ctest_args(&strings(&["mock_producer:test_a", "kafka_future", "mock_producer:test_b"])),
+            (
+                strings(&["-R", "^(mock_producer|kafka_future)$"]),
+                "mock_producer:test_a,kafka_future,mock_producer:test_b".to_string()
+            )
+        );
+        assert_eq!(
+            ctest_args(&strings(&["mock_producer"])),
+            (strings(&["-R", "^(mock_producer)$"]), "mock_producer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ctests() {
+        let cmake = "\
+add_executable(test_mock_producer tests/test_mock_producer.c)
+target_link_libraries(test_mock_producer unity)
+add_test(NAME mock_producer COMMAND test_mock_producer)
+";
+        let source = "int main(void) {\n    RUN_TEST(test_a);\n    RUN_TEST( test_b );\n    RUN_TEST(test_c);\n}\n";
+        let read = |path: &str| {
+            assert_eq!(path, "tests/test_mock_producer.c");
+            Ok(source.to_string())
+        };
+        let ctests = ctests(cmake, read).unwrap();
+        assert_eq!(ctests.keys().collect::<Vec<_>>(), ["mock_producer"]);
+        // `#func` drops the spaces of `RUN_TEST( test_b )`, as the parser does.
+        assert_eq!(
+            ctests["mock_producer"].iter().collect::<Vec<_>>(),
+            ["test_a", "test_b", "test_c"]
+        );
+
+        let renamed = "add_executable(test_x tests/other.c)\nadd_test(NAME x COMMAND test_x)\n";
+        assert_eq!(
+            super::ctests(renamed, |_| Ok(String::new())).unwrap_err().to_string(),
+            "ctest \"x\" runs tests/other.c, but its source must be test_x.c for C_TEST_FILTER"
+        );
+        assert_eq!(
+            super::ctests("add_test(NAME x COMMAND test_x)\n", |_| Ok(String::new()))
+                .unwrap_err()
+                .to_string(),
+            "ctest \"x\": no add_executable for \"test_x\""
+        );
+    }
+
+    #[test]
+    fn test_ctests_of_the_repository() {
+        let c_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../c");
+        let ctests = ctests(&fs::read_to_string(c_dir.join("CMakeLists.txt")).unwrap(), |source| {
+            Ok(fs::read_to_string(c_dir.join(source))?)
+        })
+        .unwrap();
+        assert!(ctests["mock_producer"].contains("test_destroy_null"));
+        assert!(ctests.values().all(|functions| !functions.is_empty()));
+    }
+
+    #[test]
     fn test_dotnet_filter() {
         assert!(dotnet_filter("", None).is_empty());
         assert!(dotnet_filter("  ", None).is_empty());
@@ -1441,7 +1588,7 @@ mod tests {
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
             doctest_packages: BTreeSet::new(),
-            ctest_names: strings(&["mock_producer"]),
+            ctests: [("mock_producer".to_string(), ["test_a".to_string()].into())].into(),
             python_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python"),
         }
     }
@@ -1451,7 +1598,7 @@ mod tests {
         let inventory = inventory_fixture();
         let answer = json!({
             "rust": {"lib": ["producer::"], "admin": []},
-            "c": {"unit": ["mock_producer"], "integration": []},
+            "c": {"unit": ["mock_producer", "mock_producer:test_a"], "integration": []},
             "python": {"typecheck": [], "unit": ["test/unit"], "grpc": ["producer::"]},
             "dotnet": {
                 "solution": ["Confluent.Kafka.UnitTests.ProducerRecordTests", "Confluent.Kafka.IntegrationTests"],
@@ -1468,6 +1615,14 @@ mod tests {
         assert_eq!(
             error(json!({"c": {"unit": ["kafka_admin"]}})),
             "c.unit: unknown ctest \"kafka_admin\""
+        );
+        assert_eq!(
+            error(json!({"c": {"unit": ["kafka_admin:test_a"]}})),
+            "c.unit: unknown ctest \"kafka_admin\""
+        );
+        assert_eq!(
+            error(json!({"c": {"unit": ["mock_producer:test_b"]}})),
+            "c.unit: ctest \"mock_producer\" has no test \"test_b\""
         );
         assert_eq!(
             error(json!({"python": {"unit": ["test/static"]}})),
