@@ -1170,8 +1170,10 @@ reaches the core, as Java's `acquire()` and Python's use table do (ledger 136;
 `ffi-marshalling.md` §B1). So:
 - `Dispose` from another thread during an op does not throw. It runs: wakeup, wait for the
   in-flight uses, close, join the drain thread (async consumer), destroy. This is a deviation:
-  Java and Python reject the second thread, but .NET code expects `Dispose` not to throw. A callback that a close runs
-  must not wait for another thread's `Dispose` of the same consumer: that `Dispose` waits for the close (ledger 399).
+  Java and Python reject the second thread, but .NET code expects `Dispose` not to throw. A callback that a close (a
+  `Close` of any overload, `Dispose` or `DisposeAsync`) runs must not wait for another thread's `Dispose` or
+  `DisposeAsync` of the same consumer, nor for its `Close` while the running close is a `Dispose` / `DisposeAsync`:
+  those calls wait for the close (ledger 399).
 - An explicit `Close` from another thread during an op throws `ConcurrentModificationException` at
   once and leaves the consumer open, as Java and Python. Call `Wakeup()` first.
 - A `Close` from inside a callback (a listener method or a commit callback, after an `await`

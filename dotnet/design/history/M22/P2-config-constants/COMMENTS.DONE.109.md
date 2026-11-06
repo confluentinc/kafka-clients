@@ -301,3 +301,31 @@
   - **Fix.** Write "while a close is in progress on another thread, or an async close on any thread".
   - **Resolved** in the same fixup: the `ReleaseTheGateThenDisposeTheDeserializers` comment is back above that method; the `_closerThread` comment, both rule texts and STATUS now say a `Dispose` / `DisposeAsync` returns at once while a close runs on another thread or as the caller's own async `Close` / `DisposeAsync` (ffi adds that Python's `close()` returns at once on the closing thread). Text only.
   - **Superseded** by ledger 399's change to (a), after Copilot's review of #320: the closer marker is removed and the limit is recorded instead (`dotnet/CLAUDE.md` §4, ffi-marshalling §B2).
+
+- **109-OA-1** (Low; rule text only: the recorded limit is narrower than what hangs) — 64600c1e1 —
+  `dotnet/CLAUDE.md:1173-1174`, `dotnet/.claude/rules/ffi-marshalling.md:1616` and `dotnet/design/current/STATUS.md:23`.
+  - **What the texts say.** All three record the limit as "a callback that a close runs must not wait for another
+    thread's `Dispose`". ffi §B2 also names the running close as an explicit `Close` or a `Dispose`.
+  - **What also hangs.** When the running close is a `Dispose` or `DisposeAsync` teardown, another thread's
+    explicit `Close` waits too:
+    - a sync `Close` finds the consumer closing in `TryEnterUse`, returns false, and parks on `_closeGate`;
+    - an async `Close` passes `ThrowIfHeldByAnotherThread`, since a `Dispose` sets no `_closingThread`, and awaits
+      the gate.
+
+    Only when the running close is an explicit `Close` does the other thread's `Close` throw
+    `ConcurrentModificationException`. Another thread's `DisposeAsync` waits like `Dispose`.
+  - **Probe.** On an archive of 64600c1e1, net10.0 Release, 0 W / 0 E: a commit callback that the close delivers
+    starts another thread's `Close()` and waits at most 3 s for it.
+
+    | The running close | The other thread's `Close` |
+    |---|---|
+    | sync `Dispose` | still waiting after 3 s |
+    | async `Dispose` | still waiting after 3 s |
+    | async `DisposeAsync` | still waiting after 3 s |
+    | sync `Close` | threw `ConcurrentModificationException` |
+    | async `Close` | threw `ConcurrentModificationException` |
+
+  - **Fix (text only).** "A callback that a close runs must not wait for another thread's `Dispose` /
+    `DisposeAsync` of the same consumer, nor, when that close is a `Dispose` / `DisposeAsync`, for another thread's
+    `Close`: they wait for the close." Make the same change in all three files.
+  - **Resolved** in the fixup of 64600c1e1, text only, within ledger 399 (a): `dotnet/CLAUDE.md` §4, ffi-marshalling §B2 and STATUS say once that a callback that a close (a `Close` of any overload, `Dispose` or `DisposeAsync`) runs must not wait for another thread's `Dispose` or `DisposeAsync` of the same consumer, nor for its `Close` while the running close is a `Dispose` / `DisposeAsync`: those calls wait for the close. The Java and Python difference (they throw there) is kept.
