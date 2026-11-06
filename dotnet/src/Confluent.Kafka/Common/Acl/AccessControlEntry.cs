@@ -47,7 +47,7 @@ public sealed class AccessControlEntry
     /// <exception cref="ArgumentNullException">
     /// <paramref name="principal"/> or <paramref name="host"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="IllegalArgumentException">
     /// <paramref name="operation"/> is <see cref="AclOperation.ANY"/>, or
     /// <paramref name="permissionType"/> is <see cref="AclPermissionType.ANY"/>.
     /// </exception>
@@ -61,12 +61,12 @@ public sealed class AccessControlEntry
 
         if (operation == AclOperation.ANY)
         {
-            throw new ArgumentException("operation must not be ANY", nameof(operation));
+            throw new IllegalArgumentException("operation must not be ANY");
         }
 
         if (permissionType == AclPermissionType.ANY)
         {
-            throw new ArgumentException("permissionType must not be ANY", nameof(permissionType));
+            throw new IllegalArgumentException("permissionType must not be ANY");
         }
 
         Operation = operation;

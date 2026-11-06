@@ -51,7 +51,7 @@ public sealed class ChaosRecordOutcomesTests
 
         string log = CaptureLog(() =>
         {
-            outcomes.SendRaised(record, new InvalidOperationException("x"));
+            outcomes.SendRaised(record, new IllegalStateException("x"));
             record.OnCompletion(metadata, null);
         });
 

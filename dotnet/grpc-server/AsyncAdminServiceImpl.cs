@@ -683,7 +683,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             // Java holds one future over the whole map, so its failure is the whole-call error; a
             // per-entry error is the Optional<Throwable> in the resolved map, absent meaning that
             // election succeeded.
-            (IReadOnlyDictionary<TopicPartition, KafkaException?> partitions, Proto.KafkaError? error) =
+            (IReadOnlyDictionary<TopicPartition, Exception?> partitions, Proto.KafkaError? error) =
                 await TranslateAdmin.Resolve(result.Partitions()).ConfigureAwait(false);
             if (error is not null)
             {
@@ -691,7 +691,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             }
 
             Proto.VoidKeyedResponse response = new Proto.VoidKeyedResponse();
-            foreach (KeyValuePair<TopicPartition, KafkaException?> pair in partitions)
+            foreach (KeyValuePair<TopicPartition, Exception?> pair in partitions)
             {
                 Proto.VoidResultEntry entry = new Proto.VoidResultEntry
                 {
@@ -910,7 +910,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             Proto.DescribeTransactionsResponse response = new Proto.DescribeTransactionsResponse();
             foreach (string id in ids)
             {
-                (TransactionDescription description, Proto.KafkaError? error) =
+                (TransactionDescription? description, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(result.Description(id)).ConfigureAwait(false);
                 Proto.DescribeTransactionsEntry entry = new Proto.DescribeTransactionsEntry
                 {
@@ -920,7 +920,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 {
                     entry.Error = error;
                 }
-                else
+                else if (description is not null)
                 {
                     entry.Value = TranslateAdmin.TransactionDescriptionToProto(description);
                 }
@@ -1152,7 +1152,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             // valid() and errors() are independent lists of unrelated length: never zip them.
             IReadOnlyCollection<GroupListing> valid = await result.Valid().Get().ConfigureAwait(false);
-            IReadOnlyCollection<KafkaException> errors = await result.Errors().Get().ConfigureAwait(false);
+            IReadOnlyCollection<Exception> errors = await result.Errors().Get().ConfigureAwait(false);
 
             Proto.ListGroupsResponse response = new Proto.ListGroupsResponse();
             foreach (GroupListing listing in valid)
@@ -1160,7 +1160,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 response.Valid.Add(TranslateAdmin.GroupListingToProto(listing));
             }
 
-            foreach (KafkaException error in errors)
+            foreach (Exception error in errors)
             {
                 response.ListingErrors.Add(Translate.ToProto(error));
             }
@@ -1913,10 +1913,10 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             AsyncDescribeFeaturesResult result = admin.DescribeFeatures(options);
 
-            FeatureMetadata metadata = await result.FeatureMetadata().Get().ConfigureAwait(false);
+            FeatureMetadata? metadata = await result.FeatureMetadata().Get().ConfigureAwait(false);
             return new Proto.DescribeFeaturesResponse
             {
-                Metadata = TranslateAdmin.FeatureMetadataToProto(metadata),
+                Metadata = metadata is null ? null : TranslateAdmin.FeatureMetadataToProto(metadata),
             };
         }
         catch (Exception ex)

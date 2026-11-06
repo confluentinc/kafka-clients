@@ -93,7 +93,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
         // Post-dispose stays type-only (the consumer norm asserts no ObjectName).
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = Send(producer, WithCallback, Record(), callback, CancellationToken.None); });
 
         Assert.Equal(0, callback.Count);
@@ -109,12 +109,11 @@ public sealed class PublicProducerSendSynchronousThrowTests
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        SerializationException error = Assert.Throws<SerializationException>(
+        // A throw that is neither an ApiException nor an InvalidCastException leaves Send as it is, as Java's.
+        ThrowingSerializer<byte[]>.BoomException error = Assert.Throws<ThrowingSerializer<byte[]>.BoomException>(
             () => { _ = Send(producer, overload, Record(), callback, CancellationToken.None); });
 
-        Assert.Contains("value", error.Message, StringComparison.Ordinal);
-        Assert.Contains(Topic, error.Message, StringComparison.Ordinal);
-        Assert.IsType<ThrowingSerializer<byte[]>.BoomException>(error.InnerException);
+        Assert.Same(throwing.LastThrown, error);
         Assert.Equal(1, throwing.InvocationCount);
         Assert.Equal(0, callback.Count);
     }
@@ -147,7 +146,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         NativeProducer producer = NativeProducer.CreateMock(autoComplete: true);
         TestTimeout.Dispose(producer);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { _ = producer.SendViaPump(SerializedRecord(), callback: null); });
     }
 

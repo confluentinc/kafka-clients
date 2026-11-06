@@ -183,15 +183,12 @@ public sealed class PublicAclUndefinedCodeTests
         Assert.Equal(AclOperation.ANY, any.Operation);
         Assert.Equal(AclPermissionType.ANY, any.PermissionType);
 
-        ArgumentException operation = Assert.Throws<ArgumentException>(
+        IllegalArgumentException operation = Assert.Throws<IllegalArgumentException>(
             () => new AccessControlEntry("User:alice", "*", AclOperation.ANY, AclPermissionType.ALLOW));
-        Assert.Equal("operation", operation.ParamName);
-        Assert.Equal(new ArgumentException("operation must not be ANY", "operation").Message, operation.Message);
+        Assert.Equal("operation must not be ANY", operation.Message);
 
-        ArgumentException resourceType = Assert.Throws<ArgumentException>(
+        IllegalArgumentException resourceType = Assert.Throws<IllegalArgumentException>(
             () => new ResourcePattern(ResourceType.ANY, "t", PatternType.LITERAL));
-        Assert.Equal("resourceType", resourceType.ParamName);
-        Assert.Equal(
-            new ArgumentException("resourceType must not be ANY", "resourceType").Message, resourceType.Message);
+        Assert.Equal("resourceType must not be ANY", resourceType.Message);
     }
 }

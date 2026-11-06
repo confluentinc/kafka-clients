@@ -71,7 +71,7 @@ internal class DeliveryState
         _asyncCallback = asyncCallback;
         _topic = topic;
         _partition = partition;
-        Future = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        Future = KafkaFutureImpl<RecordMetadata>.ForSend();
     }
 
     internal KafkaFutureImpl<RecordMetadata> Future { get; }

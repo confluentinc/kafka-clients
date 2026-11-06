@@ -18,6 +18,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Security.Cryptography;
 
+
 namespace Confluent.Kafka.Common;
 
 /// <summary>
@@ -85,12 +86,11 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
 
         if (value.Length > MaxTextLength)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string with prefix `{0}` is too long to be decoded as a base64 UUID",
-                    value.Substring(0, MaxTextLength)),
-                nameof(value));
+                    value.Substring(0, MaxTextLength)));
         }
 
         byte[] bytes;
@@ -100,24 +100,22 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
         }
         catch (FormatException exception)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string `{0}` is not a valid base64 UUID",
                     value),
-                nameof(value),
                 exception);
         }
 
         if (bytes.Length != ByteCount)
         {
-            throw new ArgumentException(
+            throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string `{0}` decoded as {1} bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
                     value,
-                    bytes.Length),
-                nameof(value));
+                    bytes.Length));
         }
 
         return new Uuid(ReadBigEndianInt64(bytes, 0), ReadBigEndianInt64(bytes, 8));

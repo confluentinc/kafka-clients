@@ -66,13 +66,13 @@ internal sealed partial class NativeAdminClient
     private static readonly SafeAdminResultHandle.Destroy s_destroyListPartitionReassignmentsResult =
         NativeMethods.ListPartitionReassignmentsResultDestroy;
 
-    private static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, KafkaException?>> s_copyOutElectionPartitions =
+    private static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, Exception?>> s_copyOutElectionPartitions =
         ElectLeadersMarshal.CopyOutPartitions;
 
     private static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, PartitionReassignment>> s_copyOutReassignments =
         PartitionReassignmentMarshal.CopyOutReassignments;
 
-    internal (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, KafkaException?>> Partitions, SafeAdminResultHandle Result)
+    internal (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
         ElectLeaders(
             ElectionType electionType, IReadOnlyCollection<TopicPartition>? partitions, ElectLeadersOptions? options)
     {

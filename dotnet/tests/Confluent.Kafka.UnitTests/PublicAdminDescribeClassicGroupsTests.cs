@@ -51,8 +51,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
 
         foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> described in result.DescribedGroups)
         {
-            NotSupportedException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<NotSupportedException>(() => described.Value.Get()), s_deadline);
+            UnsupportedOperationException failure = await TestTimeout.Run(
+                () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => described.Value.Get()), s_deadline);
 
             Assert.Equal(NotImplemented, failure.Message);
         }
@@ -66,8 +66,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
 
         AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(new[] { "p5-dclg-all" });
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -86,7 +86,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         Assert.Contains("P5-CDUP", result.DescribedGroups.Keys);
 
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]
@@ -118,8 +118,8 @@ public sealed class PublicAdminDescribeClassicGroupsTests
             new[] { "p5-dclg-flag" },
             new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include });
 
-        NotSupportedException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        UnsupportedOperationException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
 
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -134,7 +134,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         AsyncDescribeClassicGroupsResult result = api.DescribeClassicGroups(new[] { "p5-dclg-iface" });
 
         Assert.Equal(new[] { "p5-dclg-iface" }, result.DescribedGroups.Keys);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
+        await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]
@@ -173,7 +173,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => { admin.DescribeClassicGroups(new[] { "p5-dclg-disposed" }); });
     }
 }

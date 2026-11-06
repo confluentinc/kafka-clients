@@ -143,6 +143,8 @@ pub struct JavaClass {
     pub imports: BTreeMap<String, String>,
     /// The class Javadoc, as plain text.
     pub javadoc: String,
+    /// The `<li>` items of the class Javadoc's first `<ul>`, each as plain text.
+    pub javadoc_list: Vec<String>,
     pub ctors: Vec<Ctor>,
     pub fields: Vec<Field>,
     pub getters: Vec<Getter>,
@@ -541,6 +543,20 @@ pub fn javadoc_text(block: &str) -> String {
     crate::javadoc::plain_text(block)
 }
 
+/// The `<li>` items of the first `<ul>` of a `/** ... */` block, each as plain text.
+fn javadoc_list_items(block: &str) -> Vec<String> {
+    let Some(start) = block.find("<ul>") else {
+        return Vec::new();
+    };
+    let list = &block[start + "<ul>".len()..];
+    let list = &list[..list.find("</ul>").unwrap_or(list.len())];
+    list.split("<li>")
+        .skip(1)
+        .map(|item| javadoc_text(&format!("/** {} */", item.replace("</li>", ""))))
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
 /// The `@deprecated` text of a `/** ... */` block, if it has one.
 fn deprecated_note(block: &str) -> Option<String> {
     let inner = block.trim().trim_start_matches("/**").trim_end_matches("*/");
@@ -685,13 +701,15 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
         .iter()
         .find_map(|n| raw.find(n))
         .unwrap_or(0);
-    let javadoc = raw[..raw_decl]
+    let javadoc_block = raw[..raw_decl]
         .rfind("/**")
         .map(|s| {
             let e = raw[s..].find("*/").map(|e| s + e + 2).unwrap_or(raw_decl);
-            javadoc_text(&raw[s..e])
+            &raw[s..e]
         })
         .unwrap_or_default();
+    let javadoc = javadoc_text(javadoc_block);
+    let javadoc_list = javadoc_list_items(javadoc_block);
 
     // Deprecation notes by constructor parameter-type signature, from `raw`.
     let mut deprecated_by_sig: BTreeMap<String, String> = BTreeMap::new();
@@ -901,6 +919,7 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
         parent_simple,
         imports,
         javadoc,
+        javadoc_list,
         ctors,
         fields,
         getters,

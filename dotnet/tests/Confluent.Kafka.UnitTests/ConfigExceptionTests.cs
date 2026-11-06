@@ -19,6 +19,7 @@ using System.Linq;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Internal;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -99,7 +100,6 @@ public sealed class ConfigExceptionTests
 
         ConfigException thrown = Assert.IsType<ConfigException>(caught);
         Assert.Equal(ConfigErrorCode, thrown.Code);
-        Assert.False(thrown.IsRetriable);
         Assert.Null(thrown.InnerException);
     }
 
@@ -122,12 +122,11 @@ public sealed class ConfigExceptionTests
     {
         var cause = new InvalidOperationException("the cause: café");
 
-        ConfigException exception = ConfigException.FromCore("Invalid url in bootstrap.servers: x", cause);
+        ConfigException exception = new ConfigException(default(CoreError), "Invalid url in bootstrap.servers: x", cause);
 
         Assert.Equal("Invalid url in bootstrap.servers: x", exception.Message);
         Assert.Same(cause, exception.InnerException);
         Assert.Equal(ConfigErrorCode, exception.Code);
-        Assert.False(exception.IsRetriable);
     }
 
     [Theory]

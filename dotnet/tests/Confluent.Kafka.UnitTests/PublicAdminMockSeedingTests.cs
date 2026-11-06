@@ -22,6 +22,8 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -45,8 +47,8 @@ public class PublicAdminMockSeedingTests
 
         admin.TimeoutNextRequest(1);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException failure = await TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(
                 () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-b", 1, 1) }).All().Get()),
             s_deadline);
         Assert.Equal("The mock timed out the request.", failure.Message);
@@ -117,8 +119,9 @@ public class PublicAdminMockSeedingTests
     {
         AsyncMockAdminClient unseeded = AsyncMockAdminClient.Create().Build();
         using IDisposable unseededDisposal = TestTimeout.Disposal(unseeded);
-        FeatureMetadata before = await TestTimeout.Run(
+        FeatureMetadata? before = await TestTimeout.Run(
             () => unseeded.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
+        Assert.NotNull(before);
         Assert.Empty(before.FinalizedFeatures);
         Assert.Empty(before.SupportedFeatures);
 
@@ -129,8 +132,9 @@ public class PublicAdminMockSeedingTests
             .Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        FeatureMetadata after = await TestTimeout.Run(
+        FeatureMetadata? after = await TestTimeout.Run(
             () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
+        Assert.NotNull(after);
 
         FinalizedVersionRange finalized = Assert.Contains("metadata.version", after.FinalizedFeatures);
         Assert.Equal(5, finalized.MinVersionLevel);
@@ -196,17 +200,17 @@ public class PublicAdminMockSeedingTests
     }
 
     [Fact]
-    public void SeedingAfterDisposeThrowsObjectDisposed()
+    public void SeedingAfterDisposeThrowsIllegalState()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
-        Assert.Throws<ObjectDisposedException>(() => admin.TimeoutNextRequest(1));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(() => admin.TimeoutNextRequest(1));
+        Assert.Throws<IllegalStateException>(
             () => admin.UpdateBeginningOffsets(new Dictionary<TopicPartition, long>()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.UpdateEndOffsets(new Dictionary<TopicPartition, long>()));
-        Assert.Throws<ObjectDisposedException>(
+        Assert.Throws<IllegalStateException>(
             () => admin.UpdateConsumerGroupOffsets(new Dictionary<TopicPartition, long>()));
     }
 

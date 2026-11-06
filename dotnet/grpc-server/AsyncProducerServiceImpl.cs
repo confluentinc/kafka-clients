@@ -112,7 +112,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             RecordMetadata metadata = await send.WaitAsync(_sendTimeout).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
-        catch (TimeoutException) when (send is { IsCompleted: false })
+        catch (System.TimeoutException) when (send is { IsCompleted: false })
         {
             // Only the server's own bound is code 7: a send that failed with a TimeoutException
             // (the core's -5) is completed, and goes out through ToProto.

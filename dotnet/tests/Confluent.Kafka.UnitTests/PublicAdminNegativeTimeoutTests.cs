@@ -23,6 +23,8 @@ using Confluent.Kafka.Internal;
 
 using Xunit;
 
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
@@ -57,20 +59,21 @@ public sealed class PublicAdminNegativeTimeoutTests
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        KafkaException zero = await Failure(admin, 0);
+        KafkaTimeoutException zero = await Failure(admin, 0);
         Assert.Equal(RequestTimedOutCode, zero.Code);
 
         foreach (int negative in new[] { -1, int.MinValue })
         {
-            KafkaException failure = await Failure(admin, negative);
+            KafkaTimeoutException failure = await Failure(admin, negative);
             Assert.Equal(zero.Code, failure.Code);
             Assert.Equal(zero.Message, failure.Message);
         }
     }
 
-    private static Task<KafkaException> Failure(IAsyncAdmin admin, int timeoutMs)
+    private static Task<KafkaTimeoutException> Failure(IAsyncAdmin admin, int timeoutMs)
     {
         AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions { TimeoutMs = timeoutMs });
-        return TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.Names().Get()), s_deadline);
+        return TestTimeout.Run(
+            () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => result.Names().Get()), s_deadline);
     }
 }

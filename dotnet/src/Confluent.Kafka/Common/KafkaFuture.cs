@@ -80,29 +80,33 @@ public readonly struct KafkaFuture<T> : IEquatable<KafkaFuture<T>>
     public bool Cancel(bool mayInterruptIfRunning) => Impl.Cancel(mayInterruptIfRunning);
 
     /// <summary>
-    /// Java's <c>Future.get()</c>: blocks until the operation completes, then returns its result or rethrows its
-    /// exception, unwrapped. Inside a delivery callback, on the record's own future, it never returns, as in Java.
+    /// Java's <c>Future.get()</c>: blocks until the operation completes, then returns its result. A failed future
+    /// throws <see cref="ExecutionException"/>, whose <see cref="Exception.InnerException"/> is the failure; a
+    /// cancelled one throws <see cref="OperationCanceledException"/>. Inside a delivery callback, on the record's own
+    /// future, it never returns, as in Java.
     /// </summary>
-    public T Get() => Impl.Get();
+    public T Get() => Impl.GetWrapped();
 
     /// <summary>
-    /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing <see cref="TimeoutException"/> when the future
-    /// has not completed within <paramref name="timeout"/>; a zero or negative timeout checks once, and
-    /// <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does.
+    /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing Java's
+    /// <see cref="Confluent.Kafka.TimeoutException"/> when the future has not completed within
+    /// <paramref name="timeout"/>; a zero or negative timeout checks once, and <see cref="Timeout.InfiniteTimeSpan"/>
+    /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public T Get(TimeSpan timeout) => Impl.Get(timeout);
+    public T Get(TimeSpan timeout) => Impl.GetWrapped(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early with <see cref="OperationCanceledException"/> when
     /// <paramref name="cancellationToken"/> fires first; the token ends only this wait, never the future.
     /// </summary>
-    public T Get(CancellationToken cancellationToken) => Impl.Get(cancellationToken);
+    public T Get(CancellationToken cancellationToken) => Impl.GetWrapped(cancellationToken);
 
     /// <summary>
-    /// Java's <c>getNow</c>: the future's value when it has completed, else <paramref name="valueIfAbsent"/>; rethrows
-    /// the exception of a failed or cancelled future. Never blocks.
+    /// Java's <c>getNow</c>: the future's value when it has completed, else <paramref name="valueIfAbsent"/>; a failed
+    /// future throws <see cref="ExecutionException"/> around its failure, and a cancelled one
+    /// <see cref="OperationCanceledException"/>. Never blocks.
     /// </summary>
-    public T GetNow(T valueIfAbsent) => Impl.GetNow(valueIfAbsent);
+    public T GetNow(T valueIfAbsent) => Impl.GetNowWrapped(valueIfAbsent);
 
     /// <summary>
     /// Java's <c>isCancelled()</c>: whether the future was cancelled, by <see cref="Cancel"/> or by the cancellation of
@@ -274,29 +278,32 @@ public readonly struct KafkaFuture : IEquatable<KafkaFuture>
     public bool Cancel(bool mayInterruptIfRunning) => Impl.Cancel(mayInterruptIfRunning);
 
     /// <summary>
-    /// Java's <c>Future.get()</c> on a future of no value: blocks until the operation completes, then returns or
-    /// rethrows its exception, unwrapped.
+    /// Java's <c>Future.get()</c> on a future of no value: blocks until the operation completes, then returns. A
+    /// failed future throws <see cref="ExecutionException"/>, whose <see cref="Exception.InnerException"/> is the
+    /// failure; a cancelled one throws <see cref="OperationCanceledException"/>.
     /// </summary>
-    public void Get() => Impl.Wait();
+    public void Get() => Impl.WaitWrapped();
 
     /// <summary>
-    /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing <see cref="TimeoutException"/> when the future
-    /// has not completed within <paramref name="timeout"/>; a zero or negative timeout checks once, and
-    /// <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does.
+    /// Java's <c>get(long, TimeUnit)</c>: <see cref="Get()"/>, throwing Java's
+    /// <see cref="Confluent.Kafka.TimeoutException"/> when the future has not completed within
+    /// <paramref name="timeout"/>; a zero or negative timeout checks once, and <see cref="Timeout.InfiniteTimeSpan"/>
+    /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public void Get(TimeSpan timeout) => Impl.Wait(timeout);
+    public void Get(TimeSpan timeout) => Impl.WaitWrapped(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early with <see cref="OperationCanceledException"/> when
     /// <paramref name="cancellationToken"/> fires first; the token ends only this wait, never the future.
     /// </summary>
-    public void Get(CancellationToken cancellationToken) => Impl.Wait(cancellationToken);
+    public void Get(CancellationToken cancellationToken) => Impl.WaitWrapped(cancellationToken);
 
     /// <summary>
-    /// Java's <c>getNow(null)</c> on a future of no value: returns when the future is pending or has succeeded, and
-    /// rethrows the exception of a failed or cancelled future. Never blocks.
+    /// Java's <c>getNow(null)</c> on a future of no value: returns when the future is pending or has succeeded; a
+    /// failed future throws <see cref="ExecutionException"/> around its failure, and a cancelled one
+    /// <see cref="OperationCanceledException"/>. Never blocks.
     /// </summary>
-    public void GetNow() => Impl.GetNow();
+    public void GetNow() => Impl.GetNowWrapped();
 
     /// <summary>
     /// Java's <c>isCancelled()</c>: whether the future was cancelled, by <see cref="Cancel"/> or by the cancellation of

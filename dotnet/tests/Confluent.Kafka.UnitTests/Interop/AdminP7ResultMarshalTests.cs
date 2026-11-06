@@ -255,12 +255,7 @@ public sealed class AdminP7ResultMarshalTests
     public void CopyOutTokens_ANullList_IsEmpty() => Assert.Empty(DelegationTokenMarshal.CopyOutTokens(IntPtr.Zero));
 
     [Fact]
-    public void CopyOutToken_NoToken_ThrowsKafkaException()
-    {
-        KafkaException exception = Assert.Throws<KafkaException>(() => DelegationTokenMarshal.CopyOutToken(IntPtr.Zero));
-
-        Assert.Equal("The admin result produced no delegation token.", exception.Message);
-    }
+    public void CopyOutToken_NoToken_IsNull() => Assert.Null(DelegationTokenMarshal.CopyOutToken(IntPtr.Zero));
 
     [Fact]
     public void CopyOutFinalized_CopiesEachRangeUnderItsName()
@@ -316,12 +311,7 @@ public sealed class AdminP7ResultMarshalTests
     }
 
     [Fact]
-    public void CopyOut_NoMetadata_ThrowsKafkaException()
-    {
-        KafkaException thrown = Assert.Throws<KafkaException>(() => FeatureMetadataMarshal.CopyOut(IntPtr.Zero));
-
-        Assert.Equal("The describeFeatures result produced no feature metadata.", thrown.Message);
-    }
+    public void CopyOut_NoMetadata_IsNull() => Assert.Null(FeatureMetadataMarshal.CopyOut(IntPtr.Zero));
 
     [Theory]
     [InlineData(0L, 0L)]

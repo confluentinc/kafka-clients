@@ -16,16 +16,12 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
-using Confluent.Kafka.Common;
-using Xunit;
 
 namespace Confluent.Kafka.Soak.Tests;
 
 /// <summary>
 /// Builders shared by the soak tests: options read from the <c>SOAK_*</c> environment as
-/// production reads them, and a <see cref="KafkaException"/> with a given code, built by reflection
-/// over the binding's internal constructor (this assembly is not a friend of <c>Confluent.Kafka</c>).
+/// production reads them.
 /// </summary>
 internal static class SoakTestSupport
 {
@@ -59,17 +55,6 @@ internal static class SoakTestSupport
                 Environment.SetEnvironmentVariable(entry.Key, entry.Value);
             }
         }
-    }
-
-    internal static KafkaException KafkaError(int code, string message)
-    {
-        ConstructorInfo constructor = Assert.Single(
-            typeof(KafkaException).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic),
-            candidate => candidate.GetParameters().Select(parameter => parameter.ParameterType)
-                .SequenceEqual(new[] { typeof(int), typeof(string), typeof(bool) }));
-        var error = (KafkaException)constructor.Invoke(new object[] { code, message, false });
-        Assert.Equal(code, error.Code);
-        return error;
     }
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2025 Confluent Inc.
+// Copyright 2026 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// GENERATED, DO NOT EDIT. Produced from the Java source by `cargo xtask generate-error-codes`
+// and checked for staleness by `cargo xtask check-generated`.
+
 using System;
 
 using Confluent.Kafka.Internal;
@@ -19,47 +22,34 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Common.Config;
 
 /// <summary>
-/// An invalid configuration supplied by the user, Java's <c>ConfigException</c>: a <see cref="KafkaException"/> whose
-/// <see cref="KafkaException.Code"/> is -10 and which is not retriable.
+/// Thrown if the user supplies an invalid configuration. Java's <c>org.apache.kafka.common.config.ConfigException</c>.
 /// </summary>
-public class ConfigException : KafkaException
+public class ConfigException : global::Confluent.Kafka.Common.KafkaException
 {
-    /// <summary>Initializes an exception with a message.</summary>
+    /// <summary>Initializes the exception, as Java's <c>ConfigException(String message)</c>.</summary>
     public ConfigException(string? message)
-        : base(Config, message, isRetriable: false)
+        : base(message)
     {
     }
 
-    /// <summary>
-    /// Initializes an exception for an invalid value of a configuration, whose message is
-    /// "Invalid value <paramref name="value"/> for configuration <paramref name="name"/>".
-    /// </summary>
+    /// <summary>Initializes the exception, as Java's <c>ConfigException(String name, Object value)</c>.</summary>
     public ConfigException(string? name, object? value)
         : this(name, value, null)
     {
     }
 
     /// <summary>
-    /// Initializes an exception for an invalid value of a configuration, whose message is
-    /// "Invalid value <paramref name="value"/> for configuration <paramref name="name"/>", followed by
-    /// ": <paramref name="message"/>" when <paramref name="message"/> is not <see langword="null"/>.
+    /// Initializes the exception, as Java's <c>ConfigException(String name, Object value, String message)</c>.
     /// </summary>
     public ConfigException(string? name, object? value, string? message)
-        : base(Config, InvalidValueMessage(name, value, message), isRetriable: false)
+        : base("Invalid value " + JavaText.ValueOf(value) + " for configuration " + JavaText.ValueOf(name) + (message is null ? "" : ": " + JavaText.ValueOf(message)))
     {
     }
 
-    // Private behind a factory: an internal (string?, Exception?) constructor would win overload resolution over the
-    // public (name, value) one for a null value inside the assembly and its test assembly.
-    private ConfigException(string? message, Exception? innerException)
-        : base(Config, message, isRetriable: false, innerException)
+    internal ConfigException(CoreError _, string? message, Exception? innerException)
+        : base(_, message, innerException)
     {
     }
 
-    internal static ConfigException FromCore(string? message, Exception? innerException) =>
-        new ConfigException(message, innerException);
-
-    private static string InvalidValueMessage(string? name, object? value, string? message) =>
-        "Invalid value " + JavaText.ValueOf(value) + " for configuration " + JavaText.ValueOf(name)
-        + (message is null ? string.Empty : ": " + message);
+    internal override int FfiId => -10;
 }

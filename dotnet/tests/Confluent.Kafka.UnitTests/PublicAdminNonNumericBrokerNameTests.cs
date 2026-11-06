@@ -20,7 +20,10 @@ using Confluent.Kafka.Admin;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
 using Xunit;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -142,16 +145,16 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private static async Task AssertTimedOut(Task outcome, string call)
     {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        KafkaTimeoutException failure = await FutureAssert.ThrowsAsync<KafkaTimeoutException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(RequestTimedOutCode, failure.Code);
-        Assert.True(failure.IsRetriable);
+        Assert.IsAssignableFrom<Common.Errors.RetriableException>(failure);
         Assert.Equal("Timed out waiting for a node assignment. Call: " + call, failure.Message);
     }
 
     private static async Task AssertInvalidRequest(Task outcome, string message)
     {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        InvalidRequestException failure = await FutureAssert.ThrowsAsync<InvalidRequestException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(InvalidRequestCode, failure.Code);
         Assert.Equal(message, failure.Message);
@@ -159,7 +162,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private static async Task AssertNotSupported(Task outcome, string message)
     {
-        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
+        UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(message, failure.Message);
     }
