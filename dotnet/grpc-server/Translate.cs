@@ -76,6 +76,24 @@ internal static class Translate
         return result;
     }
 
+    /// <summary>
+    /// A transaction's offsets: an absent metadata is the empty string and an absent leader epoch none,
+    /// as Python's <c>_proto_offset_entries_to_dict</c> reads them.
+    /// </summary>
+    internal static Dictionary<TopicPartition, OffsetAndMetadata> OffsetEntriesToDictionary(
+        IEnumerable<Proto.OffsetEntry> offsets)
+    {
+        Dictionary<TopicPartition, OffsetAndMetadata> result = new Dictionary<TopicPartition, OffsetAndMetadata>();
+        foreach (Proto.OffsetEntry entry in offsets)
+        {
+            int? leaderEpoch = entry.HasLeaderEpoch ? entry.LeaderEpoch : (int?)null;
+            string metadata = entry.HasMetadata ? entry.Metadata : string.Empty;
+            result[new TopicPartition(entry.Topic, entry.Partition)] = new OffsetAndMetadata(entry.Offset, metadata, leaderEpoch);
+        }
+
+        return result;
+    }
+
     internal const string PatternSubscribeUnsupported = "pattern subscribe is not supported by the .NET binding yet";
 
     internal static TimeSpan? ConsumerTimeout(bool hasTimeoutMs, long timeoutMs) =>
@@ -192,6 +210,12 @@ internal static class Translate
     {
         Code = LocalIllegalStateCode,
         Message = $"unknown producer_id {producerId}",
+    };
+
+    internal static Proto.KafkaError UnknownGroupMetadata(ulong groupMetadataId) => new Proto.KafkaError
+    {
+        Code = LocalIllegalStateCode,
+        Message = $"unknown group_metadata_id {groupMetadataId}",
     };
 
     internal static Proto.KafkaError SendTimedOut() => new Proto.KafkaError
