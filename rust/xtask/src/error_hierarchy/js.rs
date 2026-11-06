@@ -128,9 +128,10 @@ fn root_body(info: &ClassInfo) -> String {
 fn abstract_body(info: &ClassInfo, parent: &str) -> String {
     let name = &info.py_name;
     format!(
-        r#"export class {name} extends {parent} {{
+        r#"export abstract class {name} extends {parent} {{
   /**
-   * A catch-only base: constructing it directly throws `TypeError`.
+   * A catch-only base: constructing it directly throws `TypeError` (and
+   * TypeScript rejects `new` on it, as Java's abstract class).
    *
    * @param message - the message a subclass passes on, Java's message
    * @param options - `cause`: the cause a subclass passes on, Java's cause
@@ -307,6 +308,8 @@ mod tests {
         assert_eq!(state.dir, "");
         assert!(state.content.contains("\nsetFfiId(IllegalStateError, -4);"));
         let retriable = find("RetriableError");
+        // Java's abstract base is abstract: TypeScript rejects `new`, the runtime guard stays for JavaScript.
+        assert!(retriable.content.contains("export abstract class RetriableError extends ApiError {"));
         assert!(retriable.content.contains("if (new.target === RetriableError) {"));
         assert!(!retriable.content.contains("setFfiId"));
         let api = find("ApiError");

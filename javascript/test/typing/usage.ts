@@ -24,6 +24,7 @@ import {
   type Data,
   type Header,
   KafkaProducer,
+  ProducerConfig,
   type ProducerConfigs,
   ProducerRecord,
   type ProducerRecordOptions,
@@ -108,6 +109,8 @@ const config: ConfigError = new ConfigError('Invalid value');
 void [sasl, base, stateCode, retriable, config];
 class MyRetriable extends RetriableError {}
 void new MyRetriable('m');
+// @ts-expect-error Java's RetriableError is abstract: caught and subclassed, never constructed
+new RetriableError('m');
 // @ts-expect-error code is read-only
 base.code = 1;
 
@@ -121,6 +124,8 @@ const protocolId: number = protocol.id;
 void [mechanism, truststore, reconfigurable, auth, protocolId];
 // @ts-expect-error a constant is read-only
 SslConfigs.SSL_PROTOCOL_CONFIG = 'x';
+// @ts-expect-error ProducerConfig holds Java's constants only: its constructor is private
+new ProducerConfig();
 
 // Made by the client only.
 // @ts-expect-error RecordMetadata's constructor is private
