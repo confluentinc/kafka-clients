@@ -210,16 +210,13 @@ public sealed class PublicAdminP2aShapeParityTests
         Assert.Empty(six.LastKnownElr()!);
     }
 
-    private static void AssertNullableDictionary<TKey, TValue>(Type declaring, string propertyName)
+    private static void AssertNullableDictionary<TKey, TValue>(Type declaring, string methodName)
     {
-        PropertyInfo property = declaring.GetProperty(propertyName)!;
+        MethodInfo getter = Getters.Get(declaring, methodName);
 
-        Assert.Equal(typeof(IReadOnlyDictionary<TKey, TValue>), property.PropertyType);
-        AssertNullableProperty(declaring, propertyName);
+        Assert.Equal(typeof(IReadOnlyDictionary<TKey, TValue>), getter.ReturnType);
+        AssertNullableGetter(declaring, methodName);
     }
-
-    private static void AssertNullableProperty(Type declaring, string propertyName) =>
-        Assert.Equal(2, NullableFlag(declaring.GetProperty(propertyName)!));
 
     private static void AssertNullableGetter(Type declaring, string methodName) =>
         Assert.Equal(2, NullableFlag(Getters.Get(declaring, methodName)));

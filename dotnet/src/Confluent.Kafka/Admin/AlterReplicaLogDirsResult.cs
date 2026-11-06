@@ -56,7 +56,8 @@ public sealed class AlterReplicaLogDirsResult
     /// <summary>
     /// One future per requested replica — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> Values => _values;
+    /// <returns>One future per requested replica.</returns>
+    public IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every replica move has been accepted, and fails with the first failure

@@ -58,11 +58,11 @@ public sealed class AdminP9PerKeyStage5Tests
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(bindings, options: null));
 
-        Assert.Equal(bindings.Length, result.Values.Count);
+        Assert.Equal(bindings.Length, result.Values().Count);
         foreach (AclBinding binding in bindings)
         {
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-                () => TestTimeout.Run(() => result.Values[binding].Get(), s_deadline));
+                () => TestTimeout.Run(() => result.Values()[binding].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
     }
@@ -79,11 +79,11 @@ public sealed class AdminP9PerKeyStage5Tests
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(admin.AlterClientQuotas(
             new[] { Alteration(alpha), Alteration(beta) }, options: null));
 
-        Assert.Equal(2, result.Values.Count);
+        Assert.Equal(2, result.Values().Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
         {
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-                () => TestTimeout.Run(() => result.Values[entity].Get(), s_deadline));
+                () => TestTimeout.Run(() => result.Values()[entity].Get(), s_deadline));
 
             // The core mock's own wording, typo included.
             Assert.Equal("Not implement yet", failure.Message);
@@ -103,7 +103,7 @@ public sealed class AdminP9PerKeyStage5Tests
         AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.OfClient(admin.DeleteTopics(
             TopicCollection.OfTopicIds(new[] { first, second }), options: null));
 
-        IReadOnlyDictionary<Uuid, AsyncKafkaFuture> values = result.TopicIdValues!;
+        IReadOnlyDictionary<Uuid, AsyncKafkaFuture> values = result.TopicIdValues()!;
         Assert.Equal(2, values.Count);
 
         foreach (Uuid id in new[] { first, second })
@@ -136,15 +136,15 @@ public sealed class AdminP9PerKeyStage5Tests
             },
             options: null));
 
-        Assert.Equal(2, result.Values.Count);
+        Assert.Equal(2, result.Values().Count);
 
         KafkaStorageException zeroFailure = await FutureAssert.ThrowsAsync<KafkaStorageException>(
-            () => TestTimeout.Run(() => result.Values[zero].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[zero].Get(), s_deadline));
         Assert.Equal(KafkaStorageErrorCode, zeroFailure.Code);
         Assert.Equal("Log directory /cp6-offline-zero is offline", zeroFailure.Message);
 
         KafkaStorageException oneFailure = await FutureAssert.ThrowsAsync<KafkaStorageException>(
-            () => TestTimeout.Run(() => result.Values[one].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[one].Get(), s_deadline));
         Assert.Equal("Log directory /cp6-offline-one is offline", oneFailure.Message);
     }
 
@@ -169,10 +169,10 @@ public sealed class AdminP9PerKeyStage5Tests
             },
             options: null));
 
-        await TestTimeout.Run(() => result.Values[inRange].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[inRange].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
-            () => TestTimeout.Run(() => result.Values[outOfRange].Get(), s_deadline));
+            () => TestTimeout.Run(() => result.Values()[outOfRange].Get(), s_deadline));
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
     }
 
@@ -185,11 +185,11 @@ public sealed class AdminP9PerKeyStage5Tests
         AsyncDeleteConsumerGroupsResult groups =
             AsyncDeleteConsumerGroupsResult.OfClient(admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: null));
 
-        Assert.Equal(2, groups.DeletedGroups.Count);
+        Assert.Equal(2, groups.DeletedGroups().Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
         {
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-                () => TestTimeout.Run(() => groups.DeletedGroups[group].Get(), s_deadline));
+                () => TestTimeout.Run(() => groups.DeletedGroups()[group].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
     }
@@ -209,11 +209,11 @@ public sealed class AdminP9PerKeyStage5Tests
             },
             options: null));
 
-        Assert.Equal(2, result.Values.Count);
+        Assert.Equal(2, result.Values().Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })
         {
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
-                () => TestTimeout.Run(() => result.Values[user].Get(), s_deadline));
+                () => TestTimeout.Run(() => result.Values()[user].Get(), s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
     }

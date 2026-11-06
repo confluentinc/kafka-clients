@@ -363,7 +363,7 @@ public sealed class PublicAdminStringTests
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
         UnknownTopicOrPartitionException absent = await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
-            () => TestTimeout.Run(() => described.TopicNameValues!["a"].Get(), s_deadline));
+            () => TestTimeout.Run(() => described.TopicNameValues()!["a"].Get(), s_deadline));
         Assert.Equal("Topic a not found.", absent.Message);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic("after-rejection", 1, 1) });
@@ -381,7 +381,7 @@ public sealed class PublicAdminStringTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
-        Assert.Equal(new[] { name }, created.Values.Keys);
+        Assert.Equal(new[] { name }, created.Values().Keys);
         await TestTimeout.Run(() => created.All().Get(), s_deadline);
 
         AsyncListTopicsResult listed = admin.ListTopics();

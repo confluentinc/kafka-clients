@@ -109,7 +109,7 @@ public sealed class PublicAdminP7ShapeParityTests
     {
         Assert.Equal(
             typeof(IReadOnlyDictionary<,>).MakeGenericType(typeof(string), futureType),
-            resultType.GetProperty("Values")!.PropertyType);
+            Getters.Get(resultType, "Values").ReturnType);
         Assert.Equal(futureType, resultType.GetMethod("All", Type.EmptyTypes)!.ReturnType);
 
         Assert.Equal(

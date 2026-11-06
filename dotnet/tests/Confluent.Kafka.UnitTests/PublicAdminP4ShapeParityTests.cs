@@ -110,22 +110,19 @@ public sealed class PublicAdminP4ShapeParityTests
     [Fact]
     public void AlterPartitionReassignmentsResult_PublishesOneFuturePerPartition()
     {
-        PropertyInfo values = typeof(AlterPartitionReassignmentsResult).GetProperty(
-            nameof(AlterPartitionReassignmentsResult.Values))!;
+        MethodInfo values = Getters.Get(
+            typeof(AlterPartitionReassignmentsResult), nameof(AlterPartitionReassignmentsResult.Values));
         MethodInfo all = typeof(AlterPartitionReassignmentsResult).GetMethod(
             nameof(AlterPartitionReassignmentsResult.All), Type.EmptyTypes)!;
 
-        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture>), values.ReturnType);
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(values));
-        Assert.Null(values.SetMethod);
 
         Assert.Equal(
-            new[] { nameof(AlterPartitionReassignmentsResult.All) },
+            new[] { nameof(AlterPartitionReassignmentsResult.All), nameof(AlterPartitionReassignmentsResult.Values) },
             DeclaredPublicMethodNames(typeof(AlterPartitionReassignmentsResult)));
-        Assert.Equal(
-            new[] { nameof(AlterPartitionReassignmentsResult.Values) },
-            DeclaredPublicPropertyNames(typeof(AlterPartitionReassignmentsResult)));
+        Assert.Empty(DeclaredPublicPropertyNames(typeof(AlterPartitionReassignmentsResult)));
     }
 
     [Fact]

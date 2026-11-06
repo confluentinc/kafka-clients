@@ -191,10 +191,10 @@ public sealed class PublicAdminP7Tests
 
         Assert.Equal(
             new[] { "group.version", "metadata.version" },
-            result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
 
         await FutureAssert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
-        foreach (AsyncKafkaFuture value in result.Values.Values)
+        foreach (AsyncKafkaFuture value in result.Values().Values)
         {
             await FutureAssert.ThrowsAsync<InvalidRequestException>(() => value.Get());
         }
@@ -209,7 +209,7 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result =
             admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal));
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -274,7 +274,7 @@ public sealed class PublicAdminP7Tests
                 ["a b"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
-        Assert.Equal(new[] { "a b" }, result.Values.Keys);
+        Assert.Equal(new[] { "a b" }, result.Values().Keys);
     }
 
     [Theory]
@@ -293,7 +293,7 @@ public sealed class PublicAdminP7Tests
                 [feature] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
-        Assert.Equal(new[] { feature }, result.Values.Keys);
+        Assert.Equal(new[] { feature }, result.Values().Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -312,12 +312,12 @@ public sealed class PublicAdminP7Tests
 
         Assert.Equal(
             new[] { "group.version", "metadata.version" },
-            result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
 
         // A null per-key error is the success of a KafkaFuture<Void> result. Status, as IsCompletedSuccessfully post-dates
         // netstandard2.0.
         await result.All().Get();
-        foreach (AsyncKafkaFuture value in result.Values.Values)
+        foreach (AsyncKafkaFuture value in result.Values().Values)
         {
             Assert.Equal(TaskStatus.RanToCompletion, value.Get().Status);
         }

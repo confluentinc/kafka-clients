@@ -49,10 +49,10 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { binding }, options: null));
 
-        AclBinding key = Assert.Single(result.Values).Key;
+        AclBinding key = Assert.Single(result.Values()).Key;
         Assert.Equal(binding, key);
         Assert.Equal(0, Code(column, key.Pattern().ResourceType(), key.Pattern().PatternType(), key.Entry().Operation(), key.Entry().PermissionType()));
-        await AssertNotImplemented(result.Values[binding].Get());
+        await AssertNotImplemented(result.Values()[binding].Get());
     }
 
     [Theory]
@@ -70,8 +70,8 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { first, second }, options: null));
 
-        Assert.Equal(first, Assert.Single(result.Values).Key);
-        await AssertNotImplemented(result.Values[second].Get());
+        Assert.Equal(first, Assert.Single(result.Values()).Key);
+        await AssertNotImplemented(result.Values()[second].Get());
     }
 
     [Theory]
@@ -89,10 +89,10 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { filter }, options: null));
 
-        AclBindingFilter key = Assert.Single(result.Values).Key;
+        AclBindingFilter key = Assert.Single(result.Values()).Key;
         Assert.Equal(filter, key);
         Assert.Equal(0, Code(column, key.PatternFilter().ResourceType(), key.PatternFilter().PatternType(), key.EntryFilter().Operation(), key.EntryFilter().PermissionType()));
-        await AssertNotImplemented(result.Values[filter].Get());
+        await AssertNotImplemented(result.Values()[filter].Get());
     }
 
     [Theory]
@@ -110,8 +110,8 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { first, second }, options: null));
 
-        Assert.Equal(first, Assert.Single(result.Values).Key);
-        await AssertNotImplemented(result.Values[second].Get());
+        Assert.Equal(first, Assert.Single(result.Values()).Key);
+        await AssertNotImplemented(result.Values()[second].Get());
     }
 
     public enum Column

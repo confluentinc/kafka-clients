@@ -116,8 +116,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
         AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(request, null));
 
-        Assert.Single(result.Values);
-        KafkaStorageException failure = FutureAssert.Throws<KafkaStorageException>(() => result.Values[second].Get(s_deadline));
+        Assert.Single(result.Values());
+        KafkaStorageException failure = FutureAssert.Throws<KafkaStorageException>(() => result.Values()[second].Get(s_deadline));
         Assert.Equal(KafkaStorageErrorCode, failure.Code);
         Assert.Equal("Log directory /first is offline", failure.Message);
     }

@@ -59,7 +59,8 @@ public sealed class AlterClientQuotasResult
     /// <summary>
     /// One future per requested entity, keyed by the entity — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> Values => _values;
+    /// <returns>One future per requested entity, keyed by the entity.</returns>
+    public IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every entity's quotas have been altered, and fails with the first

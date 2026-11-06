@@ -94,8 +94,8 @@ public interface IAdmin : IDisposable
     /// with <see cref="TopicCollection.OfTopicNames"/> or
     /// <see cref="TopicCollection.OfTopicIds"/>; the choice selects which of the two ABI
     /// entry points runs, and which of
-    /// <see cref="DeleteTopicsResult.TopicNameValues"/> /
-    /// <see cref="DeleteTopicsResult.TopicIdValues"/> is non-null. A repeated topic yields
+    /// <see cref="DeleteTopicsResult.TopicNameValues()"/> /
+    /// <see cref="DeleteTopicsResult.TopicIdValues()"/> is non-null. A repeated topic yields
     /// one entry, as Java's map-keyed result does.
     /// </param>
     /// <param name="options">
@@ -126,7 +126,7 @@ public interface IAdmin : IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One future per topic, in <see cref="DeleteTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="DeleteTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
     /// A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
@@ -185,7 +185,7 @@ public interface IAdmin : IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// One future per topic, in <see cref="DescribeTopicsResult.TopicNameValues"/>.
+    /// One future per topic, in <see cref="DescribeTopicsResult.TopicNameValues()"/>.
     /// </returns>
     /// <remarks>
     /// A lone literal <see langword="null"/> argument matches both <c>DescribeTopics</c>

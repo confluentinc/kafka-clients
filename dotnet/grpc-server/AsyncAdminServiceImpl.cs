@@ -134,7 +134,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .RetryOnQuotaViolation(TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation)));
 
             Proto.CreateTopicsResponse response = new Proto.CreateTopicsResponse();
-            foreach (KeyValuePair<string, AsyncKafkaFuture> pair in result.Values)
+            foreach (KeyValuePair<string, AsyncKafkaFuture> pair in result.Values())
             {
                 Proto.CreateTopicsEntry entry = new Proto.CreateTopicsEntry { Key = TranslateAdmin.NameKey(pair.Key) };
                 Proto.KafkaError? error = await TranslateAdmin.ResolveVoid(pair.Value).ConfigureAwait(false);
@@ -175,9 +175,9 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .RetryOnQuotaViolation(TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation)));
 
-            return result.TopicIdValues is not null
-                ? await TranslateAdmin.VoidResponse(result.TopicIdValues, TranslateAdmin.TopicIdKey).ConfigureAwait(false)
-                : await TranslateAdmin.VoidResponse(result.TopicNameValues!, TranslateAdmin.NameKey).ConfigureAwait(false);
+            return result.TopicIdValues() is { } topicIdValues
+                ? await TranslateAdmin.VoidResponse(topicIdValues, TranslateAdmin.TopicIdKey).ConfigureAwait(false)
+                : await TranslateAdmin.VoidResponse(result.TopicNameValues()!, TranslateAdmin.NameKey).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -238,9 +238,9 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 TranslateAdmin.TopicCollectionOf(byIds, request.Names, request.TopicIds), options);
 
             Proto.DescribeTopicsResponse response = new Proto.DescribeTopicsResponse();
-            if (result.TopicIdValues is not null)
+            if (result.TopicIdValues() is { } topicIdValues)
             {
-                foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> pair in result.TopicIdValues)
+                foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> pair in topicIdValues)
                 {
                     response.Entries.Add(
                         await DescribeTopicsEntry(TranslateAdmin.TopicIdKey(pair.Key), pair.Value).ConfigureAwait(false));
@@ -248,7 +248,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             }
             else
             {
-                foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> pair in result.TopicNameValues!)
+                foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> pair in result.TopicNameValues()!)
                 {
                     response.Entries.Add(
                         await DescribeTopicsEntry(TranslateAdmin.NameKey(pair.Key), pair.Value).ConfigureAwait(false));
@@ -280,7 +280,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .ValidateOnly(request.ValidateOnly)
                     .RetryOnQuotaViolation(TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation)));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey).ConfigureAwait(false);
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.NameKey).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -304,7 +304,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
             Proto.DeleteRecordsResponse response = new Proto.DeleteRecordsResponse();
-            foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DeletedRecords>> pair in result.LowWatermarks)
+            foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DeletedRecords>> pair in result.LowWatermarks())
             {
                 (DeletedRecords deleted, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -412,7 +412,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .IncludeDocumentation(request.IncludeDocumentation));
 
             Proto.DescribeConfigsResponse response = new Proto.DescribeConfigsResponse();
-            foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> pair in result.Values)
+            foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> pair in result.Values())
             {
                 (Config config, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -456,7 +456,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .ValidateOnly(request.ValidateOnly));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ConfigResourceKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.ConfigResourceKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -512,7 +512,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             Proto.DescribeLogDirsResponse response = new Proto.DescribeLogDirsResponse();
             foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> pair in
-                result.Descriptions)
+                result.Descriptions())
             {
                 (IReadOnlyDictionary<string, LogDirDescription> descriptions, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -563,7 +563,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 new AlterReplicaLogDirsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ReplicaKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.ReplicaKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -589,7 +589,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             Proto.DescribeReplicaLogDirsResponse response = new Proto.DescribeReplicaLogDirsResponse();
             foreach (KeyValuePair<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> pair
-                in result.Values)
+                in result.Values())
             {
                 (DescribeReplicaLogDirsResult.ReplicaLogDirInfo info, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -701,7 +701,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .AllowReplicationFactorChange(!request.HasAllowReplicationFactorChange
                         || request.AllowReplicationFactorChange));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.PartitionKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.PartitionKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1049,7 +1049,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
             Proto.FenceProducersResponse response = new Proto.FenceProducersResponse();
-            foreach (string id in result.FencedProducers.Keys)
+            foreach (string id in result.FencedProducers().Keys)
             {
                 (long producerId, Proto.KafkaError? idError) =
                     await TranslateAdmin.Resolve(result.ProducerId(id)).ConfigureAwait(false);
@@ -1136,7 +1136,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .IncludeAuthorizedOperations(request.IncludeAuthorizedOperations));
 
             Proto.DescribeConsumerGroupsResponse response = new Proto.DescribeConsumerGroupsResponse();
-            foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> pair in result.DescribedGroups)
+            foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> pair in result.DescribedGroups())
             {
                 (ConsumerGroupDescription description, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -1181,7 +1181,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .IncludeAuthorizedOperations(request.IncludeAuthorizedOperations));
 
             Proto.DescribeClassicGroupsResponse response = new Proto.DescribeClassicGroupsResponse();
-            foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> pair in result.DescribedGroups)
+            foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> pair in result.DescribedGroups())
             {
                 (ClassicGroupDescription description, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -1364,7 +1364,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 new DeleteConsumerGroupsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return await TranslateAdmin.VoidResponse(result.DeletedGroups, TranslateAdmin.NameKey)
+            return await TranslateAdmin.VoidResponse(result.DeletedGroups(), TranslateAdmin.NameKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1439,7 +1439,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 new CreateAclsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.AclBindingKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.AclBindingKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1501,7 +1501,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
             Proto.DeleteAclsResponse response = new Proto.DeleteAclsResponse();
-            foreach (KeyValuePair<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> pair in result.Values)
+            foreach (KeyValuePair<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> pair in result.Values())
             {
                 (DeleteAclsResult.FilterResults results, Proto.KafkaError? error) =
                     await TranslateAdmin.Resolve(pair.Value).ConfigureAwait(false);
@@ -1594,7 +1594,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .ValidateOnly(request.ValidateOnly));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.QuotaEntityKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.QuotaEntityKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1679,7 +1679,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 new AlterUserScramCredentialsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.NameKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1860,7 +1860,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .ValidateOnly(request.ValidateOnly));
 
-            return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey)
+            return await TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.NameKey)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1872,17 +1872,17 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
     private static Proto.FilterResults FilterResultsToProto(DeleteAclsResult.FilterResults results)
     {
         Proto.FilterResults proto = new Proto.FilterResults();
-        foreach (DeleteAclsResult.FilterResult result in results.Values)
+        foreach (DeleteAclsResult.FilterResult result in results.Values())
         {
             Proto.DeletedAcl deleted = new Proto.DeletedAcl();
-            if (result.Binding is not null)
+            if (result.Binding() is { } binding)
             {
-                deleted.Binding = TranslateAdmin.AclBindingToProto(result.Binding);
+                deleted.Binding = TranslateAdmin.AclBindingToProto(binding);
             }
 
-            if (result.Exception is not null)
+            if (result.Exception() is { } exception)
             {
-                deleted.Exception = Translate.ToProto(result.Exception);
+                deleted.Exception = Translate.ToProto(exception);
             }
 
             proto.Values.Add(deleted);

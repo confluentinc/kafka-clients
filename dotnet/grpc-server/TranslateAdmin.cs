@@ -631,12 +631,12 @@ internal static class TranslateAdmin
     {
         Proto.ListOffsetsResultInfo proto = new Proto.ListOffsetsResultInfo
         {
-            Offset = info.Offset,
-            Timestamp = info.Timestamp,
+            Offset = info.Offset(),
+            Timestamp = info.Timestamp(),
         };
-        if (info.LeaderEpoch.HasValue)
+        if (info.LeaderEpoch() is { } leaderEpoch)
         {
-            proto.LeaderEpoch = info.LeaderEpoch.Value;
+            proto.LeaderEpoch = leaderEpoch;
         }
 
         return proto;
@@ -668,7 +668,7 @@ internal static class TranslateAdmin
         DescribeProducersResult.PartitionProducerState value)
     {
         Proto.PartitionProducerState proto = new Proto.PartitionProducerState();
-        foreach (ProducerState state in value.ActiveProducers)
+        foreach (ProducerState state in value.ActiveProducers())
         {
             proto.ActiveProducers.Add(ProducerStateToProto(state));
         }

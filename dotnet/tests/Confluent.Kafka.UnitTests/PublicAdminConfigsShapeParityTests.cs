@@ -78,19 +78,16 @@ public sealed class PublicAdminConfigsShapeParityTests
     [Fact]
     public void TheTwoResults_DifferExactlyAsJavasDo()
     {
-        PropertyInfo describeValues = typeof(DescribeConfigsResult).GetProperty(
-            nameof(DescribeConfigsResult.Values))!;
-        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture<Config>>), describeValues.PropertyType);
-        Assert.Null(describeValues.SetMethod);
+        MethodInfo describeValues = Getters.Get(typeof(DescribeConfigsResult), nameof(DescribeConfigsResult.Values));
+        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture<Config>>), describeValues.ReturnType);
 
         MethodInfo describeAll = typeof(DescribeConfigsResult).GetMethod(
             nameof(DescribeConfigsResult.All), Type.EmptyTypes)!;
         Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<ConfigResource, Config>>), describeAll.ReturnType);
 
-        PropertyInfo alterValues = typeof(AlterConfigsResult).GetProperty(nameof(AlterConfigsResult.Values))!;
+        MethodInfo alterValues = Getters.Get(typeof(AlterConfigsResult), nameof(AlterConfigsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture>), alterValues.PropertyType);
-        Assert.Null(alterValues.SetMethod);
+        Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture>), alterValues.ReturnType);
 
         MethodInfo alterAll = typeof(AlterConfigsResult).GetMethod(nameof(AlterConfigsResult.All), Type.EmptyTypes)!;
 

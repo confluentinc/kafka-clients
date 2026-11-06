@@ -1181,7 +1181,7 @@ internal sealed class SoakClient : IDisposable
         IReadOnlyDictionary<string, AsyncKafkaFuture>? created = null;
         try
         {
-            created = admin.CreateTopics(new[] { newTopic }).Values;
+            created = admin.CreateTopics(new[] { newTopic }).Values();
         }
         catch (Exception ex)
         {
@@ -1250,7 +1250,7 @@ internal sealed class SoakClient : IDisposable
         {
             deleted = admin.DeleteTopics(
                 TopicCollection.OfTopicNames(new[] { topic }),
-                new DeleteTopicsOptions().TimeoutMs(30000)).TopicNameValues;
+                new DeleteTopicsOptions().TimeoutMs(30000)).TopicNameValues();
         }
         catch (Exception ex)
         {
@@ -1284,7 +1284,7 @@ internal sealed class SoakClient : IDisposable
         IReadOnlyDictionary<string, AsyncKafkaFuture>? created = null;
         try
         {
-            created = admin.CreateTopics(new[] { newTopic }).Values;
+            created = admin.CreateTopics(new[] { newTopic }).Values();
         }
         catch (Exception ex)
         {

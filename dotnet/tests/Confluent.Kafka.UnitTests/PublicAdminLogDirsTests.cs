@@ -49,7 +49,7 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
         IReadOnlyDictionary<string, LogDirDescription> directories =
-            await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Descriptions()[0].Get(), s_deadline);
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
         Assert.Null(description.Error());
@@ -73,7 +73,7 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
         IReadOnlyDictionary<string, LogDirDescription> directories =
-            await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Descriptions()[0].Get(), s_deadline);
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
         Assert.False(description.IsCordoned());
@@ -89,7 +89,7 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
         IReadOnlyDictionary<string, LogDirDescription> directories =
-            await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Descriptions()[0].Get(), s_deadline);
         Assert.Empty(directories);
     }
 
@@ -106,12 +106,12 @@ public sealed class PublicAdminLogDirsTests
         AsyncAlterReplicaLogDirsResult moved = admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir });
 
-        await TestTimeout.Run(() => moved.Values[replica].Get(), s_deadline);
+        await TestTimeout.Run(() => moved.Values()[replica].Get(), s_deadline);
         await TestTimeout.Run(() => moved.All().Get(), s_deadline);
 
         AsyncDescribeReplicaLogDirsResult described = admin.DescribeReplicaLogDirs(new[] { replica });
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info =
-            await TestTimeout.Run(() => described.Values[replica].Get(), s_deadline);
+            await TestTimeout.Run(() => described.Values()[replica].Get(), s_deadline);
 
         Assert.Equal(DefaultLogDir, info.GetCurrentReplicaLogDir());
         Assert.Equal(DefaultLogDir, info.GetFutureReplicaLogDir());
@@ -135,7 +135,7 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(new[] { replica });
 
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info =
-            await TestTimeout.Run(() => result.Values[replica].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Values()[replica].Get(), s_deadline);
 
         Assert.Null(info.GetFutureReplicaLogDir());
         Assert.Equal("ReplicaLogDirInfo(currentReplicaLogDir=/tmp/kafka-logs)", info.ToString());
@@ -158,7 +158,7 @@ public sealed class PublicAdminLogDirsTests
             new Dictionary<TopicPartitionReplica, string> { [replica] = "/mnt/absent" });
 
         KafkaStorageException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => result.Values[replica].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => result.Values()[replica].Get()), s_deadline);
         Assert.Equal("Log directory /mnt/absent is offline", failure.Message);
     }
 
@@ -175,7 +175,7 @@ public sealed class PublicAdminLogDirsTests
             new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir });
 
         ReplicaNotAvailableException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values[replica].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values()[replica].Get()), s_deadline);
 
         // The core renders the replica into this message, which is why ToString is topic-partition-brokerId.
         Assert.Equal($"Can't find {replica}", failure.Message);
@@ -194,7 +194,7 @@ public sealed class PublicAdminLogDirsTests
             admin.DescribeReplicaLogDirs(new[] { new TopicPartitionReplica(Topic, 0, 0) });
 
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info = await TestTimeout.Run(
-            () => result.Values[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
+            () => result.Values()[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
         Assert.Equal(DefaultLogDir, info.GetCurrentReplicaLogDir());
 
         AsyncAlterReplicaLogDirsResult moved = admin.AlterReplicaLogDirs(
@@ -202,7 +202,7 @@ public sealed class PublicAdminLogDirsTests
             {
                 [new TopicPartitionReplica(Topic, 0, 0)] = DefaultLogDir,
             });
-        await TestTimeout.Run(() => moved.Values[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
+        await TestTimeout.Run(() => moved.Values()[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
     }
 
     [Fact]

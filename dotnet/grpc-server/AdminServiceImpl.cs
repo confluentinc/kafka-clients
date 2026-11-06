@@ -134,7 +134,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .RetryOnQuotaViolation(TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation)));
 
             Proto.CreateTopicsResponse response = new Proto.CreateTopicsResponse();
-            foreach (KeyValuePair<string, KafkaFuture> pair in result.Values)
+            foreach (KeyValuePair<string, KafkaFuture> pair in result.Values())
             {
                 Proto.CreateTopicsEntry entry = new Proto.CreateTopicsEntry { Key = TranslateAdmin.NameKey(pair.Key) };
                 Proto.KafkaError? error = TranslateAdmin.ResolveVoid(pair.Value);
@@ -175,9 +175,9 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .RetryOnQuotaViolation(TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation)));
 
-            return Task.FromResult(result.TopicIdValues is not null
-                ? TranslateAdmin.VoidResponse(result.TopicIdValues, TranslateAdmin.TopicIdKey)
-                : TranslateAdmin.VoidResponse(result.TopicNameValues!, TranslateAdmin.NameKey));
+            return Task.FromResult(result.TopicIdValues() is { } topicIdValues
+                ? TranslateAdmin.VoidResponse(topicIdValues, TranslateAdmin.TopicIdKey)
+                : TranslateAdmin.VoidResponse(result.TopicNameValues()!, TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
@@ -238,9 +238,9 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 TranslateAdmin.TopicCollectionOf(byIds, request.Names, request.TopicIds), options);
 
             Proto.DescribeTopicsResponse response = new Proto.DescribeTopicsResponse();
-            if (result.TopicIdValues is not null)
+            if (result.TopicIdValues() is { } topicIdValues)
             {
-                foreach (KeyValuePair<Uuid, KafkaFuture<TopicDescription>> pair in result.TopicIdValues)
+                foreach (KeyValuePair<Uuid, KafkaFuture<TopicDescription>> pair in topicIdValues)
                 {
                     response.Entries.Add(
                         DescribeTopicsEntry(TranslateAdmin.TopicIdKey(pair.Key), pair.Value));
@@ -248,7 +248,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
             }
             else
             {
-                foreach (KeyValuePair<string, KafkaFuture<TopicDescription>> pair in result.TopicNameValues!)
+                foreach (KeyValuePair<string, KafkaFuture<TopicDescription>> pair in result.TopicNameValues()!)
                 {
                     response.Entries.Add(
                         DescribeTopicsEntry(TranslateAdmin.NameKey(pair.Key), pair.Value));
@@ -280,7 +280,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .ValidateOnly(request.ValidateOnly)
                     .RetryOnQuotaViolation(TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation)));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
@@ -304,7 +304,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
             Proto.DeleteRecordsResponse response = new Proto.DeleteRecordsResponse();
-            foreach (KeyValuePair<TopicPartition, KafkaFuture<DeletedRecords>> pair in result.LowWatermarks)
+            foreach (KeyValuePair<TopicPartition, KafkaFuture<DeletedRecords>> pair in result.LowWatermarks())
             {
                 (DeletedRecords deleted, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -412,7 +412,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .IncludeDocumentation(request.IncludeDocumentation));
 
             Proto.DescribeConfigsResponse response = new Proto.DescribeConfigsResponse();
-            foreach (KeyValuePair<ConfigResource, KafkaFuture<Config>> pair in result.Values)
+            foreach (KeyValuePair<ConfigResource, KafkaFuture<Config>> pair in result.Values())
             {
                 (Config config, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -456,7 +456,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .ValidateOnly(request.ValidateOnly));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ConfigResourceKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.ConfigResourceKey));
         }
         catch (Exception ex)
         {
@@ -511,7 +511,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             Proto.DescribeLogDirsResponse response = new Proto.DescribeLogDirsResponse();
             foreach (KeyValuePair<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> pair in
-                result.Descriptions)
+                result.Descriptions())
             {
                 (IReadOnlyDictionary<string, LogDirDescription> descriptions, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -562,7 +562,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 new AlterReplicaLogDirsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.ReplicaKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.ReplicaKey));
         }
         catch (Exception ex)
         {
@@ -587,7 +587,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
 
             Proto.DescribeReplicaLogDirsResponse response = new Proto.DescribeReplicaLogDirsResponse();
             foreach (KeyValuePair<TopicPartitionReplica, KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> pair
-                in result.Values)
+                in result.Values())
             {
                 (DescribeReplicaLogDirsResult.ReplicaLogDirInfo info, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -699,7 +699,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .AllowReplicationFactorChange(!request.HasAllowReplicationFactorChange
                         || request.AllowReplicationFactorChange));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.PartitionKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.PartitionKey));
         }
         catch (Exception ex)
         {
@@ -1046,7 +1046,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
             Proto.FenceProducersResponse response = new Proto.FenceProducersResponse();
-            foreach (string id in result.FencedProducers.Keys)
+            foreach (string id in result.FencedProducers().Keys)
             {
                 (long producerId, Proto.KafkaError? idError) =
                     TranslateAdmin.Resolve(result.ProducerId(id));
@@ -1133,7 +1133,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .IncludeAuthorizedOperations(request.IncludeAuthorizedOperations));
 
             Proto.DescribeConsumerGroupsResponse response = new Proto.DescribeConsumerGroupsResponse();
-            foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> pair in result.DescribedGroups)
+            foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> pair in result.DescribedGroups())
             {
                 (ConsumerGroupDescription description, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -1178,7 +1178,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .IncludeAuthorizedOperations(request.IncludeAuthorizedOperations));
 
             Proto.DescribeClassicGroupsResponse response = new Proto.DescribeClassicGroupsResponse();
-            foreach (KeyValuePair<string, KafkaFuture<ClassicGroupDescription>> pair in result.DescribedGroups)
+            foreach (KeyValuePair<string, KafkaFuture<ClassicGroupDescription>> pair in result.DescribedGroups())
             {
                 (ClassicGroupDescription description, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -1358,7 +1358,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 new DeleteConsumerGroupsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.DeletedGroups, TranslateAdmin.NameKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.DeletedGroups(), TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
@@ -1431,7 +1431,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 new CreateAclsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.AclBindingKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.AclBindingKey));
         }
         catch (Exception ex)
         {
@@ -1492,7 +1492,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
             Proto.DeleteAclsResponse response = new Proto.DeleteAclsResponse();
-            foreach (KeyValuePair<AclBindingFilter, KafkaFuture<DeleteAclsResult.FilterResults>> pair in result.Values)
+            foreach (KeyValuePair<AclBindingFilter, KafkaFuture<DeleteAclsResult.FilterResults>> pair in result.Values())
             {
                 (DeleteAclsResult.FilterResults results, Proto.KafkaError? error) =
                     TranslateAdmin.Resolve(pair.Value);
@@ -1585,7 +1585,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .ValidateOnly(request.ValidateOnly));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.QuotaEntityKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.QuotaEntityKey));
         }
         catch (Exception ex)
         {
@@ -1669,7 +1669,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                 new AlterUserScramCredentialsOptions()
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs)));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
@@ -1849,7 +1849,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
                     .TimeoutMs(TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs))
                     .ValidateOnly(request.ValidateOnly));
 
-            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.NameKey));
+            return Task.FromResult(TranslateAdmin.VoidResponse(result.Values(), TranslateAdmin.NameKey));
         }
         catch (Exception ex)
         {
@@ -1860,17 +1860,17 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     private static Proto.FilterResults FilterResultsToProto(DeleteAclsResult.FilterResults results)
     {
         Proto.FilterResults proto = new Proto.FilterResults();
-        foreach (DeleteAclsResult.FilterResult result in results.Values)
+        foreach (DeleteAclsResult.FilterResult result in results.Values())
         {
             Proto.DeletedAcl deleted = new Proto.DeletedAcl();
-            if (result.Binding is not null)
+            if (result.Binding() is { } binding)
             {
-                deleted.Binding = TranslateAdmin.AclBindingToProto(result.Binding);
+                deleted.Binding = TranslateAdmin.AclBindingToProto(binding);
             }
 
-            if (result.Exception is not null)
+            if (result.Exception() is { } exception)
             {
-                deleted.Exception = Translate.ToProto(result.Exception);
+                deleted.Exception = Translate.ToProto(exception);
             }
 
             proto.Values.Add(deleted);

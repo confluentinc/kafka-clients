@@ -45,11 +45,11 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
 
         Assert.Equal(
             new[] { "p5-dcg-a", "p5-dcg-b", "p5-dcg-c" },
-            result.DescribedGroups.Keys.OrderBy(id => id, StringComparer.Ordinal));
+            result.DescribedGroups().Keys.OrderBy(id => id, StringComparer.Ordinal));
 
-        Assert.Equal(3, result.DescribedGroups.Values.Distinct().Count());
+        Assert.Equal(3, result.DescribedGroups().Values.Distinct().Count());
 
-        foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> described in result.DescribedGroups)
+        foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> described in result.DescribedGroups())
         {
             UnsupportedOperationException failure = await TestTimeout.Run(
                 () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => described.Value.Get()), s_deadline);
@@ -81,9 +81,9 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
         AsyncDescribeConsumerGroupsResult result =
             admin.DescribeConsumerGroups(new[] { "p5-dup", "p5-dup", "P5-DUP" });
 
-        Assert.Equal(2, result.DescribedGroups.Count);
-        Assert.Contains("p5-dup", result.DescribedGroups.Keys);
-        Assert.Contains("P5-DUP", result.DescribedGroups.Keys);
+        Assert.Equal(2, result.DescribedGroups().Count);
+        Assert.Contains("p5-dup", result.DescribedGroups().Keys);
+        Assert.Contains("P5-DUP", result.DescribedGroups().Keys);
 
         await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
@@ -98,7 +98,7 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
         AsyncDescribeConsumerGroupsResult result =
             admin.DescribeConsumerGroups(Array.Empty<string>());
 
-        Assert.Empty(result.DescribedGroups);
+        Assert.Empty(result.DescribedGroups());
 
         IReadOnlyDictionary<string, ConsumerGroupDescription> all =
             await TestTimeout.Run(() => result.All().Get(), s_deadline);
@@ -133,7 +133,7 @@ public sealed class PublicAdminDescribeConsumerGroupsTests
 
         AsyncDescribeConsumerGroupsResult result = api.DescribeConsumerGroups(new[] { "p5-dcg-iface" });
 
-        Assert.Equal(new[] { "p5-dcg-iface" }, result.DescribedGroups.Keys);
+        Assert.Equal(new[] { "p5-dcg-iface" }, result.DescribedGroups().Keys);
         await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
     }
 

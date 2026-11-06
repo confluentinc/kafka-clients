@@ -53,7 +53,8 @@ public sealed class DeleteConsumerGroupsResult
     /// One future per requested group id, keyed by group id — Java's <c>deletedGroups()</c>. A group that fails fails
     /// only its own future.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture> DeletedGroups => _deletedGroups;
+    /// <returns>One future per requested group id, keyed by group id.</returns>
+    public IReadOnlyDictionary<string, KafkaFuture> DeletedGroups() => _deletedGroups;
 
     /// <summary>
     /// Completes when every group has been deleted, and fails with the first failure to complete otherwise — Java's

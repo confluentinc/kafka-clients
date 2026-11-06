@@ -85,13 +85,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
     [Fact]
     public void DescribeLogDirsResult_MatchesJavasTwoAccessors()
     {
-        PropertyInfo descriptions =
-            typeof(DescribeLogDirsResult).GetProperty(nameof(DescribeLogDirsResult.Descriptions))!;
+        MethodInfo descriptions = Getters.Get(typeof(DescribeLogDirsResult), nameof(DescribeLogDirsResult.Descriptions));
 
         Assert.Equal(
             typeof(IReadOnlyDictionary<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>>),
-            descriptions.PropertyType);
-        Assert.Null(descriptions.SetMethod);
+            descriptions.ReturnType);
 
         MethodInfo allDescriptions = typeof(DescribeLogDirsResult).GetMethod(
             nameof(DescribeLogDirsResult.AllDescriptions), Type.EmptyTypes)!;
@@ -102,33 +100,28 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Empty(typeof(DescribeLogDirsResult).GetConstructors());
 
         Assert.Equal(
-            new[] { nameof(DescribeLogDirsResult.AllDescriptions) },
+            new[] { nameof(DescribeLogDirsResult.AllDescriptions), nameof(DescribeLogDirsResult.Descriptions) },
             DeclaredPublicMethodNames(typeof(DescribeLogDirsResult)));
-        Assert.Equal(
-            new[] { nameof(DescribeLogDirsResult.Descriptions) },
-            PropertyNames(typeof(DescribeLogDirsResult)));
+        Assert.Empty(PropertyNames(typeof(DescribeLogDirsResult)));
     }
 
     [Fact]
     public void TheTwoReplicaResults_DifferExactlyAsJavasDo()
     {
-        PropertyInfo alterValues =
-            typeof(AlterReplicaLogDirsResult).GetProperty(nameof(AlterReplicaLogDirsResult.Values))!;
+        MethodInfo alterValues = Getters.Get(typeof(AlterReplicaLogDirsResult), nameof(AlterReplicaLogDirsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture>), alterValues.PropertyType);
-        Assert.Null(alterValues.SetMethod);
+        Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture>), alterValues.ReturnType);
 
         MethodInfo alterAll =
             typeof(AlterReplicaLogDirsResult).GetMethod(nameof(AlterReplicaLogDirsResult.All), Type.EmptyTypes)!;
 
         Assert.Equal(typeof(KafkaFuture), alterAll.ReturnType);
 
-        PropertyInfo describeValues =
-            typeof(DescribeReplicaLogDirsResult).GetProperty(nameof(DescribeReplicaLogDirsResult.Values))!;
+        MethodInfo describeValues =
+            Getters.Get(typeof(DescribeReplicaLogDirsResult), nameof(DescribeReplicaLogDirsResult.Values));
         Assert.Equal(
             typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>),
-            describeValues.PropertyType);
-        Assert.Null(describeValues.SetMethod);
+            describeValues.ReturnType);
 
         MethodInfo describeAll = typeof(DescribeReplicaLogDirsResult).GetMethod(
             nameof(DescribeReplicaLogDirsResult.All), Type.EmptyTypes)!;
@@ -141,8 +134,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
         {
             Assert.Empty(type.GetConstructors());
 
-            Assert.Equal(new[] { "All" }, DeclaredPublicMethodNames(type));
-            Assert.Equal(new[] { "Values" }, PropertyNames(type));
+            Assert.Equal(new[] { "All", "Values" }, DeclaredPublicMethodNames(type));
+            Assert.Empty(PropertyNames(type));
         }
     }
 

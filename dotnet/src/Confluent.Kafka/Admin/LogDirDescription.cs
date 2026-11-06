@@ -30,8 +30,8 @@ namespace Confluent.Kafka.Admin;
 /// <see cref="Error()"/> is a field of a description the broker returned, not a failure of the
 /// query: it means this log directory is offline or unreadable (Java's
 /// <c>KafkaStorageException</c> or <c>UnknownServerException</c>). The per-broker future in
-/// <see cref="DescribeLogDirsResult.Descriptions"/> and
-/// <see cref="AsyncDescribeLogDirsResult.Descriptions"/> succeeds, as in Java.
+/// <see cref="DescribeLogDirsResult.Descriptions()"/> and
+/// <see cref="AsyncDescribeLogDirsResult.Descriptions()"/> succeeds, as in Java.
 /// </remarks>
 public sealed class LogDirDescription
 {

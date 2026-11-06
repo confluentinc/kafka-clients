@@ -130,18 +130,16 @@ public sealed class PublicAdminP2bShapeParityTests
     [Fact]
     public void CreatePartitionsResult_PublishesVoidFutures()
     {
-        PropertyInfo values = typeof(CreatePartitionsResult).GetProperty(
-            nameof(CreatePartitionsResult.Values))!;
+        MethodInfo values = Getters.Get(typeof(CreatePartitionsResult), nameof(CreatePartitionsResult.Values));
 
-        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.PropertyType);
+        Assert.Equal(typeof(IReadOnlyDictionary<string, KafkaFuture>), values.ReturnType);
         Assert.Equal(1, NullableFlag(values));
-        Assert.Null(values.SetMethod);
 
         MethodInfo all = typeof(CreatePartitionsResult).GetMethod(
             nameof(CreatePartitionsResult.All), Type.EmptyTypes)!;
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        Assert.Single(typeof(CreatePartitionsResult).GetProperties());
+        Assert.Empty(typeof(CreatePartitionsResult).GetProperties());
 
         Assert.Empty(typeof(CreatePartitionsResult).GetConstructors());
     }
@@ -149,14 +147,12 @@ public sealed class PublicAdminP2bShapeParityTests
     [Fact]
     public void DeleteRecordsResult_IsKeyedByTopicPartition_AndItsConstructorIsInternal()
     {
-        PropertyInfo lowWatermarks = typeof(DeleteRecordsResult).GetProperty(
-            nameof(DeleteRecordsResult.LowWatermarks))!;
+        MethodInfo lowWatermarks = Getters.Get(typeof(DeleteRecordsResult), nameof(DeleteRecordsResult.LowWatermarks));
 
         Assert.Equal(
             typeof(IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>>),
-            lowWatermarks.PropertyType);
+            lowWatermarks.ReturnType);
         Assert.Equal(1, NullableFlag(lowWatermarks));
-        Assert.Null(lowWatermarks.SetMethod);
 
         MethodInfo all = typeof(DeleteRecordsResult).GetMethod(
             nameof(DeleteRecordsResult.All), Type.EmptyTypes)!;

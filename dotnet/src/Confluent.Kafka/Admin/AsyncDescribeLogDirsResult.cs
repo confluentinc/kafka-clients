@@ -59,7 +59,9 @@ public sealed class AsyncDescribeLogDirsResult
     /// One future per requested broker, each yielding that broker's log directories
     /// keyed by path — Java's <c>descriptions()</c>.
     /// </summary>
-    public IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions =>
+    /// <returns>One future per requested broker, each yielding that broker's log directories keyed by
+    /// path.</returns>
+    public IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions() =>
         _futures;
 
     /// <summary>

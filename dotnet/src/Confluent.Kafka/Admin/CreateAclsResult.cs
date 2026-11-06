@@ -50,7 +50,8 @@ public sealed class CreateAclsResult
     /// <summary>
     /// One future per requested binding, keyed by the binding — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<AclBinding, KafkaFuture> Values => _values;
+    /// <returns>One future per requested binding, keyed by the binding.</returns>
+    public IReadOnlyDictionary<AclBinding, KafkaFuture> Values() => _values;
 
     /// <summary>
     /// Completes when every binding has been created, and fails with the first failure to

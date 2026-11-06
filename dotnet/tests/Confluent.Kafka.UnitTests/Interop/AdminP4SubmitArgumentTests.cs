@@ -183,7 +183,7 @@ public sealed class AdminP4SubmitArgumentTests
 
         AlterPartitionReassignmentsResult altered =
             AlterPartitionReassignmentsResult.OfClient(admin.AlterPartitionReassignments(request, options: null));
-        Assert.Single(altered.Values);
+        Assert.Single(altered.Values());
         altered.All().Get(s_deadline);
 
         PartitionReassignment reassignment = Assert.Single(List(admin, new[] { first })).Value;
