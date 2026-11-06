@@ -111,7 +111,10 @@ class Reader {
   }
 }
 
-// The records of an uncompressed record set: [{offset, key, value}].
+// The records of an uncompressed record set: [{offset, timestamp, key, value,
+// headers}], `headers` an array of {key, value} and `timestamp` the batch's base
+// timestamp plus the record's delta (the record's CreateTime on a CreateTime
+// topic).
 function parseRecords(buf) {
   const out = [];
   const r = new Reader(buf);
@@ -127,7 +130,7 @@ function parseRecords(buf) {
     const attributes = r.i16();
     if ((attributes & 0x7) !== 0) throw new Error('compressed batches are not supported');
     r.i32(); // last offset delta
-    r.i64(); // base timestamp
+    const baseTimestamp = r.i64();
     r.i64(); // max timestamp
     r.i64(); // producer id
     r.i16(); // producer epoch
@@ -137,49 +140,96 @@ function parseRecords(buf) {
     for (let i = 0; i < count; i++) {
       r.varlong(); // record length
       r.i8(); // attributes
-      r.varlong(); // timestamp delta
+      const timestampDelta = r.varlong();
       const offsetDelta = r.varlong();
       const key = r.nullableVarBytes();
       const value = r.nullableVarBytes();
-      const headers = r.varlong();
-      for (let h = 0; h < headers; h++) {
-        r.bytes(r.varlong());
-        r.nullableVarBytes();
+      const headerCount = r.varlong();
+      const headers = [];
+      for (let h = 0; h < headerCount; h++) {
+        const headerKey = r.bytes(r.varlong()).toString('utf8');
+        headers.push({ key: headerKey, value: r.nullableVarBytes() });
       }
-      if (!control) out.push({ offset: baseOffset + offsetDelta, key, value });
+      if (!control) {
+        out.push({ offset: baseOffset + offsetDelta, timestamp: baseTimestamp + timestampDelta, key, value, headers });
+      }
     }
     r.pos = end;
   }
   return out;
 }
 
-function roundTrip(socket, request) {
+// A Promise over `socket`: `start(listeners, done)` adds its own listeners to
+// the socket and to `listeners` and calls `done(value)` to resolve; 'error'
+// rejects with the error, 'end' and 'close' with the message `closed()` gives.
+// Once it settles every listener in `listeners` is removed, so none piles up
+// across calls.
+function settleOn(socket, closed, start) {
   return new Promise((resolve, reject) => {
-    let chunks = Buffer.alloc(0);
-    const onData = (chunk) => {
-      chunks = Buffer.concat([chunks, chunk]);
-      if (chunks.length >= 4 && chunks.length >= 4 + chunks.readInt32BE(0)) {
-        socket.off('data', onData);
-        resolve(chunks.subarray(4, 4 + chunks.readInt32BE(0)));
-      }
+    const listeners = {};
+    const settle = (fn, value) => {
+      for (const [event, listener] of Object.entries(listeners)) socket.off(event, listener);
+      fn(value);
     };
-    socket.on('data', onData);
-    socket.once('error', reject);
-    socket.write(request);
+    listeners.error = (error) => settle(reject, error);
+    listeners.end = () => settle(reject, new Error(closed()));
+    listeners.close = () => settle(reject, new Error(closed()));
+    for (const [event, listener] of Object.entries(listeners)) socket.on(event, listener);
+    start(listeners, (value) => settle(resolve, value));
   });
 }
 
 /**
+ * Writes `request` and resolves to the response's body, once complete; rejects
+ * when the socket fails, ends or closes first.
+ */
+function roundTrip(socket, request) {
+  let chunks = Buffer.alloc(0);
+  return settleOn(
+    socket,
+    () => `the connection closed after ${chunks.length} bytes of the response`,
+    (listeners, done) => {
+      listeners.data = (chunk) => {
+        chunks = Buffer.concat([chunks, chunk]);
+        if (chunks.length >= 4 && chunks.length >= 4 + chunks.readInt32BE(0)) {
+          done(chunks.subarray(4, 4 + chunks.readInt32BE(0)));
+        }
+      };
+      socket.on('data', listeners.data);
+      socket.write(request);
+    },
+  );
+}
+
+/** Connects to `host:port`; rejects when the socket fails or closes first. */
+async function connect(host, port) {
+  const socket = net.connect({ host, port });
+  await settleOn(
+    socket,
+    () => `the connection to ${host}:${port} closed before it was established`,
+    (listeners, done) => {
+      listeners.connect = () => done();
+      socket.on('connect', listeners.connect);
+    },
+  ).catch((error) => {
+    socket.destroy();
+    throw error;
+  });
+  return socket;
+}
+
+/**
  * Reads partition `partition` of `topic` from offset 0 up to its high
- * watermark: `{highWatermark, records: [{offset, key, value}]}`.
+ * watermark: `{highWatermark, records: [{offset, timestamp, key, value,
+ * headers}]}`.
  */
 async function fetchRecords(bootstrap, topic, partition) {
   const [host, port] = bootstrap.split(',')[0].split(':');
-  const socket = net.connect({ host, port: Number(port) });
-  await new Promise((resolve, reject) => {
-    socket.once('connect', resolve);
-    socket.once('error', reject);
-  });
+  const socket = await connect(host, Number(port));
+  // An error between two round trips, with none of theirs listening, would
+  // otherwise be an uncaught 'error' event: the next round trip sees the
+  // socket closed instead.
+  socket.on('error', () => {});
   try {
     const records = [];
     let highWatermark = -1;
@@ -210,4 +260,4 @@ async function fetchRecords(bootstrap, topic, partition) {
   }
 }
 
-module.exports = { fetchRecords };
+module.exports = { fetchRecords, roundTrip, connect };

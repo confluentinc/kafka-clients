@@ -25,9 +25,10 @@ import { RefreshRetriableError } from './refresh_retriable_error';
  *
  * A catch-only base: constructing it throws `TypeError`.
  */
-export class InvalidMetadataError extends RefreshRetriableError {
+export abstract class InvalidMetadataError extends RefreshRetriableError {
   /**
-   * A catch-only base: constructing it directly throws `TypeError`.
+   * A catch-only base: constructing it directly throws `TypeError` (and
+   * TypeScript rejects `new` on it, as Java's abstract class).
    *
    * @param message - the message a subclass passes on, Java's message
    * @param options - `cause`: the cause a subclass passes on, Java's cause

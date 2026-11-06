@@ -21,7 +21,10 @@
 // constructs the base `KafkaError`; a bare KafkaException, reported as
 // UNKNOWN_SERVER_ERROR without being an ApiException, is a `KafkaError` too),
 // with the core's message, its cause chain as `cause`, and the core's `code`,
-// `errorName`, `retriable` and `apiError`.
+// `errorName`, `retriable` and `apiError`. LOCAL_NULL_POINTER, the core's
+// Java `NullPointerException` for a NULL mandatory argument, has no class: it
+// is JavaScript's own `TypeError`, with the core's message, as it is Python's
+// `TypeError` (the binding checks its arguments first, so it is not expected).
 //
 // The id -> class table is derived from the generated registry, every class
 // with its own FFI id but the base `KafkaError`, which shares
@@ -35,6 +38,12 @@ import { IllegalStateError } from './illegal_state_error';
 
 /** The FFI id the core reports for a bare `KafkaException`. */
 export const UNKNOWN_SERVER_ERROR = -1;
+
+/**
+ * The FFI id the core reports for a NULL mandatory argument
+ * (`kafka_common_Error_LOCAL_NULL_POINTER`, Java's `NullPointerException`).
+ */
+export const LOCAL_NULL_POINTER = -32;
 
 /** A generated error class: JavaScript's `(message?, {cause}?)` constructor. */
 export type ErrorClass = new (message?: string | null, options?: { cause?: unknown }) => Error;
@@ -96,9 +105,13 @@ export function classForFfiId(id: number): ErrorClass {
 export function fromNative(fields: unknown): unknown {
   if (fields instanceof Error || fields === null || typeof fields !== 'object') return fields;
   const reported = fields as NativeError;
+  const cause = reported.cause === undefined || reported.cause === null ? undefined : fromNative(reported.cause);
+  if (reported.code === LOCAL_NULL_POINTER) {
+    // Java's NullPointerException is JavaScript's TypeError (as Python's TypeError).
+    return new TypeError(reported.message ?? '', cause === undefined ? undefined : { cause });
+  }
   let cls = classForFfiId(reported.code);
   if (reported.code === UNKNOWN_SERVER_ERROR && !reported.apiError) cls = KafkaError;
-  const cause = reported.cause === undefined || reported.cause === null ? undefined : fromNative(reported.cause);
   const error = new cls(reported.message ?? '', cause === undefined ? undefined : { cause }) as Error & ReportedFields;
   // What the core reported wins over what the class alone says.
   error.code = reported.code;
