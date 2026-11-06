@@ -1065,6 +1065,18 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_uncommitted_offsets_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockProducerUncommittedOffsets(IntPtr self, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_send_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetSendError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_flush_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetFlushError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_partitions_for_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetPartitionsForError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_close_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerSetCloseError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_init_transaction_error_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MockProducerSetInitTransactionError(IntPtr self, IntPtr error, ref IntPtr outErr);
 
