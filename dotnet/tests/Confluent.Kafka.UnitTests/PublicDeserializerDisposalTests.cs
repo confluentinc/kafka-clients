@@ -517,6 +517,9 @@ public sealed class PublicDeserializerDisposalTests
     [InlineData(AsyncFlavor, DisposeHow, CloseHow)]
     [InlineData(AsyncFlavor, DisposeAsyncHow, DisposeHow)]
     [InlineData(AsyncFlavor, DisposeAsyncHow, CloseHow)]
+    [InlineData(AsyncFlavor, CloseHow, DisposeAsyncHow)]
+    [InlineData(AsyncFlavor, DisposeHow, DisposeAsyncHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow, DisposeAsyncHow)]
     public async Task ADeserializerWhoseDisposeWaitsForAnotherThreadThatClosesItsConsumer_BothReturn(
         string flavor, string how, string otherHow)
     {
@@ -539,6 +542,81 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Equal(1, key.Disposals);
         Assert.Equal(1, value.Disposals);
         Assert.Equal(ClosedMessage, Assert.Throws<IllegalStateException>(() => consumer.Assignment()).Message);
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, DisposeHow)]
+    [InlineData(SyncFlavor, CloseHow)]
+    [InlineData(AsyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow)]
+    public async Task ADeserializerWhoseDisposeWaitsForACloseParkedBeforeTheDestroy_BothReturn(string flavor, string otherHow)
+    {
+        DisposableDeserializer key = new DisposableDeserializer("key");
+        DisposableDeserializer value = new DisposableDeserializer("value");
+        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        SemaphoreSlim gate = CloseGateOf(consumer);
+        using ManualResetEventSlim release = new ManualResetEventSlim(false);
+        RunningPoll? poll = null;
+        GatedClose? other = null;
+        bool otherReturned = false;
+        try
+        {
+            poll = await StartAPollHeldInsideItsCommitCallback(consumer, release);
+            Task disposing = CloseBy(consumer, DisposeHow);
+            Assert.True(SpinWait.SpinUntil(() => gate.CurrentCount == 0, Deadline), "the Dispose never took the close gate");
+            other = GatedClose.Start(consumer, otherHow);
+            Assert.True(other.WaitParked(Deadline), "the other " + otherHow + " never reached the close gate");
+            key.OnDispose = () => otherReturned = other.WaitReturned(s_otherThreadWait);
+            Assert.Equal(0, key.Disposals);
+
+            release.Set();
+            await disposing;
+
+            Assert.Equal(WakeupCode, Assert.IsType<WakeupException>(await poll.Outcome()).Code);
+        }
+        finally
+        {
+            release.Set();
+            poll?.End();
+            await DisposeBounded(consumer);
+        }
+
+        Assert.True(otherReturned, "a " + otherHow + " parked on the close gate, waited for by a deserializer's Dispose, did not return");
+        Assert.NotNull(other);
+        Assert.Null(other.Failure);
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
+    }
+
+    [Theory]
+    [InlineData(SyncFlavor, CloseHow)]
+    [InlineData(SyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, CloseHow)]
+    [InlineData(AsyncFlavor, DisposeHow)]
+    [InlineData(AsyncFlavor, DisposeAsyncHow)]
+    public async Task AfterTheDestroy_ACloseOrDisposeFromAnotherThread_DoesNotWaitForTheCloseGate(string flavor, string how)
+    {
+        DisposableDeserializer key = new DisposableDeserializer("key");
+        DisposableDeserializer value = new DisposableDeserializer("value");
+        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        _ = await CloseBy(consumer, DisposeHow);
+        SemaphoreSlim gate = CloseGateOf(consumer);
+        Assert.True(gate.Wait(0), "the close gate is still held after the Dispose");
+        try
+        {
+            GatedClose other = GatedClose.Start(consumer, how);
+
+            Assert.True(other.WaitReturned(s_otherThreadWait), "a " + how + " after the destroy waited for the close gate");
+            Assert.Null(other.Failure);
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        Assert.Equal(1, key.Disposals);
+        Assert.Equal(1, value.Disposals);
     }
 
     [Theory]
@@ -800,6 +878,38 @@ public sealed class PublicDeserializerDisposalTests
             disposing.AsTask().Status == TaskStatus.RanToCompletion;
     }
 
+    private static Task CloseOrDispose(IConsumerCommon consumer, string how)
+    {
+        if (how == DisposeHow)
+        {
+            ((IDisposable)consumer).Dispose();
+            return Task.CompletedTask;
+        }
+
+        if (how == DisposeAsyncHow)
+        {
+            return ((IAsyncDisposable)consumer).DisposeAsync().AsTask();
+        }
+
+        if (consumer is IConsumer<byte[], byte[]> sync)
+        {
+            sync.Close();
+            return Task.CompletedTask;
+        }
+
+        return ((IAsyncConsumer<byte[], byte[]>)consumer).Close();
+    }
+
+    private static SemaphoreSlim CloseGateOf(IConsumerCommon consumer)
+    {
+        NativeConsumer native = (NativeConsumer)consumer.GetType()
+            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(consumer)!;
+        return (SemaphoreSlim)typeof(NativeConsumer)
+            .GetField("_closeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(native)!;
+    }
+
     private static Task DisposeBounded(IConsumerCommon consumer)
     {
         if (consumer is IAsyncDisposable async)
@@ -887,6 +997,88 @@ public sealed class PublicDeserializerDisposalTests
     private static Dictionary<TopicPartition, OffsetAndMetadata> Empty() =>
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
+    /// <summary>
+    /// A <c>Close</c>, <c>Dispose</c> or <c>DisposeAsync</c> made on a thread of its own, which reports when the call
+    /// has passed the consumer's closed check and waits for the close gate, and when it returns.
+    /// </summary>
+    private sealed class GatedClose
+    {
+        private readonly ManualResetEventSlim _called = new ManualResetEventSlim(false);
+        private Thread? _thread;
+        private Task? _closing;
+
+        internal Exception? Failure { get; private set; }
+
+        internal static GatedClose Start(IConsumerCommon consumer, string how)
+        {
+            GatedClose close = new GatedClose();
+            close._thread = new Thread(() => close.Run(consumer, how)) { IsBackground = true };
+            close._thread.Start();
+            return close;
+        }
+
+        internal bool WaitParked(TimeSpan timeout)
+        {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            while (elapsed.Elapsed < timeout)
+            {
+                if (_called.IsSet)
+                {
+                    return _closing is { IsCompleted: false };
+                }
+
+                if ((_thread!.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0)
+                {
+                    return true;
+                }
+
+                Thread.Sleep(1);
+            }
+
+            return false;
+        }
+
+        internal bool WaitReturned(TimeSpan timeout)
+        {
+            if (!_called.Wait(timeout))
+            {
+                return false;
+            }
+
+            try
+            {
+                return _closing is null || _closing.Wait(timeout);
+            }
+            catch (AggregateException failure)
+            {
+                Failure = failure.InnerException;
+                return true;
+            }
+        }
+
+        private void Run(IConsumerCommon consumer, string how)
+        {
+            try
+            {
+                _closing = how == DisposeHow || consumer is IConsumer<byte[], byte[]>
+                    ? null
+                    : how == DisposeAsyncHow
+                        ? ((IAsyncDisposable)consumer).DisposeAsync().AsTask()
+                        : ((IAsyncConsumer<byte[], byte[]>)consumer).Close();
+                if (_closing is null)
+                {
+                    CloseOrDispose(consumer, how).GetAwaiter().GetResult();
+                }
+            }
+            catch (Exception failure)
+            {
+                Failure = failure;
+            }
+
+            _called.Set();
+        }
+    }
+
     /// <summary>A deserializer's Dispose that closes or disposes its consumer on another thread and waits for it.</summary>
     private sealed class OtherThreadClose
     {
@@ -905,22 +1097,7 @@ public sealed class PublicDeserializerDisposalTests
 
         internal void RunAndWait()
         {
-            Task closing = Task.Run(() =>
-            {
-                if (_how == DisposeHow)
-                {
-                    ((IDisposable)_consumer).Dispose();
-                    return Task.CompletedTask;
-                }
-
-                if (_consumer is IConsumer<byte[], byte[]> sync)
-                {
-                    sync.Close();
-                    return Task.CompletedTask;
-                }
-
-                return ((IAsyncConsumer<byte[], byte[]>)_consumer).Close();
-            });
+            Task closing = Task.Run(() => CloseOrDispose(_consumer, _how));
             try
             {
                 Returned = closing.Wait(s_otherThreadWait);

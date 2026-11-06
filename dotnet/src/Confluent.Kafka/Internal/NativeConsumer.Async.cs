@@ -1377,6 +1377,7 @@ internal sealed partial class NativeConsumer
         try
         {
             await _closeGate.WaitAsync().ConfigureAwait(false);
+            bool destroyedBefore = _destroyed;
             try
             {
                 if (!TryBeginExplicitClose(thread))
@@ -1410,7 +1411,7 @@ internal sealed partial class NativeConsumer
             }
             finally
             {
-                _closeGate.Release();
+                ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
             }
         }
         finally
@@ -1422,6 +1423,7 @@ internal sealed partial class NativeConsumer
     private async Task DisposeOnThePumpAsync()
     {
         await _closeGate.WaitAsync().ConfigureAwait(false);
+        bool destroyedBefore = _destroyed;
         try
         {
             if (!TryBeginClose())
@@ -1460,7 +1462,7 @@ internal sealed partial class NativeConsumer
         }
         finally
         {
-            _closeGate.Release();
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
         }
     }
 

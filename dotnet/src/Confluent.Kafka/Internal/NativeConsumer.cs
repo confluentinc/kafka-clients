@@ -80,9 +80,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly bool _groupIdDefined;
     private readonly SerdeDisposal? _serdes;
 
-    // Set once the destroy has returned, before the deserializers are disposed, and never cleared: from then on a
-    // Close or Dispose from any thread returns at once, as Python's does, since the teardown holds the close gate
-    // while a deserializer's Dispose may wait for a thread that closes the consumer.
+    // Set once the destroy has returned and never cleared: from then on a Close or Dispose from any thread returns at
+    // once, as Python's closed check does.
     private volatile bool _destroyed;
     private readonly List<IntPtr> _recordBytes = new List<IntPtr>();
     private int _recordsHeld;
@@ -1455,6 +1454,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         _closeGate.Wait();
+        bool destroyedBefore = _destroyed;
         try
         {
             if (!TryBeginExplicitClose(Environment.CurrentManagedThreadId))
@@ -1484,7 +1484,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
         finally
         {
-            _closeGate.Release();
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
         }
     }
 
@@ -1657,7 +1657,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return block;
     }
 
-    // The deserializers the consumer was given are disposed after the destroy, on the thread that destroyed.
     private void AfterDestroy()
     {
         _destroyed = true;
@@ -1688,8 +1687,18 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 FreeRecordBytes();
             }
         }
+    }
 
-        _serdes?.DisposeOnce();
+    // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
+    // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
+    // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread.
+    private void ReleaseTheGateThenDisposeTheDeserializers(bool destroyedBefore)
+    {
+        _closeGate.Release();
+        if (!destroyedBefore && _destroyed)
+        {
+            _serdes?.DisposeOnce();
+        }
     }
 
     private void HoldRecords()
@@ -2003,6 +2012,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         _closeGate.Wait();
+        bool destroyedBefore = _destroyed;
         try
         {
             if (!TryBeginClose())
@@ -2031,7 +2041,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
         finally
         {
-            _closeGate.Release();
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
         }
     }
 
