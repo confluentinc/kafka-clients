@@ -1,0 +1,111 @@
+version: v1.0
+name: javascript-post-install
+
+# Run as a Semaphore Task (the `javascript-post-install` task in service.yml), by hand, after a
+# release of the Node.js client has been published to npmjs.com with the publish.sh of its
+# release bundle (javascript/release/README.txt). It reads npmjs.com anonymously, as a user does,
+# and publishes nothing: no job holds a token.
+#
+# Required Task parameter:
+#   JAVASCRIPT_VERSION -- the published version, X.Y.Z or X.Y.Z-alpha.N / -beta.N / -dev.N /
+#                         -rc.N (e.g. 4.4.0-beta.2).
+#
+# "Registry" checks the registry (.semaphore/check-published-npm.py check): the main package and
+# the three platform packages are there at JAVASCRIPT_VERSION, the `preview` dist-tag of each
+# points at it or at a later version (so a rerun after the next pre-release still passes), the main
+# package's `latest` (and `rc` / `alpha`, when present) stays on the earlier client, a version
+# below 4, the main package's optionalDependencies name the three at that version, and each
+# tarball matches the sha512 integrity the registry states and passes check-npm.py's package
+# checks. The task runs from master rather than from the tag build, so it cannot compare the
+# registry with the recorded bundle; publish.sh does that instead, reading each package back from
+# npmjs.com after publishing and checking the registry serves exactly the bundle's tarball.
+#
+# The install blocks install the package from npmjs.com into an empty project, with
+# `--ignore-scripts`, and run the smoke program (javascript/tools/package-smoke, from this
+# checkout; it needs no build): npm picked this platform's package, every entry point loads, and
+# a producer opens and closes. On Linux each job runs in a container of DOCKER_IMAGE with the
+# official Node.js tarball of NODE_VERSION, checked against nodejs.org's SHASUMS256.txt
+# (.semaphore/test-published-npm.sh); almalinux:8 has glibc 2.28, the packages' floor. On macOS
+# each job uses `sem-version node`. The task can be rerun any time, for example when a new
+# distribution or Node.js version comes out.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+blocks:
+  - name: "Registry"
+    dependencies: []
+    execution_time_limit:
+      minutes: 15
+    task:
+      jobs:
+        - name: "Published packages match the registry"
+          commands:
+            - checkout
+            - |
+              : "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}"
+            # The parameter is free text: only a release version is passed on.
+            - |
+              if ! [[ "${JAVASCRIPT_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+                echo "Refusing to check: '${JAVASCRIPT_VERSION}' is not a release version" >&2
+                exit 1
+              fi
+            - /usr/bin/python3 .semaphore/check-published-npm.py self-test
+            - /usr/bin/python3 .semaphore/check-published-npm.py check "${JAVASCRIPT_VERSION}"
+
+  - name: "Install (Linux amd64)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-2
+      jobs:
+        - name: "Install (Linux amd64)"
+          matrix:
+            - env_var: DOCKER_IMAGE
+              values: ["almalinux:8", "almalinux:9", "rockylinux:9", "debian:bookworm", "debian:trixie", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+            - env_var: NODE_VERSION
+              values: ["18", "20", "22", "24"]
+          commands:
+            - checkout
+            - sh .semaphore/test-published-npm.sh "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}" "${DOCKER_IMAGE}" "${NODE_VERSION}"
+
+  - name: "Install (Linux arm64)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-arm64-1
+      jobs:
+        - name: "Install (Linux arm64)"
+          matrix:
+            - env_var: DOCKER_IMAGE
+              values: ["almalinux:8", "almalinux:9", "rockylinux:9", "debian:bookworm", "debian:trixie", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+            - env_var: NODE_VERSION
+              values: ["18", "20", "22", "24"]
+          commands:
+            - checkout
+            - sh .semaphore/test-published-npm.sh "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}" "${DOCKER_IMAGE}" "${NODE_VERSION}"
+
+  - name: "Install (macOS arm64)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 30
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      jobs:
+        - name: "Install (macOS arm64)"
+          matrix:
+            - env_var: NODE_VERSION
+              values: ["18", "20", "22", "24"]
+          commands:
+            - checkout
+            - sem-version node "${NODE_VERSION}"
+            - sh .semaphore/test-published-npm.sh "${JAVASCRIPT_VERSION:?JAVASCRIPT_VERSION must be set as a Task parameter}" --here
