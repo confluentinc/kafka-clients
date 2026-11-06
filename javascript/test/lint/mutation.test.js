@@ -290,6 +290,12 @@ MUTATIONS.push(
       edit(root, 'src/producer.c', '    if (config != NULL) FFI_DISCARD(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err));\n', ''),
   },
   {
+    rule: 'check-ownership',
+    what: "the delivery callback's borrowed error destroyed through a cast",
+    apply: (root) =>
+      edit(root, 'src/producer.c', '    ctx->delivered = 1;\n', '    error_discard((kafka_common_Error_t*)error);\n    ctx->delivered = 1;\n'),
+  },
+  {
     rule: 'check-zero-copy',
     what: 'a memcpy of the key',
     apply: (root) =>

@@ -27,9 +27,12 @@
 //     set-level check;
 //   - a delivery completion (an interface method src/ implements, an
 //     `_fn_t`) never passes a `const` (borrowed) parameter to a destroy: a
-//     header `_destroy`, or a src/ function that destroys its parameter.
+//     header `_destroy`, or a src/ function that destroys its parameter,
+//     whatever casts the argument carries (one is needed to pass a `const`
+//     handle to a destroy at all).
 
 const { cModel, bodyKey } = require('../c_model');
+const { bareArg } = require('../c_source');
 
 const HANDLE = /^(const\s+)?(kafka_\w+_t)\s*\*$/;
 
@@ -112,7 +115,7 @@ module.exports = {
           const key = `${key0}#${i}`;
           if (!p.name || destroyers.has(key)) return;
           const own = calls.filter((c) => c.function === fn.name && c.file === fn.file);
-          if (own.some((c) => c.args.some((a, k) => a === p.name && destroysArg(c, k)))) {
+          if (own.some((c) => c.args.some((a, k) => bareArg(a) === p.name && destroysArg(c, k)))) {
             destroyers.add(key);
             grew = true;
           }
@@ -137,7 +140,7 @@ module.exports = {
         checked += 1;
         for (const c of calls.filter((x) => x.function === name && x.file === fn.file)) {
           c.args.forEach((a, k) => {
-            if (a === p.name && destroysArg(c, k)) {
+            if (bareArg(a) === p.name && destroysArg(c, k)) {
               findings.push({
                 kind: 'borrowed-destroyed',
                 subject: `${c.file}:${c.line}`,

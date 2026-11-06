@@ -173,3 +173,13 @@ test("a typedef's doc before a function's is not taken for the function's", () =
   const header = '/**\n * The completion.\n */\ntypedef void (*kafka_x_done_t)(void *opaque);\n\n/**\n * Closes.\n */\nvoid kafka_x_close(void);\n';
   assert.equal(c.prototypes(header).get('kafka_x_close').doc, 'Closes.');
 });
+
+test('bareArg: an argument without its casts and parentheses', () => {
+  assert.equal(c.bareArg('error'), 'error');
+  assert.equal(c.bareArg('(kafka_common_Error_t*)error'), 'error');
+  assert.equal(c.bareArg(' ( const kafka_x_M_t * ) ( metadata ) '), 'metadata');
+  assert.equal(c.bareArg('((void*)(e))'), 'e');
+  // A call keeps its parentheses; a cast of a call loses only the cast.
+  assert.equal(c.bareArg('f(e)'), 'f(e)');
+  assert.equal(c.bareArg('(int)f(e)'), 'f(e)');
+});

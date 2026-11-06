@@ -375,7 +375,27 @@ function signatureParams(signature) {
     });
 }
 
+/**
+ * Argument text `arg` without its casts and enclosing parentheses, so
+ * `(kafka_common_Error_t*)error`, `((T*)(e))` and `error` all read `error`.
+ * A cast is a parenthesized type (words, `*`) followed by more text.
+ */
+function bareArg(arg) {
+  let a = arg.trim();
+  for (;;) {
+    const cast = /^\(\s*[A-Za-z_][\w\s*]*\)\s*(?=\S)/.exec(a);
+    if (cast) {
+      a = a.slice(cast[0].length).trim();
+    } else if (a.startsWith('(') && matching(a, 0) === a.length) {
+      a = a.slice(1, -1).trim();
+    } else {
+      return a;
+    }
+  }
+}
+
 module.exports = {
+  bareArg,
   signatureParams,
   matching,
   stripComments,

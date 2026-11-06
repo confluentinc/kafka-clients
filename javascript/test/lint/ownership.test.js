@@ -57,6 +57,24 @@ test('a borrowed parameter passed to a destroy, directly or through a src helper
   ]);
 });
 
+test('a cast does not hide a borrowed parameter passed to a destroy', () => {
+  // Under -Werror a const handle reaches a destroy only through a cast, in the
+  // destroyer's own body too (a helper that destroys its parameter through one).
+  const r = runN(RULE, {
+    'src/producer.c': PRODUCER_C.replace(
+      '    call_ref(self_, metadata, error);',
+      '    call_ref(self_, metadata, error);\n    error_drop(error);\n    FFI_DISCARD(kafka_x_Thing_destroy_err((kafka_x_Thing_t*)(metadata), &ffi_err));',
+    ).replace(
+      'static void send_on_completion(',
+      'static void error_drop(const kafka_common_Error_t* e) {\n    error_discard((kafka_common_Error_t *) e);\n}\n\nstatic void send_on_completion(',
+    ),
+  });
+  assert.deepEqual(findings(r), [
+    'src/producer.c:15: send_on_completion passes its borrowed metadata (const) to kafka_x_Thing_destroy_err, which destroys it',
+    'src/producer.c:14: send_on_completion passes its borrowed error (const) to error_drop, which destroys it',
+  ]);
+});
+
 test('cannot run without the header', () => {
   const r = runN(RULE, { 'confluent_kafka_bindings.h': undefined });
   assert.match(r.err[1], /^❌ check-ownership: cannot run, no bindings header at /);
