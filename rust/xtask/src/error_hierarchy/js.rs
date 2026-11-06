@@ -15,7 +15,7 @@
 //! The Node.js client's error hierarchy: the classes of the Python one
 //! ([`super::build_graph`]), each in the lib/ folder of its Java package
 //! (`org.apache.kafka.common.errors` -> `lib/common/errors/`, `java.*` ->
-//! `lib/`), with Java's `extends` chain, plus `lib/_error_registry.js`
+//! `lib/`), with Java's `extends` chain, plus `lib/_error_registry.ts`
 //! (`javascript/CLAUDE.md`, "Errors").
 //!
 //! A class keeps Java's name with the `Exception` suffix as `Error`, its
@@ -31,7 +31,7 @@
 use std::path::Path;
 
 use super::{build_graph, is_root_class, parse_ffi_enum_ids, ClassInfo, KAFKA_EXCEPTION_FQN};
-use crate::javascript_gen::{header, js_str, jsdoc, rel_require, GeneratedFile, JsModule, JS_LIB};
+use crate::javascript_gen::{header, js_str, rel_import, tsdoc, GeneratedFile, JsModule, JS_LIB};
 
 type Res<T> = anyhow::Result<T>;
 
@@ -70,65 +70,53 @@ fn class_doc(info: &ClassInfo) -> String {
     parts.join("\n\n")
 }
 
-/// The constructor of a class at the top of a chain (its parent is Java's
-/// `RuntimeException` / `Exception`): it declares the fields every client
-/// error carries.
+/// The class at the top of a chain (its parent is Java's `RuntimeException` /
+/// `Exception`): it declares the fields every client error carries.
 fn root_body(info: &ClassInfo) -> String {
     let name = &info.py_name;
     format!(
-        r#"class {name} extends Error {{
+        r#"export class {name} extends Error {{
   /**
    * The `kafka_common_Error_e` value of the error: for an error the client
    * reports, the core's; for one constructed here, its class's (`-1`,
    * `UNKNOWN_SERVER_ERROR`, for a class without one).
-   * @readonly
-   * @type {{number}}
    */
-  code;
+  readonly code!: number;
 
   /**
    * The `kafka_common_Error_e` enumerator name of `code`
    * (`SASL_AUTHENTICATION_FAILED`, `LOCAL_ILLEGAL_STATE`, ...); `null` for a
    * class the core has no value for.
-   * @readonly
-   * @type {{string | null}}
    */
-  errorName;
+  readonly errorName!: string | null;
 
   /**
    * Java's `instanceof RetriableException`.
-   * @readonly
-   * @type {{boolean}}
    */
-  retriable;
+  readonly retriable!: boolean;
 
   /**
    * Java's `instanceof ApiException`.
-   * @readonly
-   * @type {{boolean}}
    */
-  apiError;
+  readonly apiError!: boolean;
+
+  /**
+   * The error's cause, Java's `getCause()`: set by `super()` (`Error`'s
+   * `options.cause`), declared here for the targets whose `lib` predates
+   * ES2022's `Error.cause`. A `declare` field, which emits nothing: a class
+   * field would overwrite it.
+   */
+  declare readonly cause: unknown;
 
   /**
    * Java's constructors as JavaScript's `Error`'s: `message` is Java's
    * message (`null` reads as `''`), `options.cause` its cause. Given a cause
    * and no message, the message is the cause's `String()`, as Java's
    * `(Throwable cause)` constructor takes `cause.toString()`.
-   *
-   * @param {{string | null}} [message]
-   * @param {{{{cause?: unknown}}}} [options]
    */
-  constructor(message, options) {{
-    super(_throwable.messageOf(message, options), _throwable.optionsOf(options));
-    _throwable.init(this, new.target);
-    /**
-     * The error's cause, Java's `getCause()`: set by `super()` (`Error`'s
-     * `options.cause`), declared here for the targets whose `lib` predates
-     * ES2022's `Error.cause`. Not a class field, which would overwrite it.
-     * @readonly
-     * @type {{unknown}}
-     */
-    this.cause;
+  constructor(message?: string | null, options?: {{ cause?: unknown }}) {{
+    super(messageOf(message, options), optionsOf(options));
+    init(this, new.target);
   }}
 }}"#
     )
@@ -137,14 +125,11 @@ fn root_body(info: &ClassInfo) -> String {
 fn abstract_body(info: &ClassInfo, parent: &str) -> String {
     let name = &info.py_name;
     format!(
-        r#"class {name} extends {parent} {{
+        r#"export class {name} extends {parent} {{
   /**
    * A catch-only base: constructing it directly throws `TypeError`.
-   *
-   * @param {{string | null}} [message]
-   * @param {{{{cause?: unknown}}}} [options]
    */
-  constructor(message, options) {{
+  constructor(message?: string | null, options?: {{ cause?: unknown }}) {{
     if (new.target === {name}) {{
       throw new TypeError('{name} is an abstract catch-only base; it is never thrown directly');
     }}
@@ -159,9 +144,21 @@ fn render(g: &std::collections::BTreeMap<String, ClassInfo>, info: &ClassInfo) -
     let mut text = header(&format!("the Java source of `{}`", info.java_fqn));
     text.push('\n');
     let root = is_root_class(info);
-    let needs_throwable = root || info.ffi_id.is_some();
-    if needs_throwable {
-        text.push_str(&format!("const _throwable = require('{}');\n", rel_require(&dir, "_throwable")));
+    // What the class takes from `_throwable`: a root class its constructor's
+    // helpers, a class with an FFI id `setFfiId`.
+    let mut helpers: Vec<&str> = Vec::new();
+    if root {
+        helpers.extend(["init", "messageOf", "optionsOf"]);
+    }
+    if info.ffi_id.is_some() {
+        helpers.push("setFfiId");
+    }
+    if !helpers.is_empty() {
+        text.push_str(&format!(
+            "import {{ {} }} from '{}';\n",
+            helpers.join(", "),
+            rel_import(&dir, "_throwable")
+        ));
     }
     let parent_name = if root {
         None
@@ -169,18 +166,18 @@ fn render(g: &std::collections::BTreeMap<String, ClassInfo>, info: &ClassInfo) -
         let parent = g
             .get(&info.parent_fqn)
             .ok_or_else(|| anyhow::anyhow!("javascript errors: `{}` has no parent class", info.java_fqn))?;
-        let from = rel_require(&dir, &js_path(parent));
-        text.push_str(&format!("const {{ {} }} = require('{from}');\n", parent.py_name));
+        let from = rel_import(&dir, &js_path(parent));
+        text.push_str(&format!("import {{ {} }} from '{from}';\n", parent.py_name));
         Some(parent.py_name.clone())
     };
     text.push('\n');
-    text.push_str(&jsdoc(&class_doc(info), ""));
+    text.push_str(&tsdoc(&class_doc(info), ""));
     text.push('\n');
     match (&parent_name, info.is_abstract) {
         (None, false) => text.push_str(&root_body(info)),
         (None, true) => anyhow::bail!("javascript errors: the abstract `{}` has no Kafka parent", info.java_fqn),
         (Some(p), true) => text.push_str(&abstract_body(info, p)),
-        (Some(p), false) => text.push_str(&format!("class {} extends {p} {{}}", info.py_name)),
+        (Some(p), false) => text.push_str(&format!("export class {} extends {p} {{}}", info.py_name)),
     }
     text.push('\n');
     if let Some((constant, value)) = &info.ffi_id {
@@ -192,15 +189,14 @@ fn render(g: &std::collections::BTreeMap<String, ClassInfo>, info: &ClassInfo) -
             text.push('\n');
         }
         text.push_str(&format!(
-            "_throwable.setFfiId({}, {value}); // kafka_common_Error_{constant}\n",
+            "setFfiId({}, {value}); // kafka_common_Error_{constant}\n",
             info.py_name
         ));
     }
-    text.push_str(&format!("\nmodule.exports = {{ {} }};\n", info.py_name));
     Ok(JsModule { dir, stem: info.file_stem(), name: info.py_name.clone(), content: text })
 }
 
-/// The class modules and `lib/_error_registry.js`.
+/// The class modules and `lib/_error_registry.ts`.
 pub(crate) fn outputs(repo_root: &Path) -> Res<(Vec<JsModule>, GeneratedFile)> {
     let classes = build_graph(repo_root)?;
     let mut modules = Vec::new();
@@ -233,18 +229,22 @@ pub(crate) fn outputs(repo_root: &Path) -> Res<(Vec<JsModule>, GeneratedFile)> {
          // class] (python/confluent_kafka/_error_registry.py's ERRORS), and the\n\
          // enumerator name of every kafka_common_Error_e value (private).\n\n",
     );
-    registry.push_str("const ERRORS = Object.freeze([\n");
+    registry.push_str(
+        "/** A generated error class: its module, its class name and its Java class. */\n\
+         type ErrorRow = readonly [module: string, name: string, java: string];\n\n\
+         export const ERRORS: ReadonlyArray<ErrorRow> = Object.freeze<ErrorRow[]>([\n",
+    );
     for (_, row) in &rows {
         registry.push_str(row);
         registry.push('\n');
     }
-    registry.push_str("]);\n\n/** @type {ReadonlyMap<number, string>} */\nconst FFI_NAMES = new Map([\n");
+    registry.push_str("]);\n\nexport const FFI_NAMES: ReadonlyMap<number, string> = new Map<number, string>([\n");
     for n in &names {
         registry.push_str(n);
         registry.push('\n');
     }
-    registry.push_str("]);\n\nmodule.exports = { ERRORS, FFI_NAMES };\n");
-    let path = repo_root.join(JS_LIB).join("_error_registry.js");
+    registry.push_str("]);\n");
+    let path = repo_root.join(JS_LIB).join("_error_registry.ts");
     Ok((modules, (path, registry)))
 }
 
@@ -276,23 +276,34 @@ mod tests {
         assert_eq!(sasl.dir, "common/errors");
         assert!(sasl
             .content
-            .contains("class SaslAuthenticationError extends AuthenticationError {}"));
+            .contains("export class SaslAuthenticationError extends AuthenticationError {}"));
         assert!(sasl
             .content
-            .contains("const { AuthenticationError } = require('./authentication_error');"));
-        assert!(sasl.content.contains("_throwable.setFfiId(SaslAuthenticationError, 58);"));
+            .contains("import { AuthenticationError } from './authentication_error';"));
+        assert!(!sasl.content.contains("require("));
+        assert!(!sasl.content.contains("module.exports"));
+        assert!(sasl.content.contains("import { setFfiId } from '../../_throwable';"));
+        assert!(sasl.content.contains("\nsetFfiId(SaslAuthenticationError, 58);"));
         let kafka = find("KafkaError");
         assert_eq!(kafka.dir, "common");
-        assert!(kafka.content.contains("class KafkaError extends Error {"));
-        assert!(kafka.content.contains("const _throwable = require('../_throwable');"));
+        assert!(kafka.content.contains("export class KafkaError extends Error {"));
+        assert!(kafka
+            .content
+            .contains("import { init, messageOf, optionsOf, setFfiId } from '../_throwable';"));
+        assert!(kafka.content.contains("  readonly code!: number;\n"));
+        assert!(kafka.content.contains("  readonly errorName!: string | null;\n"));
+        assert!(kafka.content.contains("  declare readonly cause: unknown;\n"));
+        assert!(kafka
+            .content
+            .contains("  constructor(message?: string | null, options?: { cause?: unknown }) {\n"));
         let state = find("IllegalStateError");
         assert_eq!(state.dir, "");
-        assert!(state.content.contains("_throwable.setFfiId(IllegalStateError, -4);"));
+        assert!(state.content.contains("\nsetFfiId(IllegalStateError, -4);"));
         let retriable = find("RetriableError");
         assert!(retriable.content.contains("if (new.target === RetriableError) {"));
         assert!(!retriable.content.contains("setFfiId"));
         let api = find("ApiError");
-        assert!(api.content.contains("const { KafkaError } = require('../kafka_error');"));
+        assert!(api.content.contains("import { KafkaError } from '../kafka_error';"));
         let buffer = find("BufferExhaustedError");
         assert_eq!(buffer.dir, "producer");
         assert!(registry.1.contains(
@@ -300,5 +311,9 @@ mod tests {
              'org.apache.kafka.common.errors.SaslAuthenticationException'],"
         ));
         assert!(registry.1.contains("  [-4, 'LOCAL_ILLEGAL_STATE'],"));
+        assert!(registry.0.ends_with("javascript/lib/_error_registry.ts"));
+        assert!(registry
+            .1
+            .contains("export const FFI_NAMES: ReadonlyMap<number, string> = new Map<number, string>([\n"));
     }
 }
