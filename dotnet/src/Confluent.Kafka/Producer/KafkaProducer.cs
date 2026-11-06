@@ -19,6 +19,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Producer;
@@ -114,6 +115,24 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
         return _native.Send(serialized, callback);
     }
+
+    /// <inheritdoc/>
+    public void InitTransactions() => _native.InitTransactions();
+
+    /// <inheritdoc/>
+    public void BeginTransaction() => _native.BeginTransaction();
+
+    /// <inheritdoc/>
+    public void SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata) =>
+        _native.SendOffsetsToTransaction(offsets, groupMetadata);
+
+    /// <inheritdoc/>
+    public void CommitTransaction() => _native.CommitTransaction();
+
+    /// <inheritdoc/>
+    public void AbortTransaction() => _native.AbortTransaction();
 
     /// <inheritdoc/>
     public void Flush() => _native.Flush();
