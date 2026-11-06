@@ -209,9 +209,10 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// retrying, the only option is to close the producer.
     /// </para>
     /// <para>
-    /// The transaction methods of one producer must not overlap: a call made while another one is still running on
-    /// the same producer throws <see cref="ConcurrentModificationException"/> ("Transactional methods of
-    /// KafkaProducer are not safe for concurrent access."), where Java has no such check.
+    /// The transaction methods of one producer must not overlap: a call made while the producer still runs another
+    /// one's operation throws <see cref="ConcurrentModificationException"/> ("Transactional methods of
+    /// KafkaProducer are not safe for concurrent access."), where Java has no such check. The check covers the
+    /// operation only: a call made while a commit or an abort waits for the delivery callbacks is not refused.
     /// </para>
     /// </remarks>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has

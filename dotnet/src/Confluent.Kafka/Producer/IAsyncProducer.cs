@@ -98,15 +98,18 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// The token ends only the wait: the task ends with <see cref="OperationCanceledException"/>, and the operation
     /// keeps running in the producer. A token already cancelled at the call throws before anything reaches the
     /// producer. Calling the same method again after a cancel has one of three outcomes, decided by the producer:
-    /// while the cancelled operation is still running, the call throws <see cref="ConcurrentModificationException"/>
-    /// ("Transactional methods of KafkaProducer are not safe for concurrent access."), where Java's retry would join
+    /// while the producer still runs the cancelled operation, the call throws
+    /// <see cref="ConcurrentModificationException"/> ("Transactional methods of KafkaProducer are not safe for
+    /// concurrent access."), where Java's retry would join
     /// the pending operation; after it timed out, the call joins it, as Java's retry does; after it succeeded, the
     /// call starts a new operation, and gets the producer's answer to it. The same holds for the other transaction
     /// methods that take a token.
     /// </para>
     /// <para>
-    /// The transaction methods of one producer must not overlap: a call made while another one is still running on
-    /// the same producer throws <see cref="ConcurrentModificationException"/>, where Java has no such check.
+    /// The transaction methods of one producer must not overlap: a call made while the producer still runs another
+    /// one's operation throws <see cref="ConcurrentModificationException"/>, where Java has no such check. The check
+    /// covers the operation only: a call made while a commit or an abort waits for the delivery callbacks is not
+    /// refused.
     /// </para>
     /// <para>
     /// Called from inside a delivery callback's synchronous part, it waits at most <c>max.block.ms</c>, then throws
