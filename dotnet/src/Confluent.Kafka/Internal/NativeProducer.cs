@@ -31,7 +31,7 @@ namespace Confluent.Kafka.Internal;
 /// the calls in flight, and tears down in order: refuse new calls, close, join the completion thread, wait for the
 /// calls in flight, then destroy on the closing thread.
 /// </summary>
-internal sealed class NativeProducer : IDisposable, IAsyncDisposable
+internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 {
     internal const string CompletionThreadName = "confluent-kafka-producer-completion";
 

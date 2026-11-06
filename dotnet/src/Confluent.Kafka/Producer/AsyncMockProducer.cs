@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Producer;
@@ -130,6 +131,28 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }
+
+    /// <inheritdoc/>
+    public Task InitTransactions(CancellationToken cancellationToken = default) =>
+        _native.InitTransactionsWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public void BeginTransaction() => _native.BeginTransaction();
+
+    /// <inheritdoc/>
+    public Task SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default) =>
+        _native.SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task CommitTransaction(CancellationToken cancellationToken = default) =>
+        _native.CommitTransactionWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task AbortTransaction(CancellationToken cancellationToken = default) =>
+        _native.AbortTransactionWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default) =>

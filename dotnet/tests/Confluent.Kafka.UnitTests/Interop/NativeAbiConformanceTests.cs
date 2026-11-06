@@ -61,6 +61,29 @@ public sealed class NativeAbiConformanceTests
             + string.Join(Environment.NewLine, failures));
     }
 
+    // The transaction imports also pin their parameter names, so a reordering of two pointers of the same type
+    // (offsets and group_metadata) that keeps the types fails here.
+    [Theory]
+    [InlineData("kafka_producer_Producer_init_transactions_cb")]
+    [InlineData("kafka_producer_Producer_init_transactions")]
+    [InlineData("kafka_producer_Producer_begin_transaction_cb")]
+    [InlineData("kafka_producer_Producer_begin_transaction")]
+    [InlineData("kafka_producer_Producer_send_offsets_to_transaction_cb")]
+    [InlineData("kafka_producer_Producer_send_offsets_to_transaction")]
+    [InlineData("kafka_producer_Producer_commit_transaction_cb")]
+    [InlineData("kafka_producer_Producer_commit_transaction")]
+    [InlineData("kafka_producer_Producer_abort_transaction_cb")]
+    [InlineData("kafka_producer_Producer_abort_transaction")]
+    public void TransactionImports_MatchTheHeaderParameterNames(string entryPoint)
+    {
+        CSignature signature = CHeader.Parse(s_headerText.Value).Functions[entryPoint];
+        MethodInfo import = Assert.Single(Imports(entryPoint));
+
+        Assert.Equal(
+            signature.Parameters.Select(parameter => parameter.Name).ToArray(),
+            import.GetParameters().Select(parameter => CName(parameter.Name!)).ToArray());
+    }
+
     [Fact]
     public void NoDllImport_NamesAPlainFunctionThatHasAnErrTwin()
     {
@@ -444,6 +467,30 @@ public sealed class NativeAbiConformanceTests
 
     private static string EntryPointOf(MethodInfo method) =>
         method.GetCustomAttribute<DllImportAttribute>()!.EntryPoint ?? method.Name;
+
+    // A C# parameter name as the header spells it: snake_case, and `self` as the header's `self_`.
+    private static string CName(string name)
+    {
+        if (name == "self")
+        {
+            return "self_";
+        }
+
+        StringBuilder snake = new StringBuilder(name.Length + 4);
+        foreach (char c in name)
+        {
+            if (char.IsUpper(c))
+            {
+                snake.Append('_').Append(char.ToLowerInvariant(c));
+            }
+            else
+            {
+                snake.Append(c);
+            }
+        }
+
+        return snake.ToString();
+    }
 
     /// <summary>A C# mirror of <c>kafka_Bytes_t</c>, for the struct-layout check.</summary>
     [StructLayout(LayoutKind.Sequential)]

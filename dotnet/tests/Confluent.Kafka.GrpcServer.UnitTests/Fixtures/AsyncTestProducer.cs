@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
@@ -114,6 +115,35 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     }
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
+
+    public Task InitTransactions(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(InitTransactions), cancellationToken);
+        return _inner.InitTransactions(cancellationToken);
+    }
+
+    public void BeginTransaction() => _inner.BeginTransaction();
+
+    public Task SendOffsetsToTransaction(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        ConsumerGroupMetadata groupMetadata,
+        CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(SendOffsetsToTransaction), cancellationToken);
+        return _inner.SendOffsetsToTransaction(offsets, groupMetadata, cancellationToken);
+    }
+
+    public Task CommitTransaction(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(CommitTransaction), cancellationToken);
+        return _inner.CommitTransaction(cancellationToken);
+    }
+
+    public Task AbortTransaction(CancellationToken cancellationToken = default)
+    {
+        _probe.Tokens.Record(nameof(AbortTransaction), cancellationToken);
+        return _inner.AbortTransaction(cancellationToken);
+    }
 
     public async Task Close(CancellationToken cancellationToken = default)
     {
