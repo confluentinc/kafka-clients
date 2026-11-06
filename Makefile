@@ -14,7 +14,7 @@
 .PHONY: build build-all devel-build build-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
 	select-tests pre-push-test-selection clean-test-selection clean \
-	build-javascript test-javascript verify-javascript \
+	build-javascript test-javascript lint-javascript verify-javascript \
 	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
@@ -142,7 +142,17 @@ test-javascript: build-javascript
 test-javascript-macos-docker: build-javascript
 	$(MAKE) -C javascript test-unit
 
-verify-javascript: test-javascript
+# The Node.js client's rule linter (ESLint, javascript/eslint.config.cjs, and
+# the runner, javascript/scripts/lint_rules.js) and its own tests; ESLint is a
+# devDependency, so `npm ci` in javascript/ first, as for the build. It reads
+# the bindings header the Rust build writes and the Java
+# index `cargo xtask java-index` makes from the kafka submodule, which needs the
+# Kafka tags pinned in xtask (`cargo xtask fetch-java-refs` on a shallow clone).
+lint-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript lint-rules test-lint
+
+verify-javascript: test-javascript lint-javascript
 
 # macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
 # the gRPC server as a native host process, as python/'s `verify-macos` does.

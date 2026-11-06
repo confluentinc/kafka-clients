@@ -1,0 +1,80 @@
+# Findings of the Node.js client's rule linter not burnt down yet
+# (ESLint's `kafka/` rules, `npx eslint .`; design/current/javascript-rule-linter/PLAN.md).
+# One `<kind> <subject>` per line, or `prefix:<p>` to waive every finding whose
+# subject starts with `p`. A line matching no finding any more is itself a
+# finding: delete it. See everything with
+# `KAFKA_LINT_NO_BASELINE=1 npx eslint .`.
+
+# check-java-completeness: Java API the client does not translate yet.
+# KafkaFuture: the composition and completion API beyond get / isDone /
+# isCompletedExceptionally / isCancelled / cancel.
+missing common.KafkaFuture#allOf
+missing common.KafkaFuture#completedFuture
+missing common.KafkaFuture#getNow
+missing common.KafkaFuture#thenApply
+missing common.KafkaFuture#toCompletionStage
+missing common.KafkaFuture#whenComplete
+# KafkaProducer: transactions, metadata, metrics and telemetry, which the
+# preview (producer only) leaves out.
+missing clients.producer.KafkaProducer#abortTransaction
+missing clients.producer.KafkaProducer#beginTransaction
+missing clients.producer.KafkaProducer#clientInstanceId
+missing clients.producer.KafkaProducer#commitTransaction
+missing clients.producer.KafkaProducer#initTransactions
+missing clients.producer.KafkaProducer#metrics
+missing clients.producer.KafkaProducer#partitionsFor
+missing clients.producer.KafkaProducer#registerMetricForSubscription
+missing clients.producer.KafkaProducer#sendOffsetsToTransaction
+missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# KafkaProducer's public metric and thread-name constants.
+missing clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
+missing clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
+# RecordMetadata: Java's public constructor; the JavaScript one is private,
+# only the native layer builds metadata (javascript/CLAUDE.md "Files and
+# layout").
+missing clients.producer.RecordMetadata#RecordMetadata
+
+
+# check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
+# Each line names one Java form not translated, so a wrong shape of the forms
+# that are translated is still a finding.
+# KafkaFuture.get: only get(); get(long, TimeUnit) is not translated yet.
+overload-missing KafkaFuture.get/get(long,TimeUnit)
+# KafkaProducer's constructor takes the configuration alone: JavaScript has no
+# serializers (a string is encoded as Java's StringSerializer would,
+# javascript/CLAUDE.md rule 8), and a Map and Properties are one configs type.
+overload-missing KafkaProducer.constructor/KafkaProducer(Map,Serializer,Serializer)
+overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
+
+
+# check-tsdoc-present (D1): items with no TSDoc comment, left for a writer to
+# document (PLAN.md §8 decision 15: the rule does not write prose).
+# SslClientAuth's constants: Java's enum constants have no Javadoc.
+# ProducerRecord.toString, RecordMetadata.toString: Java's overrides have no
+# Javadoc.
+doc-missing SslClientAuth.REQUIRED
+doc-missing SslClientAuth.REQUESTED
+doc-missing SslClientAuth.NONE
+doc-missing ProducerRecord.toString
+doc-missing RecordMetadata.toString
+
+
+# check-tsdoc-tags (D2): tags whose text Java does not give, so writing them
+# needs judgement (PLAN.md §8 decision 15).
+# SslClientAuth, SecurityProtocol, KafkaFuture: Java has no @param / @return
+# text for these members (no Javadoc, or a description without block tags).
+param-missing SslClientAuth.forConfig/key
+returns-missing SslClientAuth.forConfig
+returns-missing SslClientAuth.toString
+returns-missing KafkaFuture.isDone
+returns-missing KafkaFuture.isCompletedExceptionally
+returns-missing KafkaFuture.isCancelled
+param-missing KafkaFuture.cancel/mayInterruptIfRunning
+returns-missing KafkaFuture.cancel
+returns-missing SecurityProtocol.values
+returns-missing SecurityProtocol.names
+param-missing SecurityProtocol.forId/id
+returns-missing SecurityProtocol.forId
+param-missing SecurityProtocol.forName/name
+returns-missing SecurityProtocol.forName
+returns-missing SecurityProtocol.toString

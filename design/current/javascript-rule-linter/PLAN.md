@@ -1,0 +1,708 @@
+# Plan: a Claude-rule linter for the Node.js client
+
+Status: approved for implementation, 2026-11-05. Based on PR #312 at `b86bb9ebc`
+(which adds `lib/_native_loader.ts`, `tools/` and `release/`).
+
+## 1. Goal
+
+Check the rules of `javascript/CLAUDE.md`, and the root `CLAUDE.md` rules it inherits,
+mechanically. The model is what `cargo xtask lint-custom` does for the Rust crate:
+
+- one command;
+- every rule runs, and every finding is reported in one pass;
+- the run exits non-zero if anything fails;
+- each failing rule prints one fix hint;
+- a rule that cannot run fails the run instead of being skipped.
+
+Behaviour (ordering, timing, messages) stays with the tests. The linter checks what can
+be read from the source: names, shapes, visibility, docs, and which C functions are
+called where.
+
+Command: `make -C javascript lint-rules`, which runs
+`node scripts/lint_rules.js [check-<name>] [--no-baseline]`. `verify-javascript` runs it.
+
+## 2. What already exists (not redone)
+
+| Existing check | What it pins |
+|---|---|
+| `test/static/layout.test.js` | `lib/` has only `.ts` files with snake_case names and `_` for private ones; every folder has an `index.ts` that only re-exports; the root `index.ts` exports; `package.json` `exports` / `typesVersions` / `files` / scripts / engines; `dist/` and `build/` untracked; unit-test file names; only `util.h` includes the header; the license header; the generated-file header |
+| `test/static/header_conformance.test.js` | `src/*.c` calls only functions the header declares, and the `_err` twin where one exists; the plan's functions are called, and the blocking `send` / `flush` / `close` and `KafkaFuture_get` are not; the single blocking close sits in the finalizer; `FFI_NAMES` matches `kafka_common_Error_e` |
+| `test/typing/typing.test.js` | the declarations type-check under `--strict`, node10 resolution and no ambient types; no public declaration names a private module; a default import fails under `esModuleInterop` |
+| `test/unit/_errors.test.js` | the error classes match Java's `extends` chain in both directions; names, folders, FFI ids, abstract bases, `fromNative` |
+| `test/unit/_config.test.js`, `producer_config.test.js` | config type checks and the constants against Java's literals |
+| `cargo xtask check-generated` | generated `.ts` files are current, none missing, none orphaned |
+
+These keep running. The linter adds what they do not cover. They stay (decision 16),
+pruned only of a check the linter duplicates exactly.
+
+## 3. Architecture
+
+```
+kafka/ Java sources ──java.rs scanner──▶ cargo xtask java-index --json ──▶ build/java-index.json ─┐
+design/current/ Public + deprecated lists ──────────────────────────────────────────────────────┤
+javascript/lib/**/*.ts ──TypeScript compiler API (program + type checker)─────────────────────────┼─▶ rules ─▶ findings ─▶ baseline ─▶ report / exit 1
+javascript/src/*.c + confluent_kafka_bindings.h ──C tokenizer (from header_conformance)───────────┤
+javascript/lint-baseline.txt, eslint-baseline.txt ──────────────────────────────────────────────┘
+```
+
+The rules run in two tools (§3.5): ESLint (a local plugin, `kafka/<rule>`, for the rules
+that read TypeScript, with typescript-eslint's recommended type-checked rules on `lib/`)
+and the runner (`scripts/lint_rules.js`, for the addon's C rules and the other files).
+
+### 3.1 Java side: reuse `rust/xtask/src/java.rs`
+
+Add `cargo xtask java-index --json <out>`, which writes the `JavaIndex` the Rust lint
+already builds. For each main class it records:
+
+- package, nested path, kind, visibility, `abstract`, `@FunctionalInterface`, supertypes;
+- each overload: name, parameter types and names, visibility, `static`, `default`,
+  `@Deprecated`, and its Javadoc translated by `javadoc.rs` (the `@param` / `@return` /
+  `@throws` tags split out, plus the word count);
+- fields: visibility, `static final`, deprecated;
+- enum constants;
+- whether the class is `@InterfaceAudience.Public` in 4.4, whether its package is
+  "not supported", and whether it appears in the deprecation list.
+
+New in the scanner: the **return type** of each overload and the **type** of each field,
+as written. `java.rs` does not record these today, and rule J7 needs them.
+
+Why not scan Java again in JS: it would duplicate `java.rs` (DoD #6), and the two would
+drift on what "deprecated", "public" or "getter" means. The Rust, Python and JS lints
+should share one Java truth.
+
+### 3.2 TypeScript side: the compiler API
+
+Use `typescript` (5.9.3), already a devDependency and already used by
+`scripts/typescript.js`. `ts.createProgram` runs over `lib/` with `tsconfig.json`. The
+type checker supplies each module's exports, class members, modifiers
+(`private` / `static` / `readonly`), accessors, signatures and **resolved types**. No new
+dependency. This is stronger than the Rust lint, which works on syntax only.
+
+### 3.3 C side: a tokenizer, not libclang
+
+Move `stripComments` / `calledFunctions` out of `header_conformance.test.js` into
+`scripts/lint/c_source.js` and extend it to:
+
+- find function bodies;
+- list call sites with their argument lists;
+- list `napi_property_descriptor` registrations.
+
+Prototypes are parsed from `confluent_kafka_bindings.h`, as the test already does.
+
+### 3.4 Mapping Java to TS: by convention, plus two tags
+
+Rust needs a marker on every item because its names change (snake_case, `_with_`). JS
+keeps Java's names, so the mapping can be derived:
+
+- **Files:** `lib/<pkg>/<snake>.ts` maps to Java class `<pkg>.<Pascal>`. `clients.` is
+  dropped from the package, and `java.*` packages map to the root.
+- **Methods:** a method has its Java method's name.
+- **Getters:** a getter property `x` maps to Java `x()` or `getX()`; `isX` / `hasX` stay
+  (a property `isX` maps to `isX()`, never a property `x`).
+- **Static-ness:** a member maps only to a Java member of its own static-ness; a mismatch is
+  J2's `static-mismatch`.
+- **Exports:** a public module's exports are the type checker's (`export` declarations,
+  `export { X }` re-exports, `export declare` ones). J1 asks a function or constant export
+  for `@jsOnly` (`jsonly-required`) and reports an enum or namespace export (`export-form`).
+- **Shapes:** an exported interface or object type mapped to a Java class (`Header`) goes
+  through J2 and J3 as a class does: its property and method signatures are its members.
+- **Constants:** a `static readonly X` maps to Java `public static final X`.
+- **Constructors:** the constructor maps to Java's constructors.
+
+Two TSDoc tags cover the exceptions. A tag that exempts nothing is a finding.
+
+- `@jsOnly <reason>`: an exported item with no Java counterpart (`ProducerConfigs`,
+  `CloseOptions`, `ProducerRecordOptions`, `Data`). It plays the role of Rust's
+  `rust-only`.
+- `@java <fqn>[#member]`: where the convention does not find the Java item, e.g. the
+  `Header` type maps to `org.apache.kafka.common.header.Header`.
+- `check-java-tags` reports a tag that is malformed or not needed: an `@jsOnly` with no
+  reason, or on an item the convention maps; an `@java` naming no indexed class, a member
+  its class does not declare, what the convention already finds, or another class or
+  member than the one the convention finds (`java-remap`); both tags on one item.
+
+Three kinds of Java class map differently, by one allowance each in
+`scripts/lint/java_ts.js`, never by per-file tags (the files are generated):
+
+- **Errors** (`lib/_error_registry.ts`, javascript/CLAUDE.md "Errors"): their Java class is
+  the registry's; they are exempt from J4's audience rule; their members are the fixed set
+  (`name`, `code`, `errorName`, `retriable`, `apiError`, `message`, `cause`), which J8 also
+  allows as data properties; J3 asks nothing of them.
+- **Config classes** (`ProducerConfig`, `SslConfigs`, `SaslConfigs`, `SecurityConfig`): J3
+  asks for their non-deprecated `public static final` constants only.
+- **Function types** (`Callback`): mapped by J1, no member rule applies.
+
+J3 also leaves out the members `java.lang.Enum` gives every enum (`values`, `valueOf`,
+`name`, `ordinal`), which J2 still maps, and on an enum J2 maps `toString` to
+`java.lang.Enum#toString` when the enum declares none. J3 does not ask for the constructor
+of an abstract Java class, which only a subclass calls. J5 also reports a member a
+deprecated Java supertype declares.
+
+### 3.5 The two tools: ESLint and the runner
+
+User decision of 2026-11-06 (§8 decision 19): the rules that read TypeScript run in ESLint;
+the addon's C rules and the checks of the other files stay in the runner.
+
+- **Checks:** one module per rule in `scripts/lint/rules/`, each exporting `{ name, kinds,
+  needs, check(ctx) -> { findings, checked }, hint }`. `scripts/lint/checks.js` splits them:
+  - **ESLint** (`ESLINT_CHECKS`): java-name, java-members, java-completeness, public-audience,
+    no-deprecated-translation, getters-readonly, java-tags, overload-shape, type-mapping,
+    waiting-call-promise (the C call graph and the header stay inputs it reads; its findings
+    are on TypeScript methods), native-registry, private-members, tsdoc-present, tsdoc-tags.
+  - **Runner** (`RUNNER_CHECKS`, `scripts/lint_rules.js`): N1 to N8.
+  - **Split by file type**, one name on both sides (the module's `PART`): no-todo (TypeScript
+    and JavaScript files in ESLint, every other file in the runner), exception-word (lib/'s
+    identifiers in ESLint, with the Java-name exemption; src/'s in the runner, with Node-API's
+    prefixes), java-line (TypeScript and JavaScript comments in ESLint, C comments in the
+    runner). An exemption goes with the side it concerns (the CLAUDE.md sentence with the
+    runner).
+  - Within one tool, `kinds` are unique, so a baseline line belongs to one rule.
+- **ESLint** (`eslint.config.cjs` -> `scripts/lint/eslint/config.js`, ESLint 10 and
+  typescript-eslint 8): the local plugin `kafka` (`scripts/lint/eslint/plugin.js`) has one
+  rule per ESLint check, named after it (`check-java-name` -> `kafka/java-name`), plus
+  `kafka/baseline`, all on every TypeScript and JavaScript file (`check-directives`, below,
+  is ESLint's only: `kafka/directives`); typescript-eslint's
+  `recommendedTypeChecked` runs on `lib/**/*.ts`, typed through `projectService`. Its
+  findings on the tree are fixed when a fix is behaviour-neutral, else kept with a targeted
+  `eslint-disable-next-line <rule> -- <reason>`.
+- **The analysis** (`scripts/lint/eslint/analysis.js`): each check runs once per state of its
+  inputs, on the context below (its own TypeScript program: two programs in all, with
+  typescript-eslint's).
+  - **The client directory** is the configuration's (`config(root)`, which
+    `eslint.config.cjs` passes as `settings.kafka.root`), never ESLint's working directory:
+    `eslint javascript` from the repository and `eslint .` from `javascript/` give the same
+    result, and nothing outside `javascript/` is read.
+  - **Where a finding is reported.** A finding with a place, the check's `at`
+    (`scripts/lint/location.js`) or a `file:line` / `file:` subject, is reported there only.
+    A finding about the project is reported **on every file the rule visits**, so any run,
+    of the whole directory, of `lib/` or of one file, fails while it stands: a rule that
+    cannot run or checks nothing, a stale, duplicate or unknown baseline line, an unused
+    allowlist or exemption entry (at its entry's line in the rule's module, line 1
+    elsewhere), and a finding whose place ESLint does not lint. A registration lib/ never
+    uses is reported on `lib/_native.ts`. A message is the finding's `<subject>: <message>`,
+    its message id the finding's kind.
+  - **Freshness.** The rules of one file share one analysis; each new file compares the
+    signature of the inputs (every file of the client directory, the Java index and the
+    bindings header, by size and modification time), and any change makes a new analysis.
+    ESLint's `--cache` is **not supported** for the `kafka/` rules: ESLint keys its cache on
+    each linted file, while these findings depend on other files (the baseline, the index,
+    the C sources, other TypeScript files). Neither the Makefile nor CI passes it.
+- **Directives** (`kafka/directives`, `scripts/lint/rules/directives.js`): an inline comment
+  never changes what the `kafka/` rules report, which only `eslint-baseline.txt` and the
+  rules' allowlists may. No inline configuration comment (`/* eslint … */`,
+  `/* eslint-env … */`) is allowed, whatever it configures and however it is written
+  (quoted, JSON-escaped, object syntax): the configuration is `eslint.config.cjs`'s alone.
+  Every `eslint-disable`, `eslint-disable-line` and `eslint-disable-next-line` names exactly
+  one rule, not a `kafka/` one, with `-- <reason>`, and no `eslint-enable` names a `kafka/`
+  rule; rule names are read as ESLint reads them (split on commas, trimmed, unquoted), and the
+  reason as ESLint splits it (whitespace, two or more dashes, whitespace). The comments are
+  read twice, in the analysis, where no comment can switch the reading off: by the check,
+  and by ESLint itself (its Linter parses each file with no rule, then `getDisableDirectives()`
+  and `applyInlineConfig()`), whatever ESLint reads that the check did not being
+  `directive-unread`. A finding is reported on every file, and at 1:0 of its own file too,
+  which no disable comment reaches (the license header comes first). ESLint's
+  `reportUnusedDisableDirectives: "error"` reports a directive that disables nothing.
+  `noInlineConfig` is not used: the library keeps targeted disables.
+- **One configuration** (`kafka/config`, `scripts/lint/rules/eslint_config.js`): ESLint
+  takes each file's nearest configuration, so any other ESLint configuration in the client
+  (`eslint.config.{js,cjs,mjs,ts,cts,mts}`, `.eslintrc*`) besides the root's
+  `eslint.config.cjs` is a finding about the project, reported on every file.
+- **Output** (`scripts/lint/eslint/formatter.js`, which `make lint-rules` passes as
+  `--format`): a `kafka/` finding about the project, reported on every file, is printed once
+  with the number of files it was reported on; every other message, any rule's, stays under
+  its file with its line and column. The exit code is ESLint's.
+- **Context:** the TS program, the Java index, the C sources and the header, loaded once.
+- **Failure modes:** a missing `kafka/`, header or `java-index.json` fails with a reason,
+  and so does a rule that checks 0 items (the idea behind Rust's `check-consumer-receiver`,
+  which fails when either trait is missing): in the runner as a failed rule, in ESLint as an
+  error on every file the rule visits, so any `eslint` run exits non-zero.
+- **Baselines**, one per tool, each like `rust/xtask/src/lint_custom/baseline.rs`
+  (`<kind> <subject>` keys and `prefix:` lines; a line that waives nothing, or is listed
+  twice, is a finding, so the files only shrink): `lint-baseline.txt` for the runner,
+  `eslint-baseline.txt` for ESLint, applied by the analysis (a stale line is its rule's
+  error on every file it visits; `prefix:` and unknown-kind lines are `kafka/baseline`'s,
+  judged once every check ran). Split rather than shared because neither tool sees the other's findings:
+  one file would leave each tool unable to judge the other's lines, or need a third pass.
+  `KAFKA_LINT_NO_BASELINE=1 npx eslint .` and `node scripts/lint_rules.js --no-baseline`
+  show every finding.
+- **Commands:** `make -C javascript lint-rules` writes the Java index, then runs `eslint .`
+  and the runner, failing if either fails; `make -C javascript test-lint` runs the tests of
+  both (`node --test`).
+
+## 4. The rules: what is tested
+
+Each rule lists: the rule it enforces, the exact finding condition, an example finding,
+and what already covers part of it.
+
+### J — Java surface (Java index + TS checker)
+
+**J1 `check-java-name`** (JS "Files and layout", root §2)
+- Every exported class, interface or type of a public module maps, by 3.4, to a Java class
+  of its folder's package, unless it is tagged.
+- The file name is `snake_case(class)`, and each file holds one public Java type, except
+  `Header` beside `ProducerRecord` in `producer_record.ts` (decision 5).
+- An `Exception` class is named `…Error`.
+- Example: `lib/producer/record_meta.ts: exports RecordMetadata (clients.producer.RecordMetadata); the file must be record_metadata.ts`.
+- Already covered: `layout.test.js` checks the snake_case form, and `_errors.test.js`
+  checks the error classes. Nothing ties the hand-written classes to Java.
+
+**J2 `check-java-members`** (JS "Java shape, JS idiom")
+- Every public member of an exported class maps to a public member of its Java class:
+  a method by its own name, a property by the getter rule, a `static readonly` by a
+  `public static final` field of the same name.
+- A public member with no Java counterpart is a finding unless it is tagged `@jsOnly`.
+  TS-`private` and `_` members are exempt.
+- Example: `RecordMetadata.getOffset: no Java member; Java's getter offset() is the property offset`.
+
+**J3 `check-java-completeness`** (DoD #2)
+- Every public, non-deprecated Java constructor, method and constant of a translated class
+  is present, or appears in the baseline as `missing <Class>#<member>`, `<Class>` the Java
+  class below `org.apache.kafka.` (`clients.producer.KafkaProducer#initTransactions`), one
+  line per Java name (its overloads collapse).
+- Today the baseline holds `KafkaProducer`'s transaction methods, `partitionsFor`,
+  `metrics`, `clientInstanceId` and the metric-subscription methods. They are burned down
+  as they are translated. See decision 4; `equals` / `hashCode` are never asked for
+  (decision 6).
+
+**J4 `check-public-audience`** (root §2, §3)
+- An exported class must be `@InterfaceAudience.Public` in Kafka 4.4, and not in an
+  `internals` or "not a supported Kafka API" package.
+- An exported member must not translate a `private`, package-private or `protected` Java
+  member.
+- Exempt: error classes (one per FFI-enum exception, Public or not, as in the Python rules)
+  and items tagged `@jsOnly`.
+
+**J5 `check-no-deprecated-translation`** (root §3)
+- No exported class, member or constant translates a `@Deprecated` Java class, overload
+  or field. "Deprecated" means the `kafka/` tree plus `design/current/java-deprecated.txt`.
+- Already covered for config constants: the producer config test reads the deprecated set.
+  This rule covers everything else.
+
+**J6 `check-overload-shape`** (JS "One Java overload set is one function")
+- No two TS members map to one Java name.
+- A Java overload set with more than one form is one function taking one options object.
+  Its property names must equal the union of the Java overloads' parameter names, with a
+  `Duration x` becoming `xMs` (decision 8: milliseconds, `xMs: number`).
+- A property is required exactly when every Java overload has it.
+- Example: `ProducerRecordOptions.ts: no ProducerRecord constructor names it (topic, partition, timestamp, key, value, headers)`.
+- Example: `ProducerRecordOptions.value is optional but every Java constructor takes value`.
+
+**J7 `check-type-mapping`** (JS "Java null is null", "long crosses as number", `Future` → `KafkaFuture`)
+
+Each parameter, return and property type follows one table:
+
+| Java | TS |
+|---|---|
+| `long` / `int` / `short` / `byte` | `number` |
+| `boolean` | `boolean` |
+| `String` | `string` |
+| key/value `K` / `V` | `Data \| null` |
+| `Duration` | `number` (milliseconds), the name taking `Ms` (decision 8) |
+| `Future<T>` | `KafkaFuture<T>` |
+| a value that can be `null` | `T \| null` |
+| `void` of a blocking method | `Promise<void>` |
+
+A type the table does not cover is an `unmapped` finding, as in the Rust FFI rule. This
+needs the return and field types from 3.1.
+
+As built in P3 (`scripts/lint/rules/type_mapping.js` holds the full table): `null` /
+`undefined` are stripped from the TypeScript type first, and a return may be a `Promise` of
+the mapped type (a blocking method; A1 says which). The table also maps `byte[]` to
+`Data`; `List` / `Set` / `Collection<T>` and `T[]` to an array of `T`; `Iterable<T>` and
+`Headers` to an iterable or array (of `Header`); `Map` / `Properties` (a client's
+configuration) to the `...Configs` type; `Object` to `unknown`; a type variable to a type
+parameter; and a Java class lib/ translates to its TypeScript type. An options object's
+properties are checked against the Java parameters of their names.
+
+**J8 `check-getters-readonly`** (JS "Java getters are read-only properties", root §3 no public field)
+- Every public property of an exported class is a `get` accessor with no `set`, or a
+  `static readonly`.
+- There are no public mutable fields. A `readonly` instance data property is a finding
+  too (`readonly-field`): TypeScript's `readonly` is gone at run time. Except (decision 7):
+  one translating a Java `public final` instance field, or an enum's `name`, on a class
+  whose constructor runs `Object.freeze(this);` at its top level.
+
+### A — async shape and the native registry
+
+**A1 `check-waiting-call-promise`** (JS rule 4, "A blocking Java method returns a Promise")
+- A public method whose native path reaches a `_cb` twin returns a `Promise`; one whose
+  path reaches none does not.
+- The path is followed: TS method, then a `native.<fn>` call in its body (directly or
+  through a private method of the same class), then the `addon.c` registration
+  `{"<fn>", Impl}`, then the `kafka_*` functions `Impl` calls.
+- Example: `KafkaProducer.flush reaches kafka_producer_Producer_flush_cb but returns void`.
+- The other direction is `promise-not-waiting`. A path that leads nowhere (a `native.<fn>`
+  no descriptor registers, or an implementation no `src/*.c` defines) is
+  `unresolved-native`, never a pass. A method with no native use is not checked.
+- The path follows every call the type checker resolves into a lib/ function or method,
+  transitively (a module helper, another class's method), and the handle is recognised by
+  its type under any name (`const n = native`), in A1 and A2 alike.
+- J7 accepts a Promise return only on a method A1 resolves to a `_cb` twin, or on a listed
+  pure-JS waiting member (`KafkaFuture#get`: Java's `get()` blocks; the JS future settles
+  from the delivery callback).
+
+**A2 `check-native-registry`** (JS "Files and layout")
+- Every function `addon.c` registers is used from `lib/`, and every `native.<fn>` used
+  exists in `addon.c`.
+- Only `lib/_native_loader.ts` resolves the `.node` file: the platform package
+  `@confluentinc/kafka-javascript-<platform>` first, then `build/Release/`.
+- Only `lib/_native.ts` calls the loader and does the one-time setup.
+- No `index.ts`, and no other `lib/` file, `require`s a `.node` file or the loader; no
+  `index.ts` imports `lib/_native.ts` either (`index-native`).
+
+### N — the native addon (C)
+
+**N1 `check-out-err`** (root §4: `out_err` never NULL; nothing silently dropped)
+- Every call to a function whose prototype ends in `kafka_common_Error_t **out_err` passes
+  an error slot.
+- That slot is read by `FFI_ERR` / `FFI_SET` / `FFI_DISCARD`, or tested right after the
+  call. It is never `NULL`.
+
+**N2 `check-cb-twin-only`** (JS rule 4)
+- For every header function `f` that has an `f_cb`, `src/` calls `f_cb`, except an
+  allowlist entry with its reason (the finalizer's force-close).
+- This generalizes `header_conformance`'s fixed producer list, so a consumer or admin
+  binding is covered without editing the test.
+
+**N3 `check-notify-hook`** (JS rule 2)
+- The body of `cbq_notify` contains only the `notify_mtx` lock / unlock, the
+  `notify_open` test and one `napi_call_threadsafe_function(…, napi_tsfn_nonblocking)`.
+
+**N4 `check-single-drainer`** (JS rules 3, 10)
+- `__execute_callbacks_err` is called only from `cbq_drain`.
+- `cbq_drain` is called only from the threadsafe function's `call_js` and from `send()`'s
+  pump.
+- No `_destroy_err` appears lexically inside the drain loop.
+
+**N5 `check-completion-order`** (JS rule 6)
+- In each delivery-completion function the calls appear in this order: user callback,
+  then future completion, then `__set_callback_result_err`, each at one call site.
+- The check is lexical, not path-sensitive. Decision 13 covers what it cannot see.
+
+**N6 `check-ownership`** (JS rule 9)
+- Every handle type `src/` receives as owned (from a `_new`, from `out_err`, from a `_cb`
+  completion) has its `_destroy` called somewhere in `src/`. This is a set-level check.
+- The borrowed error and metadata a delivery callback receives are never passed to a
+  `_destroy` in that function.
+
+**N7 `check-zero-copy`** (JS rule 8) *(heuristic; decision 13: built, with an allowlist)*
+- On the send path (`record.c`, `producer.c`), the key and value cross through
+  `napi_get_buffer_info` / `napi_get_typedarray_info` into a `kafka_Bytes_t`.
+- There is no `memcpy`, `malloc` or `napi_create_buffer_copy` on them.
+
+**N8 `check-no-binding-queue`** (JS rule 7) *(heuristic; decision 13: built, with an allowlist)*
+- There is no mutex outside `callback_queue.c`, and no array, queue or cap of records in
+  `lib/producer/`.
+
+**As built in P4.** Every N rule reads `scripts/lint/c_model.js` (the bodies, calls and
+header prototypes, with their doc comments). Bodies are keyed by file and name, and a call
+reaches the definition C's linkage gives it (`resolve`): its own file's first, then a
+non-`static` one in another file, so two files' `static` functions of one name are each
+checked. A call in a `#define` body carries the macro's name. Each allowlist entry carries
+its reason, and an entry that waives nothing is the rule's `*-unused-allowance` finding.
+
+- A C call site is named `file:function:callee#n`, `n` its rank among that callee's calls
+  in the function (from 1): N1's subjects and the N1 / N7 / N8 allowlist keys use it, so a
+  key names one call and survives edits elsewhere in the file.
+- N1: the calls checked are those of a header function ending in `out_err`, of a src/
+  function that passes a `kafka_common_Error_t **` parameter of its own on as a slot
+  (a forwarder, `producer_execute`, found to a fixed point), and through a function
+  pointer whose typedef takes a slot (`cbq_execute_fn`, `q->execute(...)`). A slot is
+  read when the call is an argument of `FFI_ERR` / `FFI_SET` / `FFI_DISCARD` (possibly
+  behind a cast) with the slot those macros read, `&ffi_err`; when `ffi_take(&slot)`
+  comes in the next statement; or when the slot is a forwarder's own parameter, whose
+  callers are checked in turn.
+- N2: the blocking forms are `f` and `f_err` for every header `f_cb`, in function bodies
+  and in `#define` bodies (src/*.c and src/*.h), a macro's call checked at its
+  definition. One entry: the finalizer's
+  `kafka_producer_Producer_close_with_timeout(p->view, 0, &ffi_err)` in
+  `producer_force_close`. N2 also owns rule 5: `FORBIDDEN` makes every
+  `kafka_common_KafkaFuture_get*` call a `forbidden-call`, the `_cb` forms included.
+- N3: the hooks are the functions passed to `__set_callbacks_notify_err`. A hook is,
+  statement for statement, an optional declaration casting the opaque to the queue,
+  `pthread_mutex_lock(&q->notify_mtx);`, `if (q->notify_open)` guarding exactly one
+  `napi_call_threadsafe_function(q->tsfn, NULL, napi_tsfn_nonblocking);` (braced or
+  not), and `pthread_mutex_unlock(&q->notify_mtx);`. A negated or compared guard is
+  `notify-unguarded`; any other statement, a `return` included, is `notify-body`, which
+  names the first stray one. A hook that calls nothing (the finalizer's no-op) may only
+  `(void)` its opaque.
+- N4: `__execute_callbacks_err` is called from the queue's executor (`producer_execute`,
+  listed), which nothing calls directly, and `q->execute` is called only in `cbq_drain`.
+  `cbq_drain`'s callers are listed (`call_js`, `js_producer_pump`). Its loop, `while`,
+  `for` or `do`, holds no destroy (no loop is `drain-missing`) and no call through
+  `->after_drain` (`after-drain-in-loop`). What runs inside the drain reaches no client
+  destroy through the C call graph: the executor each client hands to `cbq_init` (its
+  `cbq_execute_fn` argument) and every src function the loop calls (`destroy-in-drain`),
+  and every completion handed to a `_cb` twin or to an interface's constructor
+  (`destroy-in-completion`). A `cbq_init` call with no executor the rule can follow is
+  `drain-missing`. The after-drain hook runs after the loop and may destroy.
+- N5: in C, a delivery completion is a function src/ hands to an interface's constructor
+  (`..._new` / `..._new_err`) as an `_fn_t`; it calls `call_ref` once and
+  `__set_callback_result_err` once, after it, the report being the statement an
+  `if (!…destroying)` guards or inside its braced block (rule 6: no report once destroy
+  has begun). In TypeScript, a delivery callback is an argument for a native parameter
+  whose function type takes a `RecordMetadata`, plus any function argument of a
+  `native.<fn>` call that completes a future (`['_complete']`). It resolves to a function
+  (a literal, or a `const`, `readonly` or module function of lib/), else
+  `completion-unresolved`; the lib/ functions it calls are followed in call order; and
+  it calls the user callback (a value of the `Callback` type itself) once, before it
+  completes the future, once.
+- N6: **owned** is a non-const `kafka_..._t *` returned by a header function (an `__as_`
+  view excepted), an `out_err` error, or a non-const handle parameter of a completion of a
+  `_cb` twin. Each owned type is destroyed somewhere (`<Type>_destroy[_err]`), or handed to
+  a header function whose doc says that parameter is "(consumed)". **Borrowed** is a
+  `const` handle parameter of an interface method src/ implements; it is never passed to
+  a destroy, or to a src/ function that destroys that parameter (found to a fixed point),
+  arguments compared without their casts and parentheses.
+- N7 and N8: the lists are in the rules (`ALLOWED`) with their reasons. N7 covers
+  allocations on the send path; a copy (`memcpy`, `memmove`, `strdup`,
+  `napi_create_buffer_copy`) is never allowed. In lib/'s hand-written modules, N7 also
+  reports a copy of a value typed as bytes (a `Uint8Array`, a `Buffer`, or a union
+  holding one, such as `Data`): `Buffer.from(x)`, `Buffer.copyBytesFrom(x)`,
+  `new Uint8Array(x)`, `Uint8Array.from(x)`, `x.slice()`; encoding a `string` and a view
+  over the same memory are no copy. N8 looks for lock identifiers outside
+  `callback_queue.c` (a declaration keyed by its declarator,
+  `src/util.h:CallbackQueue.notify_mtx`), and for array / `Map` / `Set` class fields,
+  constructor parameter properties and module variables, and cap-named constants, in
+  every hand-written module of `lib/` (the generated ones, marked `GENERATED, DO NOT
+  EDIT`, are not read). A2's `TEST_ONLY` entry also checks that its test still calls the
+  registration.
+- Known limit: the C tokenizer reads both sides of an `#if` / `#ifdef`, so a call under a
+  disabled branch counts as made.
+
+### D — documentation (TSDoc)
+
+**D1 `check-tsdoc-present`:** every export and public member has a TSDoc comment.
+The items are J1's exports of the public modules and the public members of an exported
+class, interface or object type (J2's); a get / set pair, and a function's or method's
+overload signatures, are one item, which any one comment documents. A comment documents
+the item only when its description (the text before its first block tag) is not blank: an
+empty `/** */`, or a comment of tags only, is `doc-empty`.
+
+**D2 `check-tsdoc-tags`** (JS "Types are TypeScript … TSDoc comments")
+- `@param name -` for every parameter (and each property of an options object).
+- `@returns` for a non-`void` return.
+- A `` @throws `XError` `` for each Java `@throws` of the member, the name mapped, and
+  every class named this way exists in `lib/`.
+- No JSDoc type annotations (`@param {string}`) in `lib/`.
+
+How D2 reads them (P5):
+- It checks the functions, methods and constructors D1 finds documented (D1 reports the
+  others), and the parameters of a function type (a type alias to one, `Callback`, or a
+  function-typed property); a get accessor needs no `@returns`, TSDoc documenting it by
+  its description.
+- An options object is a parameter whose type, without `null` / `undefined`, is an
+  object type that is not a union, an array, a function or a class instance (J6's
+  `isOptions`), nor an interface or class the TypeScript or Node.js libraries declare
+  (`Error`); a library mapped type over an object literal (`Readonly<{ … }>`) is one. Each of
+  its properties is documented when the property's declaration in the type has a TSDoc
+  comment of its own, or when the parameter's `@param` text names it in backquotes
+  (`close`'s `@param options - `timeoutMs`: …`); the bare word does not count. TypeScript
+  attaches a comment to a property only when it stands on its own line before it.
+- The Java `@throws` are those of the live (not deprecated) public overloads of the
+  member J2 maps it to, from the Java index's Javadoc; `XException` becomes `XError`.
+  Every `@throws` starts with its class in backquotes (`throws-form` otherwise), and that
+  class must be one `lib/` exports or a JavaScript built-in error (`TypeError`,
+  `RangeError`, …). On a method returning a Promise, a `@throws` documents a rejection
+  (decision 18).
+- A finding about one parameter, option or error names it after a `/` in its subject
+  (`KafkaProducer.send/KafkaError`), so a baseline line waives that one alone.
+
+**D3 `check-tsdoc-size`** *(not built: decision 15)*
+- The doc is at most 150% of the Javadoc's word count, measured with the same
+  `javadoc.rs` count, which reaches JS through `java-index.json`.
+- `words` in `java-index.json` counts a Javadoc as written. A Javadoc that only points
+  elsewhere (`@see KafkaConsumer#commitSync()`, `See {@link KafkaProducer#close()}`)
+  counts its pointer, where `check-api-docs` measures the Javadoc pointed to
+  (documentation.md §4). If decision 15 keeps D3, P5 adds the followed count.
+
+**D4 `check-java-line`** (documentation.md §7)
+- No comment in `lib/`, `src/`, `test/`, `scripts/`, `tools/` or the gRPC harness
+  (`grpc_server.js`, `grpc_translate.js`) cites a Java file and line (`Foo.java:123`
+  or the short `:142` form).
+
+### H — hygiene
+
+**H1 `check-no-todo`** (JS "Files and process"; no current check)
+- No `TODO` / `FIXME` in any file of the client ("every file"): every file under
+  `javascript/`, read from the file system (never from git, whose index and
+  environment vary with the caller), so the gRPC harness, `binding.gyp`, the Dockerfile
+  and the README / CHANGELOG too. Not read: `node_modules/`, `build/`, `dist/`,
+  `.claude/`, `package-lock.json` and binary files.
+- The sentence of `javascript/CLAUDE.md` that states the rule ("No TODO or FIXME.") is
+  exempt; any other marker of that file is a finding, and so is the exemption once the
+  sentence is not found.
+
+**H2 `check-exception-word`** (root §2, §4)
+- No identifier in `lib/` or `src/` contains "exception", in any case. Comments are
+  exempt.
+
+**H3 `check-private-members`** (JS "Files and layout")
+- Every `_`-prefixed member is TS `private`.
+- Every bracket access `x['_m']` targets a `private` member of another class.
+
+## 5. Not linted (left to tests and review)
+
+These depend on runtime behaviour, so a static check would be a guess:
+
+- cooperative scheduling (drain every 64th send, defer after 1000);
+- unhandled-rejection semantics of `send()` and of futures;
+- the callback running before the future completes, at runtime;
+- teardown and finalizer order;
+- keep-alive `ref` / `unref`;
+- the core's exact error messages;
+- `null` / `undefined` handling;
+- config validation;
+- the negative-timeout precedence in `close`;
+- "no Kafka logic in the binding" beyond what N8 catches.
+
+## 6. How the linter itself is tested
+
+1. **Fixture tests, per rule** (`test/lint/<rule>.test.js`, `node --test`).
+   - Each test builds a tiny project in a temp directory: a couple of `lib/*.ts`, a
+     `src/*.c`, a minimal header and a hand-written `java-index.json`.
+   - It runs one rule and asserts the **exact** finding text.
+   - Every rule has, at least:
+     - a passing case;
+     - one case per finding kind;
+     - one case per exemption (tag, allowlist, baseline line);
+     - the "cannot run" case (missing input, which must fail, not skip);
+     - the "checked 0 items" case.
+2. **The real tree.** The runner over the repository exits 0 with the checked-in baseline.
+3. **Mutation smoke test** (`test/lint/mutation.test.js`).
+   - Copy `lib/` and `src/` to a temp directory.
+   - Apply one known violation per rule. Examples:
+     - rename the `offset` getter to `getOffset`;
+     - add a public mutable field;
+     - call `kafka_producer_Producer_flush` instead of `_cb`;
+     - drop an `FFI_ERR`;
+     - add a `TODO`;
+     - make `ProducerRecordOptions.value` optional.
+   - Assert that exactly that rule fires. This catches a rule whose path resolution is
+     silently broken, which a fixture test of the rule alone would miss.
+4. **The baseline module.** Stale line, duplicate line, `prefix:` waiving, and a missing
+   file waiving nothing.
+5. **Rust side** (`cargo test -p xtask`). Cover:
+   - the `java-index` JSON for a fixture class: schema, return types, field types, the
+     Public / unsupported / deprecated flags, translated Javadoc tags;
+   - the new return-type scanning in `java.rs`.
+
+## 7. Phases
+
+Each phase runs the Actor / Critic loop of `.claude/rules/agent-roles.md`. Commits use
+`--no-verify`; the full gate runs once, before the last push.
+
+| Phase | Content | Done when |
+|---|---|---|
+| P1 | `cargo xtask java-index --json` (+ return and field types in `java.rs`), runner, baseline, `c_source.js`, H1–H3, D4 | runner green on the tree; fixture tests for each |
+| P2 | J1, J2, J4, J5, J8; J3 with its baseline | as above, plus the mutation cases for these rules |
+| P3 | J6, J7, A1, A2 | as above |
+| P4 | N1–N8 (decision 13) | as above |
+| P5 | D1, D2 (decision 15: no D3) | as above |
+| P6 | `make -C javascript lint-rules`, `verify-javascript`, Semaphore; a proposal of "(checked by `check-…`)" references for `javascript/CLAUDE.md`, for the user to apply | CI runs it |
+
+## 8. Decisions
+
+Answered 2026-11-05:
+
+1. **Architecture:** the hybrid of 3.1–3.3. `cargo xtask java-index --json` is a tooling
+   change, not a core or FFI change, so it is outside "no Rust or C changes for the
+   binding".
+2. **Mapping:** convention plus the `@jsOnly` / `@java` tags (3.4).
+3. **Java reference version:** the same as Rust. Audience is read at `java::AUDIENCE_REF`
+   (4.4), deprecations at `java::DEPRECATION_REFS` (4.3.1 + 4.4). A one-line fix to
+   `javascript/CLAUDE.md` ("Apache Kafka 4.3.1") is proposed to the user, not applied.
+4. **J3 completeness:** enforced now; the untranslated members go in
+   `javascript/lint-baseline.txt`.
+5. **`Header` beside `ProducerRecord`:** a stated exception (the user adds the sentence
+   to `javascript/CLAUDE.md` "Files and layout"). J1 allows exactly the type `Header` in
+   `lib/producer/producer_record.ts`, beside `ProducerRecord`; any other second type
+   there, or `Header` beside another type elsewhere, is a finding.
+6. **`equals` / `hashCode`:** not translated in JavaScript; J3 never asks for them.
+7. **A Java `public final` instance field** may be a `readonly` property of a frozen
+   object: J8 accepts a `readonly` instance data property when the Java class (or a
+   supertype) declares a public final instance field of that name and the constructor
+   runs `Object.freeze(this);` as a top-level statement of its body (not under a
+   condition, not in an inner function). When a name is both a public final field and a
+   getter method (`SecurityProtocol`'s `name`), the field wins. Extended the same day: on
+   a class translating a Java enum, the property `name` translating
+   `java.lang.Enum#name()` passes on the same terms (`SslClientAuth.name`). Any other
+   one translating a Java getter method stays a `readonly-field`.
+8. **`Duration` naming** (for P3): a Java `Duration x` parameter or option becomes
+   `xMs: number` (milliseconds), for every Java `Duration` parameter, single-form methods
+   included. J6 checks an option's name; J7 checks a positional parameter's
+   (`duration-name`) and both types.
+
+Answered 2026-11-05, for P3:
+
+9. **Trailing optional parameters:** when Java's forms differ only by trailing
+   parameters, a JavaScript function taking the longest form's parameters, those the
+   shorter forms lack optional, is accepted beside the options object
+   (`send(record, callback?)`).
+10. **An option whose Java parameter may be null** may be left out, omission meaning
+    null. "May be null" is read from the Java index, and needs a positive statement: the
+    parameter's type is a boxed primitive (`Byte`, `Short`, `Integer`, `Long`, `Float`,
+    `Double`, `Boolean`, `Character`) or a key / value type variable (`K`, `V`), or the
+    form's Javadoc `@param` for it says "may be null", "can be null", "if null", "null
+    means", "null for", "or null" or "nullable" (any case) and says none of "not null",
+    "non-null", "may not be null", "must not be null", "cannot be null", "not be null".
+11. **Gaps kept in the baseline:** the serializer constructor overloads
+    (`overload-missing KafkaProducer.constructor/KafkaProducer(Map,Serializer,Serializer)`
+    and `.../KafkaProducer(Properties,Serializer,Serializer)`) and
+    `KafkaFuture.get(timeout)` (`overload-missing KafkaFuture.get/get(long,TimeUnit)`).
+12. **`probe`** is an A2 allowlist entry: a test-only registration, called by
+    `test/unit/_native.test.js`. An entry that is not an unused registration any more is
+    an `unused-allowance` finding.
+13. **N1–N8 are all built**, the heuristic N5, N7 and N8 included, each with an explicit
+    allowlist whose entries carry a reason; an entry that waives nothing is a finding.
+
+Answered 2026-11-06 (14 to 18):
+
+14. **`error_discard`'s unread slot** on the destroy of a panic error is accepted as the
+    end of the chain (retrying could loop): an N1 allowlist entry for exactly that call
+    site, `src/error.c:error_discard:kafka_common_Error_destroy_err#2`.
+
+Also following the Python conventions (root CLAUDE.md, "Signatures"): J6 merges the
+parameters of different forms at one position whose Java types map to one host type into
+one, named after the earliest-declared form (`KafkaProducer(Map configs)` /
+`(Properties properties)` -> `configs`). A type variable is a kind of its own, as in the
+Python rule (`ProducerRecord[K, V]`): `K key` and `V value` never merge, although both
+are `Data` in JavaScript. Decision 10's phrases are read in the Javadoc as rendered
+(`{@code null}` as `null`), and "null indicates" counts as one.
+
+J6 keys an untranslated form by the form itself: when a function's positional parameters
+translate some of a Java overload set's forms (their names in place, a shorter form's
+missing parameters optional), each other form is an `overload-missing` finding with the
+subject `<member>/<form>`, the form's types erased (`KafkaFuture.get/get(long,TimeUnit)`).
+A positional parameter no translated form takes, or a form whose parameters the function
+takes but leaves required, is still `not-options`, so a baselined missing form never
+waives a wrong shape of the forms that are translated.
+
+15. **Doc depth** (P5): D1 and D2 only. D3 is not built: no size limit for JavaScript
+    docs, and no `WARNING` / `doc-contract-changes.md` flow. The linter writes no prose:
+    a tag whose text Java does not give, or whose wording needs a decision, stays a
+    baseline line with its reason.
+16. **Runner versus tests** (P6, the question earlier numbered 14 here): the static tests
+    stay (`test/static/*.test.js`); only a check the linter duplicates exactly is
+    removed from them, each removal justified in its commit.
+17. **Config-constant docs are generated from Java's own documentation**
+    (`rust/xtask/src/config_consts/js.rs`), translated as a Javadoc is (a list one item per
+    line, a link as `[text](url)`), in this order:
+    1. a configuration key's constant takes the documentation argument of the `define` call
+       of `ProducerConfig`'s `ConfigDef` for that key, its SSL and SASL support included
+       (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC` for `bootstrap.servers`);
+    2. else the `<NAME>_DOC` sibling in its Java class (or, for `X_CONFIG`, `X_DOC`), of any
+       visibility;
+    3. else a generated line naming it ("The `acks` configuration key.", "The documentation
+       of `ProducerConfig.X_CONFIG`.", or "Java's `C.NAME`.").
+
+    No prose is invented. With the 4.4 sources no key falls to the key line.
+18. **On a method returning a Promise, `` @throws `XError` `` documents a rejection**, its
+    text saying it rejects: D2 accepts it as Java's `@throws`. `KafkaProducer`'s `send`,
+    `flush` and `close` carry Java's `@throws` so, from Java's text ("rejects with it if
+    …").
+19. **ESLint for the TypeScript rules** (2026-11-06): the rules that read TypeScript run in
+    ESLint (a local plugin, `kafka/<rule>`, typed through typescript-eslint), with
+    typescript-eslint's `recommendedTypeChecked` on `lib/`; the addon's C rules and the
+    non-TypeScript files stay in the runner; no-todo, exception-word and java-line are split
+    by file type under one name. No custom ESLint languages (§3.5).

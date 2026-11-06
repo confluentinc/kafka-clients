@@ -126,6 +126,8 @@
     "@grpc/grpc-js": "1.14.4",
     "@grpc/proto-loader": "0.8.1",
     "@types/node": "20.19.41",
-    "typescript": "5.9.3"
+    "eslint": "10.14.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1"
   }
 }

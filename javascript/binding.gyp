@@ -57,6 +57,7 @@
           "inputs": [
             "scripts/gen_error_names.js",
             "scripts/header.js",
+            "scripts/lint/c_source.js",
             "<(ck_include_dir)/confluent_kafka_bindings.h"
           ],
           "outputs": [
