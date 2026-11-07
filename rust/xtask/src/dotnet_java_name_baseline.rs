@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `cargo xtask java-name-baseline [--add]`: rewrites the .NET binding's
+//! `cargo xtask dotnet-java-name-baseline [--add]`: rewrites the .NET binding's
 //! `dotnet/analyzers/java-name-baseline.txt` from a build. It compiles
 //! `Confluent.Kafka` for each of its target frameworks without the baseline, so
 //! CKRDA0013 reports every finding the allowlist does not hold, and writes those
@@ -39,7 +39,7 @@ const BASELINE: &str = "../dotnet/analyzers/java-name-baseline.txt";
 
 /// Where each compile writes its intermediate files and its log, emptied first so
 /// the compiler always runs: an up-to-date compile would report no finding.
-const WORK_DIR: &str = "target/java-name-baseline";
+const WORK_DIR: &str = "target/dotnet-java-name-baseline";
 
 const NAME_RULE: &str = "warning CKRDA0013: ";
 const STALE_RULE: &str = "warning CKRDA0014: ";
@@ -48,7 +48,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let add = match args {
         [] => false,
         [flag] if flag == "--add" => true,
-        _ => anyhow::bail!("usage: cargo xtask java-name-baseline [--add]"),
+        _ => anyhow::bail!("usage: cargo xtask dotnet-java-name-baseline [--add]"),
     };
     let found = build_findings()?;
     let old = fs::read_to_string(BASELINE).map_err(|e| anyhow::anyhow!("{BASELINE}: {e}"))?;
