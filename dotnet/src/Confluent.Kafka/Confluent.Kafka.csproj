@@ -132,7 +132,8 @@
   <!-- CKRDA0013 / CKRDA0014: the Java list and the name lists the analyzer checks this project against. -->
   <ItemGroup>
     <AdditionalFiles Include="../../analyzers/java-api.txt" />
-    <AdditionalFiles Include="../../analyzers/java-name-baseline.txt" />
+    <!-- -p:JavaNameBaseline=false leaves the baseline out, so every finding is reported: cargo xtask java-name-baseline. -->
+    <AdditionalFiles Include="../../analyzers/java-name-baseline.txt" Condition="'$(JavaNameBaseline)' != 'false'" />
     <AdditionalFiles Include="../../analyzers/java-name-allowlist.txt" />
     <AdditionalFiles Include="../../analyzers/java-name-pairs.txt" />
   </ItemGroup>
