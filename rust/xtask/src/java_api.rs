@@ -1,0 +1,401 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! `cargo xtask java-api <file>`: writes the public API of the Java client to
+//! `<file>`, one line per type and member, for the bindings' Java-name checks
+//! (the .NET binding's CKRDA0013 reads `dotnet/analyzers/java-api.txt`). The
+//! list depends only on the Java sources, so every binding can share it.
+//!
+//! A type is listed when its top-level class is on the `@InterfaceAudience.Public`
+//! list, or is one of [`TEST_JAR_CLASSES`], and every class on its path is
+//! `public`. A member is listed when it is `public`. Deprecated types and
+//! members are left out, whether the `kafka` working tree or
+//! [`java::DEPRECATED_LIST`] marks them: deprecated API is not translated.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+
+use crate::java::{self, JavaClass, JavaIndex, JavaKind, Overload, Visibility};
+
+/// The `@InterfaceAudience.Public` list, relative to `rust/`.
+const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
+
+/// Classes Java ships in its test jar that the bindings translate as public
+/// API: `MockAdminClient` (`.claude/rules/admin-client.md` §9).
+const TEST_JAR_CLASSES: &[&str] = &["org.apache.kafka.clients.admin.MockAdminClient"];
+
+const HEADER: &str = "\
+# The public API of the Java client, read from the `kafka` submodule by `cargo xtask java-api <file>`,
+# for the bindings' Java-name checks. Do not edit; rerun the command.
+# A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt
+# (or is MockAdminClient, from the test jar) and every class on its path is public; only public
+# members are listed, and nothing in design/current/java-deprecated.txt. Members Java declares
+# implicitly are listed too: a class's default constructor, and an enum's name(), ordinal(), values()
+# and valueOf(String); a parameter whose name the source does not spell is `?`.
+# One tab-separated line per item; a nested class is Outer$Inner:
+#   type      <class>  <class|interface|enum|record>  <supertypes, comma-separated, or ->
+#   ctor      <class>  <Name(Type name, ...)>
+#   method    <class>  <static|instance>  <name(Type name, ...)>
+#   field     <class>  <NAME>
+#   constant  <class>  <NAME>   (an enum constant)
+";
+
+/// Writes the list to the one file `args` names.
+pub fn run(args: &[String]) -> anyhow::Result<()> {
+    let [output] = args else {
+        anyhow::bail!(
+            "usage: cargo xtask java-api <file>, e.g. `cargo xtask java-api ../dotnet/analyzers/java-api.txt`"
+        );
+    };
+    let mut index = JavaIndex::load();
+    anyhow::ensure!(
+        !index.is_empty(),
+        "the `kafka` submodule is not checked out (../kafka is empty)"
+    );
+    let deprecated =
+        fs::read_to_string(java::DEPRECATED_LIST).map_err(|e| anyhow::anyhow!("{}: {e}", java::DEPRECATED_LIST))?;
+    index.merge_deprecation_list(&deprecated);
+    let public = parse_list(
+        &fs::read_to_string(PUBLIC_AUDIENCE_LIST).map_err(|e| anyhow::anyhow!("{PUBLIC_AUDIENCE_LIST}: {e}"))?,
+    );
+    let (text, types, members) = render(&index, &public);
+    fs::write(output, text).map_err(|e| anyhow::anyhow!("{output}: {e}"))?;
+    println!("✅ Wrote {types} types and {members} members to {output}");
+    Ok(())
+}
+
+/// The fully qualified names of a list file: one per line, `#` comments.
+fn parse_list(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The list's text, with how many types and members it holds.
+pub(crate) fn render(index: &JavaIndex, public: &BTreeSet<String>) -> (String, usize, usize) {
+    let by_path: BTreeMap<(&str, &[String], bool), &JavaClass> = index
+        .classes
+        .iter()
+        .map(|c| ((c.package.as_str(), c.path.as_slice(), c.is_test), c))
+        .collect();
+    let mut listed: Vec<&JavaClass> = index.classes.iter().filter(|c| is_listed(c, public, &by_path)).collect();
+    listed.sort_by_key(|c| c.marker());
+
+    let mut out = String::from(HEADER);
+    let mut members = 0;
+    for class in &listed {
+        let marker = class.marker();
+        let supertypes: Vec<String> = class
+            .supertypes
+            .iter()
+            .map(|written| {
+                index
+                    .supertype(class, written)
+                    .map_or_else(|| written.clone(), JavaClass::marker)
+            })
+            .collect();
+        let supertypes = if supertypes.is_empty() {
+            "-".to_string()
+        } else {
+            supertypes.join(",")
+        };
+        out.push_str(&format!("type\t{marker}\t{}\t{supertypes}\n", kind(class.kind)));
+
+        let mut lines = Vec::new();
+        for o in class
+            .overloads
+            .iter()
+            .filter(|o| o.visibility == Visibility::Public && !o.deprecated)
+        {
+            if o.name == class.name() {
+                lines.push(format!("ctor\t{marker}\t{}", signature(o)));
+            } else {
+                let scope = if o.is_static { "static" } else { "instance" };
+                lines.push(format!("method\t{marker}\t{scope}\t{}", signature(o)));
+            }
+        }
+        for (name, &deprecated) in &class.fields {
+            if deprecated || class.field_visibility.get(name) != Some(&Visibility::Public) {
+                continue;
+            }
+            let item = if class.enum_constants.contains(name) {
+                "constant"
+            } else {
+                "field"
+            };
+            lines.push(format!("{item}\t{marker}\t{name}"));
+        }
+        lines.sort();
+        lines.dedup();
+        members += lines.len();
+        for line in lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    (out, listed.len(), members)
+}
+
+/// Whether `class` is public API that is not deprecated.
+fn is_listed(
+    class: &JavaClass,
+    public: &BTreeSet<String>,
+    by_path: &BTreeMap<(&str, &[String], bool), &JavaClass>,
+) -> bool {
+    let top = class.marker().split('$').next().unwrap_or_default().to_string();
+    let audience = if class.is_test {
+        TEST_JAR_CLASSES.contains(&top.as_str())
+    } else {
+        public.contains(&top)
+    };
+    if !audience || class.deprecated {
+        return false;
+    }
+    // The class and every class enclosing it must be public.
+    (1..=class.path.len()).all(|depth| {
+        by_path
+            .get(&(class.package.as_str(), &class.path[..depth], class.is_test))
+            .is_some_and(|c| c.visibility == Visibility::Public)
+    })
+}
+
+fn kind(kind: JavaKind) -> &'static str {
+    match kind {
+        JavaKind::Class => "class",
+        JavaKind::Interface => "interface",
+        JavaKind::Enum => "enum",
+        JavaKind::Record => "record",
+    }
+}
+
+/// `name(Type name, ...)`; a parameter whose name the scanner did not read is `?`.
+fn signature(o: &Overload) -> String {
+    let params: Vec<String> = o
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| format!("{ty} {}", o.param_names.get(i).map_or("?", String::as_str)))
+        .collect();
+    format!("{}({})", o.name, params.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java::push_classes;
+
+    fn index(sources: &[(&[&str], &str, bool)]) -> JavaIndex {
+        let mut classes = Vec::new();
+        for (package, source, is_test) in sources {
+            let package: Vec<String> = package.iter().map(|s| s.to_string()).collect();
+            push_classes(&package, source, *is_test, &mut classes);
+        }
+        JavaIndex { classes }
+    }
+
+    fn public(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The list without its header.
+    fn body(index: &JavaIndex, public: &BTreeSet<String>) -> Vec<String> {
+        render(index, public)
+            .0
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn lists_public_members_only() {
+        let src = r#"
+            package org.apache.kafka.common;
+            public class Node {
+                public static final int NO_ID = -1;
+                private final int id;
+                public Node(int id, String host, int port) { }
+                Node(int id) { }
+                public int id() { return id; }
+                public static Node noNode() { return null; }
+                private void hidden() { }
+                protected void forSubclasses() { }
+            }
+        "#;
+        let index = index(&[(&["common"], src, false)]);
+        assert_eq!(
+            body(&index, &public(&["org.apache.kafka.common.Node"])),
+            [
+                "type\torg.apache.kafka.common.Node\tclass\t-",
+                "ctor\torg.apache.kafka.common.Node\tNode(int id, String host, int port)",
+                "field\torg.apache.kafka.common.Node\tNO_ID",
+                "method\torg.apache.kafka.common.Node\tinstance\tid()",
+                "method\torg.apache.kafka.common.Node\tstatic\tnoNode()",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_out_classes_not_on_the_public_list() {
+        let src = "package x; public class Internal { public void run() { } }";
+        let index = index(&[(&["common"], src, false)]);
+        assert!(body(&index, &public(&[])).is_empty());
+    }
+
+    #[test]
+    fn lists_public_nested_classes_of_public_classes_only() {
+        let src = r#"
+            package x;
+            public class Outer {
+                public static class Open { public int a() { return 0; } }
+                private static class Closed { public int b() { return 0; } }
+                static class PackagePrivate {
+                    public static class Inner { public int c() { return 0; } }
+                }
+            }
+        "#;
+        let index = index(&[(&["clients", "admin"], src, false)]);
+        let lines = body(&index, &public(&["org.apache.kafka.clients.admin.Outer"]));
+        assert_eq!(
+            lines,
+            [
+                "type\torg.apache.kafka.clients.admin.Outer\tclass\t-",
+                "ctor\torg.apache.kafka.clients.admin.Outer\tOuter()",
+                "type\torg.apache.kafka.clients.admin.Outer$Open\tclass\t-",
+                "ctor\torg.apache.kafka.clients.admin.Outer$Open\tOpen()",
+                "method\torg.apache.kafka.clients.admin.Outer$Open\tinstance\ta()",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_out_deprecated_classes_and_overloads() {
+        let src = r#"
+            package x;
+            public class Consumer {
+                public void close() { }
+                @Deprecated
+                public void close(long timeout) { }
+                @Deprecated
+                public static class Old { public void f() { } }
+            }
+        "#;
+        let index = index(&[(&["clients", "consumer"], src, false)]);
+        assert_eq!(
+            body(&index, &public(&["org.apache.kafka.clients.consumer.Consumer"])),
+            [
+                "type\torg.apache.kafka.clients.consumer.Consumer\tclass\t-",
+                "ctor\torg.apache.kafka.clients.consumer.Consumer\tConsumer()",
+                "method\torg.apache.kafka.clients.consumer.Consumer\tinstance\tclose()",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_out_what_the_deprecated_list_names() {
+        let src = "package x; public class Admin { public void a() { } public void b() { } }";
+        let mut index = index(&[(&["clients", "admin"], src, false)]);
+        index.merge_deprecation_list("org.apache.kafka.clients.admin.Admin#b()\n");
+        assert_eq!(
+            body(&index, &public(&["org.apache.kafka.clients.admin.Admin"])),
+            [
+                "type\torg.apache.kafka.clients.admin.Admin\tclass\t-",
+                "ctor\torg.apache.kafka.clients.admin.Admin\tAdmin()",
+                "method\torg.apache.kafka.clients.admin.Admin\tinstance\ta()",
+            ]
+        );
+    }
+
+    #[test]
+    fn lists_interface_methods_and_enum_constants() {
+        let callback =
+            "package x; public interface Callback { void onCompletion(RecordMetadata metadata, Exception exception); }";
+        let level = r#"
+            package x;
+            public enum IsolationLevel {
+                READ_UNCOMMITTED((byte) 0), READ_COMMITTED((byte) 1);
+                private final byte id;
+                IsolationLevel(byte id) { this.id = id; }
+                public byte id() { return id; }
+            }
+        "#;
+        let index = index(&[(&["clients", "producer"], callback, false), (&["common"], level, false)]);
+        let lines = body(
+            &index,
+            &public(&[
+                "org.apache.kafka.clients.producer.Callback",
+                "org.apache.kafka.common.IsolationLevel",
+            ]),
+        );
+        assert_eq!(
+            lines,
+            [
+                "type\torg.apache.kafka.clients.producer.Callback\tinterface\t-",
+                "method\torg.apache.kafka.clients.producer.Callback\tinstance\tonCompletion(RecordMetadata metadata, Exception exception)",
+                "type\torg.apache.kafka.common.IsolationLevel\tenum\t-",
+                "constant\torg.apache.kafka.common.IsolationLevel\tREAD_COMMITTED",
+                "constant\torg.apache.kafka.common.IsolationLevel\tREAD_UNCOMMITTED",
+                "method\torg.apache.kafka.common.IsolationLevel\tinstance\tid()",
+                "method\torg.apache.kafka.common.IsolationLevel\tinstance\tname()",
+                "method\torg.apache.kafka.common.IsolationLevel\tinstance\tordinal()",
+                "method\torg.apache.kafka.common.IsolationLevel\tstatic\tvalueOf(String ?)",
+                "method\torg.apache.kafka.common.IsolationLevel\tstatic\tvalues()",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_kafka_supertypes_and_keeps_jdk_ones() {
+        let records = "package x; public class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> { }";
+        let options = "package x; public abstract class AbstractOptions<T> { }";
+        let create = "package x; public class CreateTopicsOptions extends AbstractOptions<CreateTopicsOptions> { }";
+        let index = index(&[
+            (&["clients", "consumer"], records, false),
+            (&["clients", "admin"], options, false),
+            (&["clients", "admin"], create, false),
+        ]);
+        let lines = body(
+            &index,
+            &public(&[
+                "org.apache.kafka.clients.consumer.ConsumerRecords",
+                "org.apache.kafka.clients.admin.CreateTopicsOptions",
+            ]),
+        );
+        assert_eq!(
+            lines,
+            [
+                "type\torg.apache.kafka.clients.admin.CreateTopicsOptions\tclass\torg.apache.kafka.clients.admin.AbstractOptions",
+                "ctor\torg.apache.kafka.clients.admin.CreateTopicsOptions\tCreateTopicsOptions()",
+                "type\torg.apache.kafka.clients.consumer.ConsumerRecords\tclass\tIterable",
+                "ctor\torg.apache.kafka.clients.consumer.ConsumerRecords\tConsumerRecords()",
+            ]
+        );
+    }
+
+    #[test]
+    fn lists_only_the_named_test_jar_classes() {
+        let mock = "package x; public class MockAdminClient { public MockAdminClient() { } }";
+        let other = "package x; public class MockClient { public void poll() { } }";
+        let index = index(&[(&["clients", "admin"], mock, true), (&["clients"], other, true)]);
+        assert_eq!(
+            body(&index, &public(&["org.apache.kafka.clients.MockClient"])),
+            [
+                "type\torg.apache.kafka.clients.admin.MockAdminClient\tclass\t-",
+                "ctor\torg.apache.kafka.clients.admin.MockAdminClient\tMockAdminClient()",
+            ]
+        );
+    }
+}
