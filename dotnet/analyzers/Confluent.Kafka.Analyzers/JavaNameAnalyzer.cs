@@ -159,11 +159,20 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             HashSet<string> pairedMarkers = new HashSet<string>(
                 pairings.Where(p => p.Pairing.Java is not null).Select(p => p.Pairing.Java!.Marker),
                 StringComparer.Ordinal);
+            ILookup<string, INamedTypeSymbol> pairedTypes = pairings
+                .Where(p => p.Pairing.Java is not null)
+                .ToLookup(p => p.Pairing.Java!.Marker, p => p.Type, StringComparer.Ordinal);
 
             List<Finding> findings = new List<Finding>();
             foreach ((INamedTypeSymbol type, Pairing pairing) in pairings)
             {
-                Check(type, pairing, companions.TryGetValue(type, out INamedTypeSymbol? companion) ? companion : null, pairedMarkers, findings);
+                Check(
+                    type,
+                    pairing,
+                    companions.TryGetValue(type, out INamedTypeSymbol? companion) ? companion : null,
+                    pairedMarkers,
+                    pairedTypes,
+                    findings);
             }
 
             HashSet<string> found = new HashSet<string>(findings.Select(f => f.Key), StringComparer.Ordinal);
@@ -287,6 +296,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             Pairing pairing,
             INamedTypeSymbol? companion,
             HashSet<string> pairedMarkers,
+            ILookup<string, INamedTypeSymbol> pairedTypes,
             List<Finding> findings)
         {
             string typeId = DocId(type);
@@ -315,8 +325,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             IReadOnlyList<JavaType> chain = _api.Chain(java);
             HashSet<string> jdk = _api.JdkSupertypes(java);
             List<JavaMember> visible = chain.SelectMany(link => link.Members).ToList();
+            // A Java supertype's members are checked on the .NET type that translates the supertype, when this type
+            // derives from it; otherwise they are required here.
+            HashSet<INamedTypeSymbol> netChain = new HashSet<INamedTypeSymbol>(NetChain(type), SymbolEqualityComparer.Default);
             List<JavaMember> required = chain
-                .Where(link => link == java || !pairedMarkers.Contains(link.Marker))
+                .Where(link => link == java || !pairedTypes[link.Marker].Any(netChain.Contains))
                 .SelectMany(link => link.Members)
                 .Where(m => m.Kind != JavaMemberKind.Constructor || m.DeclaringType == java.Marker)
                 .Where(m => m.Kind != JavaMemberKind.Method || !m.IsStatic || m.DeclaringType == java.Marker)
@@ -335,7 +348,6 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             CheckNames(type, companion, java, jdk, javaMethods, javaFields, findings);
             CheckOverloads(type, companion, java, chain, jdk, required, javaMethods, findings);
 
-            List<INamedTypeSymbol> netChain = NetChain(type).ToList();
             foreach (JavaMember field in required.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant))
             {
                 if (!netChain.Any(t => t.GetMembers(field.Name).Any(m => m.DeclaredAccessibility == Accessibility.Public)))
@@ -501,12 +513,16 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             {
                 bool inCompanion = companion is not null && SymbolEqualityComparer.Default.Equals(method.ContainingType, companion);
                 bool declaredHere = inCompanion || SymbolEqualityComparer.Default.Equals(method.ContainingType, type);
-                IEnumerable<IParameterSymbol> parameters = inCompanion
+                bool onEnum = inCompanion
                     && method.IsExtensionMethod
-                    && SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, type)
-                        ? method.Parameters.Skip(1)
-                        : method.Parameters;
-                NetOverload overload = new NetOverload(method, declaredHere, parameters.ToList(), NamedByBase(type, method));
+                    && SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, type);
+                IEnumerable<IParameterSymbol> parameters = onEnum ? method.Parameters.Skip(1) : method.Parameters;
+                NetOverload overload = new NetOverload(
+                    method,
+                    declaredHere,
+                    parameters.ToList(),
+                    NamedByBase(type, method),
+                    isStatic: method.IsStatic && !onEnum);
                 int same = overloads.FindIndex(o => o.Signature == overload.Signature);
                 if (same < 0)
                 {
@@ -540,7 +556,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         // A method declared on a Java interface takes its parameter names from the interface, as the Python binding
         // names them; one declared only on a class, from the class. An overload taking a java.util.regex.Pattern is not
-        // translated, and one taking Properties is its Map overload.
+        // translated, one taking Properties is its Map overload, and one that differs from another only by an Optional
+        // parameter is that overload, its parameter nullable.
         private static List<JavaOverload> JavaOverloads(
             IEnumerable<(JavaType Link, JavaMember Member)> declarations,
             List<JavaMember> required,
@@ -561,6 +578,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     continue;
                 }
 
+                if (signatures.Any(other => IsOptionalTwin(first, other.First().Member)))
+                {
+                    continue;
+                }
+
                 JavaMember chosen = signature.Where(d => d.Link.IsInterface).Select(d => d.Member).FirstOrDefault() ?? first;
                 bool isRequired = signature.Any(d => required.Contains(d.Member));
                 JavaMember reported = signature.Select(d => d.Member).FirstOrDefault(required.Contains) ?? chosen;
@@ -569,6 +591,33 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             }
 
             return overloads;
+        }
+
+        // Whether `optional` is `other` with an Optional in place of one of its parameter types.
+        private static bool IsOptionalTwin(JavaMember optional, JavaMember other)
+        {
+            if (optional.Name != other.Name || optional.ParameterTypes.Length != other.ParameterTypes.Length)
+            {
+                return false;
+            }
+
+            int differences = 0;
+            for (int i = 0; i < optional.ParameterTypes.Length; i++)
+            {
+                if (optional.ParameterTypes[i] == other.ParameterTypes[i])
+                {
+                    continue;
+                }
+
+                if (optional.ParameterTypes[i] != "Optional" || other.ParameterTypes[i] == "Optional")
+                {
+                    return false;
+                }
+
+                differences++;
+            }
+
+            return differences == 1;
         }
 
         // The names .NET gives Java's parameters: a long and the TimeUnit that qualifies it are one TimeSpan named after
@@ -621,12 +670,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                         string[] javaNames = java[j].Names;
                         NetOverload n = net[i];
                         bool prefix = javaNames.Length < n.Names.Count && n.Required <= javaNames.Length;
-                        bool matches = pass switch
+                        bool fits = n.IsStatic == java[j].Member.IsStatic && TypesFit(n, java[j]);
+                        bool matches = fits && pass switch
                         {
                             0 => n.Names.Count == javaNames.Length && (n.NamedByBase || SameNames(n.Names, javaNames)),
                             1 => prefix && SameNames(n.Names, javaNames),
-                            2 => n.Names.Count == javaNames.Length && TypesFit(n, java[j]),
-                            _ => prefix && TypesFit(n, java[j]),
+                            2 => n.Names.Count == javaNames.Length,
+                            _ => prefix,
                         };
                         if (!matches)
                         {
@@ -665,12 +715,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             for (int j = 0; j < java.Count; j++)
             {
-                // A .NET overload with optional parameters accepts every Java overload whose parameters are a prefix
-                // of its own, as EnforceRebalance(reason = null) accepts both of Java's enforceRebalance forms.
+                // A .NET overload with optional parameters accepts every shorter Java overload whose parameters are a
+                // prefix of its own, as EnforceRebalance(reason = null) accepts both of Java's enforceRebalance forms.
                 string[] javaNames = java[j].Names;
                 bool accepted = net.Any(n => n.Required <= javaNames.Length
-                    && javaNames.Length <= n.Names.Count
-                    && SameNames(n.Names, javaNames));
+                    && javaNames.Length < n.Names.Count
+                    && n.IsStatic == java[j].Member.IsStatic
+                    && SameNames(n.Names, javaNames)
+                    && TypesFit(n, java[j]));
                 if (!javaDone[j] && !accepted && java[j].IsRequired)
                 {
                     findings.Add(Missing(DocId(type), java[j].Reported.Marker, LocationOf(type)));
@@ -682,6 +734,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         // where its type fits. A type the check does not know, or a named type of another name, fits.
         private static bool TypesFit(NetOverload net, JavaOverload java)
         {
+            if (net.Types.Count < java.Types.Length)
+            {
+                return false;
+            }
+
             for (int i = 0; i < java.Types.Length; i++)
             {
                 string? javaKind = JavaKind(java.Types[i]);
@@ -715,6 +772,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 case "Short":
                 case "Integer":
                 case "Long":
+                case "OptionalInt":
+                case "OptionalLong":
                     return "integer";
                 case "boolean":
                 case "Boolean":
@@ -723,6 +782,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 case "double":
                 case "Float":
                 case "Double":
+                case "OptionalDouble":
                     return "decimal";
                 case "Duration":
                     return "duration";
@@ -799,6 +859,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 case "HashSet":
                 case "ReadOnlyMemory":
                 case "Memory":
+                case "ReadOnlySpan":
+                case "Span":
                     return "collection";
             }
 
@@ -1000,12 +1062,18 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
     /// required. A last optional <c>CancellationToken cancellationToken</c> is .NET's own and not compared.</summary>
     private sealed class NetOverload
     {
-        internal NetOverload(IMethodSymbol method, bool declaredHere, IReadOnlyList<IParameterSymbol> parameters, bool namedByBase)
+        internal NetOverload(
+            IMethodSymbol method,
+            bool declaredHere,
+            IReadOnlyList<IParameterSymbol> parameters,
+            bool namedByBase,
+            bool isStatic)
         {
             Method = method;
             DeclaredHere = declaredHere;
             NamedByBase = namedByBase;
-            Signature = method.Name + "(" + string.Join(",", parameters.Select(p => p.Type.ToDisplayString() + " " + p.Name)) + ")";
+            IsStatic = isStatic;
+            Signature = method.Name + "(" + string.Join(",", parameters.Select(p => p.Type.ToDisplayString())) + ")";
             AsyncParameters = parameters.Count(p => WithoutAsync(p.Type.Name) != p.Type.Name);
             IParameterSymbol? last = parameters.Count > 0 ? parameters[parameters.Count - 1] : null;
             bool token = last is not null
@@ -1025,8 +1093,12 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         /// <summary>Whether the method overrides or implements a .NET built-in member, whose parameter names it keeps.</summary>
         internal bool NamedByBase { get; }
 
-        /// <summary>The name and the parameters' types and names: one per overload.</summary>
+        /// <summary>The name and the parameter types: one per overload, an interface's method and its implementation
+        /// being one.</summary>
         internal string Signature { get; }
+
+        /// <summary>Whether it stands for a Java static method; an enum's extension method stands for an instance one.</summary>
+        internal bool IsStatic { get; }
 
         /// <summary>How many parameters take an async form of a type (<c>IAsyncDeliveryCallback</c>).</summary>
         internal int AsyncParameters { get; }

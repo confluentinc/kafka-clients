@@ -582,11 +582,11 @@ public sealed class JavaNameAnalyzerTests
 
                 public sealed class KafkaProducer
                 {
-                    public void {|#0:Send|}(string record, IAsyncCallback callback)
+                    public void {|#0:Send|}(object record, IAsyncCallback callback)
                     {
                     }
 
-                    public void Send(string record, ICallback callback)
+                    public void Send(object record, ICallback callback)
                     {
                     }
                 }
@@ -598,7 +598,7 @@ public sealed class JavaNameAnalyzerTests
                 + "type\torg.apache.kafka.clients.producer.KafkaProducer\tclass\t-\n"
                 + "ctor\torg.apache.kafka.clients.producer.KafkaProducer\tKafkaProducer()\n"
                 + "method\torg.apache.kafka.clients.producer.KafkaProducer\tinstance\tsend(ProducerRecord record, Callback callback)\n"),
-            Name(0, "overload M:Confluent.Kafka.Producer.KafkaProducer.Send(System.String,Confluent.Kafka.Producer.IAsyncCallback): "
+            Name(0, "overload M:Confluent.Kafka.Producer.KafkaProducer.Send(System.Object,Confluent.Kafka.Producer.IAsyncCallback): "
                 + "Java's KafkaProducer.send has no overload with 2 parameter(s)"));
 
     [Fact]
@@ -786,7 +786,7 @@ public sealed class JavaNameAnalyzerTests
                     {
                     }
 
-                    public void Subscribe(string topics)
+                    public void Subscribe(System.Collections.Generic.IReadOnlyCollection<string> topics)
                     {
                     }
                 }
@@ -918,6 +918,170 @@ public sealed class JavaNameAnalyzerTests
             }
             """,
             Files("type\torg.apache.kafka.common.errors.InvalidMetadataException\tabstract class\tRuntimeException\n"));
+
+    [Fact]
+    public Task AJavaSupertypesMembers_AreRequired_WhenTheDotNetTypeDoesNotDeriveFromItsCounterpart() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public abstract class AbstractOptions
+                {
+                    protected AbstractOptions()
+                    {
+                    }
+
+                    public int TimeoutMs() => 0;
+                }
+
+                public sealed class {|#0:CreateTopicsOptions|}
+                {
+                    public bool ValidateOnly() => false;
+                }
+
+                public sealed class DeleteTopicsOptions : AbstractOptions
+                {
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.AbstractOptions\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.clients.admin.AbstractOptions\tAbstractOptions()\n"
+                + "method\torg.apache.kafka.clients.admin.AbstractOptions\tinstance\ttimeoutMs()\n"
+                + "type\torg.apache.kafka.clients.admin.CreateTopicsOptions\tclass\torg.apache.kafka.clients.admin.AbstractOptions\n"
+                + "ctor\torg.apache.kafka.clients.admin.CreateTopicsOptions\tCreateTopicsOptions()\n"
+                + "method\torg.apache.kafka.clients.admin.CreateTopicsOptions\tinstance\tvalidateOnly()\n"
+                + "type\torg.apache.kafka.clients.admin.DeleteTopicsOptions\tclass\torg.apache.kafka.clients.admin.AbstractOptions\n"
+                + "ctor\torg.apache.kafka.clients.admin.DeleteTopicsOptions\tDeleteTopicsOptions()\n"),
+            Name(0, "missing T:Confluent.Kafka.Admin.CreateTopicsOptions org.apache.kafka.clients.admin.AbstractOptions#timeoutMs(): "
+                + "has no counterpart of Java's org.apache.kafka.clients.admin.AbstractOptions#timeoutMs()"));
+
+    [Fact]
+    public Task AStaticMethod_DoesNotStandForAJavaInstanceMethod_NorTheOtherWay() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class {|#2:Node|}
+                {
+                    public static string {|#0:Host|}() => "";
+
+                    public Node {|#1:NoNode|}() => null;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
+                + "method\torg.apache.kafka.common.Node\tstatic\tnoNode()\n"),
+            Name(0, "overload M:Confluent.Kafka.Common.Node.Host: Java's Node.host has no overload with 0 parameter(s)"),
+            Name(1, "overload M:Confluent.Kafka.Common.Node.NoNode: Java's Node.noNode has no overload with 0 parameter(s)"),
+            Name(2, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#host(): has no counterpart of Java's "
+                + "org.apache.kafka.common.Node#host()"),
+            Name(2, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#noNode(): has no counterpart of Java's "
+                + "org.apache.kafka.common.Node#noNode()"));
+
+    [Fact]
+    public Task AnOverloadWithJavasNames_DoesNotStandForOneOfOtherTypes() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class {|#0:Node|}
+                {
+                    public Node(int id)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode(int id)\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode(String id)\n"),
+            Name(0, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#Node(String): has no counterpart of Java's "
+                + "org.apache.kafka.common.Node#Node(String)"));
+
+    [Fact]
+    public Task AnImplementationThatRenamesItsInterfacesParameter_IsOneOverload_WithAParameterFinding() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Consumer
+            {
+                public interface IConsumer
+                {
+                    void Subscribe(IReadOnlyCollection<string> topics, object callback);
+                }
+
+                public sealed class KafkaConsumer : IConsumer
+                {
+                    public void {|#0:Subscribe|}(IReadOnlyCollection<string> topics, object listener)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.consumer.Consumer\tinterface\t-\n"
+                + "method\torg.apache.kafka.clients.consumer.Consumer\tinstance\tsubscribe(Collection topics, ConsumerRebalanceListener callback)\n"
+                + "type\torg.apache.kafka.clients.consumer.KafkaConsumer\tclass\torg.apache.kafka.clients.consumer.Consumer\n"
+                + "ctor\torg.apache.kafka.clients.consumer.KafkaConsumer\tKafkaConsumer()\n"
+                + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\t"
+                + "subscribe(Collection topics, ConsumerRebalanceListener listener)\n"),
+            Name(0, "parameter M:Confluent.Kafka.Consumer.KafkaConsumer.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},"
+                + "System.Object): names its parameters (topics, listener) where Java's KafkaConsumer.subscribe names them (topics, callback)"));
+
+    [Fact]
+    public Task AShorterDotNetOverload_IsComparedWithALongerJavaOneWithoutFailing() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class {|#0:Node|}
+                {
+                    public int Port(int id) => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tport(int id, int fallback)\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tport(int id)\n"),
+            Name(0, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#port(int,int): has no counterpart of "
+                + "Java's org.apache.kafka.common.Node#port(int,int)"));
+
+    [Fact]
+    public Task AJavaOverloadDifferingOnlyByAnOptional_IsTheSameOverload_AndTheOptionalTypesFitTheirNullables() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Admin
+            {
+                public sealed class ProducerState
+                {
+                    public ProducerState(long producerId, int? coordinatorEpoch, long? lastTimestamp)
+                    {
+                    }
+
+                    public int Reassignments(IReadOnlyCollection<int>? partitions = null, object? options = null) => 0;
+
+                    public int Deserialize(string topic, ReadOnlySpan<byte> data) => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.ProducerState\tclass\t-\n"
+                + "ctor\torg.apache.kafka.clients.admin.ProducerState\t"
+                + "ProducerState(long producerId, OptionalInt coordinatorEpoch, OptionalLong lastTimestamp)\n"
+                + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\treassignments(Optional partitions, Options options)\n"
+                + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\treassignments(Set partitions, Options options)\n"
+                + "method\torg.apache.kafka.clients.admin.ProducerState\tinstance\tdeserialize(String topic, byte[] data)\n"));
 
     private const string Records = """
         using System.Collections;
