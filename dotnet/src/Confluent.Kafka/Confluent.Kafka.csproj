@@ -129,6 +129,14 @@
     <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="PreserveNewest" Visible="false" Pack="false" />
   </ItemGroup>
 
+  <!-- CKRDA0013 / CKRDA0014: the Java list and the name lists the analyzer checks this project against. -->
+  <ItemGroup>
+    <AdditionalFiles Include="../../analyzers/java-api.txt" />
+    <AdditionalFiles Include="../../analyzers/java-name-baseline.txt" />
+    <AdditionalFiles Include="../../analyzers/java-name-allowlist.txt" />
+    <AdditionalFiles Include="../../analyzers/java-name-pairs.txt" />
+  </ItemGroup>
+
   <!-- Fail early with a clear message if the native is missing (reinforces
        CLAUDE.md §7.1 "never build .NET before Rust"); otherwise a bare
        DllNotFoundException surfaces only at runtime. -->
