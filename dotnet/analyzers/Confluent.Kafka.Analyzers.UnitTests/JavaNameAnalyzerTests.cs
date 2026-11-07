@@ -726,6 +726,46 @@ public sealed class JavaNameAnalyzerTests
                 + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)"));
 
     [Fact]
+    public Task TheCompanionClassesPropertiesFieldsAndEvents_AreCheckedAsTheEnums() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public enum ScramMechanism
+                {
+                    UNKNOWN,
+                }
+
+                public static class ScramMechanisms
+                {
+                    public static int {|#2:Limit|};
+
+                    public static int {|#0:Extra|} => 0;
+
+                    public static event System.Action {|#1:Changed|}
+                    {
+                        add
+                        {
+                        }
+
+                        remove
+                        {
+                        }
+                    }
+
+                    public static string MechanismName(this ScramMechanism mechanism) => "";
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
+                + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"
+                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tmechanismName()\n"),
+            Name(0, "unmatched P:Confluent.Kafka.Admin.ScramMechanisms.Extra: Java's ScramMechanism has no method or field of this name"),
+            Name(1, "unmatched E:Confluent.Kafka.Admin.ScramMechanisms.Changed: Java has no events"),
+            Name(2, "unmatched F:Confluent.Kafka.Admin.ScramMechanisms.Limit: Java's ScramMechanism has no field or constant of this name"));
+
+    [Fact]
     public Task AJavaAbstractClassesConstructors_AreProtected_AndATypeNothingDerivesFromHasNone() =>
         Verifier.VerifyWithFilesAsync(
             """
@@ -981,6 +1021,32 @@ public sealed class JavaNameAnalyzerTests
                 + "org.apache.kafka.common.Node#host()"),
             Name(2, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#noNode(): has no counterpart of Java's "
                 + "org.apache.kafka.common.Node#noNode()"));
+
+    [Fact]
+    public Task OverloadsDifferingOnlyByATypeParameterOrARef_AreTwoOverloads() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Node
+                {
+                    public string Host() => "";
+
+                    public T {|#0:Host|}<T>() => default;
+
+                    public int Port(int id) => 0;
+
+                    public int {|#1:Port|}(ref int id) => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tport(int id)\n"),
+            Name(0, "overload M:Confluent.Kafka.Common.Node.Host``1: Java's Node.host has no overload with 0 parameter(s)"),
+            Name(1, "overload M:Confluent.Kafka.Common.Node.Port(System.Int32@): Java's Node.port has no overload with 1 parameter(s)"));
 
     [Fact]
     public Task AnOverloadWithJavasNames_DoesNotStandForOneOfOtherTypes() =>

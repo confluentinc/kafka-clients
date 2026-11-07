@@ -371,13 +371,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             HashSet<string> javaFields,
             List<Finding> findings)
         {
-            IEnumerable<ISymbol> companionMethods = companion is null
+            // The companion class is not checked as a type of its own: every public member of it is the enum's.
+            IEnumerable<ISymbol> companionMembers = companion is null
                 ? Enumerable.Empty<ISymbol>()
-                : companion.GetMembers().OfType<IMethodSymbol>();
+                : companion.GetMembers();
             bool overridesEquals = type.GetMembers("Equals")
                 .OfType<IMethodSymbol>()
                 .Any(m => m.IsOverride && m.Parameters.Length == 1 && m.Parameters[0].Type.SpecialType == SpecialType.System_Object);
-            foreach (ISymbol member in type.GetMembers().Concat(companionMethods))
+            foreach (ISymbol member in type.GetMembers().Concat(companionMembers))
             {
                 if (member.DeclaredAccessibility != Accessibility.Public
                     || member.IsImplicitlyDeclared
@@ -1073,7 +1074,9 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             DeclaredHere = declaredHere;
             NamedByBase = namedByBase;
             IsStatic = isStatic;
-            Signature = method.Name + "(" + string.Join(",", parameters.Select(p => p.Type.ToDisplayString())) + ")";
+            Signature = method.Name + "`" + method.Arity + "("
+                + string.Join(",", parameters.Select(p => (p.RefKind == RefKind.None ? "" : p.RefKind + " ") + p.Type.ToDisplayString()))
+                + ")";
             AsyncParameters = parameters.Count(p => WithoutAsync(p.Type.Name) != p.Type.Name);
             IParameterSymbol? last = parameters.Count > 0 ? parameters[parameters.Count - 1] : null;
             bool token = last is not null
@@ -1093,8 +1096,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         /// <summary>Whether the method overrides or implements a .NET built-in member, whose parameter names it keeps.</summary>
         internal bool NamedByBase { get; }
 
-        /// <summary>The name and the parameter types: one per overload, an interface's method and its implementation
-        /// being one.</summary>
+        /// <summary>The name, the number of type parameters, and the parameter types with their <c>ref</c>, <c>out</c> or
+        /// <c>in</c>: one per overload, an interface's method and its implementation being one.</summary>
         internal string Signature { get; }
 
         /// <summary>Whether it stands for a Java static method; an enum's extension method stands for an instance one.</summary>
