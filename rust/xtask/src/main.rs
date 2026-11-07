@@ -2738,6 +2738,7 @@ fn print_help() {
   generate-admin-results  Regenerate the admin *Result Python classes from the Java sources
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
   java-api        Write the Java client's public API to a file, for the bindings' Java-name checks
+                  (--check: fail when the file is out of date instead of writing it)
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
@@ -2852,7 +2853,7 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
-  cargo xtask java-api <file>
+  cargo xtask java-api [--check] <file>
   cargo xtask lint-custom [rule-name] [--no-baseline]
   cargo xtask ffi-baseline
   cargo xtask doc-baseline

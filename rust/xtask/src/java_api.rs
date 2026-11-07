@@ -16,6 +16,8 @@
 //! `<file>`, one line per type and member, for the bindings' Java-name checks
 //! (the .NET binding's CKRDA0013 reads `dotnet/analyzers/java-api.txt`). The
 //! list depends only on the Java sources, so every binding can share it.
+//! `cargo xtask java-api --check <file>` writes nothing: it fails when `<file>`
+//! differs from what the command would write.
 //!
 //! A type is listed when its top-level class is on the `@InterfaceAudience.Public`
 //! list, or is one of [`TEST_JAR_CLASSES`], and every class on its path is
@@ -51,13 +53,76 @@ const HEADER: &str = "\
 #   constant  <class>  <NAME>   (an enum constant)
 ";
 
-/// Writes the list to the one file `args` names.
+/// What the command was asked to do with its file.
+#[derive(Debug, PartialEq, Eq)]
+enum Mode<'a> {
+    /// Write the list to the file.
+    Write(&'a str),
+    /// Fail when the file differs from the list.
+    Check(&'a str),
+}
+
+/// `<file>` or `--check <file>`.
+fn parse_args(args: &[String]) -> anyhow::Result<Mode<'_>> {
+    match args {
+        [flag, file] if flag == "--check" => Ok(Mode::Check(file)),
+        [file] if !file.starts_with("--") => Ok(Mode::Write(file)),
+        _ => anyhow::bail!(
+            "usage: cargo xtask java-api [--check] <file>, e.g. `cargo xtask java-api ../dotnet/analyzers/java-api.txt`"
+        ),
+    }
+}
+
+/// Writes the list to the file `args` names, or, with `--check`, fails when
+/// that file is out of date.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    let [output] = args else {
-        anyhow::bail!(
-            "usage: cargo xtask java-api <file>, e.g. `cargo xtask java-api ../dotnet/analyzers/java-api.txt`"
-        );
-    };
+    let mode = parse_args(args)?;
+    let (text, types, members) = generate()?;
+    match mode {
+        Mode::Write(file) => {
+            fs::write(file, text).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+            println!("✅ Wrote {types} types and {members} members to {file}");
+        },
+        Mode::Check(file) => {
+            let on_disk = fs::read_to_string(file)
+                .map_err(|e| anyhow::anyhow!("{file}: {e}: run `cargo xtask java-api {file}`"))?;
+            check(file, &on_disk, &text)?;
+            println!("✅ {file} is up to date ({types} types and {members} members)");
+        },
+    }
+    Ok(())
+}
+
+/// Fails, naming the first line that differs, when `on_disk` is not `expected`.
+fn check(file: &str, on_disk: &str, expected: &str) -> anyhow::Result<()> {
+    if on_disk == expected {
+        return Ok(());
+    }
+    let mut found = on_disk.lines();
+    let mut wanted = expected.lines();
+    let mut line = 1;
+    loop {
+        match (wanted.next(), found.next()) {
+            (Some(w), Some(f)) if w == f => line += 1,
+            (None, None) => anyhow::bail!(
+                "{file} is out of date with the Java sources: it differs only in its line endings or its final \
+                 newline; run `cargo xtask java-api {file}`"
+            ),
+            (w, f) => {
+                anyhow::bail!(
+                    "{file} is out of date with the Java sources: line {line} should be `{}` but is `{}`; \
+                     run `cargo xtask java-api {file}`",
+                    w.unwrap_or("<end of file>"),
+                    f.unwrap_or("<end of file>"),
+                )
+            },
+        }
+    }
+}
+
+/// The list's text, with how many types and members it holds, read from the
+/// `kafka` submodule and the two lists.
+fn generate() -> anyhow::Result<(String, usize, usize)> {
     let mut index = JavaIndex::load();
     anyhow::ensure!(
         !index.is_empty(),
@@ -69,10 +134,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let public = parse_list(
         &fs::read_to_string(PUBLIC_AUDIENCE_LIST).map_err(|e| anyhow::anyhow!("{PUBLIC_AUDIENCE_LIST}: {e}"))?,
     );
-    let (text, types, members) = render(&index, &public);
-    fs::write(output, text).map_err(|e| anyhow::anyhow!("{output}: {e}"))?;
-    println!("✅ Wrote {types} types and {members} members to {output}");
-    Ok(())
+    Ok(render(&index, &public))
 }
 
 /// The fully qualified names of a list file: one per line, `#` comments.
@@ -397,5 +459,80 @@ mod tests {
                 "ctor\torg.apache.kafka.clients.admin.MockAdminClient\tMockAdminClient()",
             ]
         );
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_a_file_or_check_and_a_file() {
+        assert_eq!(parse_args(&args(&["out.txt"])).unwrap(), Mode::Write("out.txt"));
+        assert_eq!(parse_args(&args(&["--check", "out.txt"])).unwrap(), Mode::Check("out.txt"));
+    }
+
+    #[test]
+    fn refuses_any_other_arguments() {
+        let usage = "usage: cargo xtask java-api [--check] <file>, \
+                     e.g. `cargo xtask java-api ../dotnet/analyzers/java-api.txt`";
+        for bad in [
+            &[][..],
+            &["--check"],
+            &["--write", "out.txt"],
+            &["a.txt", "b.txt"],
+            &["--check", "a", "b"],
+        ] {
+            assert_eq!(parse_args(&args(bad)).unwrap_err().to_string(), usage, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn check_passes_on_an_up_to_date_file() {
+        let src = "package x; public class Node { public int id() { return 0; } }";
+        let index = index(&[(&["common"], src, false)]);
+        let (text, _, _) = render(&index, &public(&["org.apache.kafka.common.Node"]));
+        assert!(check("java-api.txt", &text, &text).is_ok());
+    }
+
+    #[test]
+    fn check_names_the_first_line_that_differs() {
+        let expected = "# header\ntype\tx.A\tclass\t-\nmethod\tx.A\tinstance\ta()\n";
+        let on_disk = "# header\ntype\tx.A\tclass\t-\nmethod\tx.A\tinstance\told()\n";
+        assert_eq!(
+            check("java-api.txt", on_disk, expected).unwrap_err().to_string(),
+            "java-api.txt is out of date with the Java sources: line 3 should be \
+             `method\tx.A\tinstance\ta()` but is `method\tx.A\tinstance\told()`; \
+             run `cargo xtask java-api java-api.txt`"
+        );
+    }
+
+    #[test]
+    fn check_reports_a_missing_or_an_extra_line() {
+        let expected = "# header\ntype\tx.A\tclass\t-\n";
+        assert_eq!(
+            check("f.txt", "# header\n", expected).unwrap_err().to_string(),
+            "f.txt is out of date with the Java sources: line 2 should be `type\tx.A\tclass\t-` \
+             but is `<end of file>`; run `cargo xtask java-api f.txt`"
+        );
+        assert_eq!(
+            check("f.txt", "# header\ntype\tx.A\tclass\t-\ntype\tx.B\tclass\t-\n", expected)
+                .unwrap_err()
+                .to_string(),
+            "f.txt is out of date with the Java sources: line 3 should be `<end of file>` \
+             but is `type\tx.B\tclass\t-`; run `cargo xtask java-api f.txt`"
+        );
+    }
+
+    #[test]
+    fn check_reports_a_difference_in_line_endings_only() {
+        let expected = "# header\ntype\tx.A\tclass\t-\n";
+        for on_disk in ["# header\r\ntype\tx.A\tclass\t-\r\n", "# header\ntype\tx.A\tclass\t-"] {
+            assert_eq!(
+                check("f.txt", on_disk, expected).unwrap_err().to_string(),
+                "f.txt is out of date with the Java sources: it differs only in its line endings or its final \
+                 newline; run `cargo xtask java-api f.txt`",
+                "{on_disk:?}"
+            );
+        }
     }
 }
