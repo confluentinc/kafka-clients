@@ -25,6 +25,7 @@ namespace Confluent.Kafka.Analyzers;
 internal sealed class JavaApi
 {
     private const string JavaPrefix = "org.apache.kafka.";
+    private const string JdkPrefix = "java.";
     private const string ClientsSegment = "clients.";
     private const string RootNamespace = "Confluent.Kafka";
 
@@ -154,9 +155,14 @@ internal sealed class JavaApi
     }
 
     /// <summary>The .NET namespace of a Java package: <c>org.apache.kafka.</c> and <c>clients.</c> dropped, each
-    /// segment in PascalCase, under <c>Confluent.Kafka</c>.</summary>
+    /// segment in PascalCase, under <c>Confluent.Kafka</c>. A JDK package is <c>Confluent.Kafka</c> itself.</summary>
     internal static string NamespaceOf(string javaPackage)
     {
+        if (javaPackage.StartsWith(JdkPrefix, StringComparison.Ordinal))
+        {
+            return RootNamespace;
+        }
+
         string below = javaPackage.Substring(JavaPrefix.Length);
         if (below.StartsWith(ClientsSegment, StringComparison.Ordinal))
         {
@@ -188,7 +194,7 @@ internal sealed class JavaType
     /// <summary>The Java name, nested classes after <c>$</c>.</summary>
     internal string Marker { get; }
 
-    /// <summary><c>class</c>, <c>interface</c>, <c>enum</c> or <c>record</c>.</summary>
+    /// <summary><c>class</c>, <c>abstract class</c>, <c>interface</c>, <c>enum</c> or <c>record</c>.</summary>
     internal string Kind { get; }
 
     /// <summary>A Kafka supertype's marker, or a JDK supertype as Java writes it.</summary>
@@ -206,6 +212,8 @@ internal sealed class JavaType
     internal bool IsInterface => Kind == "interface";
 
     internal bool IsEnum => Kind == "enum";
+
+    internal bool IsAbstractClass => Kind == "abstract class";
 }
 
 /// <summary>What a member of the Java list is.</summary>

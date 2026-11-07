@@ -20,14 +20,18 @@
 //! differs from what the command would write.
 //!
 //! A type is listed when its top-level class is on the `@InterfaceAudience.Public`
-//! list, or is one of [`TEST_JAR_CLASSES`], and every class on its path is
-//! `public`. A member is listed when it is `public`. Deprecated types and
-//! members are left out, whether the `kafka` working tree or
-//! [`java::DEPRECATED_LIST`] marks them: deprecated API is not translated.
+//! list, is one of [`TEST_JAR_CLASSES`], or is an exception class the error
+//! generator makes a class for, and every class on its path is `public`. A
+//! member is listed when it is `public`. Deprecated types and members are left
+//! out, whether the `kafka` working tree or [`java::DEPRECATED_LIST`] marks them:
+//! deprecated API is not translated. The Java built-in exceptions the bindings
+//! translate, whose source is not in the tree, are listed from the error
+//! generator's table of their Java 11 constructors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+use crate::error_hierarchy::{self, JdkCtor};
 use crate::java::{self, JavaClass, JavaIndex, JavaKind, Overload, Visibility};
 
 /// The `@InterfaceAudience.Public` list, relative to `rust/`.
@@ -40,13 +44,15 @@ const TEST_JAR_CLASSES: &[&str] = &["org.apache.kafka.clients.admin.MockAdminCli
 const HEADER: &str = "\
 # The public API of the Java client, read from the `kafka` submodule by `cargo xtask java-api <file>`,
 # for the bindings' Java-name checks. Do not edit; rerun the command.
-# A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt
-# (or is MockAdminClient, from the test jar) and every class on its path is public; only public
-# members are listed, and nothing in design/current/java-deprecated.txt. Members Java declares
-# implicitly are listed too: a class's default constructor, and an enum's name(), ordinal(), values()
-# and valueOf(String); a parameter whose name the source does not spell is `?`.
+# A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt,
+# is MockAdminClient (from the test jar) or is an exception class the error generator makes a class
+# for, and every class on its path is public; only public members are listed, and nothing in
+# design/current/java-deprecated.txt. The Java built-in exceptions the bindings translate are listed
+# with their Java 11 constructors. Members Java declares implicitly are listed too: a class's default
+# constructor, and an enum's name(), ordinal(), values() and valueOf(String); a parameter whose name
+# the source does not spell is `?`.
 # One tab-separated line per item; a nested class is Outer$Inner:
-#   type      <class>  <class|interface|enum|record>  <supertypes, comma-separated, or ->
+#   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
 #   method    <class>  <static|instance>  <name(Type name, ...)>
 #   field     <class>  <NAME>
@@ -131,10 +137,12 @@ fn generate() -> anyhow::Result<(String, usize, usize)> {
     let deprecated =
         fs::read_to_string(java::DEPRECATED_LIST).map_err(|e| anyhow::anyhow!("{}: {e}", java::DEPRECATED_LIST))?;
     index.merge_deprecation_list(&deprecated);
-    let public = parse_list(
+    let mut public = parse_list(
         &fs::read_to_string(PUBLIC_AUDIENCE_LIST).map_err(|e| anyhow::anyhow!("{PUBLIC_AUDIENCE_LIST}: {e}"))?,
     );
-    Ok(render(&index, &public))
+    public.extend(error_hierarchy::generated_kafka_classes().map(str::to_string));
+    let jdk: Vec<_> = error_hierarchy::jdk_exceptions().collect();
+    Ok(render(&index, &public, &jdk))
 }
 
 /// The fully qualified names of a list file: one per line, `#` comments.
@@ -146,8 +154,14 @@ fn parse_list(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The list's text, with how many types and members it holds.
-pub(crate) fn render(index: &JavaIndex, public: &BTreeSet<String>) -> (String, usize, usize) {
+/// The list's text, with how many types and members it holds: the classes of
+/// `index` that `public` lists, and the JDK classes of `jdk` (FQN, parent FQN,
+/// constructors), which sort before them.
+pub(crate) fn render(
+    index: &JavaIndex,
+    public: &BTreeSet<String>,
+    jdk: &[(&str, &str, &[JdkCtor])],
+) -> (String, usize, usize) {
     let by_path: BTreeMap<(&str, &[String], bool), &JavaClass> = index
         .classes
         .iter()
@@ -158,6 +172,25 @@ pub(crate) fn render(index: &JavaIndex, public: &BTreeSet<String>) -> (String, u
 
     let mut out = String::from(HEADER);
     let mut members = 0;
+    let mut jdk = jdk.to_vec();
+    jdk.sort_by_key(|(fqn, _, _)| *fqn);
+    for (fqn, parent, ctors) in &jdk {
+        out.push_str(&format!("type\t{fqn}\tclass\t{parent}\n"));
+        let simple = fqn.rsplit('.').next().unwrap_or(fqn);
+        let mut lines: Vec<String> = ctors
+            .iter()
+            .map(|params| {
+                let params: Vec<String> = params.iter().map(|(ty, name)| format!("{ty} {name}")).collect();
+                format!("ctor\t{fqn}\t{simple}({})", params.join(", "))
+            })
+            .collect();
+        lines.sort();
+        members += lines.len();
+        for line in lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
     for class in &listed {
         let marker = class.marker();
         let supertypes: Vec<String> = class
@@ -174,7 +207,7 @@ pub(crate) fn render(index: &JavaIndex, public: &BTreeSet<String>) -> (String, u
         } else {
             supertypes.join(",")
         };
-        out.push_str(&format!("type\t{marker}\t{}\t{supertypes}\n", kind(class.kind)));
+        out.push_str(&format!("type\t{marker}\t{}\t{supertypes}\n", kind(class)));
 
         let mut lines = Vec::new();
         for o in class
@@ -208,7 +241,7 @@ pub(crate) fn render(index: &JavaIndex, public: &BTreeSet<String>) -> (String, u
             out.push('\n');
         }
     }
-    (out, listed.len(), members)
+    (out, jdk.len() + listed.len(), members)
 }
 
 /// Whether `class` is public API that is not deprecated.
@@ -234,8 +267,9 @@ fn is_listed(
     })
 }
 
-fn kind(kind: JavaKind) -> &'static str {
-    match kind {
+fn kind(class: &JavaClass) -> &'static str {
+    match class.kind {
+        JavaKind::Class if class.is_abstract => "abstract class",
         JavaKind::Class => "class",
         JavaKind::Interface => "interface",
         JavaKind::Enum => "enum",
@@ -274,7 +308,7 @@ mod tests {
 
     /// The list without its header.
     fn body(index: &JavaIndex, public: &BTreeSet<String>) -> Vec<String> {
-        render(index, public)
+        render(index, public, &[])
             .0
             .lines()
             .filter(|l| !l.starts_with('#'))
@@ -448,6 +482,69 @@ mod tests {
     }
 
     #[test]
+    fn marks_abstract_classes() {
+        let src = r#"
+            package org.apache.kafka.common.errors;
+            public abstract class RetriableException extends RuntimeException {
+                public RetriableException(String message) { }
+            }
+            public class TimeoutException extends RetriableException { }
+        "#;
+        let index = index(&[(&["common", "errors"], src, false)]);
+        let lines = body(
+            &index,
+            &public(&[
+                "org.apache.kafka.common.errors.RetriableException",
+                "org.apache.kafka.common.errors.TimeoutException",
+            ]),
+        );
+        assert!(
+            lines.contains(
+                &"type\torg.apache.kafka.common.errors.RetriableException\tabstract class\tRuntimeException"
+                    .to_string()
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(
+                &"type\torg.apache.kafka.common.errors.TimeoutException\tclass\torg.apache.kafka.common.errors.RetriableException"
+                    .to_string()
+            ),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn lists_jdk_classes_first_with_their_constructors() {
+        let src = "package x; public class Node { public int id() { return 0; } }";
+        let index = index(&[(&["common"], src, false)]);
+        let four: &[JdkCtor] = &[&[], &[("String", "s")], &[("Throwable", "cause")]];
+        let two: &[JdkCtor] = &[&[], &[("String", "message")]];
+        let jdk = [
+            ("java.util.concurrent.TimeoutException", "java.lang.Exception", two),
+            ("java.lang.IllegalStateException", "java.lang.RuntimeException", four),
+        ];
+        let (text, types, members) = render(&index, &public(&["org.apache.kafka.common.Node"]), &jdk);
+        let lines: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(
+            lines,
+            [
+                "type\tjava.lang.IllegalStateException\tclass\tjava.lang.RuntimeException",
+                "ctor\tjava.lang.IllegalStateException\tIllegalStateException()",
+                "ctor\tjava.lang.IllegalStateException\tIllegalStateException(String s)",
+                "ctor\tjava.lang.IllegalStateException\tIllegalStateException(Throwable cause)",
+                "type\tjava.util.concurrent.TimeoutException\tclass\tjava.lang.Exception",
+                "ctor\tjava.util.concurrent.TimeoutException\tTimeoutException()",
+                "ctor\tjava.util.concurrent.TimeoutException\tTimeoutException(String message)",
+                "type\torg.apache.kafka.common.Node\tclass\t-",
+                "ctor\torg.apache.kafka.common.Node\tNode()",
+                "method\torg.apache.kafka.common.Node\tinstance\tid()",
+            ]
+        );
+        assert_eq!((types, members), (3, 7));
+    }
+
+    #[test]
     fn lists_only_the_named_test_jar_classes() {
         let mock = "package x; public class MockAdminClient { public MockAdminClient() { } }";
         let other = "package x; public class MockClient { public void poll() { } }";
@@ -490,7 +587,7 @@ mod tests {
     fn check_passes_on_an_up_to_date_file() {
         let src = "package x; public class Node { public int id() { return 0; } }";
         let index = index(&[(&["common"], src, false)]);
-        let (text, _, _) = render(&index, &public(&["org.apache.kafka.common.Node"]));
+        let (text, _, _) = render(&index, &public(&["org.apache.kafka.common.Node"]), &[]);
         assert!(check("java-api.txt", &text, &text).is_ok());
     }
 

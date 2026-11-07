@@ -1,16 +1,50 @@
 # The public API of the Java client, read from the `kafka` submodule by `cargo xtask java-api <file>`,
 # for the bindings' Java-name checks. Do not edit; rerun the command.
-# A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt
-# (or is MockAdminClient, from the test jar) and every class on its path is public; only public
-# members are listed, and nothing in design/current/java-deprecated.txt. Members Java declares
-# implicitly are listed too: a class's default constructor, and an enum's name(), ordinal(), values()
-# and valueOf(String); a parameter whose name the source does not spell is `?`.
+# A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt,
+# is MockAdminClient (from the test jar) or is an exception class the error generator makes a class
+# for, and every class on its path is public; only public members are listed, and nothing in
+# design/current/java-deprecated.txt. The Java built-in exceptions the bindings translate are listed
+# with their Java 11 constructors. Members Java declares implicitly are listed too: a class's default
+# constructor, and an enum's name(), ordinal(), values() and valueOf(String); a parameter whose name
+# the source does not spell is `?`.
 # One tab-separated line per item; a nested class is Outer$Inner:
-#   type      <class>  <class|interface|enum|record>  <supertypes, comma-separated, or ->
+#   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
 #   method    <class>  <static|instance>  <name(Type name, ...)>
 #   field     <class>  <NAME>
 #   constant  <class>  <NAME>   (an enum constant)
+type	java.lang.IllegalArgumentException	class	java.lang.RuntimeException
+ctor	java.lang.IllegalArgumentException	IllegalArgumentException()
+ctor	java.lang.IllegalArgumentException	IllegalArgumentException(String message, Throwable cause)
+ctor	java.lang.IllegalArgumentException	IllegalArgumentException(String s)
+ctor	java.lang.IllegalArgumentException	IllegalArgumentException(Throwable cause)
+type	java.lang.IllegalStateException	class	java.lang.RuntimeException
+ctor	java.lang.IllegalStateException	IllegalStateException()
+ctor	java.lang.IllegalStateException	IllegalStateException(String message, Throwable cause)
+ctor	java.lang.IllegalStateException	IllegalStateException(String s)
+ctor	java.lang.IllegalStateException	IllegalStateException(Throwable cause)
+type	java.lang.IndexOutOfBoundsException	class	java.lang.RuntimeException
+ctor	java.lang.IndexOutOfBoundsException	IndexOutOfBoundsException()
+ctor	java.lang.IndexOutOfBoundsException	IndexOutOfBoundsException(String s)
+type	java.lang.UnsupportedOperationException	class	java.lang.RuntimeException
+ctor	java.lang.UnsupportedOperationException	UnsupportedOperationException()
+ctor	java.lang.UnsupportedOperationException	UnsupportedOperationException(String message, Throwable cause)
+ctor	java.lang.UnsupportedOperationException	UnsupportedOperationException(String s)
+ctor	java.lang.UnsupportedOperationException	UnsupportedOperationException(Throwable cause)
+type	java.util.ConcurrentModificationException	class	java.lang.RuntimeException
+ctor	java.util.ConcurrentModificationException	ConcurrentModificationException()
+ctor	java.util.ConcurrentModificationException	ConcurrentModificationException(String message)
+ctor	java.util.ConcurrentModificationException	ConcurrentModificationException(String message, Throwable cause)
+ctor	java.util.ConcurrentModificationException	ConcurrentModificationException(Throwable cause)
+type	java.util.NoSuchElementException	class	java.lang.RuntimeException
+ctor	java.util.NoSuchElementException	NoSuchElementException()
+ctor	java.util.NoSuchElementException	NoSuchElementException(String s)
+type	java.util.concurrent.ExecutionException	class	java.lang.Exception
+ctor	java.util.concurrent.ExecutionException	ExecutionException(String message, Throwable cause)
+ctor	java.util.concurrent.ExecutionException	ExecutionException(Throwable cause)
+type	java.util.concurrent.TimeoutException	class	java.lang.Exception
+ctor	java.util.concurrent.TimeoutException	TimeoutException()
+ctor	java.util.concurrent.TimeoutException	TimeoutException(String message)
 type	org.apache.kafka.clients.admin.AbortTransactionOptions	class	org.apache.kafka.clients.admin.AbstractOptions
 ctor	org.apache.kafka.clients.admin.AbortTransactionOptions	AbortTransactionOptions()
 method	org.apache.kafka.clients.admin.AbortTransactionOptions	instance	toString()
@@ -25,7 +59,7 @@ method	org.apache.kafka.clients.admin.AbortTransactionSpec	instance	producerEpoc
 method	org.apache.kafka.clients.admin.AbortTransactionSpec	instance	producerId()
 method	org.apache.kafka.clients.admin.AbortTransactionSpec	instance	toString()
 method	org.apache.kafka.clients.admin.AbortTransactionSpec	instance	topicPartition()
-type	org.apache.kafka.clients.admin.AbstractOptions	class	-
+type	org.apache.kafka.clients.admin.AbstractOptions	abstract class	-
 ctor	org.apache.kafka.clients.admin.AbstractOptions	AbstractOptions()
 method	org.apache.kafka.clients.admin.AbstractOptions	instance	timeoutMs()
 method	org.apache.kafka.clients.admin.AbstractOptions	instance	timeoutMs(Integer timeoutMs)
@@ -171,7 +205,7 @@ method	org.apache.kafka.clients.admin.Admin	instance	updateFeatures(Map featureU
 method	org.apache.kafka.clients.admin.Admin	instance	updateFeatures(Map featureUpdates, UpdateFeaturesOptions options)
 method	org.apache.kafka.clients.admin.Admin	static	create(Map conf)
 method	org.apache.kafka.clients.admin.Admin	static	create(Properties props)
-type	org.apache.kafka.clients.admin.AdminClient	class	org.apache.kafka.clients.admin.Admin
+type	org.apache.kafka.clients.admin.AdminClient	abstract class	org.apache.kafka.clients.admin.Admin
 ctor	org.apache.kafka.clients.admin.AdminClient	AdminClient()
 method	org.apache.kafka.clients.admin.AdminClient	static	create(Map conf)
 method	org.apache.kafka.clients.admin.AdminClient	static	create(Properties props)
@@ -1473,7 +1507,7 @@ method	org.apache.kafka.clients.admin.UpdateFeaturesOptions	instance	validateOnl
 type	org.apache.kafka.clients.admin.UpdateFeaturesResult	class	-
 method	org.apache.kafka.clients.admin.UpdateFeaturesResult	instance	all()
 method	org.apache.kafka.clients.admin.UpdateFeaturesResult	instance	values()
-type	org.apache.kafka.clients.admin.UserScramCredentialAlteration	class	-
+type	org.apache.kafka.clients.admin.UserScramCredentialAlteration	abstract class	-
 method	org.apache.kafka.clients.admin.UserScramCredentialAlteration	instance	user()
 type	org.apache.kafka.clients.admin.UserScramCredentialDeletion	class	org.apache.kafka.clients.admin.UserScramCredentialAlteration
 ctor	org.apache.kafka.clients.admin.UserScramCredentialDeletion	UserScramCredentialDeletion(String user, ScramMechanism mechanism)
@@ -1758,7 +1792,7 @@ method	org.apache.kafka.clients.consumer.GroupProtocol	instance	ordinal()
 method	org.apache.kafka.clients.consumer.GroupProtocol	static	of(String name)
 method	org.apache.kafka.clients.consumer.GroupProtocol	static	valueOf(String ?)
 method	org.apache.kafka.clients.consumer.GroupProtocol	static	values()
-type	org.apache.kafka.clients.consumer.InvalidOffsetException	class	org.apache.kafka.common.KafkaException
+type	org.apache.kafka.clients.consumer.InvalidOffsetException	abstract class	org.apache.kafka.common.KafkaException
 ctor	org.apache.kafka.clients.consumer.InvalidOffsetException	InvalidOffsetException(String message)
 method	org.apache.kafka.clients.consumer.InvalidOffsetException	instance	partitions()
 type	org.apache.kafka.clients.consumer.KafkaConsumer	class	org.apache.kafka.clients.consumer.Consumer
@@ -2339,7 +2373,7 @@ ctor	org.apache.kafka.common.KafkaException	KafkaException()
 ctor	org.apache.kafka.common.KafkaException	KafkaException(String message)
 ctor	org.apache.kafka.common.KafkaException	KafkaException(String message, Throwable cause)
 ctor	org.apache.kafka.common.KafkaException	KafkaException(Throwable cause)
-type	org.apache.kafka.common.KafkaFuture	class	Future
+type	org.apache.kafka.common.KafkaFuture	abstract class	Future
 ctor	org.apache.kafka.common.KafkaFuture	KafkaFuture()
 method	org.apache.kafka.common.KafkaFuture	instance	cancel(boolean mayInterruptIfRunning)
 method	org.apache.kafka.common.KafkaFuture	instance	get()
@@ -2415,7 +2449,7 @@ type	org.apache.kafka.common.Reconfigurable	interface	org.apache.kafka.common.Co
 method	org.apache.kafka.common.Reconfigurable	instance	reconfigurableConfigs()
 method	org.apache.kafka.common.Reconfigurable	instance	reconfigure(Map configs)
 method	org.apache.kafka.common.Reconfigurable	instance	validateReconfiguration(Map configs)
-type	org.apache.kafka.common.TopicCollection	class	-
+type	org.apache.kafka.common.TopicCollection	abstract class	-
 method	org.apache.kafka.common.TopicCollection	static	ofTopicIds(Collection topics)
 method	org.apache.kafka.common.TopicCollection	static	ofTopicNames(Collection topics)
 type	org.apache.kafka.common.TopicCollection$TopicIdCollection	class	org.apache.kafka.common.TopicCollection
@@ -3123,7 +3157,7 @@ ctor	org.apache.kafka.common.errors.ApiException	ApiException(String message)
 ctor	org.apache.kafka.common.errors.ApiException	ApiException(String message, Throwable cause)
 ctor	org.apache.kafka.common.errors.ApiException	ApiException(Throwable cause)
 method	org.apache.kafka.common.errors.ApiException	instance	fillInStackTrace()
-type	org.apache.kafka.common.errors.ApplicationRecoverableException	class	org.apache.kafka.common.errors.ApiException
+type	org.apache.kafka.common.errors.ApplicationRecoverableException	abstract class	org.apache.kafka.common.errors.ApiException
 ctor	org.apache.kafka.common.errors.ApplicationRecoverableException	ApplicationRecoverableException()
 ctor	org.apache.kafka.common.errors.ApplicationRecoverableException	ApplicationRecoverableException(String message)
 ctor	org.apache.kafka.common.errors.ApplicationRecoverableException	ApplicationRecoverableException(String message, Throwable cause)
@@ -3285,7 +3319,7 @@ ctor	org.apache.kafka.common.errors.InvalidFetchSizeException	InvalidFetchSizeEx
 type	org.apache.kafka.common.errors.InvalidGroupIdException	class	org.apache.kafka.common.errors.ApiException
 ctor	org.apache.kafka.common.errors.InvalidGroupIdException	InvalidGroupIdException(String message)
 ctor	org.apache.kafka.common.errors.InvalidGroupIdException	InvalidGroupIdException(String message, Throwable cause)
-type	org.apache.kafka.common.errors.InvalidMetadataException	class	org.apache.kafka.common.errors.RefreshRetriableException
+type	org.apache.kafka.common.errors.InvalidMetadataException	abstract class	org.apache.kafka.common.errors.RefreshRetriableException
 type	org.apache.kafka.common.errors.InvalidOffsetException	class	org.apache.kafka.common.errors.ApiException
 ctor	org.apache.kafka.common.errors.InvalidOffsetException	InvalidOffsetException(String message)
 ctor	org.apache.kafka.common.errors.InvalidOffsetException	InvalidOffsetException(String message, Throwable cause)
@@ -3462,7 +3496,7 @@ ctor	org.apache.kafka.common.errors.RecordTooLargeException	RecordTooLargeExcept
 ctor	org.apache.kafka.common.errors.RecordTooLargeException	RecordTooLargeException(String message, Throwable cause)
 ctor	org.apache.kafka.common.errors.RecordTooLargeException	RecordTooLargeException(Throwable cause)
 method	org.apache.kafka.common.errors.RecordTooLargeException	instance	recordTooLargePartitions()
-type	org.apache.kafka.common.errors.RefreshRetriableException	class	org.apache.kafka.common.errors.RetriableException
+type	org.apache.kafka.common.errors.RefreshRetriableException	abstract class	org.apache.kafka.common.errors.RetriableException
 ctor	org.apache.kafka.common.errors.RefreshRetriableException	RefreshRetriableException()
 ctor	org.apache.kafka.common.errors.RefreshRetriableException	RefreshRetriableException(String message)
 ctor	org.apache.kafka.common.errors.RefreshRetriableException	RefreshRetriableException(String message, Throwable cause)
@@ -3477,7 +3511,7 @@ ctor	org.apache.kafka.common.errors.ResourceNotFoundException	ResourceNotFoundEx
 ctor	org.apache.kafka.common.errors.ResourceNotFoundException	ResourceNotFoundException(String resource, String message)
 ctor	org.apache.kafka.common.errors.ResourceNotFoundException	ResourceNotFoundException(String resource, String message, Throwable cause)
 method	org.apache.kafka.common.errors.ResourceNotFoundException	instance	resource()
-type	org.apache.kafka.common.errors.RetriableException	class	org.apache.kafka.common.errors.ApiException
+type	org.apache.kafka.common.errors.RetriableException	abstract class	org.apache.kafka.common.errors.ApiException
 ctor	org.apache.kafka.common.errors.RetriableException	RetriableException()
 ctor	org.apache.kafka.common.errors.RetriableException	RetriableException(String message)
 ctor	org.apache.kafka.common.errors.RetriableException	RetriableException(String message, Throwable cause)
@@ -3873,7 +3907,7 @@ method	org.apache.kafka.common.metrics.stats.Rate	instance	record(MetricConfig c
 method	org.apache.kafka.common.metrics.stats.Rate	instance	toString()
 method	org.apache.kafka.common.metrics.stats.Rate	instance	unitName()
 method	org.apache.kafka.common.metrics.stats.Rate	instance	windowSize(MetricConfig config, long now)
-type	org.apache.kafka.common.metrics.stats.SampledStat	class	org.apache.kafka.common.metrics.MeasurableStat
+type	org.apache.kafka.common.metrics.stats.SampledStat	abstract class	org.apache.kafka.common.metrics.MeasurableStat
 ctor	org.apache.kafka.common.metrics.stats.SampledStat	SampledStat(double initialValue)
 method	org.apache.kafka.common.metrics.stats.SampledStat	instance	combine(List samples, MetricConfig config, long now)
 method	org.apache.kafka.common.metrics.stats.SampledStat	instance	current(long timeMs)
@@ -3899,6 +3933,11 @@ ctor	org.apache.kafka.common.metrics.stats.WindowedCount	WindowedCount()
 type	org.apache.kafka.common.metrics.stats.WindowedSum	class	org.apache.kafka.common.metrics.stats.SampledStat
 ctor	org.apache.kafka.common.metrics.stats.WindowedSum	WindowedSum()
 method	org.apache.kafka.common.metrics.stats.WindowedSum	instance	combine(List samples, MetricConfig config, long now)
+type	org.apache.kafka.common.network.InvalidReceiveException	class	org.apache.kafka.common.KafkaException
+ctor	org.apache.kafka.common.network.InvalidReceiveException	InvalidReceiveException(String message)
+type	org.apache.kafka.common.protocol.types.SchemaException	class	org.apache.kafka.common.KafkaException
+ctor	org.apache.kafka.common.protocol.types.SchemaException	SchemaException(String message)
+ctor	org.apache.kafka.common.protocol.types.SchemaException	SchemaException(String message, Throwable cause)
 type	org.apache.kafka.common.quota.ClientQuotaAlteration	class	-
 ctor	org.apache.kafka.common.quota.ClientQuotaAlteration	ClientQuotaAlteration(ClientQuotaEntity entity, Collection ops)
 method	org.apache.kafka.common.quota.ClientQuotaAlteration	instance	entity()
@@ -3951,6 +3990,10 @@ method	org.apache.kafka.common.record.TimestampType	instance	toString()
 method	org.apache.kafka.common.record.TimestampType	static	forName(String name)
 method	org.apache.kafka.common.record.TimestampType	static	valueOf(String ?)
 method	org.apache.kafka.common.record.TimestampType	static	values()
+type	org.apache.kafka.common.requests.CorrelationIdMismatchException	class	IllegalStateException
+ctor	org.apache.kafka.common.requests.CorrelationIdMismatchException	CorrelationIdMismatchException(String message, int requestCorrelationId, int responseCorrelationId)
+method	org.apache.kafka.common.requests.CorrelationIdMismatchException	instance	requestCorrelationId()
+method	org.apache.kafka.common.requests.CorrelationIdMismatchException	instance	responseCorrelationId()
 type	org.apache.kafka.common.resource.PatternType	enum	-
 constant	org.apache.kafka.common.resource.PatternType	ANY
 constant	org.apache.kafka.common.resource.PatternType	LITERAL
