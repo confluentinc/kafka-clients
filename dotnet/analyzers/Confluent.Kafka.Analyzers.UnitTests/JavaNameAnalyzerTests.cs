@@ -853,6 +853,72 @@ public sealed class JavaNameAnalyzerTests
             Name(0, "unmatched T:Confluent.Kafka.Common.Config.ConfigResourceType: Java has no type of this name; its members "
                 + "are compared with org.apache.kafka.common.config.ConfigResource$Type"));
 
+    [Fact]
+    public Task ARenamedParameter_IsMatchedOnlyWhereItsTypeFits() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Consumer
+            {
+                public interface IConsumerRebalanceListener
+                {
+                }
+
+                public interface IAsyncConsumerRebalanceListener
+                {
+                }
+
+                public sealed class {|#2:KafkaConsumer|}
+                {
+                    public void {|#0:Subscribe|}(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener)
+                    {
+                    }
+
+                    public void {|#1:Subscribe|}(IReadOnlyCollection<string> topics, IAsyncConsumerRebalanceListener listener)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.consumer.ConsumerRebalanceListener\tinterface\t-\n"
+                + "type\torg.apache.kafka.clients.consumer.KafkaConsumer\tclass\t-\n"
+                + "ctor\torg.apache.kafka.clients.consumer.KafkaConsumer\tKafkaConsumer()\n"
+                + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\t"
+                + "subscribe(Collection topics, ConsumerRebalanceListener callback)\n"
+                + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\t"
+                + "subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener callback)\n"),
+            Name(0, "parameter M:Confluent.Kafka.Consumer.KafkaConsumer.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},"
+                + "Confluent.Kafka.Consumer.IConsumerRebalanceListener): names its parameters (topics, listener) where Java's "
+                + "KafkaConsumer.subscribe names them (topics, callback)"),
+            Name(1, "overload M:Confluent.Kafka.Consumer.KafkaConsumer.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},"
+                + "Confluent.Kafka.Consumer.IAsyncConsumerRebalanceListener): Java's KafkaConsumer.subscribe has no overload with 2 parameter(s)"),
+            Name(2, "missing T:Confluent.Kafka.Consumer.KafkaConsumer "
+                + "org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener): has no "
+                + "counterpart of Java's org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)"));
+
+    [Fact]
+    public Task AProtectedConstructor_CanStandForAProtectedJavaOne() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Errors
+            {
+                public abstract class InvalidMetadataException : System.Exception
+                {
+                    protected InvalidMetadataException()
+                    {
+                    }
+
+                    protected InvalidMetadataException(string message)
+                        : base(message)
+                    {
+                    }
+                }
+            }
+            """,
+            Files("type\torg.apache.kafka.common.errors.InvalidMetadataException\tabstract class\tRuntimeException\n"));
+
     private const string Records = """
         using System.Collections;
         using System.Collections.Generic;

@@ -564,7 +564,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 JavaMember chosen = signature.Where(d => d.Link.IsInterface).Select(d => d.Member).FirstOrDefault() ?? first;
                 bool isRequired = signature.Any(d => required.Contains(d.Member));
                 JavaMember reported = signature.Select(d => d.Member).FirstOrDefault(required.Contains) ?? chosen;
-                overloads.Add(new JavaOverload(chosen, reported, isRequired, ParameterNames(chosen, isExceptionConstructor)));
+                (string[] names, string[] types) = Parameters(chosen, isExceptionConstructor);
+                overloads.Add(new JavaOverload(chosen, reported, isRequired, names, types));
             }
 
             return overloads;
@@ -572,9 +573,10 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         // The names .NET gives Java's parameters: a long and the TimeUnit that qualifies it are one TimeSpan named after
         // the long; in an exception's constructor a Throwable is innerException and a String named s or msg is message.
-        private static string[] ParameterNames(JavaMember member, bool isExceptionConstructor)
+        private static (string[] Names, string[] Types) Parameters(JavaMember member, bool isExceptionConstructor)
         {
             List<string> names = new List<string>();
+            List<string> types = new List<string>();
             for (int i = 0; i < member.ParameterNames.Length; i++)
             {
                 string type = member.ParameterTypes[i];
@@ -591,11 +593,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 names.Add(name);
                 if (type == "long" && i + 1 < member.ParameterTypes.Length && member.ParameterTypes[i + 1] == "TimeUnit")
                 {
+                    type = "Duration";
                     i++;
                 }
+
+                types.Add(type);
             }
 
-            return names.ToArray();
+            return (names.ToArray(), types.ToArray());
         }
 
         private static void Match(INamedTypeSymbol type, string javaName, List<NetOverload> net, List<JavaOverload> java, List<Finding> findings)
@@ -620,8 +625,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                         {
                             0 => n.Names.Count == javaNames.Length && (n.NamedByBase || SameNames(n.Names, javaNames)),
                             1 => prefix && SameNames(n.Names, javaNames),
-                            2 => n.Names.Count == javaNames.Length,
-                            _ => prefix,
+                            2 => n.Names.Count == javaNames.Length && TypesFit(n, java[j]),
+                            _ => prefix && TypesFit(n, java[j]),
                         };
                         if (!matches)
                         {
@@ -649,7 +654,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             for (int i = 0; i < net.Count; i++)
             {
-                if (!netDone[i] && net[i].DeclaredHere)
+                if (!netDone[i] && net[i].DeclaredHere && net[i].Method.DeclaredAccessibility == Accessibility.Public)
                 {
                     findings.Add(new Finding(
                         "overload " + DocId(net[i].Method),
@@ -671,6 +676,133 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     findings.Add(Missing(DocId(type), java[j].Reported.Marker, LocationOf(type)));
                 }
             }
+        }
+
+        // Whether each Java parameter type can stand for the .NET one at its place: a renamed parameter is matched only
+        // where its type fits. A type the check does not know, or a named type of another name, fits.
+        private static bool TypesFit(NetOverload net, JavaOverload java)
+        {
+            for (int i = 0; i < java.Types.Length; i++)
+            {
+                string? javaKind = JavaKind(java.Types[i]);
+                string? netKind = NetKind(net.Types[i]);
+                if (javaKind is not null && netKind is not null && javaKind != netKind
+                    && !(javaKind.StartsWith("named:", StringComparison.Ordinal) && netKind.StartsWith("named:", StringComparison.Ordinal)))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static string? JavaKind(string type)
+        {
+            if (type.EndsWith("[]", StringComparison.Ordinal))
+            {
+                return "collection";
+            }
+
+            switch (type)
+            {
+                case "String":
+                    return "text";
+                case "byte":
+                case "short":
+                case "int":
+                case "long":
+                case "Byte":
+                case "Short":
+                case "Integer":
+                case "Long":
+                    return "integer";
+                case "boolean":
+                case "Boolean":
+                    return "boolean";
+                case "float":
+                case "double":
+                case "Float":
+                case "Double":
+                    return "decimal";
+                case "Duration":
+                    return "duration";
+                case "Collection":
+                case "List":
+                case "Set":
+                case "Iterable":
+                case "ByteBuffer":
+                    return "collection";
+                case "Map":
+                    return "map";
+                case "Object":
+                case "Optional":
+                    return null;
+            }
+
+            // A Java type variable (K, V, T) fits anything.
+            return type.Length <= 2 && char.IsUpper(type[0]) ? null : "named:" + type;
+        }
+
+        private static string? NetKind(ITypeSymbol type)
+        {
+            if (type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable)
+            {
+                type = nullable.TypeArguments[0];
+            }
+
+            switch (type.SpecialType)
+            {
+                case SpecialType.System_String:
+                    return "text";
+                case SpecialType.System_Byte:
+                case SpecialType.System_SByte:
+                case SpecialType.System_Int16:
+                case SpecialType.System_Int32:
+                case SpecialType.System_Int64:
+                    return "integer";
+                case SpecialType.System_Boolean:
+                    return "boolean";
+                case SpecialType.System_Single:
+                case SpecialType.System_Double:
+                case SpecialType.System_Decimal:
+                    return "decimal";
+                case SpecialType.System_Object:
+                    return null;
+            }
+
+            if (type.TypeKind == TypeKind.TypeParameter)
+            {
+                return null;
+            }
+
+            if (type.TypeKind == TypeKind.Array)
+            {
+                return "collection";
+            }
+
+            switch (type.Name)
+            {
+                case "TimeSpan":
+                    return "duration";
+                case "IReadOnlyDictionary":
+                case "IDictionary":
+                case "Dictionary":
+                    return "map";
+                case "IEnumerable":
+                case "IReadOnlyCollection":
+                case "IReadOnlyList":
+                case "ICollection":
+                case "IList":
+                case "ISet":
+                case "IReadOnlySet":
+                case "List":
+                case "HashSet":
+                case "ReadOnlyMemory":
+                case "Memory":
+                    return "collection";
+            }
+
+            return "named:" + type.Name;
         }
 
         private static bool SameNames(IReadOnlyList<string> net, string[] java)
@@ -880,8 +1012,9 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 && last.IsOptional
                 && last.Name == "cancellationToken"
                 && last.Type.ToDisplayString() == "System.Threading.CancellationToken";
-            IEnumerable<IParameterSymbol> compared = token ? parameters.Take(parameters.Count - 1) : parameters;
+            List<IParameterSymbol> compared = (token ? parameters.Take(parameters.Count - 1) : parameters).ToList();
             Names = compared.Select(p => p.Name).ToList();
+            Types = compared.Select(p => p.Type).ToList();
             Required = compared.Count(p => !p.IsOptional);
         }
 
@@ -900,6 +1033,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         internal IReadOnlyList<string> Names { get; }
 
+        internal IReadOnlyList<ITypeSymbol> Types { get; }
+
         internal int Required { get; }
     }
 
@@ -907,12 +1042,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
     /// type must have it, and the parameter names .NET gives it.</summary>
     private sealed class JavaOverload
     {
-        internal JavaOverload(JavaMember member, JavaMember reported, bool isRequired, string[] names)
+        internal JavaOverload(JavaMember member, JavaMember reported, bool isRequired, string[] names, string[] types)
         {
             Member = member;
             Reported = reported;
             IsRequired = isRequired;
             Names = names;
+            Types = types;
         }
 
         internal JavaMember Member { get; }
@@ -922,6 +1058,9 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         internal bool IsRequired { get; }
 
         internal string[] Names { get; }
+
+        /// <summary>The Java types at the places of <see cref="Names"/>; a long and its TimeUnit are a Duration.</summary>
+        internal string[] Types { get; }
     }
 
     /// <summary>One of the Java-name lists: its lines other than blanks and comments, each with where it is in the file.</summary>
