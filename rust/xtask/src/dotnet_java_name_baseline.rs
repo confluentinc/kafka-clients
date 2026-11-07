@@ -31,6 +31,9 @@ use std::process::Command;
 /// The library project, relative to `rust/`.
 const PROJECT: &str = "../dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj";
 
+/// The build props that reference the analyzer for every project, relative to `rust/`.
+const BUILD_PROPS: &str = "../dotnet/Directory.Build.props";
+
 /// The analyzer project, built first so the compile runs the current analyzer.
 const ANALYZER_PROJECT: &str = "../dotnet/analyzers/Confluent.Kafka.Analyzers/Confluent.Kafka.Analyzers.csproj";
 
@@ -43,6 +46,10 @@ const WORK_DIR: &str = "target/dotnet-java-name-baseline";
 
 const NAME_RULE: &str = "warning CKRDA0013: ";
 const STALE_RULE: &str = "warning CKRDA0014: ";
+
+/// An analyzer that threw (AD0001) or could not be created (CS8032): its findings
+/// are missing, so the log says nothing about the baseline.
+const ANALYZER_FAILURES: &[&str] = &["warning AD0001: ", "warning CS8032: "];
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let add = match args {
@@ -73,6 +80,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 /// The findings of a compile of every target framework, the baseline left out.
 fn build_findings() -> anyhow::Result<Findings> {
     let project = fs::read_to_string(PROJECT).map_err(|e| anyhow::anyhow!("{PROJECT}: {e}"))?;
+    let props = fs::read_to_string(BUILD_PROPS).map_err(|e| anyhow::anyhow!("{BUILD_PROPS}: {e}"))?;
+    // A build with no finding is a clean one, unless the analyzer does not run at all.
+    check_wiring(&project, &props)?;
     let frameworks = target_frameworks(&project)?;
     let work = Path::new(WORK_DIR);
     if work.exists() {
@@ -82,6 +92,8 @@ fn build_findings() -> anyhow::Result<Findings> {
     let work = fs::canonicalize(work)?;
 
     dotnet(&["build", ANALYZER_PROJECT, "-nologo", "-v:q"])?;
+    // `msbuild -t:Compile` does not restore.
+    dotnet(&["restore", PROJECT, "-nologo", "-v:q"])?;
     let mut all = Findings::default();
     for framework in &frameworks {
         let log = work.join(format!("{framework}.log"));
@@ -102,8 +114,9 @@ fn build_findings() -> anyhow::Result<Findings> {
         let text = fs::read_to_string(&log).map_err(|e| anyhow::anyhow!("{}: {e}", log.display()))?;
         let findings = findings(&text);
         anyhow::ensure!(
-            !findings.keys.is_empty(),
-            "the {framework} compile reported no CKRDA0013 finding; is the analyzer wired into {PROJECT}?"
+            findings.failures.is_empty(),
+            "the analyzer failed in the {framework} compile, so the baseline is left as it is:\n  {}",
+            findings.failures.join("\n  ")
         );
         all.keys.extend(findings.keys);
         all.stale.extend(findings.stale);
@@ -125,6 +138,20 @@ fn dotnet(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fails unless the analyzer runs on the project: `Directory.Build.props` references
+/// it, and the project gives it the Java list (without which it checks nothing).
+fn check_wiring(project: &str, props: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        props.contains("Confluent.Kafka.Analyzers.csproj") && props.contains(r#"OutputItemType="Analyzer""#),
+        "{BUILD_PROPS} does not reference the analyzer project as an analyzer"
+    );
+    anyhow::ensure!(
+        project.contains(r#"<AdditionalFiles Include="../../analyzers/java-api.txt""#),
+        "{PROJECT} does not give the analyzer ../../analyzers/java-api.txt"
+    );
+    Ok(())
+}
+
 /// The frameworks of the project's `<TargetFrameworks>`.
 fn target_frameworks(project: &str) -> anyhow::Result<Vec<String>> {
     let start = project
@@ -143,11 +170,13 @@ fn target_frameworks(project: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-/// What a build log reports: the CKRDA0013 keys and the CKRDA0014 messages.
+/// What a build log reports: the CKRDA0013 keys, the CKRDA0014 messages, and any
+/// analyzer failure.
 #[derive(Debug, Default, PartialEq)]
 struct Findings {
     keys: BTreeSet<String>,
     stale: BTreeSet<String>,
+    failures: Vec<String>,
 }
 
 /// The findings of an MSBuild log. A CKRDA0013 message is `<key>: <explanation>`,
@@ -161,6 +190,8 @@ fn findings(log: &str) -> Findings {
             found.keys.insert(key.to_string());
         } else if let Some((_, message)) = line.split_once(STALE_RULE) {
             found.stale.insert(message.to_string());
+        } else if ANALYZER_FAILURES.iter().any(|f| line.contains(f)) {
+            found.failures.push(line.to_string());
         }
     }
     found
@@ -205,7 +236,7 @@ mod tests {
     use super::*;
 
     fn keys(list: &[&str]) -> Findings {
-        Findings { keys: list.iter().map(|s| s.to_string()).collect(), stale: BTreeSet::new() }
+        Findings { keys: list.iter().map(|s| s.to_string()).collect(), ..Findings::default() }
     }
 
     #[test]
@@ -235,6 +266,33 @@ mod tests {
             found.stale.into_iter().collect::<Vec<_>>(),
             ["'A.B org.x.B' in java-name-pairs.txt matches nothing; delete it"]
         );
+    }
+
+    #[test]
+    fn reads_an_analyzer_failure_from_a_log() {
+        let log = "CSC : warning AD0001: Analyzer 'Confluent.Kafka.Analyzers.JavaNameAnalyzer' threw an exception [/x/Confluent.Kafka.csproj::TargetFramework=net8.0]\n";
+        let found = findings(log);
+        assert!(found.keys.is_empty());
+        assert_eq!(
+            found.failures,
+            ["CSC : warning AD0001: Analyzer 'Confluent.Kafka.Analyzers.JavaNameAnalyzer' threw an exception"]
+        );
+    }
+
+    #[test]
+    fn checks_that_the_analyzer_runs_on_the_project() {
+        let props = r#"<ProjectReference Include="analyzers/Confluent.Kafka.Analyzers/Confluent.Kafka.Analyzers.csproj" OutputItemType="Analyzer" />"#;
+        let project = r#"<AdditionalFiles Include="../../analyzers/java-api.txt" />"#;
+        assert!(check_wiring(project, props).is_ok());
+        assert!(check_wiring("<Project/>", props).is_err());
+        assert!(check_wiring(project, "<Project/>").is_err());
+    }
+
+    #[test]
+    fn a_clean_build_empties_the_baseline_to_its_header() {
+        let rewrite = rewrite("# header\nunmatched T:A\n", &keys(&[]));
+        assert_eq!(rewrite.text, "# header\n");
+        assert_eq!((rewrite.removed, rewrite.added.len()), (1, 0));
     }
 
     #[test]
