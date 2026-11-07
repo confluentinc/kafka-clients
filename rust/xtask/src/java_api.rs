@@ -37,6 +37,10 @@ use crate::java::{self, JavaClass, JavaIndex, JavaKind, Overload, Visibility};
 /// The `@InterfaceAudience.Public` list, relative to `rust/`.
 const PUBLIC_AUDIENCE_LIST: &str = "../design/current/interface-audience-public-4.4.txt";
 
+/// The bindings' copies of the list, relative to `rust/`: `cargo xtask check-generated`
+/// fails when one is out of date with the Java sources.
+pub(crate) const BINDING_COPIES: &[&str] = &["../dotnet/analyzers/java-api.txt"];
+
 /// Classes Java ships in its test jar that the bindings translate as public
 /// API: `MockAdminClient` (`.claude/rules/admin-client.md` §9).
 const TEST_JAR_CLASSES: &[&str] = &["org.apache.kafka.clients.admin.MockAdminClient"];
@@ -95,6 +99,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             check(file, &on_disk, &text)?;
             println!("✅ {file} is up to date ({types} types and {members} members)");
         },
+    }
+    Ok(())
+}
+
+/// Fails, naming the file and its first line that differs, when a binding's copy
+/// of the list is out of date.
+pub(crate) fn check_binding_copies() -> anyhow::Result<()> {
+    let (text, _, _) = generate()?;
+    for file in BINDING_COPIES {
+        let on_disk =
+            fs::read_to_string(file).map_err(|e| anyhow::anyhow!("{file}: {e}: run `cargo xtask java-api {file}`"))?;
+        check(file, &on_disk, &text)?;
     }
     Ok(())
 }

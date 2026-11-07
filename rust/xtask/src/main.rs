@@ -138,6 +138,7 @@ fn check_generated() -> anyhow::Result<()> {
     error_predicates::check_error_predicates_up_to_date()?;
     check_admin_options_up_to_date()?;
     check_admin_results_up_to_date()?;
+    check_java_api_up_to_date()?;
 
     println!("🔍 Checking generated code formatting...");
 
@@ -592,6 +593,17 @@ fn check_admin_results_up_to_date() -> anyhow::Result<()> {
         exit(1);
     }
     println!("✅ Generated admin Result modules are up to date");
+    Ok(())
+}
+
+/// Fail when a binding's copy of the Java API list no longer matches the Java sources.
+fn check_java_api_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking the bindings' Java API lists...");
+    if let Err(e) = java_api::check_binding_copies() {
+        eprintln!("\n❌ {e}");
+        exit(1);
+    }
+    println!("✅ The bindings' Java API lists are up to date");
     Ok(())
 }
 
