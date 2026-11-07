@@ -514,7 +514,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             for (int j = 0; j < java.Count; j++)
             {
-                if (!javaDone[j] && java[j].IsRequired)
+                // A .NET overload with optional parameters accepts every Java overload whose parameters are a prefix
+                // of its own, as EnforceRebalance(reason = null) accepts both of Java's enforceRebalance forms.
+                string[] javaNames = java[j].Member.ParameterNames;
+                bool accepted = net.Any(n => n.Required <= javaNames.Length
+                    && javaNames.Length <= n.Names.Count
+                    && SameNames(n.Names, javaNames));
+                if (!javaDone[j] && !accepted && java[j].IsRequired)
                 {
                     findings.Add(Missing(DocId(type), java[j].Reported.Marker, LocationOf(type)));
                 }

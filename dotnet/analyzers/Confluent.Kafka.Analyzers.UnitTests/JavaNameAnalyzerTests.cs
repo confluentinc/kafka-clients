@@ -269,6 +269,30 @@ public sealed class JavaNameAnalyzerTests
                 + "Java's org.apache.kafka.common.Node#hasRack()"));
 
     [Fact]
+    public Task OptionalParameters_AcceptEveryJavaOverloadTheyCover() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Consumer
+            {
+                public sealed class {|#0:MockConsumer|}
+                {
+                    public void EnforceRebalance(string reason = null)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.consumer.MockConsumer\tclass\t-\n"
+                + "ctor\torg.apache.kafka.clients.consumer.MockConsumer\tMockConsumer()\n"
+                + "method\torg.apache.kafka.clients.consumer.MockConsumer\tinstance\tenforceRebalance()\n"
+                + "method\torg.apache.kafka.clients.consumer.MockConsumer\tinstance\tenforceRebalance(String reason)\n"
+                + "method\torg.apache.kafka.clients.consumer.MockConsumer\tinstance\tenforceRebalance(String reason, int x)\n"),
+            Name(0, "missing T:Confluent.Kafka.Consumer.MockConsumer org.apache.kafka.clients.consumer.MockConsumer"
+                + "#enforceRebalance(String,int): has no counterpart of Java's org.apache.kafka.clients.consumer.MockConsumer"
+                + "#enforceRebalance(String,int)"));
+
+    [Fact]
     public Task ParameterNames_FollowJava_TheInterfaceDeclarationFirst() =>
         Verifier.VerifyWithFilesAsync(
             """
