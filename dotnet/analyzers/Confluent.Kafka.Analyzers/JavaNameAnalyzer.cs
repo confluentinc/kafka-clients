@@ -369,7 +369,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 .SelectMany(t => t.GetMembers().OfType<IMethodSymbol>())
                 .Where(m => m.MethodKind == MethodKind.Ordinary
                     && m.DeclaredAccessibility == Accessibility.Public
-                    && !m.IsImplicitlyDeclared)
+                    && !m.IsImplicitlyDeclared
+                    && !ImplementsEquatable(type, m))
                 .ToList();
             HashSet<string> netProperties = new HashSet<string>(
                 NetChain(type)
@@ -575,6 +576,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             return false;
         }
+
+        // IEquatable<T>.Equals is a member .NET adds beside object.Equals, which stands for Java's equals(Object).
+        private static bool ImplementsEquatable(INamedTypeSymbol type, IMethodSymbol method) =>
+            type.AllInterfaces
+                .Where(contract => contract.Name == "IEquatable" && IsSystem(contract))
+                .SelectMany(contract => contract.GetMembers().OfType<IMethodSymbol>())
+                .Any(m => SymbolEqualityComparer.Default.Equals(type.FindImplementationForInterfaceMember(m), method));
 
         private static ISymbol? Overridden(ISymbol member) => member switch
         {

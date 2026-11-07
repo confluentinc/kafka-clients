@@ -323,6 +323,34 @@ public sealed class JavaNameAnalyzerTests
                 + "of this name"));
 
     [Fact]
+    public Task IEquatableEquals_IsNotAnOverload_AndObjectEqualsIsJavasEquals() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public readonly struct TopicPartition : System.IEquatable<TopicPartition>
+                {
+                    public TopicPartition(string topic, int partition)
+                    {
+                    }
+
+                    public bool Equals(TopicPartition other) => true;
+
+                    public override bool {|#0:Equals|}(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.TopicPartition\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.TopicPartition\tTopicPartition(String topic, int partition)\n"
+                + "method\torg.apache.kafka.common.TopicPartition\tinstance\tequals(Object o)\n"
+                + "method\torg.apache.kafka.common.TopicPartition\tinstance\thashCode()\n"),
+            Name(0, "parameter M:Confluent.Kafka.Common.TopicPartition.Equals(System.Object): names its parameters (obj) where "
+                + "Java's TopicPartition.equals names them (o)"));
+
+    [Fact]
     public Task AnEnum_HasJavasConstants_AndCoversJavasBuiltInEnumMembers() =>
         Verifier.VerifyWithFilesAsync(
             """
