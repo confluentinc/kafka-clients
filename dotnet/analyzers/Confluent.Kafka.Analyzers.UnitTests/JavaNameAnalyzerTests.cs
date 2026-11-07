@@ -149,7 +149,7 @@ public sealed class JavaNameAnalyzerTests
             Files(Callback));
 
     [Fact]
-    public Task AnAsyncPeer_IsReported_AndItsMembersAreComparedWithItsJavaClass() =>
+    public Task AnAsyncPeer_HasItsJavaClassesNameAfterAsync_AndItsMembersAreCompared() =>
         Verifier.VerifyWithFilesAsync(
             """
             using System.Threading;
@@ -163,7 +163,7 @@ public sealed class JavaNameAnalyzerTests
                     {
                     }
 
-                    public Task {|#1:Flush|}(CancellationToken cancellationToken = default) => Task.CompletedTask;
+                    public Task Flush(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
                     public void {|#2:Frob|}()
                     {
@@ -176,12 +176,8 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.clients.producer.KafkaProducer\tKafkaProducer(Map configs)\n"
                 + "method\torg.apache.kafka.clients.producer.KafkaProducer\tinstance\tclose()\n"
                 + "method\torg.apache.kafka.clients.producer.KafkaProducer\tinstance\tflush()\n"),
-            Name(0, "unmatched T:Confluent.Kafka.Producer.AsyncKafkaProducer: Java has no type of this name; its members "
-                + "are compared with org.apache.kafka.clients.producer.KafkaProducer"),
             Name(0, "missing T:Confluent.Kafka.Producer.AsyncKafkaProducer org.apache.kafka.clients.producer.KafkaProducer#close(): "
                 + "has no counterpart of Java's org.apache.kafka.clients.producer.KafkaProducer#close()"),
-            Name(1, "parameter M:Confluent.Kafka.Producer.AsyncKafkaProducer.Flush(System.Threading.CancellationToken): adds the "
-                + ".NET-only parameter(s) cancellationToken to Java's KafkaProducer.flush()"),
             Name(2, "unmatched M:Confluent.Kafka.Producer.AsyncKafkaProducer.Frob: Java's KafkaProducer has no method of this name"));
 
     [Fact]
@@ -347,7 +343,7 @@ public sealed class JavaNameAnalyzerTests
                 + "of this name"));
 
     [Fact]
-    public Task IEquatableEquals_IsNotAnOverload_AndObjectEqualsIsJavasEquals() =>
+    public Task IEquatableEquals_IsNotAnOverload_AndObjectEqualsKeepsItsBaseParameterName() =>
         Verifier.VerifyWithFilesAsync(
             """
             namespace Confluent.Kafka.Common
@@ -360,7 +356,7 @@ public sealed class JavaNameAnalyzerTests
 
                     public bool Equals(TopicPartition other) => true;
 
-                    public override bool {|#0:Equals|}(object obj) => false;
+                    public override bool Equals(object obj) => false;
 
                     public override int GetHashCode() => 0;
                 }
@@ -370,9 +366,7 @@ public sealed class JavaNameAnalyzerTests
                 "type\torg.apache.kafka.common.TopicPartition\tclass\t-\n"
                 + "ctor\torg.apache.kafka.common.TopicPartition\tTopicPartition(String topic, int partition)\n"
                 + "method\torg.apache.kafka.common.TopicPartition\tinstance\tequals(Object o)\n"
-                + "method\torg.apache.kafka.common.TopicPartition\tinstance\thashCode()\n"),
-            Name(0, "parameter M:Confluent.Kafka.Common.TopicPartition.Equals(System.Object): names its parameters (obj) where "
-                + "Java's TopicPartition.equals names them (o)"));
+                + "method\torg.apache.kafka.common.TopicPartition\tinstance\thashCode()\n"));
 
     [Fact]
     public Task AnEnum_HasJavasConstants_AndCoversJavasBuiltInEnumMembers() =>
@@ -516,6 +510,348 @@ public sealed class JavaNameAnalyzerTests
         + "constant\torg.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation\tLEAVE_GROUP\n"
         + "constant\torg.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation\tREMAIN_IN_GROUP\n"
         + "method\torg.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation\tinstance\tname()\n";
+
+    [Fact]
+    public Task OnlyALastOptionalCancellationToken_IsLeftOutOfTheComparison() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class {|#2:Node|}
+                {
+                    public Task Host(CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+                    public Task {|#0:Port|}(int timeoutMs = 0) => Task.CompletedTask;
+
+                    public Task {|#1:Rack|}(CancellationToken cancellationToken) => Task.CompletedTask;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tport()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\track()\n"),
+            Name(0, "parameter M:Confluent.Kafka.Common.Node.Port(System.Int32): adds the .NET-only parameter(s) timeoutMs to "
+                + "Java's Node.port()"),
+            Name(1, "overload M:Confluent.Kafka.Common.Node.Rack(System.Threading.CancellationToken): Java's Node.rack has no "
+                + "overload with 1 parameter(s)"),
+            Name(2, "missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#rack(): has no counterpart of Java's "
+                + "org.apache.kafka.common.Node#rack()"));
+
+    [Fact]
+    public Task ARenamedParameterBesideAnAddedOne_IsOneParameterFinding() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Node
+                {
+                    public string {|#0:Host|}(int nodeId, bool quick = false) => "";
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Node\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Node\tNode()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thost(int id)\n"),
+            Name(0, "parameter M:Confluent.Kafka.Common.Node.Host(System.Int32,System.Boolean): names its parameters (nodeId) "
+                + "where Java's Node.host names them (id), and adds the .NET-only parameter(s) quick"));
+
+    [Fact]
+    public Task OverloadsWithTheSameNamesAndOtherTypes_AreEachChecked_AndJavasPairsWithTheSyncForm() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Threading.Tasks;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public interface ICallback
+                {
+                    void OnCompletion();
+                }
+
+                public interface IAsyncCallback
+                {
+                    Task OnCompletion();
+                }
+
+                public sealed class KafkaProducer
+                {
+                    public void {|#0:Send|}(string record, IAsyncCallback callback)
+                    {
+                    }
+
+                    public void Send(string record, ICallback callback)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.producer.Callback\tinterface\t-\n"
+                + "method\torg.apache.kafka.clients.producer.Callback\tinstance\tonCompletion()\n"
+                + "type\torg.apache.kafka.clients.producer.KafkaProducer\tclass\t-\n"
+                + "ctor\torg.apache.kafka.clients.producer.KafkaProducer\tKafkaProducer()\n"
+                + "method\torg.apache.kafka.clients.producer.KafkaProducer\tinstance\tsend(ProducerRecord record, Callback callback)\n"),
+            Name(0, "overload M:Confluent.Kafka.Producer.KafkaProducer.Send(System.String,Confluent.Kafka.Producer.IAsyncCallback): "
+                + "Java's KafkaProducer.send has no overload with 2 parameter(s)"));
+
+    [Fact]
+    public Task AJavaStaticMethod_IsRequiredOnlyOnTheTypeThatDeclaresIt() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public interface {|#0:IAdmin|}
+                {
+                    void Close();
+                }
+
+                public sealed class KafkaAdminClient : IAdmin
+                {
+                    public void Close()
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.Admin\tinterface\t-\n"
+                + "method\torg.apache.kafka.clients.admin.Admin\tinstance\tclose()\n"
+                + "method\torg.apache.kafka.clients.admin.Admin\tstatic\tcreate(Map conf)\n"
+                + "type\torg.apache.kafka.clients.admin.AdminClient\tabstract class\torg.apache.kafka.clients.admin.Admin\n"
+                + "ctor\torg.apache.kafka.clients.admin.AdminClient\tAdminClient()\n"
+                + "method\torg.apache.kafka.clients.admin.AdminClient\tstatic\tcreate(Map conf)\n"
+                + "type\torg.apache.kafka.clients.admin.KafkaAdminClient\tclass\torg.apache.kafka.clients.admin.AdminClient\n"
+                + "ctor\torg.apache.kafka.clients.admin.KafkaAdminClient\tKafkaAdminClient()\n"),
+            Name(0, "missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#create(Map): has no counterpart "
+                + "of Java's org.apache.kafka.clients.admin.Admin#create(Map)"));
+
+    [Fact]
+    public Task AJdkException_IsInTheRootNamespace_AndAnExceptionNamesItsCauseInnerException() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka
+            {
+                public class IllegalStateException : InvalidOperationException
+                {
+                    public IllegalStateException()
+                    {
+                    }
+
+                    public IllegalStateException(string message)
+                        : base(message)
+                    {
+                    }
+
+                    public IllegalStateException(string message, Exception innerException)
+                        : base(message, innerException)
+                    {
+                    }
+
+                    public IllegalStateException(Exception innerException)
+                        : base(null, innerException)
+                    {
+                    }
+                }
+            }
+
+            namespace Confluent.Kafka.Common.Config
+            {
+                public class ConfigException : Exception
+                {
+                    public ConfigException(string message)
+                        : base(message)
+                    {
+                    }
+
+                    public {|#0:ConfigException|}(string key, object value)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\tjava.lang.IllegalStateException\tclass\tjava.lang.RuntimeException\n"
+                + "ctor\tjava.lang.IllegalStateException\tIllegalStateException()\n"
+                + "ctor\tjava.lang.IllegalStateException\tIllegalStateException(String s)\n"
+                + "ctor\tjava.lang.IllegalStateException\tIllegalStateException(String message, Throwable cause)\n"
+                + "ctor\tjava.lang.IllegalStateException\tIllegalStateException(Throwable cause)\n"
+                + "type\torg.apache.kafka.common.config.ConfigException\tclass\tRuntimeException\n"
+                + "ctor\torg.apache.kafka.common.config.ConfigException\tConfigException(String message)\n"
+                + "ctor\torg.apache.kafka.common.config.ConfigException\tConfigException(String name, Object value)\n"),
+            Name(0, "parameter M:Confluent.Kafka.Common.Config.ConfigException.#ctor(System.String,System.Object): names its "
+                + "parameters (key, value) where Java's ConfigException constructor names them (name, value)"));
+
+    [Fact]
+    public Task AJavaEnumsMethods_SitInAStaticClassNamedAfterTheEnum() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public enum {|#1:ScramMechanism|}
+                {
+                    UNKNOWN,
+                    SCRAM_SHA_256,
+                }
+
+                public static class ScramMechanisms
+                {
+                    public static string MechanismName(this ScramMechanism mechanism) => "";
+
+                    public static ScramMechanism FromType(byte type) => default;
+
+                    public static ScramMechanism {|#0:FromName|}(string name) => default;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
+                + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"
+                + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tSCRAM_SHA_256\n"
+                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tmechanismName()\n"
+                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tinstance\tname()\n"
+                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tstatic\tfromMechanismName(String mechanismName)\n"
+                + "method\torg.apache.kafka.clients.admin.ScramMechanism\tstatic\tfromType(byte type)\n"),
+            Name(0, "unmatched M:Confluent.Kafka.Admin.ScramMechanisms.FromName(System.String): Java's ScramMechanism has no "
+                + "method of this name"),
+            Name(1, "missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String): "
+                + "has no counterpart of Java's org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName(String)"));
+
+    [Fact]
+    public Task AJavaAbstractClassesConstructors_AreProtected_AndATypeNothingDerivesFromHasNone() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Errors
+            {
+                public abstract class {|#0:RetriableException|} : Exception
+                {
+                    protected RetriableException(string message)
+                        : base(message)
+                    {
+                    }
+
+                    protected RetriableException(string message, Exception innerException)
+                        : base(message, innerException)
+                    {
+                    }
+                }
+            }
+
+            namespace Confluent.Kafka.Common
+            {
+                public readonly struct KafkaFuture
+                {
+                    public void Get()
+                    {
+                    }
+
+                    public void Get(TimeSpan timeout)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.errors.RetriableException\tabstract class\tRuntimeException\n"
+                + "ctor\torg.apache.kafka.common.errors.RetriableException\tRetriableException(String message)\n"
+                + "ctor\torg.apache.kafka.common.errors.RetriableException\tRetriableException(String message, Throwable cause)\n"
+                + "ctor\torg.apache.kafka.common.errors.RetriableException\tRetriableException(Throwable cause)\n"
+                + "type\torg.apache.kafka.common.KafkaFuture\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.common.KafkaFuture\tKafkaFuture()\n"
+                + "method\torg.apache.kafka.common.KafkaFuture\tinstance\tget()\n"
+                + "method\torg.apache.kafka.common.KafkaFuture\tinstance\tget(long timeout, TimeUnit unit)\n"),
+            Name(0, "missing T:Confluent.Kafka.Common.Errors.RetriableException "
+                + "org.apache.kafka.common.errors.RetriableException#RetriableException(Throwable): has no counterpart of "
+                + "Java's org.apache.kafka.common.errors.RetriableException#RetriableException(Throwable)"));
+
+    [Fact]
+    public Task APropertiesOverload_IsItsMapOverload_AndARegexPatternOverloadIsNotTranslated() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Consumer
+            {
+                public sealed class KafkaConsumer
+                {
+                    public KafkaConsumer(object configs, object keyDeserializer, object valueDeserializer)
+                    {
+                    }
+
+                    public void Subscribe(string topics)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.consumer.KafkaConsumer\tclass\t-\n"
+                + "ctor\torg.apache.kafka.clients.consumer.KafkaConsumer\t"
+                + "KafkaConsumer(Map configs, Deserializer keyDeserializer, Deserializer valueDeserializer)\n"
+                + "ctor\torg.apache.kafka.clients.consumer.KafkaConsumer\t"
+                + "KafkaConsumer(Properties properties, Deserializer keyDeserializer, Deserializer valueDeserializer)\n"
+                + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\tsubscribe(Collection topics)\n"
+                + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\tsubscribe(Pattern pattern)\n"));
+
+    [Fact]
+    public Task EqualityOperators_OnATypeThatOverridesEquals_AreDotNetsEquals() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public readonly struct Uuid : System.IEquatable<Uuid>
+                {
+                    public bool Equals(Uuid other) => true;
+
+                    public override bool Equals(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+
+                    public static bool operator ==(Uuid left, Uuid right) => left.Equals(right);
+
+                    public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Uuid\tclass\t-\n"
+                + "method\torg.apache.kafka.common.Uuid\tinstance\tequals(Object o)\n"
+                + "method\torg.apache.kafka.common.Uuid\tinstance\thashCode()\n"));
+
+    [Fact]
+    public Task APairedType_StandsForTheNestedJavaTypeItNames() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Config
+            {
+                public enum {|#0:ConfigResourceType|}
+                {
+                    BROKER,
+                }
+
+                public sealed class ConfigResource
+                {
+                    public ConfigResourceType Type() => default;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.config.ConfigResource\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.config.ConfigResource\tConfigResource()\n"
+                + "method\torg.apache.kafka.common.config.ConfigResource\tinstance\ttype()\n"
+                + "type\torg.apache.kafka.common.config.ConfigResource$Type\tenum\t-\n"
+                + "constant\torg.apache.kafka.common.config.ConfigResource$Type\tBROKER\n",
+                pairs: "Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type\n"),
+            Name(0, "unmatched T:Confluent.Kafka.Common.Config.ConfigResourceType: Java has no type of this name; its members "
+                + "are compared with org.apache.kafka.common.config.ConfigResource$Type"));
 
     private const string Records = """
         using System.Collections;

@@ -147,6 +147,15 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 .OrderBy(DocId, StringComparer.Ordinal)
                 .Select(type => (type, Pair(type, pairs, usedPairs)))
                 .ToList();
+            Dictionary<INamedTypeSymbol, INamedTypeSymbol> companions = Companions(pairings);
+            for (int i = 0; i < pairings.Count; i++)
+            {
+                if (companions.Values.Contains(pairings[i].Type, SymbolEqualityComparer.Default))
+                {
+                    pairings[i] = (pairings[i].Type, new Pairing(null, nameIsJava: true, isCompanion: true));
+                }
+            }
+
             HashSet<string> pairedMarkers = new HashSet<string>(
                 pairings.Where(p => p.Pairing.Java is not null).Select(p => p.Pairing.Java!.Marker),
                 StringComparer.Ordinal);
@@ -154,7 +163,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             List<Finding> findings = new List<Finding>();
             foreach ((INamedTypeSymbol type, Pairing pairing) in pairings)
             {
-                Check(type, pairing, pairedMarkers, findings);
+                Check(type, pairing, companions.TryGetValue(type, out INamedTypeSymbol? companion) ? companion : null, pairedMarkers, findings);
             }
 
             HashSet<string> found = new HashSet<string>(findings.Select(f => f.Key), StringComparer.Ordinal);
@@ -192,14 +201,20 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 return new Pairing(listed, nameIsJava: false);
             }
 
+            // An async peer has its Java type's name with Async in front, as an interface has it with I.
             string syncKey = ns + "." + string.Join("$", chain.Select(t => WithoutAsync(JavaNameOf(t))));
             if (syncKey != javaKey)
             {
-                JavaType? peer = _api.ByDotNetName(syncKey)
-                    ?? Listed(ns + "." + string.Join(".", chain.Select(t => WithoutAsync(t.Name))), pairs, usedPairs);
+                JavaType? peer = _api.ByDotNetName(syncKey);
                 if (peer is not null)
                 {
-                    return new Pairing(peer, nameIsJava: false);
+                    return new Pairing(peer, nameIsJava: true);
+                }
+
+                JavaType? listedPeer = Listed(ns + "." + string.Join(".", chain.Select(t => WithoutAsync(t.Name))), pairs, usedPairs);
+                if (listedPeer is not null)
+                {
+                    return new Pairing(listedPeer, nameIsJava: false);
                 }
             }
 
@@ -222,6 +237,35 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             return new Pairing(null, nameIsJava: false);
         }
 
+        // A C# enum has no methods, so a Java enum's methods sit in a top-level static class named after the enum plus s,
+        // in the enum's namespace: its members are checked as the enum's.
+        private static Dictionary<INamedTypeSymbol, INamedTypeSymbol> Companions(
+            List<(INamedTypeSymbol Type, Pairing Pairing)> pairings)
+        {
+            Dictionary<INamedTypeSymbol, INamedTypeSymbol> companions =
+                new Dictionary<INamedTypeSymbol, INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            foreach ((INamedTypeSymbol type, Pairing pairing) in pairings)
+            {
+                if (type.TypeKind != TypeKind.Enum || pairing.Java is null)
+                {
+                    continue;
+                }
+
+                INamedTypeSymbol? companion = pairings
+                    .Select(p => p.Type)
+                    .FirstOrDefault(t => t.IsStatic
+                        && t.ContainingType is null
+                        && t.Name == type.Name + "s"
+                        && SymbolEqualityComparer.Default.Equals(t.ContainingNamespace, type.ContainingNamespace));
+                if (companion is not null)
+                {
+                    companions[type] = companion;
+                }
+            }
+
+            return companions;
+        }
+
         private JavaType? Listed(string dotNetName, Dictionary<string, string> pairs, HashSet<string> usedPairs)
         {
             if (!pairs.TryGetValue(dotNetName, out string? marker))
@@ -238,11 +282,21 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             return type;
         }
 
-        private void Check(INamedTypeSymbol type, Pairing pairing, HashSet<string> pairedMarkers, List<Finding> findings)
+        private void Check(
+            INamedTypeSymbol type,
+            Pairing pairing,
+            INamedTypeSymbol? companion,
+            HashSet<string> pairedMarkers,
+            List<Finding> findings)
         {
             string typeId = DocId(type);
             Location typeLocation = LocationOf(type);
             JavaType? java = pairing.Java;
+            if (pairing.IsCompanion)
+            {
+                return;
+            }
+
             if (!pairing.NameIsJava)
             {
                 findings.Add(new Finding(
@@ -265,6 +319,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 .Where(link => link == java || !pairedMarkers.Contains(link.Marker))
                 .SelectMany(link => link.Members)
                 .Where(m => m.Kind != JavaMemberKind.Constructor || m.DeclaringType == java.Marker)
+                .Where(m => m.Kind != JavaMemberKind.Method || !m.IsStatic || m.DeclaringType == java.Marker)
                 .Where(m => type.TypeKind != TypeKind.Enum || m.Kind != JavaMemberKind.Method || !s_enumBuiltIns.Contains(m.Name))
                 .ToList();
             Dictionary<string, string> javaMethods = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -277,8 +332,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 visible.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant).Select(m => m.Name),
                 StringComparer.Ordinal);
 
-            CheckNames(type, java, jdk, javaMethods, javaFields, findings);
-            CheckOverloads(type, java, chain, required, javaMethods, findings);
+            CheckNames(type, companion, java, jdk, javaMethods, javaFields, findings);
+            CheckOverloads(type, companion, java, chain, jdk, required, javaMethods, findings);
 
             List<INamedTypeSymbol> netChain = NetChain(type).ToList();
             foreach (JavaMember field in required.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant))
@@ -297,18 +352,26 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         private static void CheckNames(
             INamedTypeSymbol type,
+            INamedTypeSymbol? companion,
             JavaType java,
             HashSet<string> jdk,
             Dictionary<string, string> javaMethods,
             HashSet<string> javaFields,
             List<Finding> findings)
         {
-            foreach (ISymbol member in type.GetMembers())
+            IEnumerable<ISymbol> companionMethods = companion is null
+                ? Enumerable.Empty<ISymbol>()
+                : companion.GetMembers().OfType<IMethodSymbol>();
+            bool overridesEquals = type.GetMembers("Equals")
+                .OfType<IMethodSymbol>()
+                .Any(m => m.IsOverride && m.Parameters.Length == 1 && m.Parameters[0].Type.SpecialType == SpecialType.System_Object);
+            foreach (ISymbol member in type.GetMembers().Concat(companionMethods))
             {
                 if (member.DeclaredAccessibility != Accessibility.Public
                     || member.IsImplicitlyDeclared
                     || member is INamedTypeSymbol
-                    || IsFixed(type, member, jdk))
+                    || IsFixed(type, member, jdk)
+                    || (overridesEquals && member.Name is "op_Equality" or "op_Inequality"))
                 {
                     continue;
                 }
@@ -359,14 +422,17 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         private static void CheckOverloads(
             INamedTypeSymbol type,
+            INamedTypeSymbol? companion,
             JavaType java,
             IReadOnlyList<JavaType> chain,
+            HashSet<string> jdk,
             List<JavaMember> required,
             Dictionary<string, string> javaMethods,
             List<Finding> findings)
         {
             List<IMethodSymbol> netMethods = NetChain(type)
                 .SelectMany(t => t.GetMembers().OfType<IMethodSymbol>())
+                .Concat(companion is null ? Enumerable.Empty<IMethodSymbol>() : companion.GetMembers().OfType<IMethodSymbol>())
                 .Where(m => m.MethodKind == MethodKind.Ordinary
                     && m.DeclaredAccessibility == Accessibility.Public
                     && !m.IsImplicitlyDeclared
@@ -384,7 +450,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             names.UnionWith(required.Where(m => m.Kind == JavaMemberKind.Method).Select(m => DotNetNameOf(m.Name)));
             foreach (string name in names.OrderBy(n => n, StringComparer.Ordinal))
             {
-                List<NetOverload> net = Overloads(type, netMethods.Where(m => m.Name == name));
+                List<NetOverload> net = Overloads(type, companion, netMethods.Where(m => m.Name == name));
                 if (net.Count == 0 && netProperties.Contains(name))
                 {
                     continue;
@@ -393,19 +459,32 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 List<JavaOverload> javaOverloads = JavaOverloads(
                     chain.SelectMany(link => link.Members.Select(m => (link, m)))
                         .Where(p => p.m.Kind == JavaMemberKind.Method && DotNetNameOf(p.m.Name) == name),
-                    required);
+                    required,
+                    isExceptionConstructor: false);
                 Match(type, java.SimpleName + "." + JavaNameIn(javaOverloads, name), net, javaOverloads, findings);
             }
 
             if (type.TypeKind == TypeKind.Class || type.TypeKind == TypeKind.Struct)
             {
+                // A Java abstract class's constructors are for its subclasses: C# writes them protected, and a type
+                // nothing can derive from has none.
+                if (java.IsAbstractClass && (type.IsValueType || type.IsSealed || type.IsStatic))
+                {
+                    return;
+                }
+
+                bool forSubclasses = java.IsAbstractClass && type.IsAbstract;
                 List<NetOverload> ctors = Overloads(
                     type,
-                    type.InstanceConstructors.Where(c => c.DeclaredAccessibility == Accessibility.Public
+                    companion: null,
+                    type.InstanceConstructors.Where(c => (c.DeclaredAccessibility == Accessibility.Public
+                            || (forSubclasses && c.DeclaredAccessibility is Accessibility.Protected or Accessibility.ProtectedOrInternal))
                         && !(type.IsValueType && c.IsImplicitlyDeclared)));
+                bool isException = jdk.Contains("Throwable") || jdk.Contains("Exception") || jdk.Contains("RuntimeException");
                 List<JavaOverload> javaCtors = JavaOverloads(
                     java.Members.Where(m => m.Kind == JavaMemberKind.Constructor).Select(m => (java, m)),
-                    required);
+                    required,
+                    isException);
                 Match(type, java.SimpleName + " constructor", ctors, javaCtors, findings);
             }
         }
@@ -413,14 +492,22 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         private static string JavaNameIn(List<JavaOverload> overloads, string dotNetName) =>
             overloads.Count > 0 ? overloads[0].Member.Name : char.ToLowerInvariant(dotNetName[0]) + dotNetName.Substring(1);
 
-        private static List<NetOverload> Overloads(INamedTypeSymbol type, IEnumerable<IMethodSymbol> methods)
+        // One NetOverload per signature: a method declared on an interface and on the class implementing it is one
+        // overload. Overloads taking an async form of a callback come last, so a Java overload pairs with the sync form.
+        private static List<NetOverload> Overloads(INamedTypeSymbol type, INamedTypeSymbol? companion, IEnumerable<IMethodSymbol> methods)
         {
             List<NetOverload> overloads = new List<NetOverload>();
             foreach (IMethodSymbol method in methods)
             {
-                bool declaredHere = SymbolEqualityComparer.Default.Equals(method.ContainingType, type);
-                NetOverload overload = new NetOverload(method, declaredHere);
-                int same = overloads.FindIndex(o => o.Names.SequenceEqual(overload.Names));
+                bool inCompanion = companion is not null && SymbolEqualityComparer.Default.Equals(method.ContainingType, companion);
+                bool declaredHere = inCompanion || SymbolEqualityComparer.Default.Equals(method.ContainingType, type);
+                IEnumerable<IParameterSymbol> parameters = inCompanion
+                    && method.IsExtensionMethod
+                    && SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, type)
+                        ? method.Parameters.Skip(1)
+                        : method.Parameters;
+                NetOverload overload = new NetOverload(method, declaredHere, parameters.ToList(), NamedByBase(type, method));
+                int same = overloads.FindIndex(o => o.Signature == overload.Signature);
                 if (same < 0)
                 {
                     overloads.Add(overload);
@@ -431,32 +518,91 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                 }
             }
 
-            return overloads;
+            return overloads.OrderBy(o => o.AsyncParameters).ToList();
+        }
+
+        // A method that overrides or implements a .NET built-in member keeps that member's parameter names.
+        private static bool NamedByBase(INamedTypeSymbol type, IMethodSymbol method)
+        {
+            for (ISymbol? overridden = Overridden(method); overridden is not null; overridden = Overridden(overridden))
+            {
+                if (IsSystem(overridden.ContainingType))
+                {
+                    return true;
+                }
+            }
+
+            return type.AllInterfaces
+                .Where(IsSystem)
+                .SelectMany(contract => contract.GetMembers())
+                .Any(m => SymbolEqualityComparer.Default.Equals(type.FindImplementationForInterfaceMember(m), method));
         }
 
         // A method declared on a Java interface takes its parameter names from the interface, as the Python binding
-        // names them; one declared only on a class, from the class.
-        private static List<JavaOverload> JavaOverloads(IEnumerable<(JavaType Link, JavaMember Member)> declarations, List<JavaMember> required)
+        // names them; one declared only on a class, from the class. An overload taking a java.util.regex.Pattern is not
+        // translated, and one taking Properties is its Map overload.
+        private static List<JavaOverload> JavaOverloads(
+            IEnumerable<(JavaType Link, JavaMember Member)> declarations,
+            List<JavaMember> required,
+            bool isExceptionConstructor)
         {
+            List<IGrouping<string, (JavaType Link, JavaMember Member)>> signatures = declarations
+                .Where(d => !d.Member.ParameterTypes.Contains("Pattern"))
+                .GroupBy(d => d.Member.Name + "(" + string.Join(",", d.Member.ParameterTypes) + ")", StringComparer.Ordinal)
+                .ToList();
+            HashSet<string> keys = new HashSet<string>(signatures.Select(s => s.Key), StringComparer.Ordinal);
             List<JavaOverload> overloads = new List<JavaOverload>();
-            foreach (IGrouping<string, (JavaType Link, JavaMember Member)> signature in declarations
-                .GroupBy(d => d.Member.Name + "(" + string.Join(",", d.Member.ParameterTypes) + ")", StringComparer.Ordinal))
+            foreach (IGrouping<string, (JavaType Link, JavaMember Member)> signature in signatures)
             {
-                JavaMember chosen = signature.Where(d => d.Link.IsInterface).Select(d => d.Member).FirstOrDefault()
-                    ?? signature.First().Member;
+                JavaMember first = signature.First().Member;
+                if (first.ParameterTypes.Contains("Properties")
+                    && keys.Contains(first.Name + "(" + string.Join(",", first.ParameterTypes.Select(t => t == "Properties" ? "Map" : t)) + ")"))
+                {
+                    continue;
+                }
+
+                JavaMember chosen = signature.Where(d => d.Link.IsInterface).Select(d => d.Member).FirstOrDefault() ?? first;
                 bool isRequired = signature.Any(d => required.Contains(d.Member));
                 JavaMember reported = signature.Select(d => d.Member).FirstOrDefault(required.Contains) ?? chosen;
-                overloads.Add(new JavaOverload(chosen, reported, isRequired));
+                overloads.Add(new JavaOverload(chosen, reported, isRequired, ParameterNames(chosen, isExceptionConstructor)));
             }
 
             return overloads;
+        }
+
+        // The names .NET gives Java's parameters: a long and the TimeUnit that qualifies it are one TimeSpan named after
+        // the long; in an exception's constructor a Throwable is innerException and a String named s or msg is message.
+        private static string[] ParameterNames(JavaMember member, bool isExceptionConstructor)
+        {
+            List<string> names = new List<string>();
+            for (int i = 0; i < member.ParameterNames.Length; i++)
+            {
+                string type = member.ParameterTypes[i];
+                string name = member.ParameterNames[i];
+                if (isExceptionConstructor && type == "Throwable")
+                {
+                    name = "innerException";
+                }
+                else if (isExceptionConstructor && type == "String" && name is "s" or "msg")
+                {
+                    name = "message";
+                }
+
+                names.Add(name);
+                if (type == "long" && i + 1 < member.ParameterTypes.Length && member.ParameterTypes[i + 1] == "TimeUnit")
+                {
+                    i++;
+                }
+            }
+
+            return names.ToArray();
         }
 
         private static void Match(INamedTypeSymbol type, string javaName, List<NetOverload> net, List<JavaOverload> java, List<Finding> findings)
         {
             bool[] netDone = new bool[net.Count];
             bool[] javaDone = new bool[java.Count];
-            for (int pass = 0; pass < 3; pass++)
+            for (int pass = 0; pass < 4; pass++)
             {
                 for (int i = 0; i < net.Count; i++)
                 {
@@ -467,13 +613,15 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                             continue;
                         }
 
-                        string[] javaNames = java[j].Member.ParameterNames;
+                        string[] javaNames = java[j].Names;
                         NetOverload n = net[i];
+                        bool prefix = javaNames.Length < n.Names.Count && n.Required <= javaNames.Length;
                         bool matches = pass switch
                         {
-                            0 => n.Names.Count == javaNames.Length && SameNames(n.Names, javaNames),
-                            1 => javaNames.Length < n.Names.Count && n.Required <= javaNames.Length && SameNames(n.Names, javaNames),
-                            _ => n.Names.Count == javaNames.Length,
+                            0 => n.Names.Count == javaNames.Length && (n.NamedByBase || SameNames(n.Names, javaNames)),
+                            1 => prefix && SameNames(n.Names, javaNames),
+                            2 => n.Names.Count == javaNames.Length,
+                            _ => prefix,
                         };
                         if (!matches)
                         {
@@ -481,21 +629,19 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                         }
 
                         netDone[i] = javaDone[j] = true;
-                        if (pass == 1 && n.DeclaredHere)
+                        string added = string.Join(", ", n.Names.Skip(javaNames.Length));
+                        string renamed = "names its parameters (" + string.Join(", ", n.Names.Take(javaNames.Length)) + ") where Java's "
+                            + javaName + " names them (" + string.Join(", ", javaNames) + ")";
+                        string? explanation = pass switch
                         {
-                            findings.Add(new Finding(
-                                "parameter " + DocId(n.Method),
-                                "adds the .NET-only parameter(s) " + string.Join(", ", n.Names.Skip(javaNames.Length))
-                                    + " to Java's " + javaName + "(" + string.Join(", ", javaNames) + ")",
-                                LocationOf(n.Method)));
-                        }
-                        else if (pass == 2 && n.DeclaredHere)
+                            1 => "adds the .NET-only parameter(s) " + added + " to Java's " + javaName + "(" + string.Join(", ", javaNames) + ")",
+                            2 => renamed,
+                            3 => renamed + ", and adds the .NET-only parameter(s) " + added,
+                            _ => null,
+                        };
+                        if (explanation is not null && n.DeclaredHere)
                         {
-                            findings.Add(new Finding(
-                                "parameter " + DocId(n.Method),
-                                "names its parameters (" + string.Join(", ", n.Names) + ") where Java's " + javaName
-                                    + " names them (" + string.Join(", ", javaNames) + ")",
-                                LocationOf(n.Method)));
+                            findings.Add(new Finding("parameter " + DocId(n.Method), explanation, LocationOf(n.Method)));
                         }
                     }
                 }
@@ -516,7 +662,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             {
                 // A .NET overload with optional parameters accepts every Java overload whose parameters are a prefix
                 // of its own, as EnforceRebalance(reason = null) accepts both of Java's enforceRebalance forms.
-                string[] javaNames = java[j].Member.ParameterNames;
+                string[] javaNames = java[j].Names;
                 bool accepted = net.Any(n => n.Required <= javaNames.Length
                     && javaNames.Length <= n.Names.Count
                     && SameNames(n.Names, javaNames));
@@ -683,18 +829,22 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         symbol.Locations.FirstOrDefault(l => l.IsInSource)
         ?? (symbol.ContainingType is not null ? LocationOf(symbol.ContainingType) : Location.None);
 
-    /// <summary>How a .NET type pairs with a Java type: the Java type, if any, and whether the .NET name is Java's.</summary>
+    /// <summary>How a .NET type pairs with a Java type: the Java type, if any, whether the .NET name is Java's, and
+    /// whether the type holds a Java enum's methods, checked with the enum.</summary>
     private readonly struct Pairing
     {
-        internal Pairing(JavaType? java, bool nameIsJava)
+        internal Pairing(JavaType? java, bool nameIsJava, bool isCompanion = false)
         {
             Java = java;
             NameIsJava = nameIsJava;
+            IsCompanion = isCompanion;
         }
 
         internal JavaType? Java { get; }
 
         internal bool NameIsJava { get; }
+
+        internal bool IsCompanion { get; }
     }
 
     /// <summary>One finding: its key, what it means, and where it is reported.</summary>
@@ -714,35 +864,55 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         internal Location Location { get; }
     }
 
-    /// <summary>A .NET method or constructor with its parameter names and how many of them are required.</summary>
+    /// <summary>A .NET method or constructor with the parameter names compared with Java's and how many of them are
+    /// required. A last optional <c>CancellationToken cancellationToken</c> is .NET's own and not compared.</summary>
     private sealed class NetOverload
     {
-        internal NetOverload(IMethodSymbol method, bool declaredHere)
+        internal NetOverload(IMethodSymbol method, bool declaredHere, IReadOnlyList<IParameterSymbol> parameters, bool namedByBase)
         {
             Method = method;
             DeclaredHere = declaredHere;
-            Names = method.Parameters.Select(p => p.Name).ToList();
-            Required = method.Parameters.Count(p => !p.IsOptional);
+            NamedByBase = namedByBase;
+            Signature = method.Name + "(" + string.Join(",", parameters.Select(p => p.Type.ToDisplayString() + " " + p.Name)) + ")";
+            AsyncParameters = parameters.Count(p => WithoutAsync(p.Type.Name) != p.Type.Name);
+            IParameterSymbol? last = parameters.Count > 0 ? parameters[parameters.Count - 1] : null;
+            bool token = last is not null
+                && last.IsOptional
+                && last.Name == "cancellationToken"
+                && last.Type.ToDisplayString() == "System.Threading.CancellationToken";
+            IEnumerable<IParameterSymbol> compared = token ? parameters.Take(parameters.Count - 1) : parameters;
+            Names = compared.Select(p => p.Name).ToList();
+            Required = compared.Count(p => !p.IsOptional);
         }
 
         internal IMethodSymbol Method { get; }
 
         internal bool DeclaredHere { get; }
 
+        /// <summary>Whether the method overrides or implements a .NET built-in member, whose parameter names it keeps.</summary>
+        internal bool NamedByBase { get; }
+
+        /// <summary>The name and the parameters' types and names: one per overload.</summary>
+        internal string Signature { get; }
+
+        /// <summary>How many parameters take an async form of a type (<c>IAsyncDeliveryCallback</c>).</summary>
+        internal int AsyncParameters { get; }
+
         internal IReadOnlyList<string> Names { get; }
 
         internal int Required { get; }
     }
 
-    /// <summary>A Java overload: the declaration that names its parameters, the one a finding names, and whether the
-    /// .NET type must have it.</summary>
+    /// <summary>A Java overload: the declaration that names its parameters, the one a finding names, whether the .NET
+    /// type must have it, and the parameter names .NET gives it.</summary>
     private sealed class JavaOverload
     {
-        internal JavaOverload(JavaMember member, JavaMember reported, bool isRequired)
+        internal JavaOverload(JavaMember member, JavaMember reported, bool isRequired, string[] names)
         {
             Member = member;
             Reported = reported;
             IsRequired = isRequired;
+            Names = names;
         }
 
         internal JavaMember Member { get; }
@@ -750,6 +920,8 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         internal JavaMember Reported { get; }
 
         internal bool IsRequired { get; }
+
+        internal string[] Names { get; }
     }
 
     /// <summary>One of the Java-name lists: its lines other than blanks and comments, each with where it is in the file.</summary>
