@@ -2104,7 +2104,6 @@ method	org.apache.kafka.clients.producer.PreparedTxnState	instance	hashCode()
 method	org.apache.kafka.clients.producer.PreparedTxnState	instance	producerId()
 method	org.apache.kafka.clients.producer.PreparedTxnState	instance	toString()
 type	org.apache.kafka.clients.producer.Producer	interface	Closeable
-field	org.apache.kafka.clients.producer.Producer	ProducerFencedException
 method	org.apache.kafka.clients.producer.Producer	instance	abortTransaction()
 method	org.apache.kafka.clients.producer.Producer	instance	beginTransaction()
 method	org.apache.kafka.clients.producer.Producer	instance	clientInstanceId(Duration timeout)
@@ -2413,7 +2412,6 @@ method	org.apache.kafka.common.PartitionInfo	instance	replicas()
 method	org.apache.kafka.common.PartitionInfo	instance	toString()
 method	org.apache.kafka.common.PartitionInfo	instance	topic()
 type	org.apache.kafka.common.Reconfigurable	interface	org.apache.kafka.common.Configurable
-field	org.apache.kafka.common.Reconfigurable	ConfigException
 method	org.apache.kafka.common.Reconfigurable	instance	reconfigurableConfigs()
 method	org.apache.kafka.common.Reconfigurable	instance	reconfigure(Map configs)
 method	org.apache.kafka.common.Reconfigurable	instance	validateReconfiguration(Map configs)
@@ -3615,7 +3613,6 @@ type	org.apache.kafka.common.header.Header	interface	-
 method	org.apache.kafka.common.header.Header	instance	key()
 method	org.apache.kafka.common.header.Header	instance	value()
 type	org.apache.kafka.common.header.Headers	interface	Iterable
-field	org.apache.kafka.common.header.Headers	IllegalStateException
 method	org.apache.kafka.common.header.Headers	instance	add(Header header)
 method	org.apache.kafka.common.header.Headers	instance	add(String key, byte[] value)
 method	org.apache.kafka.common.header.Headers	instance	headers(String key)
@@ -4042,11 +4039,9 @@ method	org.apache.kafka.common.security.auth.KafkaPrincipal	instance	tokenAuthen
 type	org.apache.kafka.common.security.auth.KafkaPrincipalBuilder	interface	org.apache.kafka.common.security.auth.KafkaPrincipalSerde
 method	org.apache.kafka.common.security.auth.KafkaPrincipalBuilder	instance	build(AuthenticationContext context)
 type	org.apache.kafka.common.security.auth.KafkaPrincipalSerde	interface	-
-field	org.apache.kafka.common.security.auth.KafkaPrincipalSerde	SerializationException
 method	org.apache.kafka.common.security.auth.KafkaPrincipalSerde	instance	deserialize(byte[] bytes)
 method	org.apache.kafka.common.security.auth.KafkaPrincipalSerde	instance	serialize(KafkaPrincipal principal)
 type	org.apache.kafka.common.security.auth.Login	interface	-
-field	org.apache.kafka.common.security.auth.Login	LoginException
 method	org.apache.kafka.common.security.auth.Login	instance	close()
 method	org.apache.kafka.common.security.auth.Login	instance	configure(Map configs, String contextName, Configuration jaasConfiguration, AuthenticateCallbackHandler loginCallbackHandler)
 method	org.apache.kafka.common.security.auth.Login	instance	login()
@@ -4111,7 +4106,6 @@ ctor	org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator	BrokerJwtVa
 method	org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator	instance	configure(Map configs, String saslMechanism, List jaasConfigEntries)
 method	org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator	instance	validate(String accessToken)
 type	org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator$ClaimSupplier	interface	-
-field	org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator$ClaimSupplier	MalformedClaimException
 method	org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator$ClaimSupplier	instance	get()
 type	org.apache.kafka.common.security.oauthbearer.ClientCredentialsJwtRetriever	class	org.apache.kafka.common.security.oauthbearer.JwtRetriever
 ctor	org.apache.kafka.common.security.oauthbearer.ClientCredentialsJwtRetriever	ClientCredentialsJwtRetriever()
@@ -4147,14 +4141,12 @@ method	org.apache.kafka.common.security.oauthbearer.JwtBearerJwtRetriever	instan
 method	org.apache.kafka.common.security.oauthbearer.JwtBearerJwtRetriever	instance	configure(Map configs, String saslMechanism, List jaasConfigEntries)
 method	org.apache.kafka.common.security.oauthbearer.JwtBearerJwtRetriever	instance	retrieve()
 type	org.apache.kafka.common.security.oauthbearer.JwtRetriever	interface	org.apache.kafka.common.security.oauthbearer.internals.secured.OAuthBearerConfigurable
-field	org.apache.kafka.common.security.oauthbearer.JwtRetriever	JwtRetrieverException
 method	org.apache.kafka.common.security.oauthbearer.JwtRetriever	instance	retrieve()
 type	org.apache.kafka.common.security.oauthbearer.JwtRetrieverException	class	org.apache.kafka.common.KafkaException
 ctor	org.apache.kafka.common.security.oauthbearer.JwtRetrieverException	JwtRetrieverException(String message)
 ctor	org.apache.kafka.common.security.oauthbearer.JwtRetrieverException	JwtRetrieverException(String message, Throwable cause)
 ctor	org.apache.kafka.common.security.oauthbearer.JwtRetrieverException	JwtRetrieverException(Throwable cause)
 type	org.apache.kafka.common.security.oauthbearer.JwtValidator	interface	org.apache.kafka.common.security.oauthbearer.internals.secured.OAuthBearerConfigurable
-field	org.apache.kafka.common.security.oauthbearer.JwtValidator	JwtValidatorException
 method	org.apache.kafka.common.security.oauthbearer.JwtValidator	instance	validate(String accessToken)
 type	org.apache.kafka.common.security.oauthbearer.JwtValidatorException	class	org.apache.kafka.common.KafkaException
 ctor	org.apache.kafka.common.security.oauthbearer.JwtValidatorException	JwtValidatorException(String message)
@@ -4509,7 +4501,6 @@ method	org.apache.kafka.server.authorizer.AuthorizerServerInfo	instance	earlySta
 method	org.apache.kafka.server.authorizer.AuthorizerServerInfo	instance	endpoints()
 method	org.apache.kafka.server.authorizer.AuthorizerServerInfo	instance	interBrokerEndpoint()
 type	org.apache.kafka.server.policy.AlterConfigPolicy	interface	org.apache.kafka.common.Configurable,AutoCloseable
-field	org.apache.kafka.server.policy.AlterConfigPolicy	PolicyViolationException
 method	org.apache.kafka.server.policy.AlterConfigPolicy	instance	validate(RequestMetadata requestMetadata)
 type	org.apache.kafka.server.policy.AlterConfigPolicy$RequestMetadata	class	-
 ctor	org.apache.kafka.server.policy.AlterConfigPolicy$RequestMetadata	RequestMetadata(ConfigResource resource, Map configs)
@@ -4519,7 +4510,6 @@ method	org.apache.kafka.server.policy.AlterConfigPolicy$RequestMetadata	instance
 method	org.apache.kafka.server.policy.AlterConfigPolicy$RequestMetadata	instance	resource()
 method	org.apache.kafka.server.policy.AlterConfigPolicy$RequestMetadata	instance	toString()
 type	org.apache.kafka.server.policy.CreateTopicPolicy	interface	org.apache.kafka.common.Configurable,AutoCloseable
-field	org.apache.kafka.server.policy.CreateTopicPolicy	PolicyViolationException
 method	org.apache.kafka.server.policy.CreateTopicPolicy	instance	validate(RequestMetadata requestMetadata)
 type	org.apache.kafka.server.policy.CreateTopicPolicy$RequestMetadata	class	-
 ctor	org.apache.kafka.server.policy.CreateTopicPolicy$RequestMetadata	RequestMetadata(String topic, Integer numPartitions, Short replicationFactor, Map replicasAssignments, Map configs)
