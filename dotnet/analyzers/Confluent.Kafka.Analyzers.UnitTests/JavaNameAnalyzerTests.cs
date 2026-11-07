@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 
 using Microsoft.CodeAnalysis.Testing;
@@ -403,6 +405,45 @@ public sealed class JavaNameAnalyzerTests
                     + "Confluent.Kafka.Common.Gone org.apache.kafka.common.Node\n"),
             Stale(JavaNameAnalyzer.PairsFile, 1, "Confluent.Kafka.Common.Node org.apache.kafka.common.Node"),
             Stale(JavaNameAnalyzer.PairsFile, 2, "Confluent.Kafka.Common.Gone org.apache.kafka.common.Node"));
+
+    [Fact]
+    public Task TheJavaListTheRustCommandWrites_IsReadAsWritten() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class TopicPartition
+                {
+                    public TopicPartition(string topic, int partition)
+                    {
+                    }
+
+                    public string {|#0:Topic|} => "";
+
+                    public int Partition() => 0;
+
+                    public override bool Equals(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+
+                    public override string ToString() => "";
+                }
+
+                public enum {|#1:IsolationLevel|}
+                {
+                    READ_UNCOMMITTED,
+                    READ_COMMITTED,
+                }
+            }
+            """,
+            Files(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, JavaNameAnalyzer.JavaApiFile))),
+            Name(0, "property P:Confluent.Kafka.Common.TopicPartition.Topic: Java's TopicPartition.topic() is a method"),
+            Name(1, "missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#forId(byte): has no "
+                + "counterpart of Java's org.apache.kafka.common.IsolationLevel#forId(byte)"),
+            Name(1, "missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#id(): has no "
+                + "counterpart of Java's org.apache.kafka.common.IsolationLevel#id()"),
+            Name(1, "missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#toString(): has no "
+                + "counterpart of Java's org.apache.kafka.common.IsolationLevel#toString()"));
 
     private const string DeliveryCallback = """
         namespace Confluent.Kafka.Producer
