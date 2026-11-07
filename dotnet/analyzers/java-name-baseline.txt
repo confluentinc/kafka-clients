@@ -1,0 +1,1061 @@
+# CKRDA0013 findings not fixed yet, one key per line. A line that matches no finding is CKRDA0014: delete it.
+# Written from a build's findings less the allowlist; fixing a gap removes its line.
+missing T:Confluent.Kafka.Admin.AlterClientQuotasResult org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult(Map)
+missing T:Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType#forId(byte)
+missing T:Confluent.Kafka.Admin.AlterConfigOpType org.apache.kafka.clients.admin.AlterConfigOp$OpType#id()
+missing T:Confluent.Kafka.Admin.AlterConfigsOptions org.apache.kafka.clients.admin.AlterConfigsOptions#shouldValidateOnly()
+missing T:Confluent.Kafka.Admin.AlterUserScramCredentialsResult org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult(Map)
+missing T:Confluent.Kafka.Admin.AsyncAlterClientQuotasResult org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult(Map)
+missing T:Confluent.Kafka.Admin.AsyncAlterUserScramCredentialsResult org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult(Map)
+missing T:Confluent.Kafka.Admin.AsyncDeleteRecordsResult org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult(Map)
+missing T:Confluent.Kafka.Admin.AsyncDescribeClientQuotasResult org.apache.kafka.clients.admin.DescribeClientQuotasResult#DescribeClientQuotasResult(KafkaFuture)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteShareGroups(Collection,DeleteShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#describeMetadataQuorum(DescribeMetadataQuorumOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#describeShareGroups(Collection,DescribeShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#metrics()
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#unregisterBroker(int,UnregisterBrokerOptions)
+missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.AsyncListOffsetsResult org.apache.kafka.clients.admin.ListOffsetsResult#ListOffsetsResult(Map)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addStreamsGroupDescription(StreamsGroupDescription)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addTopic(boolean,String,List,Map,boolean)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addedMetrics()
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#advanceTimeOnClientInstanceId(Time,long)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#broker(int)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#brokers()
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteShareGroups(Collection,DeleteShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#describeMetadataQuorum(DescribeMetadataQuorumOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#describeShareGroups(Collection,DescribeShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#disableTelemetry()
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#handleDescribeTopicsUsingIds(Collection)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#injectTimeoutException(int)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listConsumerGroups(ListConsumerGroupsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#metrics()
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#setClientInstanceId(Uuid)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#setMockMetrics(MetricName,Metric)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterBroker(int,UnregisterBrokerOptions)
+missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.CreatePartitionsOptions org.apache.kafka.clients.admin.CreatePartitionsOptions#shouldRetryOnQuotaViolation()
+missing T:Confluent.Kafka.Admin.CreateTopicsOptions org.apache.kafka.clients.admin.CreateTopicsOptions#shouldRetryOnQuotaViolation()
+missing T:Confluent.Kafka.Admin.CreateTopicsOptions org.apache.kafka.clients.admin.CreateTopicsOptions#shouldValidateOnly()
+missing T:Confluent.Kafka.Admin.DeleteRecordsResult org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult(Map)
+missing T:Confluent.Kafka.Admin.DeleteTopicsOptions org.apache.kafka.clients.admin.DeleteTopicsOptions#shouldRetryOnQuotaViolation()
+missing T:Confluent.Kafka.Admin.DescribeClientQuotasResult org.apache.kafka.clients.admin.DescribeClientQuotasResult#DescribeClientQuotasResult(KafkaFuture)
+missing T:Confluent.Kafka.Admin.FeatureUpdate org.apache.kafka.clients.admin.FeatureUpdate#upgradeType()
+missing T:Confluent.Kafka.Admin.FeatureUpdate.UpgradeType org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#code()
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#addRaftVoter(int,Uuid,Set)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets(String,Map)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#alterStreamsGroupOffsets(String,Map)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#create(Map)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets(String,Set)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroups(Collection,DeleteShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroupOffsets(String,Set)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#describeMetadataQuorum()
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#describeMetadataQuorum(DescribeMetadataQuorumOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#describeShareGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#describeShareGroups(Collection,DescribeShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#describeStreamsGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#listShareGroupOffsets(Map)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#listStreamsGroupOffsets(Map)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#metrics()
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#removeRaftVoter(int,Uuid)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#unregisterBroker(int)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#unregisterBroker(int,UnregisterBrokerOptions)
+missing T:Confluent.Kafka.Admin.IAdmin org.apache.kafka.clients.admin.Admin#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#addRaftVoter(int,Uuid,Set)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets(String,Map)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#alterStreamsGroupOffsets(String,Map)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#create(Map)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets(String,Set)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteShareGroups(Collection,DeleteShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroupOffsets(String,Set)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#describeMetadataQuorum()
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#describeMetadataQuorum(DescribeMetadataQuorumOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#describeShareGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#describeShareGroups(Collection,DescribeShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#describeStreamsGroups(Collection)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#listShareGroupOffsets(Map)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#listStreamsGroupOffsets(Map)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#metrics()
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#removeRaftVoter(int,Uuid)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#unregisterBroker(int)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#unregisterBroker(int,UnregisterBrokerOptions)
+missing T:Confluent.Kafka.Admin.IAsyncAdmin org.apache.kafka.clients.admin.Admin#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteShareGroups(Collection,DeleteShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#describeMetadataQuorum(DescribeMetadataQuorumOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#describeShareGroups(Collection,DescribeShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#metrics()
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#unregisterBroker(int,UnregisterBrokerOptions)
+missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.ListGroupsOptions org.apache.kafka.clients.admin.ListGroupsOptions#inGroupStates(Set)
+missing T:Confluent.Kafka.Admin.ListGroupsOptions org.apache.kafka.clients.admin.ListGroupsOptions#withProtocolTypes(Set)
+missing T:Confluent.Kafka.Admin.ListGroupsOptions org.apache.kafka.clients.admin.ListGroupsOptions#withTypes(Set)
+missing T:Confluent.Kafka.Admin.ListOffsetsOptions org.apache.kafka.clients.admin.ListOffsetsOptions#ListOffsetsOptions(IsolationLevel)
+missing T:Confluent.Kafka.Admin.ListOffsetsResult org.apache.kafka.clients.admin.ListOffsetsResult#ListOffsetsResult(Map)
+missing T:Confluent.Kafka.Admin.ListTopicsOptions org.apache.kafka.clients.admin.ListTopicsOptions#shouldListInternal()
+missing T:Confluent.Kafka.Admin.ListTransactionsOptions org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnDuration(long)
+missing T:Confluent.Kafka.Admin.ListTransactionsOptions org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnTransactionalIdPattern(String)
+missing T:Confluent.Kafka.Admin.ListTransactionsOptions org.apache.kafka.clients.admin.ListTransactionsOptions#filterProducerIds(Collection)
+missing T:Confluent.Kafka.Admin.ListTransactionsOptions org.apache.kafka.clients.admin.ListTransactionsOptions#filterStates(Collection)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addRaftVoter(int,Uuid,Set,AddRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addStreamsGroupDescription(StreamsGroupDescription)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addTopic(boolean,String,List,Map,boolean)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#addedMetrics()
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#advanceTimeOnClientInstanceId(Time,long)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#alterShareGroupOffsets(String,Map,AlterShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#alterStreamsGroupOffsets(String,Map,AlterStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#broker(int)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#brokers()
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteShareGroupOffsets(String,Set,DeleteShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteShareGroups(Collection,DeleteShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteStreamsGroupOffsets(String,Set,DeleteStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#deleteStreamsGroups(Collection,DeleteStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#describeMetadataQuorum(DescribeMetadataQuorumOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#describeShareGroups(Collection,DescribeShareGroupsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#describeStreamsGroups(Collection,DescribeStreamsGroupsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#disableTelemetry()
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#handleDescribeTopicsUsingIds(Collection)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#injectTimeoutException(int)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listConsumerGroups(ListConsumerGroupsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listShareGroupOffsets(Map,ListShareGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listStreamsGroupOffsets(Map,ListStreamsGroupOffsetsOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#metrics()
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#removeRaftVoter(int,Uuid,RemoveRaftVoterOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#setClientInstanceId(Uuid)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#setMockMetrics(MetricName,Metric)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterBroker(int,UnregisterBrokerOptions)
+missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Admin.OffsetSpec org.apache.kafka.clients.admin.OffsetSpec#OffsetSpec()
+missing T:Confluent.Kafka.Admin.OffsetSpec.EarliestLocalSpec org.apache.kafka.clients.admin.OffsetSpec$EarliestLocalSpec#EarliestLocalSpec()
+missing T:Confluent.Kafka.Admin.OffsetSpec.EarliestPendingUploadSpec org.apache.kafka.clients.admin.OffsetSpec$EarliestPendingUploadSpec#EarliestPendingUploadSpec()
+missing T:Confluent.Kafka.Admin.OffsetSpec.EarliestSpec org.apache.kafka.clients.admin.OffsetSpec$EarliestSpec#EarliestSpec()
+missing T:Confluent.Kafka.Admin.OffsetSpec.LatestSpec org.apache.kafka.clients.admin.OffsetSpec$LatestSpec#LatestSpec()
+missing T:Confluent.Kafka.Admin.OffsetSpec.LatestTieredSpec org.apache.kafka.clients.admin.OffsetSpec$LatestTieredSpec#LatestTieredSpec()
+missing T:Confluent.Kafka.Admin.OffsetSpec.MaxTimestampSpec org.apache.kafka.clients.admin.OffsetSpec$MaxTimestampSpec#MaxTimestampSpec()
+missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#type()
+missing T:Confluent.Kafka.Admin.TopicDescription org.apache.kafka.clients.admin.TopicDescription#equals(Object)
+missing T:Confluent.Kafka.Admin.TopicDescription org.apache.kafka.clients.admin.TopicDescription#hashCode()
+missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#parse(String)
+missing T:Confluent.Kafka.Common.Acl.AccessControlEntryFilter org.apache.kafka.common.acl.AccessControlEntryFilter#findIndefiniteField()
+missing T:Confluent.Kafka.Common.Acl.AccessControlEntryFilter org.apache.kafka.common.acl.AccessControlEntryFilter#matches(AccessControlEntry)
+missing T:Confluent.Kafka.Common.Acl.AccessControlEntryFilter org.apache.kafka.common.acl.AccessControlEntryFilter#matchesAtMostOne()
+missing T:Confluent.Kafka.Common.Acl.AclBindingFilter org.apache.kafka.common.acl.AclBindingFilter#findIndefiniteField()
+missing T:Confluent.Kafka.Common.Acl.AclBindingFilter org.apache.kafka.common.acl.AclBindingFilter#matches(AclBinding)
+missing T:Confluent.Kafka.Common.Acl.AclBindingFilter org.apache.kafka.common.acl.AclBindingFilter#matchesAtMostOne()
+missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#code()
+missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#fromCode(byte)
+missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#fromString(String)
+missing T:Confluent.Kafka.Common.Acl.AclOperation org.apache.kafka.common.acl.AclOperation#isUnknown()
+missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#code()
+missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#fromCode(byte)
+missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#fromString(String)
+missing T:Confluent.Kafka.Common.Acl.AclPermissionType org.apache.kafka.common.acl.AclPermissionType#isUnknown()
+missing T:Confluent.Kafka.Common.AsyncKafkaFuture`1 org.apache.kafka.common.KafkaFuture#allOf(KafkaFuture[])
+missing T:Confluent.Kafka.Common.AsyncKafkaFuture`1 org.apache.kafka.common.KafkaFuture#completedFuture(U)
+missing T:Confluent.Kafka.Common.ClassicGroupState org.apache.kafka.common.ClassicGroupState#parse(String)
+missing T:Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type#forId(byte)
+missing T:Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type#id()
+missing T:Confluent.Kafka.Common.Errors.ApiException org.apache.kafka.common.errors.ApiException#fillInStackTrace()
+missing T:Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException org.apache.kafka.common.errors.CoordinatorNotAvailableException#INSTANCE
+missing T:Confluent.Kafka.Common.Errors.DisconnectException org.apache.kafka.common.errors.DisconnectException#INSTANCE
+missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#groupStatesForType(GroupType)
+missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#parse(String)
+missing T:Confluent.Kafka.Common.GroupType org.apache.kafka.common.GroupType#parse(String)
+missing T:Confluent.Kafka.Common.IMetric org.apache.kafka.common.Metric#metricName()
+missing T:Confluent.Kafka.Common.IMetric org.apache.kafka.common.Metric#metricValue()
+missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#forId(byte)
+missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#id()
+missing T:Confluent.Kafka.Common.KafkaFuture org.apache.kafka.common.KafkaFuture#toCompletionStage()
+missing T:Confluent.Kafka.Common.KafkaFuture`1 org.apache.kafka.common.KafkaFuture#allOf(KafkaFuture[])
+missing T:Confluent.Kafka.Common.KafkaFuture`1 org.apache.kafka.common.KafkaFuture#completedFuture(U)
+missing T:Confluent.Kafka.Common.KafkaFuture`1 org.apache.kafka.common.KafkaFuture#toCompletionStage()
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#KafkaMetric(Object,MetricName,MetricValueProvider,MetricConfig,Time)
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#config()
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#config(MetricConfig)
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#isMeasurable()
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#measurable()
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#metricName()
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#metricValue()
+missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#toString()
+missing T:Confluent.Kafka.Common.Metrics.QuotaViolationException org.apache.kafka.common.metrics.QuotaViolationException#fillInStackTrace()
+missing T:Confluent.Kafka.Common.Metrics.QuotaViolationException org.apache.kafka.common.metrics.QuotaViolationException#toString()
+missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#equals(Object)
+missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#hasRack()
+missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#hashCode()
+missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#idString()
+missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#isEmpty()
+missing T:Confluent.Kafka.Common.Node org.apache.kafka.common.Node#noNode()
+missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#PartitionInfo(String,int,Node,Node[],Node[])
+missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#PartitionInfo(String,int,Node,Node[],Node[],Node[])
+missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#equals(Object)
+missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#hashCode()
+missing T:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent org.apache.kafka.common.quota.ClientQuotaFilterComponent#match()
+missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#forName(String)
+missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#code()
+missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#fromCode(byte)
+missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#fromString(String)
+missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#isSpecific()
+missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#isUnknown()
+missing T:Confluent.Kafka.Common.Resource.ResourcePatternFilter org.apache.kafka.common.resource.ResourcePatternFilter#findIndefiniteField()
+missing T:Confluent.Kafka.Common.Resource.ResourcePatternFilter org.apache.kafka.common.resource.ResourcePatternFilter#matches(ResourcePattern)
+missing T:Confluent.Kafka.Common.Resource.ResourcePatternFilter org.apache.kafka.common.resource.ResourcePatternFilter#matchesAtMostOne()
+missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#code()
+missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#fromCode(byte)
+missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#fromString(String)
+missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#isUnknown()
+missing T:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal org.apache.kafka.common.security.auth.KafkaPrincipal#getName()
+missing T:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal org.apache.kafka.common.security.auth.KafkaPrincipal#getPrincipalType()
+missing T:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation org.apache.kafka.common.security.token.delegation.TokenInformation#fromRecord(String,KafkaPrincipal,KafkaPrincipal,Collection,long,long,long)
+missing T:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation org.apache.kafka.common.security.token.delegation.TokenInformation#setExpiryTimestamp(long)
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#configure(Map,boolean)
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
+missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,byte[])
+missing T:Confluent.Kafka.Common.Serialization.ISerde`1 org.apache.kafka.common.serialization.Serde#close()
+missing T:Confluent.Kafka.Common.Serialization.ISerde`1 org.apache.kafka.common.serialization.Serde#configure(Map,boolean)
+missing T:Confluent.Kafka.Common.Serialization.ISerde`1 org.apache.kafka.common.serialization.Serde#deserializer()
+missing T:Confluent.Kafka.Common.Serialization.ISerde`1 org.apache.kafka.common.serialization.Serde#serializer()
+missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#close()
+missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#configure(Map,boolean)
+missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#serialize(String,Headers,T)
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Boolean()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#ByteBuffer()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Bytes()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Float()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Integer()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#ListSerde(Class,Serde)
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Long()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Serdes()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Short()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#UUID()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#Void()
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#serdeFrom(Class)
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes#serdeFrom(Serializer,Deserializer)
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$BooleanSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$ByteArraySerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$ByteBufferSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$BytesSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$DoubleSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$FloatSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$IntegerSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$ListSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$LongSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$ShortSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$StringSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$UUIDSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$VoidSerde
+missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$WrapperSerde
+missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#equals(Object)
+missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#hashCode()
+missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#isr()
+missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#fromString(String)
+missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#getLeastSignificantBits()
+missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#getMostSignificantBits()
+missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toArray(List)
+missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toList(Uuid[])
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addedMetrics()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#closed()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#disableTelemetry()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#injectTimeoutException(int)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#lastPollTimeout()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#resetShouldRebalance()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#schedulePollTask(Runnable)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#setClientInstanceId(Uuid)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#setMaxPollRecords(long)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException(KafkaException)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#shouldRebalance()
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateBeginningOffsets(Map)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateDurationOffsets(Map)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets(Map)
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updatePartitions(String,List)
+missing T:Confluent.Kafka.Consumer.ConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#equals(Object)
+missing T:Confluent.Kafka.Consumer.ConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#hashCode()
+missing T:Confluent.Kafka.Consumer.ConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#toString()
+missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,K,V)
+missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional)
+missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional,Optional)
+missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#NULL_SIZE
+missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount()
+missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#toString()
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#EMPTY
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#empty()
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#isEmpty()
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#nextOffsets()
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#partitions()
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#records(String)
+missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#records(TopicPartition)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync()
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#subscribe(SubscriptionPattern)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+missing T:Confluent.Kafka.Consumer.IAsyncConsumer`2 org.apache.kafka.clients.consumer.Consumer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync()
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#subscribe(SubscriptionPattern)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+missing T:Confluent.Kafka.Consumer.IConsumer`2 org.apache.kafka.clients.consumer.Consumer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+missing T:Confluent.Kafka.Consumer.KafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addedMetrics()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#closed()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Duration)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#commitSync(Map,Duration)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#disableTelemetry()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#injectTimeoutException(int)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#lastPollTimeout()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#resetShouldRebalance()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#schedulePollTask(Runnable)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#setClientInstanceId(Uuid)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#setMaxPollRecords(long)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException(KafkaException)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#shouldRebalance()
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateBeginningOffsets(Map)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateDurationOffsets(Map)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets(Map)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updatePartitions(String,List)
+missing T:Confluent.Kafka.Consumer.OffsetAndMetadata org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)
+missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp(long,long)
+missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp(long,long,Optional)
+missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#equals(Object)
+missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#hashCode()
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map)
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#abortTransaction()
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#beginTransaction()
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#commitTransaction()
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#initTransactions()
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
+missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#MockProducer()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#MockProducer(boolean,Partitioner,Serializer,Serializer)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#abortTransaction()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#abortTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#addedMetrics()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransaction()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#closeException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#closed()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitCount()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransaction()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#consumerGroupOffsetsHistory()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#disableTelemetry()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#fenceProducer()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushed()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#history()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactions()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#injectTimeoutException(int)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#partitionsForException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#sentOffsets()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#setClientInstanceId(Uuid)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#setMockMetrics(MetricName,Metric)
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionAborted()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionCommitted()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionInFlight()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionInitialized()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#uncommittedOffsets()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#uncommittedRecords()
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#abortTransaction()
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#beginTransaction()
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#commitTransaction()
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#initTransactions()
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
+missing T:Confluent.Kafka.Producer.IAsyncProducer`2 org.apache.kafka.clients.producer.Producer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#abortTransaction()
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#beginTransaction()
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#commitTransaction()
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#initTransactions()
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
+missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map)
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#abortTransaction()
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#beginTransaction()
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#commitTransaction()
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#initTransactions()
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
+missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#MockProducer()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#MockProducer(boolean,Partitioner,Serializer,Serializer)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#abortTransaction()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#abortTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#addedMetrics()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransaction()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#beginTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#clientInstanceId(Duration)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#closeException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#closed()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitCount()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransaction()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#commitTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#consumerGroupOffsetsHistory()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#disableTelemetry()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#fenceProducer()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#flushed()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#history()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#initTransactions()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#injectTimeoutException(int)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#partitionsForException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#registerMetricForSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#sentOffsets()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#setClientInstanceId(Uuid)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#setMockMetrics(MetricName,Metric)
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionAborted()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionCommitted()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionInFlight()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#transactionInitialized()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#uncommittedOffsets()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#uncommittedRecords()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#unregisterMetricFromSubscription(KafkaMetric)
+missing T:Confluent.Kafka.Producer.ProducerRecord`2 org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,K,V)
+missing T:Confluent.Kafka.Producer.ProducerRecord`2 org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,K,V,Iterable)
+missing T:Confluent.Kafka.Producer.ProducerRecord`2 org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,Long,K,V)
+missing T:Confluent.Kafka.Producer.ProducerRecord`2 org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,Integer,Long,K,V,Iterable)
+missing T:Confluent.Kafka.Producer.ProducerRecord`2 org.apache.kafka.clients.producer.ProducerRecord#ProducerRecord(String,K,V)
+overload M:Confluent.Kafka.Admin.AsyncKafkaAdminClient.#ctor(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object})
+overload M:Confluent.Kafka.Admin.KafkaAdminClient.#ctor(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object})
+overload M:Confluent.Kafka.Common.AsyncKafkaFuture.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.AsyncKafkaFuture`1.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.KafkaFuture.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.KafkaFuture`1.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.UpdatePartitions(System.String,System.Int32,System.Int32,System.String,System.Int32)
+overload M:Confluent.Kafka.Consumer.MockConsumer`2.UpdatePartitions(System.String,System.Int32,System.Int32,System.String,System.Int32)
+overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1},System.Boolean)
+overload M:Confluent.Kafka.Producer.MockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1},System.Boolean)
+parameter M:Confluent.Kafka.Admin.AlterConfigOp.#ctor(Confluent.Kafka.Admin.ConfigEntry,Confluent.Kafka.Admin.AlterConfigOpType)
+parameter M:Confluent.Kafka.Admin.AsyncKafkaAdminClient.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+parameter M:Confluent.Kafka.Admin.AsyncMockAdminClient.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+parameter M:Confluent.Kafka.Admin.IAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+parameter M:Confluent.Kafka.Admin.IAsyncAdmin.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+parameter M:Confluent.Kafka.Admin.KafkaAdminClient.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+parameter M:Confluent.Kafka.Admin.MockAdminClient.DeleteTopics(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Admin.DeleteTopicsOptions)
+parameter M:Confluent.Kafka.Admin.TopicDescription.#ctor(System.String,System.Boolean,System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.TopicPartitionInfo})
+parameter M:Confluent.Kafka.Admin.TopicDescription.#ctor(System.String,System.Boolean,System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.TopicPartitionInfo},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Acl.AclOperation})
+parameter M:Confluent.Kafka.Admin.TopicDescription.#ctor(System.String,System.Boolean,System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.TopicPartitionInfo},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Acl.AclOperation},Confluent.Kafka.Common.Uuid)
+parameter M:Confluent.Kafka.Admin.TopicListing.#ctor(System.String,Confluent.Kafka.Common.Uuid,System.Boolean)
+parameter M:Confluent.Kafka.Admin.TransactionListing.#ctor(System.String,System.Int64,Confluent.Kafka.Admin.TransactionState)
+parameter M:Confluent.Kafka.Common.Errors.InterruptException.#ctor(System.Exception)
+parameter M:Confluent.Kafka.Common.Errors.InterruptException.#ctor(System.String,System.Exception)
+parameter M:Confluent.Kafka.Common.Errors.RecordDeserializationException.#ctor(System.Nullable{Confluent.Kafka.Common.Errors.RecordDeserializationException.DeserializationExceptionOrigin},Confluent.Kafka.Common.TopicPartition,System.Int64,System.Int64,Confluent.Kafka.Common.Record.TimestampType,System.Byte[],System.Byte[],Confluent.Kafka.Common.Header.Headers,System.String,System.Exception)
+parameter M:Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.#ctor(Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation,System.Byte[])
+parameter M:Confluent.Kafka.Common.TopicPartitionInfo.#ctor(System.Int32,Confluent.Kafka.Common.Node,System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Node},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Node})
+parameter M:Confluent.Kafka.Common.TopicPartitionInfo.#ctor(System.Int32,Confluent.Kafka.Common.Node,System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Node},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Node},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Node},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Node})
+parameter M:Confluent.Kafka.Common.Uuid.#ctor(System.Int64,System.Int64)
+parameter M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.CurrentLag(Confluent.Kafka.Common.TopicPartition,System.Threading.CancellationToken)
+parameter M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IConsumerRebalanceListener,System.Threading.CancellationToken)
+parameter M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.CurrentLag(Confluent.Kafka.Common.TopicPartition,System.Threading.CancellationToken)
+parameter M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.LosePartitions(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+parameter M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Rebalance(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+parameter M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IConsumerRebalanceListener,System.Threading.CancellationToken)
+parameter M:Confluent.Kafka.Consumer.IAsyncConsumer`2.CurrentLag(Confluent.Kafka.Common.TopicPartition,System.Threading.CancellationToken)
+parameter M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IConsumerRebalanceListener,System.Threading.CancellationToken)
+parameter M:Confluent.Kafka.Consumer.IConsumer`2.CurrentLag(Confluent.Kafka.Common.TopicPartition)
+parameter M:Confluent.Kafka.Consumer.IConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IConsumerRebalanceListener)
+parameter M:Confluent.Kafka.Consumer.KafkaConsumer`2.CurrentLag(Confluent.Kafka.Common.TopicPartition)
+parameter M:Confluent.Kafka.Consumer.KafkaConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IConsumerRebalanceListener)
+parameter M:Confluent.Kafka.Consumer.MockConsumer`2.CurrentLag(Confluent.Kafka.Common.TopicPartition)
+parameter M:Confluent.Kafka.Consumer.MockConsumer`2.LosePartitions(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+parameter M:Confluent.Kafka.Consumer.MockConsumer`2.Rebalance(System.Collections.Generic.IReadOnlyCollection{Confluent.Kafka.Common.TopicPartition})
+parameter M:Confluent.Kafka.Consumer.MockConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IConsumerRebalanceListener)
+parameter M:Confluent.Kafka.Consumer.OffsetAndMetadata.#ctor(System.Int64,System.String,System.Nullable{System.Int32})
+parameter M:Confluent.Kafka.Producer.AsyncMockProducer`2.ErrorNext(System.Exception)
+parameter M:Confluent.Kafka.Producer.MockProducer`2.ErrorNext(System.Exception)
+parameter M:Confluent.Kafka.Producer.ProducerRecord`2.#ctor(System.String,`1,`0,System.Nullable{System.Int32},System.Nullable{System.Int64},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Header.Header})
+property P:Confluent.Kafka.Admin.AbortTransactionOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AbortTransactionSpec.CoordinatorEpoch
+property P:Confluent.Kafka.Admin.AbortTransactionSpec.ProducerEpoch
+property P:Confluent.Kafka.Admin.AbortTransactionSpec.ProducerId
+property P:Confluent.Kafka.Admin.AbortTransactionSpec.TopicPartition
+property P:Confluent.Kafka.Admin.AlterClientQuotasOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AlterClientQuotasOptions.ValidateOnly
+property P:Confluent.Kafka.Admin.AlterClientQuotasResult.Values
+property P:Confluent.Kafka.Admin.AlterConfigOp.ConfigEntry
+property P:Confluent.Kafka.Admin.AlterConfigOp.OpType
+property P:Confluent.Kafka.Admin.AlterConfigsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AlterConfigsOptions.ValidateOnly
+property P:Confluent.Kafka.Admin.AlterConfigsResult.Values
+property P:Confluent.Kafka.Admin.AlterConsumerGroupOffsetsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AlterPartitionReassignmentsOptions.AllowReplicationFactorChange
+property P:Confluent.Kafka.Admin.AlterPartitionReassignmentsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AlterPartitionReassignmentsResult.Values
+property P:Confluent.Kafka.Admin.AlterReplicaLogDirsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AlterReplicaLogDirsResult.Values
+property P:Confluent.Kafka.Admin.AlterUserScramCredentialsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.AlterUserScramCredentialsResult.Values
+property P:Confluent.Kafka.Admin.AsyncAlterClientQuotasResult.Values
+property P:Confluent.Kafka.Admin.AsyncAlterConfigsResult.Values
+property P:Confluent.Kafka.Admin.AsyncAlterPartitionReassignmentsResult.Values
+property P:Confluent.Kafka.Admin.AsyncAlterReplicaLogDirsResult.Values
+property P:Confluent.Kafka.Admin.AsyncAlterUserScramCredentialsResult.Values
+property P:Confluent.Kafka.Admin.AsyncCreateAclsResult.Values
+property P:Confluent.Kafka.Admin.AsyncCreatePartitionsResult.Values
+property P:Confluent.Kafka.Admin.AsyncCreateTopicsResult.Values
+property P:Confluent.Kafka.Admin.AsyncDeleteAclsResult.Values
+property P:Confluent.Kafka.Admin.AsyncDeleteConsumerGroupsResult.DeletedGroups
+property P:Confluent.Kafka.Admin.AsyncDeleteRecordsResult.LowWatermarks
+property P:Confluent.Kafka.Admin.AsyncDeleteTopicsResult.TopicIdValues
+property P:Confluent.Kafka.Admin.AsyncDeleteTopicsResult.TopicNameValues
+property P:Confluent.Kafka.Admin.AsyncDescribeClassicGroupsResult.DescribedGroups
+property P:Confluent.Kafka.Admin.AsyncDescribeConfigsResult.Values
+property P:Confluent.Kafka.Admin.AsyncDescribeConsumerGroupsResult.DescribedGroups
+property P:Confluent.Kafka.Admin.AsyncDescribeLogDirsResult.Descriptions
+property P:Confluent.Kafka.Admin.AsyncDescribeReplicaLogDirsResult.Values
+property P:Confluent.Kafka.Admin.AsyncDescribeTopicsResult.TopicIdValues
+property P:Confluent.Kafka.Admin.AsyncDescribeTopicsResult.TopicNameValues
+property P:Confluent.Kafka.Admin.AsyncFenceProducersResult.FencedProducers
+property P:Confluent.Kafka.Admin.AsyncUpdateFeaturesResult.Values
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.AuthorizedOperations
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.Coordinator
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.GroupId
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.IsSimpleConsumerGroup
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.Members
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.Protocol
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.ProtocolData
+property P:Confluent.Kafka.Admin.ClassicGroupDescription.State
+property P:Confluent.Kafka.Admin.Config.Entries
+property P:Confluent.Kafka.Admin.ConfigEntry.ConfigSynonym.Name
+property P:Confluent.Kafka.Admin.ConfigEntry.ConfigSynonym.Source
+property P:Confluent.Kafka.Admin.ConfigEntry.ConfigSynonym.Value
+property P:Confluent.Kafka.Admin.ConfigEntry.Documentation
+property P:Confluent.Kafka.Admin.ConfigEntry.IsDefault
+property P:Confluent.Kafka.Admin.ConfigEntry.IsReadOnly
+property P:Confluent.Kafka.Admin.ConfigEntry.IsSensitive
+property P:Confluent.Kafka.Admin.ConfigEntry.Name
+property P:Confluent.Kafka.Admin.ConfigEntry.Source
+property P:Confluent.Kafka.Admin.ConfigEntry.Synonyms
+property P:Confluent.Kafka.Admin.ConfigEntry.Type
+property P:Confluent.Kafka.Admin.ConfigEntry.Value
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.AuthorizedOperations
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.Coordinator
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.GroupEpoch
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.GroupId
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.GroupState
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.IsSimpleConsumerGroup
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.Members
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.PartitionAssignor
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.TargetAssignmentEpoch
+property P:Confluent.Kafka.Admin.ConsumerGroupDescription.Type
+property P:Confluent.Kafka.Admin.CreateAclsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.CreateAclsResult.Values
+property P:Confluent.Kafka.Admin.CreateDelegationTokenOptions.MaxLifetimeMs
+property P:Confluent.Kafka.Admin.CreateDelegationTokenOptions.Owner
+property P:Confluent.Kafka.Admin.CreateDelegationTokenOptions.Renewers
+property P:Confluent.Kafka.Admin.CreateDelegationTokenOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.CreatePartitionsOptions.RetryOnQuotaViolation
+property P:Confluent.Kafka.Admin.CreatePartitionsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.CreatePartitionsOptions.ValidateOnly
+property P:Confluent.Kafka.Admin.CreatePartitionsResult.Values
+property P:Confluent.Kafka.Admin.CreateTopicsOptions.RetryOnQuotaViolation
+property P:Confluent.Kafka.Admin.CreateTopicsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.CreateTopicsOptions.ValidateOnly
+property P:Confluent.Kafka.Admin.CreateTopicsResult.Values
+property P:Confluent.Kafka.Admin.DeleteAclsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DeleteAclsResult.FilterResult.Binding
+property P:Confluent.Kafka.Admin.DeleteAclsResult.FilterResult.Exception
+property P:Confluent.Kafka.Admin.DeleteAclsResult.FilterResults.Values
+property P:Confluent.Kafka.Admin.DeleteAclsResult.Values
+property P:Confluent.Kafka.Admin.DeleteConsumerGroupOffsetsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DeleteConsumerGroupsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DeleteConsumerGroupsResult.DeletedGroups
+property P:Confluent.Kafka.Admin.DeleteRecordsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DeleteRecordsResult.LowWatermarks
+property P:Confluent.Kafka.Admin.DeleteTopicsOptions.RetryOnQuotaViolation
+property P:Confluent.Kafka.Admin.DeleteTopicsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DeleteTopicsResult.TopicIdValues
+property P:Confluent.Kafka.Admin.DeleteTopicsResult.TopicNameValues
+property P:Confluent.Kafka.Admin.DeletedRecords.LowWatermark
+property P:Confluent.Kafka.Admin.DescribeAclsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeClassicGroupsOptions.IncludeAuthorizedOperations
+property P:Confluent.Kafka.Admin.DescribeClassicGroupsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeClassicGroupsResult.DescribedGroups
+property P:Confluent.Kafka.Admin.DescribeClientQuotasOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeClusterOptions.IncludeAuthorizedOperations
+property P:Confluent.Kafka.Admin.DescribeClusterOptions.IncludeFencedBrokers
+property P:Confluent.Kafka.Admin.DescribeClusterOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeConfigsOptions.IncludeDocumentation
+property P:Confluent.Kafka.Admin.DescribeConfigsOptions.IncludeSynonyms
+property P:Confluent.Kafka.Admin.DescribeConfigsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeConfigsResult.Values
+property P:Confluent.Kafka.Admin.DescribeConsumerGroupsOptions.IncludeAuthorizedOperations
+property P:Confluent.Kafka.Admin.DescribeConsumerGroupsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeConsumerGroupsResult.DescribedGroups
+property P:Confluent.Kafka.Admin.DescribeDelegationTokenOptions.Owners
+property P:Confluent.Kafka.Admin.DescribeDelegationTokenOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeFeaturesOptions.NodeId
+property P:Confluent.Kafka.Admin.DescribeFeaturesOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeLogDirsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeLogDirsResult.Descriptions
+property P:Confluent.Kafka.Admin.DescribeProducersOptions.BrokerId
+property P:Confluent.Kafka.Admin.DescribeProducersOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeProducersResult.PartitionProducerState.ActiveProducers
+property P:Confluent.Kafka.Admin.DescribeReplicaLogDirsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeReplicaLogDirsResult.Values
+property P:Confluent.Kafka.Admin.DescribeTopicsOptions.IncludeAuthorizedOperations
+property P:Confluent.Kafka.Admin.DescribeTopicsOptions.PartitionSizeLimitPerResponse
+property P:Confluent.Kafka.Admin.DescribeTopicsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeTopicsResult.TopicIdValues
+property P:Confluent.Kafka.Admin.DescribeTopicsResult.TopicNameValues
+property P:Confluent.Kafka.Admin.DescribeTransactionsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.DescribeUserScramCredentialsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ElectLeadersOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ExpireDelegationTokenOptions.ExpiryTimePeriodMs
+property P:Confluent.Kafka.Admin.ExpireDelegationTokenOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.FeatureMetadata.FinalizedFeatures
+property P:Confluent.Kafka.Admin.FeatureMetadata.FinalizedFeaturesEpoch
+property P:Confluent.Kafka.Admin.FeatureMetadata.SupportedFeatures
+property P:Confluent.Kafka.Admin.FeatureUpdate.MaxVersionLevel
+property P:Confluent.Kafka.Admin.FenceProducersOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.FenceProducersResult.FencedProducers
+property P:Confluent.Kafka.Admin.FinalizedVersionRange.MaxVersionLevel
+property P:Confluent.Kafka.Admin.FinalizedVersionRange.MinVersionLevel
+property P:Confluent.Kafka.Admin.GroupListing.GroupId
+property P:Confluent.Kafka.Admin.GroupListing.GroupState
+property P:Confluent.Kafka.Admin.GroupListing.IsSimpleConsumerGroup
+property P:Confluent.Kafka.Admin.GroupListing.Protocol
+property P:Confluent.Kafka.Admin.GroupListing.Type
+property P:Confluent.Kafka.Admin.ListConfigResourcesOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions.RequireStable
+property P:Confluent.Kafka.Admin.ListConsumerGroupOffsetsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ListConsumerGroupOffsetsSpec.TopicPartitions
+property P:Confluent.Kafka.Admin.ListGroupsOptions.GroupStates
+property P:Confluent.Kafka.Admin.ListGroupsOptions.ProtocolTypes
+property P:Confluent.Kafka.Admin.ListGroupsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ListGroupsOptions.Types
+property P:Confluent.Kafka.Admin.ListOffsetsOptions.IsolationLevel
+property P:Confluent.Kafka.Admin.ListOffsetsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ListOffsetsResult.ListOffsetsResultInfo.LeaderEpoch
+property P:Confluent.Kafka.Admin.ListOffsetsResult.ListOffsetsResultInfo.Offset
+property P:Confluent.Kafka.Admin.ListOffsetsResult.ListOffsetsResultInfo.Timestamp
+property P:Confluent.Kafka.Admin.ListPartitionReassignmentsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ListTopicsOptions.ListInternal
+property P:Confluent.Kafka.Admin.ListTopicsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ListTransactionsOptions.FilteredDuration
+property P:Confluent.Kafka.Admin.ListTransactionsOptions.FilteredProducerIds
+property P:Confluent.Kafka.Admin.ListTransactionsOptions.FilteredStates
+property P:Confluent.Kafka.Admin.ListTransactionsOptions.FilteredTransactionalIdPattern
+property P:Confluent.Kafka.Admin.ListTransactionsOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.LogDirDescription.Error
+property P:Confluent.Kafka.Admin.LogDirDescription.IsCordoned
+property P:Confluent.Kafka.Admin.LogDirDescription.ReplicaInfos
+property P:Confluent.Kafka.Admin.LogDirDescription.TotalBytes
+property P:Confluent.Kafka.Admin.LogDirDescription.UsableBytes
+property P:Confluent.Kafka.Admin.MemberAssignment.TopicPartitions
+property P:Confluent.Kafka.Admin.MemberDescription.Assignment
+property P:Confluent.Kafka.Admin.MemberDescription.ClientId
+property P:Confluent.Kafka.Admin.MemberDescription.ConsumerId
+property P:Confluent.Kafka.Admin.MemberDescription.GroupInstanceId
+property P:Confluent.Kafka.Admin.MemberDescription.Host
+property P:Confluent.Kafka.Admin.MemberDescription.MemberEpoch
+property P:Confluent.Kafka.Admin.MemberDescription.RackId
+property P:Confluent.Kafka.Admin.MemberDescription.TargetAssignment
+property P:Confluent.Kafka.Admin.MemberDescription.Upgraded
+property P:Confluent.Kafka.Admin.MemberToRemove.GroupInstanceId
+property P:Confluent.Kafka.Admin.NewPartitionReassignment.TargetReplicas
+property P:Confluent.Kafka.Admin.NewPartitions.Assignments
+property P:Confluent.Kafka.Admin.NewPartitions.TotalCount
+property P:Confluent.Kafka.Admin.NewTopic.Configs
+property P:Confluent.Kafka.Admin.NewTopic.Name
+property P:Confluent.Kafka.Admin.NewTopic.NumPartitions
+property P:Confluent.Kafka.Admin.NewTopic.ReplicasAssignments
+property P:Confluent.Kafka.Admin.NewTopic.ReplicationFactor
+property P:Confluent.Kafka.Admin.PartitionReassignment.AddingReplicas
+property P:Confluent.Kafka.Admin.PartitionReassignment.RemovingReplicas
+property P:Confluent.Kafka.Admin.PartitionReassignment.Replicas
+property P:Confluent.Kafka.Admin.ProducerState.CoordinatorEpoch
+property P:Confluent.Kafka.Admin.ProducerState.CurrentTransactionStartOffset
+property P:Confluent.Kafka.Admin.ProducerState.LastSequence
+property P:Confluent.Kafka.Admin.ProducerState.LastTimestamp
+property P:Confluent.Kafka.Admin.ProducerState.ProducerEpoch
+property P:Confluent.Kafka.Admin.ProducerState.ProducerId
+property P:Confluent.Kafka.Admin.RemoveMembersFromConsumerGroupOptions.Members
+property P:Confluent.Kafka.Admin.RemoveMembersFromConsumerGroupOptions.Reason
+property P:Confluent.Kafka.Admin.RemoveMembersFromConsumerGroupOptions.RemoveAll
+property P:Confluent.Kafka.Admin.RemoveMembersFromConsumerGroupOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.RenewDelegationTokenOptions.RenewTimePeriodMs
+property P:Confluent.Kafka.Admin.RenewDelegationTokenOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.ReplicaInfo.IsFuture
+property P:Confluent.Kafka.Admin.ReplicaInfo.OffsetLag
+property P:Confluent.Kafka.Admin.ReplicaInfo.Size
+property P:Confluent.Kafka.Admin.ScramCredentialInfo.Iterations
+property P:Confluent.Kafka.Admin.ScramCredentialInfo.Mechanism
+property P:Confluent.Kafka.Admin.SupportedVersionRange.MaxVersion
+property P:Confluent.Kafka.Admin.SupportedVersionRange.MinVersion
+property P:Confluent.Kafka.Admin.TerminateTransactionOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.TopicDescription.AuthorizedOperations
+property P:Confluent.Kafka.Admin.TopicDescription.IsInternal
+property P:Confluent.Kafka.Admin.TopicDescription.Name
+property P:Confluent.Kafka.Admin.TopicDescription.Partitions
+property P:Confluent.Kafka.Admin.TopicDescription.TopicId
+property P:Confluent.Kafka.Admin.TopicListing.IsInternal
+property P:Confluent.Kafka.Admin.TopicListing.Name
+property P:Confluent.Kafka.Admin.TopicListing.TopicId
+property P:Confluent.Kafka.Admin.TransactionDescription.CoordinatorId
+property P:Confluent.Kafka.Admin.TransactionDescription.ProducerEpoch
+property P:Confluent.Kafka.Admin.TransactionDescription.ProducerId
+property P:Confluent.Kafka.Admin.TransactionDescription.State
+property P:Confluent.Kafka.Admin.TransactionDescription.TopicPartitions
+property P:Confluent.Kafka.Admin.TransactionDescription.TransactionStartTimeMs
+property P:Confluent.Kafka.Admin.TransactionDescription.TransactionTimeoutMs
+property P:Confluent.Kafka.Admin.TransactionListing.ProducerId
+property P:Confluent.Kafka.Admin.TransactionListing.State
+property P:Confluent.Kafka.Admin.TransactionListing.TransactionalId
+property P:Confluent.Kafka.Admin.UnregisterControllerOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.UpdateFeaturesOptions.TimeoutMs
+property P:Confluent.Kafka.Admin.UpdateFeaturesOptions.ValidateOnly
+property P:Confluent.Kafka.Admin.UpdateFeaturesResult.Values
+property P:Confluent.Kafka.Admin.UserScramCredentialAlteration.User
+property P:Confluent.Kafka.Admin.UserScramCredentialDeletion.Mechanism
+property P:Confluent.Kafka.Admin.UserScramCredentialUpsertion.CredentialInfo
+property P:Confluent.Kafka.Admin.UserScramCredentialUpsertion.Password
+property P:Confluent.Kafka.Admin.UserScramCredentialUpsertion.Salt
+property P:Confluent.Kafka.Admin.UserScramCredentialsDescription.CredentialInfos
+property P:Confluent.Kafka.Admin.UserScramCredentialsDescription.Name
+property P:Confluent.Kafka.Common.Acl.AccessControlEntry.Host
+property P:Confluent.Kafka.Common.Acl.AccessControlEntry.IsUnknown
+property P:Confluent.Kafka.Common.Acl.AccessControlEntry.Operation
+property P:Confluent.Kafka.Common.Acl.AccessControlEntry.PermissionType
+property P:Confluent.Kafka.Common.Acl.AccessControlEntry.Principal
+property P:Confluent.Kafka.Common.Acl.AccessControlEntryFilter.Host
+property P:Confluent.Kafka.Common.Acl.AccessControlEntryFilter.IsUnknown
+property P:Confluent.Kafka.Common.Acl.AccessControlEntryFilter.Operation
+property P:Confluent.Kafka.Common.Acl.AccessControlEntryFilter.PermissionType
+property P:Confluent.Kafka.Common.Acl.AccessControlEntryFilter.Principal
+property P:Confluent.Kafka.Common.Acl.AclBinding.Entry
+property P:Confluent.Kafka.Common.Acl.AclBinding.IsUnknown
+property P:Confluent.Kafka.Common.Acl.AclBinding.Pattern
+property P:Confluent.Kafka.Common.Acl.AclBindingFilter.EntryFilter
+property P:Confluent.Kafka.Common.Acl.AclBindingFilter.IsUnknown
+property P:Confluent.Kafka.Common.Acl.AclBindingFilter.PatternFilter
+property P:Confluent.Kafka.Common.AsyncKafkaFuture.IsCancelled
+property P:Confluent.Kafka.Common.AsyncKafkaFuture.IsCompletedExceptionally
+property P:Confluent.Kafka.Common.AsyncKafkaFuture.IsDone
+property P:Confluent.Kafka.Common.AsyncKafkaFuture`1.IsCancelled
+property P:Confluent.Kafka.Common.AsyncKafkaFuture`1.IsCompletedExceptionally
+property P:Confluent.Kafka.Common.AsyncKafkaFuture`1.IsDone
+property P:Confluent.Kafka.Common.Config.ConfigResource.IsDefault
+property P:Confluent.Kafka.Common.Config.ConfigResource.Name
+property P:Confluent.Kafka.Common.Config.ConfigResource.Type
+property P:Confluent.Kafka.Common.Errors.DuplicateResourceException.Resource
+property P:Confluent.Kafka.Common.Errors.GroupAuthorizationException.GroupId
+property P:Confluent.Kafka.Common.Errors.InvalidTopicException.InvalidTopics
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.Headers
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.KeyBuffer
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.Offset
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.Origin
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.Timestamp
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.TimestampType
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.TopicPartition
+property P:Confluent.Kafka.Common.Errors.RecordDeserializationException.ValueBuffer
+property P:Confluent.Kafka.Common.Errors.RecordTooLargeException.RecordTooLargePartitions
+property P:Confluent.Kafka.Common.Errors.ResourceNotFoundException.Resource
+property P:Confluent.Kafka.Common.Errors.ThrottlingQuotaExceededException.ThrottleTimeMs
+property P:Confluent.Kafka.Common.Errors.TopicAuthorizationException.UnauthorizedTopics
+property P:Confluent.Kafka.Common.Header.Header.Key
+property P:Confluent.Kafka.Common.Header.Header.Value
+property P:Confluent.Kafka.Common.KafkaFuture.IsCancelled
+property P:Confluent.Kafka.Common.KafkaFuture.IsCompletedExceptionally
+property P:Confluent.Kafka.Common.KafkaFuture.IsDone
+property P:Confluent.Kafka.Common.KafkaFuture`1.IsCancelled
+property P:Confluent.Kafka.Common.KafkaFuture`1.IsCompletedExceptionally
+property P:Confluent.Kafka.Common.KafkaFuture`1.IsDone
+property P:Confluent.Kafka.Common.MetricName.Description
+property P:Confluent.Kafka.Common.MetricName.Group
+property P:Confluent.Kafka.Common.MetricName.Name
+property P:Confluent.Kafka.Common.MetricName.Tags
+property P:Confluent.Kafka.Common.Metrics.QuotaViolationException.Bound
+property P:Confluent.Kafka.Common.Metrics.QuotaViolationException.Metric
+property P:Confluent.Kafka.Common.Metrics.QuotaViolationException.Value
+property P:Confluent.Kafka.Common.Node.Host
+property P:Confluent.Kafka.Common.Node.Id
+property P:Confluent.Kafka.Common.Node.IsFenced
+property P:Confluent.Kafka.Common.Node.Port
+property P:Confluent.Kafka.Common.Node.Rack
+property P:Confluent.Kafka.Common.PartitionInfo.InSyncReplicas
+property P:Confluent.Kafka.Common.PartitionInfo.Leader
+property P:Confluent.Kafka.Common.PartitionInfo.OfflineReplicas
+property P:Confluent.Kafka.Common.PartitionInfo.Partition
+property P:Confluent.Kafka.Common.PartitionInfo.Replicas
+property P:Confluent.Kafka.Common.PartitionInfo.Topic
+property P:Confluent.Kafka.Common.Quota.ClientQuotaAlteration.Entity
+property P:Confluent.Kafka.Common.Quota.ClientQuotaAlteration.Op.Key
+property P:Confluent.Kafka.Common.Quota.ClientQuotaAlteration.Op.Value
+property P:Confluent.Kafka.Common.Quota.ClientQuotaAlteration.Ops
+property P:Confluent.Kafka.Common.Quota.ClientQuotaEntity.Entries
+property P:Confluent.Kafka.Common.Quota.ClientQuotaFilter.Components
+property P:Confluent.Kafka.Common.Quota.ClientQuotaFilter.Strict
+property P:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.EntityType
+property P:Confluent.Kafka.Common.Requests.CorrelationIdMismatchException.RequestCorrelationId
+property P:Confluent.Kafka.Common.Requests.CorrelationIdMismatchException.ResponseCorrelationId
+property P:Confluent.Kafka.Common.Resource.ResourcePattern.IsUnknown
+property P:Confluent.Kafka.Common.Resource.ResourcePattern.Name
+property P:Confluent.Kafka.Common.Resource.ResourcePattern.PatternType
+property P:Confluent.Kafka.Common.Resource.ResourcePattern.ResourceType
+property P:Confluent.Kafka.Common.Resource.ResourcePatternFilter.IsUnknown
+property P:Confluent.Kafka.Common.Resource.ResourcePatternFilter.Name
+property P:Confluent.Kafka.Common.Resource.ResourcePatternFilter.PatternType
+property P:Confluent.Kafka.Common.Resource.ResourcePatternFilter.ResourceType
+property P:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal.TokenAuthenticated
+property P:Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.Hmac
+property P:Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.HmacAsBase64String
+property P:Confluent.Kafka.Common.Security.Token.Delegation.DelegationToken.TokenInfo
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.ExpiryTimestamp
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.IssueTimestamp
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.MaxTimestamp
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.Owner
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.OwnerAsString
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.Renewers
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.RenewersAsString
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.TokenId
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.TokenRequester
+property P:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation.TokenRequesterAsString
+property P:Confluent.Kafka.Common.Serialization.Serdes.ByteArray
+property P:Confluent.Kafka.Common.Serialization.Serdes.Double
+property P:Confluent.Kafka.Common.Serialization.Serdes.String
+property P:Confluent.Kafka.Common.TopicPartition.Partition
+property P:Confluent.Kafka.Common.TopicPartition.Topic
+property P:Confluent.Kafka.Common.TopicPartitionInfo.Elr
+property P:Confluent.Kafka.Common.TopicPartitionInfo.LastKnownElr
+property P:Confluent.Kafka.Common.TopicPartitionInfo.Leader
+property P:Confluent.Kafka.Common.TopicPartitionInfo.Partition
+property P:Confluent.Kafka.Common.TopicPartitionInfo.Replicas
+property P:Confluent.Kafka.Common.TopicPartitionReplica.BrokerId
+property P:Confluent.Kafka.Common.TopicPartitionReplica.Partition
+property P:Confluent.Kafka.Common.TopicPartitionReplica.Topic
+property P:Confluent.Kafka.Consumer.ConsumerGroupMetadata.GenerationId
+property P:Confluent.Kafka.Consumer.ConsumerGroupMetadata.GroupId
+property P:Confluent.Kafka.Consumer.ConsumerGroupMetadata.GroupInstanceId
+property P:Confluent.Kafka.Consumer.ConsumerGroupMetadata.MemberId
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Headers
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Key
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.LeaderEpoch
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Offset
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Partition
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.SerializedKeySize
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.SerializedValueSize
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Timestamp
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.TimestampType
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Topic
+property P:Confluent.Kafka.Consumer.ConsumerRecord`2.Value
+property P:Confluent.Kafka.Consumer.ConsumerRecords`2.Count
+property P:Confluent.Kafka.Consumer.InvalidOffsetException.Partitions
+property P:Confluent.Kafka.Consumer.LogTruncationException.DivergentOffsets
+property P:Confluent.Kafka.Consumer.NoOffsetForPartitionException.Partitions
+property P:Confluent.Kafka.Consumer.OffsetAndMetadata.LeaderEpoch
+property P:Confluent.Kafka.Consumer.OffsetAndMetadata.Metadata
+property P:Confluent.Kafka.Consumer.OffsetAndMetadata.Offset
+property P:Confluent.Kafka.Consumer.OffsetAndTimestamp.LeaderEpoch
+property P:Confluent.Kafka.Consumer.OffsetAndTimestamp.Offset
+property P:Confluent.Kafka.Consumer.OffsetAndTimestamp.Timestamp
+property P:Confluent.Kafka.Consumer.OffsetOutOfRangeException.OffsetOutOfRangePartitions
+property P:Confluent.Kafka.Consumer.OffsetOutOfRangeException.Partitions
+property P:Confluent.Kafka.Producer.ProducerRecord`2.Headers
+property P:Confluent.Kafka.Producer.ProducerRecord`2.Key
+property P:Confluent.Kafka.Producer.ProducerRecord`2.Partition
+property P:Confluent.Kafka.Producer.ProducerRecord`2.Timestamp
+property P:Confluent.Kafka.Producer.ProducerRecord`2.Topic
+property P:Confluent.Kafka.Producer.ProducerRecord`2.Value
+property P:Confluent.Kafka.Producer.RecordMetadata.HasOffset
+property P:Confluent.Kafka.Producer.RecordMetadata.HasTimestamp
+property P:Confluent.Kafka.Producer.RecordMetadata.Offset
+property P:Confluent.Kafka.Producer.RecordMetadata.Partition
+property P:Confluent.Kafka.Producer.RecordMetadata.SerializedKeySize
+property P:Confluent.Kafka.Producer.RecordMetadata.SerializedValueSize
+property P:Confluent.Kafka.Producer.RecordMetadata.Timestamp
+property P:Confluent.Kafka.Producer.RecordMetadata.Topic
+unmatched F:Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.Instance
+unmatched F:Confluent.Kafka.Common.Errors.DisconnectException.Instance
+unmatched M:Confluent.Kafka.Common.Uuid.Parse(System.String)
+unmatched M:Confluent.Kafka.Common.Uuid.TryParse(System.String,Confluent.Kafka.Common.Uuid@)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Commit(System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.UpdateBeginningOffset(System.String,System.Int32,System.Int64)
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.UpdateEndOffset(System.String,System.Int32,System.Int64)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Commit(System.TimeSpan,System.Threading.CancellationToken)
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.IConsumer`2.Commit(System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Commit(System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata})
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.TimeSpan)
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.UpdateBeginningOffset(System.String,System.Int32,System.Int64)
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.UpdateEndOffset(System.String,System.Int32,System.Int64)
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.HistoryCount
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.HistoryCount
+unmatched P:Confluent.Kafka.Admin.CreateTopicsResult.TopicMetadataAndConfig.HasMetadata
+unmatched P:Confluent.Kafka.Admin.FeatureUpdate.Type
+unmatched P:Confluent.Kafka.Common.IMetric.Name
+unmatched P:Confluent.Kafka.Common.IMetric.Value
+unmatched P:Confluent.Kafka.Common.Metrics.KafkaMetric.Name
+unmatched P:Confluent.Kafka.Common.Metrics.KafkaMetric.Value
+unmatched P:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.MatchName
+unmatched P:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.MatchType
+unmatched P:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal.Name
+unmatched P:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal.PrincipalType
+unmatched P:Confluent.Kafka.Common.Serialization.Serdes.Guid
+unmatched P:Confluent.Kafka.Common.Serialization.Serdes.Int32
+unmatched P:Confluent.Kafka.Common.Serialization.Serdes.Int64
+unmatched P:Confluent.Kafka.Common.Serialization.Serdes.Null
+unmatched P:Confluent.Kafka.Common.TopicPartitionInfo.InSyncReplicas
+unmatched P:Confluent.Kafka.Common.Uuid.LeastSignificantBits
+unmatched P:Confluent.Kafka.Common.Uuid.MostSignificantBits
+unmatched T:Confluent.Kafka.Admin.AlterConfigOpType
+unmatched T:Confluent.Kafka.Common.GroupStateExtensions
+unmatched T:Confluent.Kafka.Common.Quota.ClientQuotaMatchType
+unmatched T:Confluent.Kafka.Consumer.AsyncConsumerRebalanceListenerBase
+unmatched T:Confluent.Kafka.Consumer.ConsumerRebalanceListenerBase
+unmatched T:Confluent.Kafka.Producer.IAsyncDeliveryCallback
+unmatched T:Confluent.Kafka.Producer.IDeliveryCallback

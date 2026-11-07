@@ -78,4 +78,14 @@ public static class DiagnosticIds
     /// A comment that holds a phase or review id.
     /// </summary>
     public const string PhaseOrReviewId = "CKRDA0012";
+
+    /// <summary>
+    /// A public type or member whose name is not the name of the Java type or member it translates.
+    /// </summary>
+    public const string JavaName = "CKRDA0013";
+
+    /// <summary>
+    /// A line of the Java-name baseline, allowlist or pairs that matches nothing.
+    /// </summary>
+    public const string StaleJavaNameLine = "CKRDA0014";
 }
