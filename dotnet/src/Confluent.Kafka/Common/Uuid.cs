@@ -182,6 +182,30 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
         return (int)(value ^ (value >> 32));
     }
 
+    /// <summary>Converts a list of ids to an array, Java's <c>Uuid.toArray(List)</c>.</summary>
+    /// <param name="list">The ids, or <see langword="null"/>.</param>
+    /// <returns>A new array of the ids in order, or <see langword="null"/> when <paramref name="list"/> is.</returns>
+    public static Uuid[]? ToArray(IReadOnlyList<Uuid>? list)
+    {
+        if (list is null)
+        {
+            return null;
+        }
+
+        Uuid[] array = new Uuid[list.Count];
+        for (int i = 0; i < array.Length; i++)
+        {
+            array[i] = list[i];
+        }
+
+        return array;
+    }
+
+    /// <summary>Converts an array of ids to a list, Java's <c>Uuid.toList(Uuid[])</c>.</summary>
+    /// <param name="array">The ids, or <see langword="null"/>.</param>
+    /// <returns>A new list of the ids in order, or <see langword="null"/> when <paramref name="array"/> is.</returns>
+    public static IReadOnlyList<Uuid>? ToList(Uuid[]? array) => array is null ? null : new List<Uuid>(array);
+
     internal static Uuid RandomUuid(Func<Uuid> unsafeRandomUuid)
     {
         Uuid uuid = unsafeRandomUuid();

@@ -303,4 +303,34 @@ public sealed class PublicUuidTests
         Assert.Equal(0x0000000000004000L, fromZeros.MostSignificantBits);
         Assert.Equal(long.MinValue, fromZeros.LeastSignificantBits);
     }
+
+    [Fact]
+    public void ToArray_CopiesTheListInOrder_AndANullListIsNull()
+    {
+        Assert.Null(Uuid.ToArray(null));
+
+        Uuid other = Uuid.FromString("UXyU9i5ARn6W00ON2taeWA");
+        List<Uuid> list = new List<Uuid> { Uuid.ZERO_UUID, other };
+        Uuid[]? array = Uuid.ToArray(list);
+
+        Assert.Equal(new[] { Uuid.ZERO_UUID, other }, array);
+        list[0] = Uuid.ONE_UUID;
+        Assert.Equal(Uuid.ZERO_UUID, array![0]);
+        Assert.Empty(Uuid.ToArray(new List<Uuid>())!);
+    }
+
+    [Fact]
+    public void ToList_CopiesTheArrayInOrder_AndANullArrayIsNull()
+    {
+        Assert.Null(Uuid.ToList(null));
+
+        Uuid other = Uuid.FromString("UXyU9i5ARn6W00ON2taeWA");
+        Uuid[] array = { Uuid.ZERO_UUID, other };
+        IReadOnlyList<Uuid>? list = Uuid.ToList(array);
+
+        Assert.Equal(new[] { Uuid.ZERO_UUID, other }, list);
+        array[0] = Uuid.ONE_UUID;
+        Assert.Equal(Uuid.ZERO_UUID, list![0]);
+        Assert.Empty(Uuid.ToList(Array.Empty<Uuid>())!);
+    }
 }
