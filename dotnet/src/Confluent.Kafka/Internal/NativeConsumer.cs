@@ -563,9 +563,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    internal void Rebalance(IReadOnlyCollection<TopicPartition> partitions)
+    internal void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(newAssignment, paramName: nameof(newAssignment));
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -574,9 +574,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitions)
+    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitionsLost, paramName: nameof(partitionsLost));
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -2174,11 +2174,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // assigned.
     internal static (string Topic, int Partition)[] SnapshotPartitions(
         IReadOnlyCollection<TopicPartition> partitions,
-        bool nullTopicIsUnassigned = false)
+        bool nullTopicIsUnassigned = false,
+        string paramName = "partitions")
     {
         if (partitions is null)
         {
-            throw new ArgumentNullException(nameof(partitions));
+            throw new ArgumentNullException(paramName);
         }
 
         (string Topic, int Partition)[] snapshot = new (string, int)[partitions.Count];
@@ -2189,7 +2190,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 throw nullTopicIsUnassigned
                     ? new IllegalStateException(NoCurrentAssignment(tp.Partition))
-                    : new ArgumentException("Topic names must not be null.", nameof(partitions));
+                    : new ArgumentException("Topic names must not be null.", paramName);
             }
 
             snapshot[index++] = (tp.Topic, tp.Partition);

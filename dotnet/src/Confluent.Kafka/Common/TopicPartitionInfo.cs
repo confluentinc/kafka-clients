@@ -48,16 +48,16 @@ public sealed class TopicPartitionInfo
     /// <param name="replicas">
     /// The replicas, in replica-assignment order (the preferred replica is first).
     /// </param>
-    /// <param name="inSyncReplicas">The in-sync replicas — Java's <c>isr</c>.</param>
+    /// <param name="isr">The in-sync replicas.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="replicas"/> or <paramref name="inSyncReplicas"/> is null.
+    /// <paramref name="replicas"/> or <paramref name="isr"/> is null.
     /// </exception>
     public TopicPartitionInfo(
         int partition,
         Node? leader,
         IEnumerable<Node> replicas,
-        IEnumerable<Node> inSyncReplicas)
-        : this(Copy(replicas, nameof(replicas)), Copy(inSyncReplicas, nameof(inSyncReplicas)), null, null, partition, leader)
+        IEnumerable<Node> isr)
+        : this(Copy(replicas, nameof(replicas)), Copy(isr, nameof(isr)), null, null, partition, leader)
     {
     }
 
@@ -70,26 +70,26 @@ public sealed class TopicPartitionInfo
     /// <param name="replicas">
     /// The replicas, in replica-assignment order (the preferred replica is first).
     /// </param>
-    /// <param name="inSyncReplicas">The in-sync replicas — Java's <c>isr</c>.</param>
+    /// <param name="isr">The in-sync replicas.</param>
     /// <param name="elr">
     /// The eligible leader replicas; an <em>empty</em> collection means "reported, and empty". Use the
     /// four-argument constructor for a partition whose broker reported no such set.
     /// </param>
     /// <param name="lastKnownElr">The last known eligible leader replicas, as <paramref name="elr"/>.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="replicas"/>, <paramref name="inSyncReplicas"/>, <paramref name="elr"/> or
+    /// <paramref name="replicas"/>, <paramref name="isr"/>, <paramref name="elr"/> or
     /// <paramref name="lastKnownElr"/> is null.
     /// </exception>
     public TopicPartitionInfo(
         int partition,
         Node? leader,
         IEnumerable<Node> replicas,
-        IEnumerable<Node> inSyncReplicas,
+        IEnumerable<Node> isr,
         IEnumerable<Node> elr,
         IEnumerable<Node> lastKnownElr)
         : this(
             Copy(replicas, nameof(replicas)),
-            Copy(inSyncReplicas, nameof(inSyncReplicas)),
+            Copy(isr, nameof(isr)),
             Copy(elr, nameof(elr)),
             Copy(lastKnownElr, nameof(lastKnownElr)),
             partition,

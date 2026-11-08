@@ -321,7 +321,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
         bool autoComplete = true);
     public bool CompleteNext();
-    public bool ErrorNext(Exception exception);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
+    public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
     public void Clear();
 }
@@ -429,9 +429,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     // blocking-in-Java / callback-at-ABI → async (§4); method names mirror Java — no `Async` suffix
     Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
-    Task Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener,   // Java subscribe(Collection, listener) — M9/P6
+    Task Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback,   // Java subscribe(Collection, callback) — M9/P6
         CancellationToken cancellationToken = default);
-    Task Subscribe(IReadOnlyCollection<string> topics, IAsyncConsumerRebalanceListener listener, CancellationToken cancellationToken = default);   // Java subscribe(Collection, listener), async listener — M19/P1
+    Task Subscribe(IReadOnlyCollection<string> topics, IAsyncConsumerRebalanceListener callback, CancellationToken cancellationToken = default);   // Java subscribe(Collection, callback), async listener — M19/P1
     Task Unsubscribe(CancellationToken cancellationToken = default);
     // Java commitSync / commitSync(Map) (+ Duration overloads) — blocks in Java → Task over commit_sync*_cb (§4 note)
     Task Commit(CancellationToken cancellationToken = default);
@@ -461,7 +461,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
         CancellationToken cancellationToken = default);
     // Java currentLag — blocks in Java → Task over current_lag_cb; empty → null (ledger 103). Not wakeable:
     //   a cancel sends no Wakeup(); the Task ends with OperationCanceledException once the lag call has ended
-    Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default);
+    Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);                        // Java close()
     Task Close(CloseOptions options, CancellationToken cancellationToken = default);  // Java close(CloseOptions), close_with_options_cb
 
@@ -482,8 +482,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null);
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
-    public Task Rebalance(IReadOnlyCollection<TopicPartition> partitions);       // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
-    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitions);  // lose_partitions_cb (ledger 48)
+    public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);    // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
+    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // lose_partitions_cb (ledger 48)
     public void SetPollException(KafkaException? exception);                     // Java setPollException (decision 15); null clears
 }
 
@@ -500,7 +500,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
 public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // Java `Consumer<K,V>` (synchronous)
     ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);      // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
-    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener); // M9/P6
+    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback); // M9/P6
     void Unsubscribe();
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
@@ -520,7 +520,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // J
         IOffsetCommitCallback? callback = null);                           // null callback = Java's commitAsync(Map, null)
     void Seek(TopicPartition partition, long offset);                      // Java seek(tp, long) — blocking form
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
-    long? CurrentLag(TopicPartition partition);                            // Java currentLag(tp) — blocking form; empty → null (ledger 103)
+    long? CurrentLag(TopicPartition topicPartition);                       // Java currentLag(tp) — blocking form; empty → null (ledger 103)
     // ---- query family (M5/P8b) — blocks; returns the owned result directly; each has a TimeSpan overload (decision 22) ----
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions);
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
@@ -550,8 +550,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    //
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null);   // deviation §7: takes deserializers (Java's mock doesn't)
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
-    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions);  // Java MockConsumer.rebalance — inherent (M9/P6)
-    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitions);  // Java MockConsumer.losePartitions — inherent
+    public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);  // Java MockConsumer.rebalance — inherent (M9/P6)
+    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent
     public void SetPollException(KafkaException? exception);                     // Java setPollException (decision 15); null clears
 }
 ```

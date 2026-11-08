@@ -383,7 +383,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.LosePartitions(null!));
 
-        Assert.Equal("partitions", exception.ParamName);
+        Assert.Equal("partitionsLost", exception.ParamName);
     }
 
     [Fact]
@@ -914,7 +914,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
             () => consumer.Rebalance(null!));
 
-        Assert.Equal("partitions", exception.ParamName);
+        Assert.Equal("newAssignment", exception.ParamName);
     }
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets(TopicPartition partition, long offset) =>

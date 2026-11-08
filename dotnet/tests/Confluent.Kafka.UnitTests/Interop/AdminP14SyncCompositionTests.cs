@@ -415,8 +415,8 @@ public sealed class AdminP14SyncCompositionTests
         ListTopicsHarness harness = ListTopicsHarness.For(flavour);
         Dictionary<string, TopicListing> listings = new Dictionary<string, TopicListing>(StringComparer.Ordinal)
         {
-            ["alpha"] = new TopicListing("alpha", new Uuid(3L, 1L), isInternal: false),
-            ["beta"] = new TopicListing("beta", new Uuid(3L, 2L), isInternal: true),
+            ["alpha"] = new TopicListing("alpha", new Uuid(3L, 1L), @internal: false),
+            ["beta"] = new TopicListing("beta", new Uuid(3L, 2L), @internal: true),
         };
 
         switch (row)

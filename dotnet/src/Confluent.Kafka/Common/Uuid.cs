@@ -39,10 +39,10 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     private static readonly Func<Uuid> s_unsafeRandomUuid = UnsafeRandomUuid;
 
     /// <summary>Initializes an id from its high and low 64 bits.</summary>
-    public Uuid(long mostSignificantBits, long leastSignificantBits)
+    public Uuid(long mostSigBits, long leastSigBits)
     {
-        MostSignificantBits = mostSignificantBits;
-        LeastSignificantBits = leastSignificantBits;
+        MostSignificantBits = mostSigBits;
+        LeastSignificantBits = leastSigBits;
     }
 
     /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>

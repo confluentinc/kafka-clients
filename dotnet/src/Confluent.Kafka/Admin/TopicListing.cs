@@ -27,13 +27,13 @@ public sealed class TopicListing
     /// <summary>Initializes a listing — Java's constructor.</summary>
     /// <param name="name">The topic name.</param>
     /// <param name="topicId">The topic id.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
-    public TopicListing(string name, Uuid topicId, bool isInternal)
+    public TopicListing(string name, Uuid topicId, bool @internal)
     {
         Name = name ?? throw new ArgumentNullException(nameof(name));
         TopicId = topicId;
-        IsInternal = isInternal;
+        IsInternal = @internal;
     }
 
     /// <summary>The topic name — Java's <c>name()</c>.</summary>
