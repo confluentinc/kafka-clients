@@ -162,6 +162,128 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Subscribes to the topics matching <paramref name="pattern"/>, a regular expression compatible with Google
+    /// RE2/J that the broker evaluates (Java <c>subscribe(SubscriptionPattern)</c>).
+    /// </summary>
+    /// <remarks>
+    /// A pattern that is not compatible with RE2/J is not refused here: a later
+    /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
+    /// </remarks>
+    /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
+    /// operation has ended; no <c>wakeup()</c> is sent.
+    /// </param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="pattern"/> is null or its pattern is empty, with the message of Java's
+    /// <c>KafkaConsumer</c> on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and of Java's <c>MockConsumer</c>
+    /// on an <see cref="AsyncMockConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> contains a NUL character, which
+    /// the native client cannot receive unchanged.
+    /// </exception>
+    /// <exception cref="InvalidGroupIdException">
+    /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <c>group.id</c> is not set.
+    /// </exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
+    /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Subscribes to the topics matching <paramref name="pattern"/> with a rebalance listener (Java
+    /// <c>subscribe(SubscriptionPattern, ConsumerRebalanceListener)</c>). The listener fires on every later
+    /// rebalance until a subscribe that succeeds replaces it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The broker evaluates the pattern with Google RE2/J; one that is not compatible is not refused here: a later
+    /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
+    /// </para>
+    /// <para>
+    /// A replacing subscribe releases the previous listener, a listener-less
+    /// <see cref="Subscribe(SubscriptionPattern, CancellationToken)"/> included, as does disposing the consumer.
+    /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
+    /// <see cref="IConsumerRebalanceListener"/> describes where the listener runs, what throwing does, and what it
+    /// may call on its own consumer.
+    /// </para>
+    /// </remarks>
+    /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
+    /// <param name="callback">The rebalance listener to register.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
+    /// operation has ended; no <c>wakeup()</c> is sent.
+    /// </param>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="callback"/> is null, or <paramref name="pattern"/> is null or its pattern is empty, with the
+    /// message of Java's <c>KafkaConsumer</c> on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and of Java's
+    /// <c>MockConsumer</c> on an <see cref="AsyncMockConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> contains a NUL character, which
+    /// the native client cannot receive unchanged.
+    /// </exception>
+    /// <exception cref="InvalidGroupIdException">
+    /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <c>group.id</c> is not set.
+    /// </exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
+    /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    Task Subscribe(
+        SubscriptionPattern pattern,
+        IConsumerRebalanceListener callback,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Subscribes to the topics matching <paramref name="pattern"/> with an asynchronous rebalance listener (Java
+    /// <c>subscribe(SubscriptionPattern, ConsumerRebalanceListener)</c>). The listener fires on every later
+    /// rebalance until a subscribe that succeeds replaces it.
+    /// </summary>
+    /// <remarks>
+    /// The broker evaluates the pattern with Google RE2/J; one that is not compatible is not refused here: a later
+    /// <see cref="Poll(TimeSpan, CancellationToken)"/> fails with <see cref="InvalidRegularExpression"/>.
+    /// </remarks>
+    /// <param name="pattern">The RE2/J pattern to subscribe to.</param>
+    /// <param name="callback">The rebalance listener to register.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
+    /// operation has ended; no <c>wakeup()</c> is sent.
+    /// </param>
+    /// <returns>A <see cref="Task"/> that completes when the subscription is applied.</returns>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="callback"/> is null, or <paramref name="pattern"/> is null or its pattern is empty, with the
+    /// message of Java's <c>KafkaConsumer</c> on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and of Java's
+    /// <c>MockConsumer</c> on an <see cref="AsyncMockConsumer{TKey, TValue}"/>.
+    /// </exception>
+    /// <exception cref="ArgumentNullException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> is null.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// The <see cref="SubscriptionPattern.Pattern()"/> of <paramref name="pattern"/> contains a NUL character, which
+    /// the native client cannot receive unchanged.
+    /// </exception>
+    /// <exception cref="InvalidGroupIdException">
+    /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <c>group.id</c> is not set.
+    /// </exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
+    /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    Task Subscribe(
+        SubscriptionPattern pattern,
+        IAsyncConsumerRebalanceListener callback,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>).
     /// </summary>
     /// <param name="cancellationToken">

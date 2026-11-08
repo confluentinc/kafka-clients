@@ -841,7 +841,7 @@ public sealed class PublicConsumerRebalanceListenerTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(
-            () => consumer.Subscribe(null!, new RecordingListener()));
+            () => consumer.Subscribe((IReadOnlyCollection<string>)null!, new RecordingListener()));
 
         Assert.Equal("topics", exception.ParamName);
     }
