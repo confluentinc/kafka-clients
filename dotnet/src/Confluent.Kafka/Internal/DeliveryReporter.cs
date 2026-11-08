@@ -74,7 +74,7 @@ internal sealed class DeliveryReporter
 
     internal void Post(Action action) => _completion.Post(action);
 
-    internal Task CallAsync(IAsyncDeliveryCallback callback, RecordMetadata metadata, Exception? exception)
+    internal Task CallAsync(IAsyncCallback callback, RecordMetadata metadata, Exception? exception)
     {
         _inAsyncCallback.Value = true;
         try

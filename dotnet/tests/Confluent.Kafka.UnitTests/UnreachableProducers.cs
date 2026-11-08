@@ -168,7 +168,7 @@ internal static class UnreachableProducers
     }
 
     /// <summary>A delivery callback that runs a test's body on the producer's thread and records its own end.</summary>
-    internal sealed class ProbeCallback : IDeliveryCallback
+    internal sealed class ProbeCallback : ICallback
     {
         private readonly Action<RecordMetadata, Exception?> _body;
         private readonly ManualResetEventSlim _done = new ManualResetEventSlim();
@@ -210,7 +210,7 @@ internal static class UnreachableProducers
     /// A delivery callback that holds the producer's completion thread until released, so the completions queued
     /// behind it, the delivery of a later record included, wait.
     /// </summary>
-    internal sealed class HoldingCallback : IDeliveryCallback
+    internal sealed class HoldingCallback : ICallback
     {
         private readonly ManualResetEventSlim _entered = new ManualResetEventSlim();
         private readonly ManualResetEventSlim _release = new ManualResetEventSlim();

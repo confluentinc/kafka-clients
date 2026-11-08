@@ -151,10 +151,10 @@ internal sealed class LoggingCommitCallback : IOffsetCommitCallback
 }
 
 /// <summary>
-/// An <see cref="IDeliveryCallback"/> that logs each record's metadata and error in a
+/// An <see cref="ICallback"/> that logs each record's metadata and error in a
 /// <see cref="CallbackLog"/>, the C# port of Python's <c>make_logging_delivery_callback</c>.
 /// </summary>
-internal sealed class LoggingDeliveryCallback : IDeliveryCallback
+internal sealed class LoggingDeliveryCallback : ICallback
 {
     private readonly CallbackLog _log;
     private readonly ulong _producerId;

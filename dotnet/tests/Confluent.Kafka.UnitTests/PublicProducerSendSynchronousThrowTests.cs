@@ -194,7 +194,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
         IAsyncProducer<byte[], byte[]> producer,
         string overload,
         ProducerRecord<byte[], byte[]> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken) =>
         overload == Plain
             ? producer.Send(record, cancellationToken)
@@ -213,7 +213,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     }
 
     /// <summary>A delivery callback that counts its calls.</summary>
-    private sealed class CountingDeliveryCallback : IDeliveryCallback
+    private sealed class CountingDeliveryCallback : ICallback
     {
         private int _count;
 

@@ -434,7 +434,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     }
 
     /// <summary>Records each invocation's arguments and the thread it ran on. Asserts nothing itself.</summary>
-    private sealed class ThreadRecordingCallback : IDeliveryCallback
+    private sealed class ThreadRecordingCallback : ICallback
     {
         private readonly object _gate = new object();
 
@@ -520,7 +520,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     /// Counts invocations and the most threads ever inside it at once. The spin widens each
     /// invocation's window so two overlapping callers would be seen; it is not a correctness wait.
     /// </summary>
-    private sealed class ConcurrencyProbeCallback : IDeliveryCallback
+    private sealed class ConcurrencyProbeCallback : ICallback
     {
         private const int SpinIterations = 10000;
 
@@ -560,7 +560,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     }
 
     /// <summary>Sends again from inside the callback and keeps the re-entrant send's future.</summary>
-    private sealed class ReentrantSendCallback : IDeliveryCallback
+    private sealed class ReentrantSendCallback : ICallback
     {
         private readonly object _gate = new object();
 

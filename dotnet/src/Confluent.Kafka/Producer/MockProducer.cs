@@ -76,7 +76,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
     {
         if (record is null)
         {
@@ -91,7 +91,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
         return SendValidated(record, callback);
     }
 
-    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, IDeliveryCallback? callback)
+    private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, ICallback? callback)
     {
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();

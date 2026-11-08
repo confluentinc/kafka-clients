@@ -54,7 +54,7 @@ namespace Confluent.Kafka.Producer;
 /// </para>
 /// <para>
 /// <see cref="Close()"/> surfaces a close failure; <see cref="IDisposable.Dispose"/> swallows it. Both are
-/// idempotent. What a delivery callback may call on its own producer is in <see cref="IDeliveryCallback"/>.
+/// idempotent. What a delivery callback may call on its own producer is in <see cref="ICallback"/>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
@@ -90,7 +90,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <remarks>
     /// A <see langword="null"/> <paramref name="callback"/> is rejected, where Java accepts it:
     /// <see cref="Send(ProducerRecord{TKey, TValue})"/> already sends without one. The callback's contract is
-    /// in <see cref="IDeliveryCallback"/>.
+    /// in <see cref="ICallback"/>.
     /// </remarks>
     /// <param name="record">The record to publish.</param>
     /// <param name="callback">The delivery callback (non-null).</param>
@@ -109,7 +109,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
-    KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback);
+    KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback);
 
     /// <summary>
     /// Blocks until every record whose <c>Send</c> returned before this call has completed, and its
