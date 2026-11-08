@@ -31,10 +31,6 @@ namespace Confluent.Kafka.Admin;
 /// known (the broker was not asked, or did not answer), and empty when the broker answered that
 /// none is authorized, as Java's accessor.
 /// </para>
-/// <para>
-/// Value equality is not implemented, although Java's class overrides <c>equals</c> and
-/// <c>hashCode</c>: a recorded deviation, as on <see cref="TopicPartitionInfo"/>.
-/// </para>
 /// </remarks>
 public sealed class TopicDescription
 {
@@ -170,7 +166,7 @@ public sealed class TopicDescription
             hash = (hash * 31) + IsInternal.GetHashCode();
             foreach (TopicPartitionInfo partition in _partitions)
             {
-                hash = (hash * 31) + partition.GetHashCode();
+                hash = (hash * 31) + (partition?.GetHashCode() ?? 0);
             }
 
             hash = (hash * 31) + OperationsHash(_authorizedOperations);

@@ -27,9 +27,7 @@ namespace Confluent.Kafka.Common;
 /// <remarks>
 /// <see cref="Elr"/> and <see cref="LastKnownElr"/> are <see langword="null"/> when the broker
 /// reported no eligible-leader-replica set, which differs from an empty set. A partition reported
-/// with only one of the two sets reads both as absent, as Python's binding does. Value equality
-/// is deliberately not implemented, although Java's class overrides <c>equals</c>, as for
-/// <see cref="Node"/> and <see cref="PartitionInfo"/>.
+/// with only one of the two sets reads both as absent, as Python's binding does.
 /// </remarks>
 public sealed class TopicPartitionInfo
 {
@@ -212,7 +210,7 @@ public sealed class TopicPartitionInfo
         int hash = 1;
         foreach (Node node in nodes)
         {
-            hash = unchecked((31 * hash) + node.GetHashCode());
+            hash = unchecked((31 * hash) + (node?.GetHashCode() ?? 0));
         }
 
         return hash;

@@ -104,6 +104,24 @@ public sealed class PublicValueTypeJavaEqualityTests
     }
 
     [Fact]
+    public void TopicPartitionInfo_AndTopicDescription_HashANullElementAsJavasListHashCodeDoes()
+    {
+        TopicPartitionInfo withNull = new TopicPartitionInfo(0, s_n0, new Node[] { s_n0, null! }, new Node[] { null! });
+        TopicPartitionInfo sameNull = new TopicPartitionInfo(0, s_n0, new Node[] { s_n0, null! }, new Node[] { null! });
+
+        Assert.Equal(withNull, sameNull);
+        Assert.Equal(withNull.GetHashCode(), sameNull.GetHashCode());
+        Assert.Contains(sameNull, new HashSet<TopicPartitionInfo> { withNull });
+
+        TopicDescription description = new TopicDescription("t", false, new TopicPartitionInfo[] { null!, withNull });
+        TopicDescription sameDescription = new TopicDescription("t", false, new TopicPartitionInfo[] { null!, sameNull });
+
+        Assert.Equal(description, sameDescription);
+        Assert.Equal(description.GetHashCode(), sameDescription.GetHashCode());
+        Assert.Contains(sameDescription, new HashSet<TopicDescription> { description });
+    }
+
+    [Fact]
     public void PartitionInfo_Equality_ComparesTheTopicPartitionLeaderAndReplicaListsInOrder()
     {
         PartitionInfo info = new PartitionInfo("t", 0, s_n0, new[] { s_n0, s_n1 }, new[] { s_n0 }, Array.Empty<Node>());

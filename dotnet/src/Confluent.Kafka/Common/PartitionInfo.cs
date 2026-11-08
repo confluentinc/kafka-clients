@@ -24,7 +24,6 @@ namespace Confluent.Kafka.Common;
 /// Metadata about one partition of a topic, Java's <c>PartitionInfo</c>, as <c>PartitionsFor</c> and
 /// <c>ListTopics</c> return it.
 /// </summary>
-/// <remarks>Unlike Java's <c>PartitionInfo</c>, it has no value equality.</remarks>
 public sealed class PartitionInfo
 {
     /// <summary>
