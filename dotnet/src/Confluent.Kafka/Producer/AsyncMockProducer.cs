@@ -79,7 +79,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback callback,
+        ICallback callback,
         CancellationToken cancellationToken = default)
     {
         if (record is null)
@@ -98,7 +98,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncDeliveryCallback callback,
+        IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
         if (record is null)
@@ -117,9 +117,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     // Not async, so a serializer throw stays synchronous.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
-        IDeliveryCallback? callback,
+        ICallback? callback,
         CancellationToken cancellationToken,
-        IAsyncDeliveryCallback? asyncCallback = null)
+        IAsyncCallback? asyncCallback = null)
     {
         // Java's doSend checks for a closed producer before it serializes.
         _native.ThrowIfClosed();

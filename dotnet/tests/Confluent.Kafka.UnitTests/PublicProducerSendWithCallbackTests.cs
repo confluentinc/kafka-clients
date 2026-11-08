@@ -411,7 +411,7 @@ public sealed class PublicProducerSendWithCallbackTests
     }
 
     /// <summary>Waits for the test to publish the record's future, then reads it from inside the callback.</summary>
-    private sealed class OrderProbe : IDeliveryCallback
+    private sealed class OrderProbe : ICallback
     {
         private readonly ManualResetEventSlim _published = new ManualResetEventSlim();
         private KafkaFuture<RecordMetadata> _future;
@@ -444,7 +444,7 @@ public sealed class PublicProducerSendWithCallbackTests
     }
 
     /// <summary>Throws from <see cref="OnCompletion"/>, with its marker in the message.</summary>
-    private sealed class ThrowingCallback : IDeliveryCallback
+    private sealed class ThrowingCallback : ICallback
     {
         private readonly string _marker;
         private int _count;
@@ -464,15 +464,15 @@ public sealed class PublicProducerSendWithCallbackTests
     }
 
     /// <summary>Sends one more record, through the sync <c>Send</c>, from inside its own delivery callback.</summary>
-    private sealed class NestedSendCallback : IDeliveryCallback
+    private sealed class NestedSendCallback : ICallback
     {
         private readonly KafkaProducer<byte[], byte[]> _producer;
         private readonly ProducerRecord<byte[], byte[]> _record;
-        private readonly IDeliveryCallback _callback;
+        private readonly ICallback _callback;
         private readonly TaskCompletionSource<KafkaFuture<RecordMetadata>> _nested =
             new TaskCompletionSource<KafkaFuture<RecordMetadata>>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        internal NestedSendCallback(KafkaProducer<byte[], byte[]> producer, ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback)
+        internal NestedSendCallback(KafkaProducer<byte[], byte[]> producer, ProducerRecord<byte[], byte[]> record, ICallback callback)
         {
             _producer = producer;
             _record = record;

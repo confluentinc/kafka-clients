@@ -25,10 +25,10 @@ using Confluent.Kafka.Producer;
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// Hands one record's delivery from the binding's <see cref="IDeliveryCallback"/> to the engine's
+/// Hands one record's delivery from the binding's <see cref="ICallback"/> to the engine's
 /// <see cref="IPerfDeliveryCallback"/>, with the send's start time; one per measured send.
 /// </summary>
-internal sealed class V3Delivery : IDeliveryCallback
+internal sealed class V3Delivery : ICallback
 {
     private readonly IPerfDeliveryCallback _callback;
     private readonly long _sendStartMs;

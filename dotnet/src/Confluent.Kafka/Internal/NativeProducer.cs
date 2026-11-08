@@ -202,9 +202,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     internal ValueTask<AsyncKafkaFuture<RecordMetadata>> SendViaPump(
         SerializedProducerRecord record,
-        IDeliveryCallback? callback,
+        ICallback? callback,
         CancellationToken cancellationToken = default,
-        IAsyncDeliveryCallback? asyncCallback = null)
+        IAsyncCallback? asyncCallback = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         EnterUse();
@@ -228,7 +228,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal KafkaFuture<RecordMetadata> Send(SerializedProducerRecord record, IDeliveryCallback? callback)
+    internal KafkaFuture<RecordMetadata> Send(SerializedProducerRecord record, ICallback? callback)
     {
         EnterUse();
         try

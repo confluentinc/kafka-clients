@@ -31,11 +31,11 @@ namespace Confluent.Kafka.Internal;
 internal class DeliveryState
 {
     private const string CallbackThrew =
-        "Confluent.Kafka: an IDeliveryCallback (OnCompletion) threw; the producer was told, and the record's " +
+        "Confluent.Kafka: an ICallback (OnCompletion) threw; the producer was told, and the record's " +
         "outcome is unchanged. Details: {0}";
 
     private const string AsyncCallbackFailed =
-        "Confluent.Kafka: an IAsyncDeliveryCallback (OnCompletion) threw, or its task faulted or was canceled; the " +
+        "Confluent.Kafka: an IAsyncCallback (OnCompletion) threw, or its task faulted or was canceled; the " +
         "producer was told, and the record's outcome is unchanged. Details: {0}";
 
     private static readonly NativeMethods.CallbackOnCompletion s_onCompletion = OnCompletion;
@@ -43,8 +43,8 @@ internal class DeliveryState
     private static readonly Action<Task, object?> s_onAsyncCallbackEnded = OnAsyncCallbackEnded;
 
     private readonly DeliveryReporter _reporter;
-    private readonly IDeliveryCallback? _callback;
-    private readonly IAsyncDeliveryCallback? _asyncCallback;
+    private readonly ICallback? _callback;
+    private readonly IAsyncCallback? _asyncCallback;
     private readonly string _topic;
     private readonly int _partition;
     private GCHandle _self;
@@ -54,15 +54,15 @@ internal class DeliveryState
     private Exception? _failure;
     private long _callbackId;
 
-    internal DeliveryState(DeliveryReporter reporter, IDeliveryCallback? callback, string topic, int partition)
+    internal DeliveryState(DeliveryReporter reporter, ICallback? callback, string topic, int partition)
         : this(reporter, callback, null, topic, partition)
     {
     }
 
     internal DeliveryState(
         DeliveryReporter reporter,
-        IDeliveryCallback? callback,
-        IAsyncDeliveryCallback? asyncCallback,
+        ICallback? callback,
+        IAsyncCallback? asyncCallback,
         string topic,
         int partition)
     {

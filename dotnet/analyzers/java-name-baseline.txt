@@ -569,5 +569,3 @@ unmatched T:Confluent.Kafka.Common.GroupStateExtensions
 unmatched T:Confluent.Kafka.Common.Quota.ClientQuotaMatchType
 unmatched T:Confluent.Kafka.Consumer.AsyncConsumerRebalanceListenerBase
 unmatched T:Confluent.Kafka.Consumer.ConsumerRebalanceListenerBase
-unmatched T:Confluent.Kafka.Producer.IAsyncDeliveryCallback
-unmatched T:Confluent.Kafka.Producer.IDeliveryCallback
