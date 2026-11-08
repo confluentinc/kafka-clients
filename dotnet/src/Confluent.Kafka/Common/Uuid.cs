@@ -73,30 +73,31 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
 
     /// <summary>
-    /// Parses the URL-safe base64 text form, padded or not: Java's <c>Uuid.fromString</c>. Throws
-    /// <see cref="ArgumentNullException"/> for <see langword="null"/>, and <see cref="ArgumentException"/> for
-    /// text longer than 24 characters, not valid URL-safe base64, or not decoding to 16 bytes.
+    /// Creates an id from the URL-safe base64 text form <see cref="ToString"/> writes, padded or not: Java's
+    /// <c>Uuid.fromString</c>. Throws <see cref="ArgumentNullException"/> for <see langword="null"/>, and
+    /// <see cref="ArgumentException"/> for text longer than 24 characters, not valid URL-safe base64, or not
+    /// decoding to 16 bytes.
     /// </summary>
-    public static Uuid Parse(string value)
+    public static Uuid FromString(string str)
     {
-        if (value is null)
+        if (str is null)
         {
-            throw new ArgumentNullException(nameof(value));
+            throw new ArgumentNullException(nameof(str));
         }
 
-        if (value.Length > MaxTextLength)
+        if (str.Length > MaxTextLength)
         {
             throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string with prefix `{0}` is too long to be decoded as a base64 UUID",
-                    value.Substring(0, MaxTextLength)));
+                    str.Substring(0, MaxTextLength)));
         }
 
         byte[] bytes;
         try
         {
-            bytes = DecodeUrlSafeBase64(value);
+            bytes = DecodeUrlSafeBase64(str);
         }
         catch (FormatException exception)
         {
@@ -104,7 +105,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string `{0}` is not a valid base64 UUID",
-                    value),
+                    str),
                 exception);
         }
 
@@ -114,44 +115,11 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Input string `{0}` decoded as {1} bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
-                    value,
+                    str,
                     bytes.Length));
         }
 
         return new Uuid(ReadBigEndianInt64(bytes, 0), ReadBigEndianInt64(bytes, 8));
-    }
-
-    /// <summary>
-    /// Parses as <see cref="Parse(string)"/> does, but returns <see langword="false"/>, with <see cref="ZERO_UUID"/>,
-    /// instead of throwing.
-    /// </summary>
-    public static bool TryParse(string? value, out Uuid result)
-    {
-        if (value is null || value.Length > MaxTextLength)
-        {
-            result = ZERO_UUID;
-            return false;
-        }
-
-        byte[] bytes;
-        try
-        {
-            bytes = DecodeUrlSafeBase64(value);
-        }
-        catch (FormatException)
-        {
-            result = ZERO_UUID;
-            return false;
-        }
-
-        if (bytes.Length != ByteCount)
-        {
-            result = ZERO_UUID;
-            return false;
-        }
-
-        result = new Uuid(ReadBigEndianInt64(bytes, 0), ReadBigEndianInt64(bytes, 8));
-        return true;
     }
 
     /// <inheritdoc/>

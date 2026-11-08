@@ -319,7 +319,6 @@ missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.se
 missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#equals(Object)
 missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#hashCode()
 missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#isr()
-missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#fromString(String)
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#getLeastSignificantBits()
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#getMostSignificantBits()
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toArray(List)
@@ -1005,8 +1004,6 @@ property P:Confluent.Kafka.Producer.RecordMetadata.Timestamp
 property P:Confluent.Kafka.Producer.RecordMetadata.Topic
 unmatched F:Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.Instance
 unmatched F:Confluent.Kafka.Common.Errors.DisconnectException.Instance
-unmatched M:Confluent.Kafka.Common.Uuid.Parse(System.String)
-unmatched M:Confluent.Kafka.Common.Uuid.TryParse(System.String,Confluent.Kafka.Common.Uuid@)
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Threading.CancellationToken)
