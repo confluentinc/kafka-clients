@@ -197,6 +197,22 @@ public sealed class PublicMockConsumerJavaHelpersTests
     }
 
     [Fact]
+    public void LastPollTimeout_AnswersAnotherThreadWhileARebalanceListenerHoldsTheConsumer()
+    {
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, Earliest);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        bool workerAnswered = false;
+        consumer.Subscribe(
+            new[] { "test" },
+            new AssignedListener(() =>
+                workerAnswered = Task.Run(() => consumer.LastPollTimeout()).Wait(TimeSpan.FromSeconds(10))));
+
+        TestTimeout.Run(() => consumer.Rebalance(new[] { s_test0 }), s_deadline);
+
+        Assert.True(workerAnswered);
+    }
+
+    [Fact]
     public void Closed_IsFalseUntilTheConsumerCloses_AndTheOtherHelpersThenThrow()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -242,6 +258,23 @@ public sealed class PublicMockConsumerJavaHelpersTests
     }
 
     // Java's MockConsumerTest builds its consumer with the earliest reset strategy.
+    private sealed class AssignedListener : IConsumerRebalanceListener
+    {
+        private readonly Action _onAssigned;
+
+        internal AssignedListener(Action onAssigned) => _onAssigned = onAssigned;
+
+        public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+
+        public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
+
+        public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
+        {
+        }
+    }
+
     private static MockConsumer<byte[], byte[]> Assigned()
     {
         MockConsumer<byte[], byte[]> consumer =

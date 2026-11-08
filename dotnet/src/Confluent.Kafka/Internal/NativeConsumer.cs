@@ -1763,15 +1763,19 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
 
+    // Java's lastPollTimeout() is the one mock helper that is not synchronized, so this read takes no ownership and
+    // answers while another thread's call holds the mock, as the native getter does.
     internal TimeSpan? LastPollTimeout()
     {
         long timeoutMs = -1;
-        CallMock((mock, _) =>
-        {
-            IntPtr outErr = IntPtr.Zero;
-            timeoutMs = NativeMethods.MockConsumerLastPollTimeout(mock, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        });
+        CallMock(
+            (mock, _) =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                timeoutMs = NativeMethods.MockConsumerLastPollTimeout(mock, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            },
+            UseKind.Unowned);
         return timeoutMs < 0 ? null : TimeSpan.FromMilliseconds(timeoutMs);
     }
 
@@ -2375,10 +2379,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    private void CallMock(Action<IntPtr, NativeCallArguments> call)
+    private void CallMock(Action<IntPtr, NativeCallArguments> call, UseKind kind = UseKind.Owned)
     {
         bool added = false;
-        int owner = EnterUse();
+        int owner = EnterUse(kind);
         try
         {
             using NativeCallArguments arguments = new NativeCallArguments();
