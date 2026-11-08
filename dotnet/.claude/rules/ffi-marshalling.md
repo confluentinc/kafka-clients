@@ -1953,8 +1953,13 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     negative timeout <ms>"; `Close`: "The timeout cannot be negative."); `Seek`'s negative
     offset; a null `Subscribe` collection ("Topic collection to subscribe to cannot be
     null") or a null or blank topic in it ("Topic collection to subscribe to cannot contain
-    null or empty topic"); a null or empty `SubscriptionPattern` ("Topic pattern to
-    subscribe to cannot be null" / "… cannot be empty"); a null `Assign` collection ("Topic partitions collection to
+    null or empty topic"); a null `SubscriptionPattern` ("Topic pattern to subscribe to
+    cannot be null"; on a mock Java's `MockConsumer` text, "Topic pattern cannot be null"),
+    and on a mock an empty one ("Topic pattern cannot be empty"), checked on a mock before
+    the closed check, as Java's `MockConsumer` checks the pattern before `ensureNotClosed()`
+    (on a `KafkaConsumer` the core refuses an empty pattern after its closed and `group.id`
+    checks, with Java's "Topic pattern to subscribe to cannot be empty"); a null `Assign`
+    collection ("Topic partitions collection to
     assign to cannot be null") or a null or blank topic in one of its partitions ("Topic
     partitions to assign to cannot have null or empty topic"); a null listener
     ("RebalanceListener cannot be null"); and a null `SeekToBeginning` / `SeekToEnd`
@@ -1966,7 +1971,8 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     closed."). Any other .NET-only precondition, where Java throws `NullPointerException`
     or nothing, keeps `ArgumentNullException` (a null `PartitionsFor` topic; a null
     `Pause` / `Resume`, `Committed`, `BeginningOffsets` or `EndOffsets` collection or
-    `OffsetsForTimes` map; a null config) or `ArgumentOutOfRangeException`. **Mandatory**, not
+    `OffsetsForTimes` map; a null config; a `SubscriptionPattern` whose `Pattern()` is
+    null) or `ArgumentOutOfRangeException`. **Mandatory**, not
     optional: a `NULL` where the header asks for a mandatory pointer comes back as -32
     "<param> must not be null" (`LocalNullPointerError`), which the error table maps to
     `ArgumentNullException` with the core's message and no `ParamName`. Any other panic in
@@ -2118,9 +2124,10 @@ same `ConcurrentModificationException`, sync or async (decision 17).
     async failure faults the `Task` (via `MockConsumer.SetPollException`, decision 15); the
     handle is freed exactly once; a non-ASCII message round-trips.
   - A null `Subscribe`, `Assign` or `SeekToBeginning` collection, a null topic in a
-    `Subscribe` or `Assign` argument, a null pattern or a null listener →
-    `IllegalArgumentException` with Java's message; a null `PartitionsFor` topic or `Pause`
-    collection → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
+    `Subscribe` or `Assign` argument, a null pattern (each flavour's text), an empty pattern
+    on a mock, or a null listener → `IllegalArgumentException` with Java's message; a null
+    `PartitionsFor` topic or `Pause` collection → `ArgumentNullException`; a pattern whose
+    `Pattern()` is null → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
     with Java's or the core's message; post-`Dispose` → `IllegalStateException` with the
     closed message; each before any native call.
   - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
