@@ -1710,6 +1710,97 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
 
+    internal void SetOffsetsException(KafkaException? exception) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetOffsetsError(
+                mock, exception is null ? IntPtr.Zero : ManagedExceptionCarrier.ToError(exception), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets)
+    {
+        if (newOffsets is null)
+        {
+            throw new ArgumentNullException(nameof(newOffsets));
+        }
+
+        int count = newOffsets.Count;
+        string[] topics = new string[count];
+        int[] partitions = new int[count];
+        long[] offsets = new long[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
+        {
+            topics[index] = entry.Key.Topic ?? throw new ArgumentException("Topic names must not be null.", nameof(newOffsets));
+            partitions[index] = entry.Key.Partition;
+            offsets[index] = entry.Value;
+            index++;
+        }
+
+        CallMock((mock, arguments) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerUpdateDurationOffsets(mock, arguments.LongMap(topics, partitions, offsets, count), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void ScheduleNopPollTask() =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerScheduleNopPollTask(mock, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void SetMaxPollRecords(long maxPollRecords) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetMaxPollRecords(mock, maxPollRecords, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal TimeSpan? LastPollTimeout()
+    {
+        long timeoutMs = -1;
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            timeoutMs = NativeMethods.MockConsumerLastPollTimeout(mock, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+        return timeoutMs < 0 ? null : TimeSpan.FromMilliseconds(timeoutMs);
+    }
+
+    // Close tears the native mock down, so once closed the answer is the managed state's, as Java's closed() still is.
+    internal bool MockClosed()
+    {
+        if (Volatile.Read(ref _closed) != Open)
+        {
+            return true;
+        }
+
+        bool closed = false;
+        try
+        {
+            CallMock((mock, _) =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                closed = NativeMethods.MockConsumerClosed(mock, ref outErr) != 0;
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            });
+        }
+        catch (IllegalStateException) when (Volatile.Read(ref _closed) != Open)
+        {
+            return true;
+        }
+
+        return closed;
+    }
+
     internal void Wakeup()
     {
         if (!TryEnterUse(out int owner, UseKind.Unowned))
