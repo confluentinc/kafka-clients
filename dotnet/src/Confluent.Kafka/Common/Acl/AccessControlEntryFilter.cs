@@ -95,6 +95,85 @@ public sealed class AccessControlEntryFilter
     public bool IsUnknown =>
         Operation == AclOperation.UNKNOWN || PermissionType == AclPermissionType.UNKNOWN;
 
+    /// <summary>
+    /// Whether this filter matches <paramref name="other"/> — Java's <c>matches(AccessControlEntry)</c>: each
+    /// component is <see langword="null"/> or <c>ANY</c>, or equal to the entry's.
+    /// </summary>
+    /// <param name="other">The access control entry to test.</param>
+    /// <returns>Whether the filter matches the entry.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="other"/> is null.</exception>
+    public bool Matches(AccessControlEntry other)
+    {
+        if (other is null)
+        {
+            throw new ArgumentNullException(nameof(other));
+        }
+
+        if (Principal is not null && !string.Equals(Principal, other.Principal, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (Host is not null && !string.Equals(Host, other.Host, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (Operation != AclOperation.ANY && Operation != other.Operation)
+        {
+            return false;
+        }
+
+        return PermissionType == AclPermissionType.ANY || PermissionType == other.PermissionType;
+    }
+
+    /// <summary>
+    /// Whether this filter matches at most one entry — Java's <c>matchesAtMostOne()</c>: it has no
+    /// <see cref="FindIndefiniteField"/>.
+    /// </summary>
+    /// <returns>Whether every component is definite.</returns>
+    public bool MatchesAtMostOne() => FindIndefiniteField() is null;
+
+    /// <summary>
+    /// A description of the first component that keeps this filter from matching just one entry, or
+    /// <see langword="null"/> when there is none — Java's <c>findIndefiniteField()</c>.
+    /// </summary>
+    /// <returns>Java's text for the indefinite component, or <see langword="null"/>.</returns>
+    public string? FindIndefiniteField()
+    {
+        if (Principal is null)
+        {
+            return "Principal is NULL";
+        }
+
+        if (Host is null)
+        {
+            return "Host is NULL";
+        }
+
+        if (Operation == AclOperation.ANY)
+        {
+            return "Operation is ANY";
+        }
+
+        if (Operation == AclOperation.UNKNOWN)
+        {
+            return "Operation is UNKNOWN";
+        }
+
+        if (PermissionType == AclPermissionType.ANY)
+        {
+            return "Permission type is ANY";
+        }
+
+        if (PermissionType == AclPermissionType.UNKNOWN)
+        {
+            return "Permission type is UNKNOWN";
+        }
+
+        return null;
+    }
+
     /// <summary>Value equality over all four components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>
