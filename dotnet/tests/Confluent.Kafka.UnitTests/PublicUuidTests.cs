@@ -45,11 +45,11 @@ public sealed class PublicUuidTests
     [InlineData(-1L, -1L)]
     [InlineData(long.MinValue, long.MaxValue)]
     [InlineData(0x0123456789ABCDEFL, 0x1122334455667788L)]
-    public void Parse_InvertsToString(long mostSignificant, long leastSignificant)
+    public void FromString_InvertsToString(long mostSignificant, long leastSignificant)
     {
         Uuid original = new Uuid(mostSignificant, leastSignificant);
 
-        Uuid parsed = Uuid.Parse(original.ToString());
+        Uuid parsed = Uuid.FromString(original.ToString());
 
         Assert.Equal(original, parsed);
         Assert.Equal(mostSignificant, parsed.GetMostSignificantBits());
@@ -91,95 +91,73 @@ public sealed class PublicUuidTests
     }
 
     [Fact]
-    public void Parse_RejectsWhatJavaRejects()
+    public void FromString_RejectsWhatJavaRejects()
     {
-        Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => Uuid.Parse(null!)).ParamName);
+        Assert.Equal("str", Assert.Throws<ArgumentNullException>(() => Uuid.FromString(null!)).ParamName);
 
         string twentyFive = new string('A', 25);
-        IllegalArgumentException tooLong = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(twentyFive));
+        IllegalArgumentException tooLong = Assert.Throws<IllegalArgumentException>(() => Uuid.FromString(twentyFive));
         Assert.Equal(
             "Input string with prefix `" + new string('A', 24) + "` is too long to be decoded as a base64 UUID",
             tooLong.Message);
 
         string twentyThree = new string('A', 23);
-        IllegalArgumentException wrongCount = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(twentyThree));
+        IllegalArgumentException wrongCount = Assert.Throws<IllegalArgumentException>(() => Uuid.FromString(twentyThree));
         Assert.Equal(
             "Input string `" + twentyThree + "` decoded as 17 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
             wrongCount.Message);
 
-        IllegalArgumentException wrongLength = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse("AAAA"));
+        IllegalArgumentException wrongLength = Assert.Throws<IllegalArgumentException>(() => Uuid.FromString("AAAA"));
         Assert.Equal(
             "Input string `AAAA` decoded as 3 bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
             wrongLength.Message);
 
-        IllegalArgumentException notBase64 = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse("!!!!"));
+        IllegalArgumentException notBase64 = Assert.Throws<IllegalArgumentException>(() => Uuid.FromString("!!!!"));
         Assert.Equal("Input string `!!!!` is not a valid base64 UUID", notBase64.Message);
     }
 
     [Fact]
-    public void Parse_RejectsTheStandardBase64Alphabet()
+    public void FromString_RejectsTheStandardBase64Alphabet()
     {
         string urlSafe = new Uuid(-1L, -1L).ToString();
         string standard = urlSafe.Replace('_', '/');
         Assert.NotEqual(urlSafe, standard);
 
-        IllegalArgumentException slash = Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(standard));
+        IllegalArgumentException slash = Assert.Throws<IllegalArgumentException>(() => Uuid.FromString(standard));
         Assert.Equal("Input string `" + standard + "` is not a valid base64 UUID", slash.Message);
 
-        Assert.False(Uuid.TryParse(standard, out Uuid rejected));
-        Assert.Equal(Uuid.ZERO_UUID, rejected);
+        Assert.Throws<IllegalArgumentException>(() => Uuid.FromString("AAAAAAAAAAAAAAAAAAAA+A"));
+        Assert.Equal("AAAAAAAAAAAAAAAAAAAA-A", Uuid.FromString("AAAAAAAAAAAAAAAAAAAA-A").ToString());
 
-        Assert.Throws<IllegalArgumentException>(() => Uuid.Parse("AAAAAAAAAAAAAAAAAAAA+A"));
-        Assert.Equal("AAAAAAAAAAAAAAAAAAAA-A", Uuid.Parse("AAAAAAAAAAAAAAAAAAAA-A").ToString());
-
-        Assert.Equal(new Uuid(-1L, -1L), Uuid.Parse(urlSafe));
+        Assert.Equal(new Uuid(-1L, -1L), Uuid.FromString(urlSafe));
     }
 
     [Fact]
-    public void Parse_AcceptsThePaddedFormJavaAccepts()
+    public void FromString_AcceptsThePaddedFormJavaAccepts()
     {
         Uuid expected = new Uuid(1L, 2L);
 
-        Assert.Equal(expected, Uuid.Parse("AAAAAAAAAAEAAAAAAAAAAg=="));
-        Assert.True(Uuid.TryParse("AAAAAAAAAAEAAAAAAAAAAg==", out Uuid parsed));
+        Uuid parsed = Uuid.FromString("AAAAAAAAAAEAAAAAAAAAAg==");
         Assert.Equal(expected, parsed);
 
         Assert.Equal("AAAAAAAAAAEAAAAAAAAAAg", parsed.ToString());
     }
 
     [Fact]
-    public void Parse_RejectsPaddingJavaRejects()
+    public void FromString_RejectsPaddingJavaRejects()
     {
         string padded = new Uuid(1L, 2L) + "==";
         Assert.Equal(24, padded.Length);
-        Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded));
+        Assert.Equal(new Uuid(1L, 2L), Uuid.FromString(padded));
 
         string shortOfPadding = padded.Substring(0, padded.Length - 1);
         Assert.Equal(23, shortOfPadding.Length);
 
         IllegalArgumentException rejected =
-            Assert.Throws<IllegalArgumentException>(() => Uuid.Parse(shortOfPadding));
+            Assert.Throws<IllegalArgumentException>(() => Uuid.FromString(shortOfPadding));
         Assert.Equal("Input string `" + shortOfPadding + "` is not a valid base64 UUID", rejected.Message);
 
-        Assert.False(Uuid.TryParse(shortOfPadding, out Uuid fromTryParse));
-        Assert.Equal(Uuid.ZERO_UUID, fromTryParse);
-
-        Assert.Equal(new Uuid(1L, 2L), Uuid.Parse(padded.Substring(0, 22)));
-    }
-
-    [Fact]
-    public void TryParse_ReportsFailureWithoutThrowing()
-    {
-        Assert.False(Uuid.TryParse(null, out Uuid fromNull));
-        Assert.Equal(Uuid.ZERO_UUID, fromNull);
-
-        Assert.False(Uuid.TryParse("AAAAAAAAAAAAAAAAAAAAAAAAA", out _));
-        Assert.False(Uuid.TryParse("AAAAAAAAAAAAAAAAAAAAAAA", out _));
-        Assert.False(Uuid.TryParse("AAAA", out _));
-        Assert.False(Uuid.TryParse("!!!!", out _));
-
-        Assert.True(Uuid.TryParse("AAAAAAAAAAEAAAAAAAAAAg", out Uuid parsed));
-        Assert.Equal(new Uuid(1L, 2L), parsed);
+        Assert.Equal(new Uuid(1L, 2L), Uuid.FromString(padded.Substring(0, 22)));
     }
 
     [Fact]

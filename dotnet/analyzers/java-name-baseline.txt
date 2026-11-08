@@ -290,7 +290,6 @@ missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.se
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$WrapperSerde
 missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#equals(Object)
 missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#hashCode()
-missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#fromString(String)
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toArray(List)
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toList(Uuid[])
 missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map)
@@ -572,8 +571,6 @@ parameter M:Confluent.Kafka.Producer.AsyncMockProducer`2.ErrorNext(System.Except
 parameter M:Confluent.Kafka.Producer.MockProducer`2.ErrorNext(System.Exception)
 parameter M:Confluent.Kafka.Producer.ProducerRecord`2.#ctor(System.String,`1,`0,System.Nullable{System.Int32},System.Nullable{System.Int64},System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Header.Header})
 unmatched M:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent.MatchType
-unmatched M:Confluent.Kafka.Common.Uuid.Parse(System.String)
-unmatched M:Confluent.Kafka.Common.Uuid.TryParse(System.String,Confluent.Kafka.Common.Uuid@)
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.Threading.CancellationToken)
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},System.TimeSpan,System.Threading.CancellationToken)
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Commit(System.Threading.CancellationToken)
