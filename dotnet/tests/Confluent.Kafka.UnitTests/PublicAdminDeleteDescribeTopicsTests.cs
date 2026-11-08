@@ -375,7 +375,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         foreach (MethodInfo method in new[] { delete, describe })
         {
             ParameterInfo[] parameters = method.GetParameters();
-            Assert.Equal("topicNames", parameters[0].Name);
+            Assert.Equal(method == delete ? "topics" : "topicNames", parameters[0].Name);
             Assert.False(parameters[0].IsOptional);
             Assert.True(parameters[1].IsOptional);
             Assert.Null(parameters[1].DefaultValue);
@@ -473,7 +473,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             {
                 ArgumentNullException delete = Assert.Throws<ArgumentNullException>(
                     () => admin.DeleteTopics((IReadOnlyCollection<string>)null!));
-                Assert.Equal("topicNames", delete.ParamName);
+                Assert.Equal("topics", delete.ParamName);
                 Assert.StartsWith("Value cannot be null.", delete.Message, StringComparison.Ordinal);
 
                 ArgumentNullException describe = Assert.Throws<ArgumentNullException>(

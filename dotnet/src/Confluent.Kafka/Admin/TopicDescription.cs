@@ -49,15 +49,15 @@ public sealed class TopicDescription
     /// <see cref="Uuid.ZERO_UUID"/> as the topic id — Java's three-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="partitions"/> is null.
     /// </exception>
-    public TopicDescription(string name, bool isInternal, IEnumerable<TopicPartitionInfo> partitions)
-        : this(name, isInternal, partitions, Array.Empty<AclOperation>())
+    public TopicDescription(string name, bool @internal, IEnumerable<TopicPartitionInfo> partitions)
+        : this(name, @internal, partitions, Array.Empty<AclOperation>())
     {
     }
 
@@ -66,7 +66,7 @@ public sealed class TopicDescription
     /// four-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
@@ -78,16 +78,16 @@ public sealed class TopicDescription
     /// </exception>
     public TopicDescription(
         string name,
-        bool isInternal,
+        bool @internal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations)
-        : this(name, isInternal, partitions, authorizedOperations, Uuid.ZERO_UUID)
+        : this(name, @internal, partitions, authorizedOperations, Uuid.ZERO_UUID)
     {
     }
 
     /// <summary>Creates a description — Java's five-argument constructor.</summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
@@ -100,7 +100,7 @@ public sealed class TopicDescription
     /// </exception>
     public TopicDescription(
         string name,
-        bool isInternal,
+        bool @internal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations,
         Uuid topicId)
@@ -111,7 +111,7 @@ public sealed class TopicDescription
         }
 
         _name = name ?? throw new ArgumentNullException(nameof(name));
-        _isInternal = isInternal;
+        _isInternal = @internal;
         _partitions = new List<TopicPartitionInfo>(partitions);
 
         _authorizedOperations =

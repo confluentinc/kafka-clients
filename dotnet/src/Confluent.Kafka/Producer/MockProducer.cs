@@ -129,17 +129,17 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     public bool CompleteNext() => _native.MockCompleteNext();
 
     /// <summary>
-    /// Fails the earliest uncompleted send with <paramref name="exception"/> (Java <c>MockProducer.errorNext</c>); its
+    /// Fails the earliest uncompleted send with <paramref name="e"/> (Java <c>MockProducer.errorNext</c>); its
     /// delivery callback receives the same instance, and its future's <see cref="KafkaFuture{T}.Get()"/> throws an
     /// <see cref="Confluent.Kafka.ExecutionException"/> around it.
     /// </summary>
-    /// <param name="exception">
+    /// <param name="e">
     /// The exception to fail the send with; <see langword="null"/> completes it successfully, as
     /// <see cref="CompleteNext"/> does.
     /// </param>
     /// <returns><see langword="true"/> if a pending send was completed; otherwise <see langword="false"/>.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool ErrorNext(Exception? exception) => _native.MockErrorNext(exception);
+    public bool ErrorNext(Exception? e) => _native.MockErrorNext(e);
 
     /// <summary>
     /// The number of records in the sent history (Java <c>MockProducer.history().size()</c>); the native mock

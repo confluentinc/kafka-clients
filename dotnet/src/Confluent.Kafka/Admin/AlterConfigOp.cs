@@ -43,27 +43,27 @@ public sealed class AlterConfigOp
     /// <c>AlterConfigOp(ConfigEntry configEntry, OpType operationType)</c>.
     /// </summary>
     /// <param name="configEntry">The configuration entry the operation applies to.</param>
-    /// <param name="opType">What to do with it.</param>
+    /// <param name="operationType">What to do with it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="configEntry"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="opType"/> is not a defined <see cref="AlterConfigOpType"/> member.
+    /// <paramref name="operationType"/> is not a defined <see cref="AlterConfigOpType"/> member.
     /// </exception>
     /// <remarks>
     /// The null check is stricter than Java, which stores the reference unchecked. An undefined
-    /// <paramref name="opType"/> is refused, because Java's closed <c>OpType</c> enum cannot hold one
+    /// <paramref name="operationType"/> is refused, because Java's closed <c>OpType</c> enum cannot hold one
     /// and has no <c>UNKNOWN</c> member to map it to, while a C# enum accepts any integral value by
     /// cast.
     /// </remarks>
-    public AlterConfigOp(ConfigEntry configEntry, AlterConfigOpType opType)
+    public AlterConfigOp(ConfigEntry configEntry, AlterConfigOpType operationType)
     {
         _configEntry = configEntry ?? throw new ArgumentNullException(nameof(configEntry));
-        if (!Enum.IsDefined(typeof(AlterConfigOpType), opType))
+        if (!Enum.IsDefined(typeof(AlterConfigOpType), operationType))
         {
             throw new ArgumentOutOfRangeException(
-                nameof(opType), opType, "opType must be a defined AlterConfigOpType member.");
+                nameof(operationType), operationType, "operationType must be a defined AlterConfigOpType member.");
         }
 
-        _opType = opType;
+        _opType = operationType;
     }
 
     /// <summary>The entry this operation applies to — Java's <c>configEntry()</c>.</summary>

@@ -38,10 +38,10 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     private readonly long _leastSignificantBits;
 
     /// <summary>Initializes an id from its high and low 64 bits.</summary>
-    public Uuid(long mostSignificantBits, long leastSignificantBits)
+    public Uuid(long mostSigBits, long leastSigBits)
     {
-        _mostSignificantBits = mostSignificantBits;
-        _leastSignificantBits = leastSignificantBits;
+        _mostSignificantBits = mostSigBits;
+        _leastSignificantBits = leastSigBits;
     }
 
     /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>

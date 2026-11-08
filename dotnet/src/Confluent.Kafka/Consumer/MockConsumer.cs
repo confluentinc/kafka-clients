@@ -79,8 +79,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
 
     /// <inheritdoc/>
-    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
-        _native.Subscribe(topics, listener);
+    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback) =>
+        _native.Subscribe(topics, callback);
 
     /// <inheritdoc/>
     public void Unsubscribe() => _native.Unsubscribe();
@@ -183,8 +183,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
         _native.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata);
 
     /// <inheritdoc/>
-    public long? CurrentLag(TopicPartition partition) =>
-        _native.CurrentLag(partition.Topic(), partition.Partition());
+    public long? CurrentLag(TopicPartition topicPartition) =>
+        _native.CurrentLag(topicPartition.Topic(), topicPartition.Partition());
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();
@@ -288,7 +288,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void SetPollException(KafkaException? exception) => _native.SetPollException(exception);
 
     /// <summary>
-    /// Simulates a rebalance to the new full assignment <paramref name="partitions"/> (Java
+    /// Simulates a rebalance to the new full assignment <paramref name="newAssignment"/> (Java
     /// <c>MockConsumer.rebalance(Collection)</c>).
     /// </summary>
     /// <remarks>
@@ -297,16 +297,16 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// returns after they have returned; an exception from either is thrown here as the same instance. Buffered
     /// records are cleared, as in Java.
     /// </remarks>
-    /// <param name="partitions">The new full assignment.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <param name="newAssignment">The new full assignment.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or the consumer is manually assigned (Java's <c>IllegalArgumentException</c>).
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
+    public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment) => _native.Rebalance(newAssignment);
 
     /// <summary>
-    /// Simulates losing <paramref name="partitions"/> without a clean revocation (Java
+    /// Simulates losing <paramref name="partitionsLost"/> without a clean revocation (Java
     /// <c>MockConsumer.losePartitions(Collection)</c>).
     /// </summary>
     /// <remarks>
@@ -314,13 +314,13 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <c>OnPartitionsLost</c> fires with them on the calling thread; then they leave the <see cref="Assignment"/>.
     /// An exception from the listener is thrown here as the same instance, and the assignment is left unchanged.
     /// </remarks>
-    /// <param name="partitions">The partitions to lose; every one must be currently assigned.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or a partition is not currently assigned.
     /// </exception>
-    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitions) => _native.LosePartitions(partitions);
+    public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost) => _native.LosePartitions(partitionsLost);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
