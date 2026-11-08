@@ -179,6 +179,34 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     }
 
     [Fact]
+    public void PartitionInfo_FiveArgumentConstructor_HasNoOfflineReplicas()
+    {
+        Node leader = new Node(1, "h", 9092, null);
+        Node[] replicas = { leader };
+
+        PartitionInfo info = new PartitionInfo("t", 3, leader, replicas, replicas);
+
+        Assert.Same(replicas, info.Replicas);
+        Assert.Same(replicas, info.InSyncReplicas);
+        Assert.Empty(info.OfflineReplicas);
+        Assert.Equal(new PartitionInfo("t", 3, leader, replicas, replicas, Array.Empty<Node>()), info);
+    }
+
+    [Fact]
+    public void PartitionInfo_PublicConstructors_RefuseNullTopicAndLists()
+    {
+        Node[] none = Array.Empty<Node>();
+
+        Assert.Equal("topic", Assert.Throws<ArgumentNullException>(() => new PartitionInfo(null!, 0, null, none, none)).ParamName);
+        Assert.Equal("replicas", Assert.Throws<ArgumentNullException>(() => new PartitionInfo("t", 0, null, null!, none)).ParamName);
+        Assert.Equal(
+            "inSyncReplicas", Assert.Throws<ArgumentNullException>(() => new PartitionInfo("t", 0, null, none, null!)).ParamName);
+        Assert.Equal(
+            "offlineReplicas",
+            Assert.Throws<ArgumentNullException>(() => new PartitionInfo("t", 0, null, none, none, null!)).ParamName);
+    }
+
+    [Fact]
     public void PartitionInfo_NullLeader_IsNull()
     {
         PartitionInfo info = new PartitionInfo(

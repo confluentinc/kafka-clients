@@ -27,7 +27,43 @@ namespace Confluent.Kafka.Common;
 /// <remarks>Unlike Java's <c>PartitionInfo</c>, it has no value equality.</remarks>
 public sealed class PartitionInfo
 {
-    internal PartitionInfo(
+    /// <summary>
+    /// Creates the metadata of a partition with no offline replicas, Java's
+    /// <c>PartitionInfo(String, int, Node, Node[], Node[])</c>.
+    /// </summary>
+    /// <param name="topic">The topic name.</param>
+    /// <param name="partition">The partition id.</param>
+    /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
+    /// <param name="replicas">The partition's replicas.</param>
+    /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/>, <paramref name="replicas"/> or <paramref name="inSyncReplicas"/> is null.
+    /// </exception>
+    public PartitionInfo(
+        string topic,
+        int partition,
+        Node? leader,
+        IReadOnlyList<Node> replicas,
+        IReadOnlyList<Node> inSyncReplicas)
+        : this(topic, partition, leader, replicas, inSyncReplicas, Array.Empty<Node>())
+    {
+    }
+
+    /// <summary>
+    /// Creates the metadata of a partition, Java's <c>PartitionInfo(String, int, Node, Node[], Node[], Node[])</c>.
+    /// The lists are kept as given, not copied, as Java keeps its arrays.
+    /// </summary>
+    /// <param name="topic">The topic name.</param>
+    /// <param name="partition">The partition id.</param>
+    /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
+    /// <param name="replicas">The partition's replicas.</param>
+    /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
+    /// <param name="offlineReplicas">The replicas that are offline.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/>, <paramref name="replicas"/>, <paramref name="inSyncReplicas"/> or
+    /// <paramref name="offlineReplicas"/> is null.
+    /// </exception>
+    public PartitionInfo(
         string topic,
         int partition,
         Node? leader,
@@ -35,12 +71,12 @@ public sealed class PartitionInfo
         IReadOnlyList<Node> inSyncReplicas,
         IReadOnlyList<Node> offlineReplicas)
     {
-        Topic = topic;
+        Topic = topic ?? throw new ArgumentNullException(nameof(topic));
         Partition = partition;
         Leader = leader;
-        Replicas = replicas;
-        InSyncReplicas = inSyncReplicas;
-        OfflineReplicas = offlineReplicas;
+        Replicas = replicas ?? throw new ArgumentNullException(nameof(replicas));
+        InSyncReplicas = inSyncReplicas ?? throw new ArgumentNullException(nameof(inSyncReplicas));
+        OfflineReplicas = offlineReplicas ?? throw new ArgumentNullException(nameof(offlineReplicas));
     }
 
     /// <summary>The topic name.</summary>

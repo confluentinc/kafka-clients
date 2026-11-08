@@ -22,8 +22,38 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 public sealed class OffsetAndTimestamp
 {
-    internal OffsetAndTimestamp(long offset, long timestamp, int? leaderEpoch)
+    /// <summary>
+    /// Creates an offset and the timestamp it was found for, with no leader epoch, Java's
+    /// <c>OffsetAndTimestamp(long, long)</c>.
+    /// </summary>
+    /// <param name="offset">The offset.</param>
+    /// <param name="timestamp">The timestamp, in milliseconds since the Unix epoch.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="offset"/> or <paramref name="timestamp"/> is negative.</exception>
+    public OffsetAndTimestamp(long offset, long timestamp)
+        : this(offset, timestamp, null)
     {
+    }
+
+    /// <summary>
+    /// Creates an offset and the timestamp it was found for, Java's
+    /// <c>OffsetAndTimestamp(long, long, Optional&lt;Integer&gt;)</c>.
+    /// </summary>
+    /// <param name="offset">The offset.</param>
+    /// <param name="timestamp">The timestamp, in milliseconds since the Unix epoch.</param>
+    /// <param name="leaderEpoch">The leader epoch of the record at the offset, or <see langword="null"/>.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="offset"/> or <paramref name="timestamp"/> is negative.</exception>
+    public OffsetAndTimestamp(long offset, long timestamp, int? leaderEpoch)
+    {
+        if (offset < 0)
+        {
+            throw new IllegalArgumentException("Invalid negative offset");
+        }
+
+        if (timestamp < 0)
+        {
+            throw new IllegalArgumentException("Invalid negative timestamp");
+        }
+
         Offset = offset;
         Timestamp = timestamp;
         LeaderEpoch = leaderEpoch;
