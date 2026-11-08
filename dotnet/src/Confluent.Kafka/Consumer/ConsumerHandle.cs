@@ -143,14 +143,14 @@ public sealed class ConsumerHandle : IDisposable
     }
 
     /// <summary>
-    /// Returns how far the consumer's position in <paramref name="partition"/> is behind its end, or
+    /// Returns how far the consumer's position in <paramref name="topicPartition"/> is behind its end, or
     /// <see langword="null"/> when the consumer does not know.
     /// </summary>
-    public long? CurrentLag(TopicPartition partition)
+    public long? CurrentLag(TopicPartition topicPartition)
     {
         ThrowIfDisposed();
-        RequireAssigned(partition);
-        return _native.CurrentLag(partition.Topic, partition.Partition);
+        RequireAssigned(topicPartition);
+        return _native.CurrentLag(topicPartition.Topic, topicPartition.Partition);
     }
 
     /// <summary>

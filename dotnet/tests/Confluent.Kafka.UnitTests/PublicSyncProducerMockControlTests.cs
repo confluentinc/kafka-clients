@@ -135,6 +135,48 @@ public sealed class PublicSyncProducerMockControlTests
         Assert.Throws<IllegalStateException>(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("x")));
         Assert.Throws<IllegalStateException>(() => producer.HistoryCount());
         Assert.Throws<IllegalStateException>(() => producer.Clear());
+        Assert.Throws<IllegalStateException>(() => producer.Flushed());
+        Assert.True(producer.Closed());
+    }
+
+    [Fact]
+    public void Flushed_WithAutoComplete_IsTrue_WithOrWithoutBufferedRecords()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Assert.True(producer.Flushed());
+        TestTimeout.Run(
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)).Get(),
+            s_deadline);
+        Assert.True(producer.Flushed());
+    }
+
+    [Fact]
+    public void Flushed_WithoutAutoComplete_IsFalseWhileASendWaits_AndTrueAfterFlush()
+    {
+        MockProducer<byte[], byte[]> producer =
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Common.KafkaFuture<RecordMetadata> pending =
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+        Assert.False(producer.Flushed());
+
+        TestTimeout.Run(() => producer.Flush(), s_deadline);
+        Assert.True(producer.Flushed());
+        Assert.True(pending.IsDone);
+    }
+
+    [Fact]
+    public void Closed_IsFalseUntilTheProducerCloses()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Assert.False(producer.Closed());
+        TestTimeout.Run(() => producer.Close(), s_deadline);
+        Assert.True(producer.Closed());
     }
 
     // Retries drive until it resolves the worker's pending send or the deadline passes: an early call returns

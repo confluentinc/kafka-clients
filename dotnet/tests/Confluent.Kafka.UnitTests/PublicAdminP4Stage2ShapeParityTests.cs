@@ -229,10 +229,13 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.All(nested, type => Assert.Empty(DeclaredPublicMethodNames(type)));
         Assert.All(nested, type => Assert.Empty(DeclaredPublicPropertyNames(type)));
 
-        // The recorded deviation: the hierarchy is closed, so an external subclass, which Java's encoder would query as
-        // latest(), is not expressible.
-        Assert.Empty(
-            typeof(OffsetSpec).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+        // Java's implicit public constructors: OffsetSpec and every kind but TimestampSpec, whose constructor is
+        // package-private.
+        Assert.Single(typeof(OffsetSpec).GetConstructors(BindingFlags.Public | BindingFlags.Instance), c => c.GetParameters().Length == 0);
+        Assert.All(
+            nested.Where(type => type != typeof(OffsetSpec.TimestampSpec)),
+            type => Assert.Single(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance), c => c.GetParameters().Length == 0));
+        Assert.Empty(typeof(OffsetSpec.TimestampSpec).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
     }
 
     [Theory]

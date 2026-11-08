@@ -19,8 +19,8 @@ namespace Confluent.Kafka.Producer;
 
 /// <summary>
 /// The callback of a record send, Java's <c>org.apache.kafka.clients.producer.Callback</c>. Pass it to
-/// <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, IDeliveryCallback)"/> or
-/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, System.Threading.CancellationToken)"/>,
+/// <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, ICallback)"/> or
+/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, ICallback, System.Threading.CancellationToken)"/>,
 /// which still return the record's future, as Java's <c>send(ProducerRecord, Callback)</c> does.
 /// </summary>
 /// <remarks>
@@ -64,7 +64,7 @@ namespace Confluent.Kafka.Producer;
 /// throw from the call inside <c>Send</c> leaves <c>Send</c>, as in Java.
 /// </para>
 /// </remarks>
-public interface IDeliveryCallback
+public interface ICallback
 {
     /// <summary>
     /// Java's <c>onCompletion</c>: invoked once, when the record's send completes.

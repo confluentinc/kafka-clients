@@ -303,4 +303,41 @@ public sealed class PublicAdminP7ShapeParityTests
             .Select(member => member.Name)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(name => name, StringComparer.Ordinal);
+
+    [Fact]
+    public void TokenInformation_FromRecord_IsTheSevenArgumentConstructor()
+    {
+        KafkaPrincipal owner = new KafkaPrincipal("User", "owner");
+        KafkaPrincipal requester = new KafkaPrincipal("User", "req");
+        KafkaPrincipal renewer = new KafkaPrincipal("User", "renewer");
+
+        TokenInformation fromRecord = TokenInformation.FromRecord("id1", owner, requester, new[] { renewer }, 1, 3, 2);
+
+        Assert.Equal(new TokenInformation("id1", owner, requester, new[] { renewer }, 1, 3, 2), fromRecord);
+        Assert.Equal(requester, fromRecord.TokenRequester);
+        Assert.Equal(2, fromRecord.ExpiryTimestamp);
+        Assert.Equal(
+            "renewers",
+            Assert.Throws<ArgumentNullException>(() => TokenInformation.FromRecord("id1", owner, requester, null!, 1, 3, 2))
+                .ParamName);
+    }
+
+    [Fact]
+    public void TokenInformation_SetExpiryTimestamp_ChangesNeitherEqualityNorTheHash()
+    {
+        KafkaPrincipal owner = new KafkaPrincipal("User", "owner");
+        KafkaPrincipal renewer = new KafkaPrincipal("User", "renewer");
+        TokenInformation info = new TokenInformation("id1", owner, new[] { renewer }, 1, 3, 2);
+        TokenInformation same = new TokenInformation("id1", owner, new[] { renewer }, 1, 3, 2);
+        HashSet<TokenInformation> set = new HashSet<TokenInformation> { same };
+
+        same.SetExpiryTimestamp(9);
+
+        Assert.Equal(9, same.ExpiryTimestamp);
+        Assert.Equal(info, same);
+        Assert.Equal(info.GetHashCode(), same.GetHashCode());
+        Assert.Contains(same, set);
+        Assert.Equal(new DelegationToken(info, new byte[] { 1 }), new DelegationToken(same, new byte[] { 1 }));
+        Assert.NotEqual(info, new TokenInformation("id1", owner, new[] { renewer }, 1, 4, 2));
+    }
 }

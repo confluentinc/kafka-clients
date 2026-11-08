@@ -115,14 +115,14 @@ public sealed class PublicAdminP2bShapeParityTests
         // Java's topicId() is a Uuid, not the base64 string the ABI transports.
         Assert.Equal(1, NullableFlag(typeof(TopicListing).GetProperty(nameof(TopicListing.Name))!));
 
-        TopicListing listing = new TopicListing("t", new Uuid(1L, 2L), isInternal: true);
+        TopicListing listing = new TopicListing("t", new Uuid(1L, 2L), @internal: true);
         Assert.Equal("t", listing.Name);
         Assert.True(listing.IsInternal);
         // Java renders the boolean in lowercase, where bool.ToString() gives "True".
         Assert.Equal("(name=t, topicId=" + listing.TopicId + ", internal=true)", listing.ToString());
         Assert.Equal(
             "(name=t, topicId=" + listing.TopicId + ", internal=false)",
-            new TopicListing("t", new Uuid(1L, 2L), isInternal: false).ToString());
+            new TopicListing("t", new Uuid(1L, 2L), @internal: false).ToString());
 
         Assert.Throws<ArgumentNullException>(() => new TopicListing(null!, Uuid.ZERO_UUID, false));
     }

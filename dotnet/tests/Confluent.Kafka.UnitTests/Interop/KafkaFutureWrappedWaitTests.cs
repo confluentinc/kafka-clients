@@ -273,7 +273,7 @@ public sealed class KafkaFutureWrappedWaitTests
     private static ProducerRecord<byte[], byte[]> Record() =>
         new ProducerRecord<byte[], byte[]>("errornext-topic", new byte[] { 1 }, partition: 0);
 
-    private sealed class Recording : IDeliveryCallback
+    private sealed class Recording : ICallback
     {
         internal RecordMetadata? Metadata { get; private set; }
 

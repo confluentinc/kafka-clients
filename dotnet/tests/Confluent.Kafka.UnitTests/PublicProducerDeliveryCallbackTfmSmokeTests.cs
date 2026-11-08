@@ -128,12 +128,12 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
             new[]
             {
                 typeof(ProducerRecord<byte[], byte[]>),
-                typeof(IDeliveryCallback),
+                typeof(ICallback),
                 typeof(System.Threading.CancellationToken),
             }));
         Assert.NotNull(typeof(KafkaProducer<byte[], byte[]>).GetMethod(
             "Send",
-            new[] { typeof(ProducerRecord<byte[], byte[]>), typeof(IDeliveryCallback) }));
+            new[] { typeof(ProducerRecord<byte[], byte[]>), typeof(ICallback) }));
     }
 
     private static async Task WaitForCompletions(SmokeDeliveryCallback callback, int expected)
@@ -145,7 +145,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     }
 
     /// <summary>A delivery callback that counts its calls.</summary>
-    private sealed class SmokeDeliveryCallback : IDeliveryCallback
+    private sealed class SmokeDeliveryCallback : ICallback
     {
         private int _count;
 

@@ -192,7 +192,7 @@ internal static class TranslateAdmin
             {
                 foreach (string value in topicIds.Values)
                 {
-                    ids.Add(Uuid.Parse(value));
+                    ids.Add(Uuid.FromString(value));
                 }
             }
 

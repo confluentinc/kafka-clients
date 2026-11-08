@@ -330,7 +330,6 @@ internal sealed partial class NativeAdminClient
                 }
 
                 AdminStrings.Validate(entry.Key.Topic, nameof(topicPartitionOffsets));
-                CheckOffsetSpec(entry.Value, nameof(topicPartitionOffsets));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);
@@ -411,24 +410,6 @@ internal sealed partial class NativeAdminClient
             : NativeMethods.IsolationLevelReadUncommitted(ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return level;
-    }
-
-    private static void CheckOffsetSpec(OffsetSpec? spec, string parameterName)
-    {
-        switch (spec)
-        {
-            case null:
-            case OffsetSpec.LatestSpec:
-            case OffsetSpec.EarliestSpec:
-            case OffsetSpec.MaxTimestampSpec:
-            case OffsetSpec.EarliestLocalSpec:
-            case OffsetSpec.LatestTieredSpec:
-            case OffsetSpec.EarliestPendingUploadSpec:
-            case OffsetSpec.TimestampSpec:
-                return;
-            default:
-                throw new ArgumentException($"Unsupported offset spec '{spec.GetType().Name}'.", parameterName);
-        }
     }
 
     internal static IntPtr NativeOffsetSpec(OffsetSpec? spec, out IntPtr owned)

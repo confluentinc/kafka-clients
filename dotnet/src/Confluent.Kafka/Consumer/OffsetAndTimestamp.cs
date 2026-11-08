@@ -22,8 +22,38 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 public sealed class OffsetAndTimestamp
 {
-    internal OffsetAndTimestamp(long offset, long timestamp, int? leaderEpoch)
+    /// <summary>
+    /// Creates an offset and the timestamp it was found for, with no leader epoch, Java's
+    /// <c>OffsetAndTimestamp(long, long)</c>.
+    /// </summary>
+    /// <param name="offset">The offset.</param>
+    /// <param name="timestamp">The timestamp, in milliseconds since the Unix epoch.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="offset"/> or <paramref name="timestamp"/> is negative.</exception>
+    public OffsetAndTimestamp(long offset, long timestamp)
+        : this(offset, timestamp, null)
     {
+    }
+
+    /// <summary>
+    /// Creates an offset and the timestamp it was found for, Java's
+    /// <c>OffsetAndTimestamp(long, long, Optional&lt;Integer&gt;)</c>.
+    /// </summary>
+    /// <param name="offset">The offset.</param>
+    /// <param name="timestamp">The timestamp, in milliseconds since the Unix epoch.</param>
+    /// <param name="leaderEpoch">The leader epoch of the record at the offset, or <see langword="null"/>.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="offset"/> or <paramref name="timestamp"/> is negative.</exception>
+    public OffsetAndTimestamp(long offset, long timestamp, int? leaderEpoch)
+    {
+        if (offset < 0)
+        {
+            throw new IllegalArgumentException("Invalid negative offset");
+        }
+
+        if (timestamp < 0)
+        {
+            throw new IllegalArgumentException("Invalid negative timestamp");
+        }
+
         Offset = offset;
         Timestamp = timestamp;
         LeaderEpoch = leaderEpoch;
@@ -42,6 +72,30 @@ public sealed class OffsetAndTimestamp
     /// when absent (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
     /// </summary>
     public int? LeaderEpoch { get; }
+
+    /// <summary>Value equality over the timestamp, the offset and the leader epoch, Java's <c>equals</c>.</summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two are the same offset and timestamp.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is OffsetAndTimestamp other
+            && Timestamp == other.Timestamp
+            && Offset == other.Offset
+            && LeaderEpoch == other.LeaderEpoch);
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + Timestamp.GetHashCode();
+            hash = (hash * 31) + Offset.GetHashCode();
+            hash = (hash * 31) + (LeaderEpoch?.GetHashCode() ?? 0);
+            return hash;
+        }
+    }
 
     /// <summary>
     /// Returns a debug string of the form

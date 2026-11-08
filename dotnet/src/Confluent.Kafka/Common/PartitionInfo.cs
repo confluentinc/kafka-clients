@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 
 namespace Confluent.Kafka.Common;
@@ -25,7 +27,43 @@ namespace Confluent.Kafka.Common;
 /// <remarks>Unlike Java's <c>PartitionInfo</c>, it has no value equality.</remarks>
 public sealed class PartitionInfo
 {
-    internal PartitionInfo(
+    /// <summary>
+    /// Creates the metadata of a partition with no offline replicas, Java's
+    /// <c>PartitionInfo(String, int, Node, Node[], Node[])</c>.
+    /// </summary>
+    /// <param name="topic">The topic name.</param>
+    /// <param name="partition">The partition id.</param>
+    /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
+    /// <param name="replicas">The partition's replicas.</param>
+    /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/>, <paramref name="replicas"/> or <paramref name="inSyncReplicas"/> is null.
+    /// </exception>
+    public PartitionInfo(
+        string topic,
+        int partition,
+        Node? leader,
+        IReadOnlyList<Node> replicas,
+        IReadOnlyList<Node> inSyncReplicas)
+        : this(topic, partition, leader, replicas, inSyncReplicas, Array.Empty<Node>())
+    {
+    }
+
+    /// <summary>
+    /// Creates the metadata of a partition, Java's <c>PartitionInfo(String, int, Node, Node[], Node[], Node[])</c>.
+    /// The lists are kept as given, not copied, as Java keeps its arrays.
+    /// </summary>
+    /// <param name="topic">The topic name.</param>
+    /// <param name="partition">The partition id.</param>
+    /// <param name="leader">The partition's leader, or <see langword="null"/> when it has none.</param>
+    /// <param name="replicas">The partition's replicas.</param>
+    /// <param name="inSyncReplicas">The replicas in sync with the leader.</param>
+    /// <param name="offlineReplicas">The replicas that are offline.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/>, <paramref name="replicas"/>, <paramref name="inSyncReplicas"/> or
+    /// <paramref name="offlineReplicas"/> is null.
+    /// </exception>
+    public PartitionInfo(
         string topic,
         int partition,
         Node? leader,
@@ -33,12 +71,12 @@ public sealed class PartitionInfo
         IReadOnlyList<Node> inSyncReplicas,
         IReadOnlyList<Node> offlineReplicas)
     {
-        Topic = topic;
+        Topic = topic ?? throw new ArgumentNullException(nameof(topic));
         Partition = partition;
         Leader = leader;
-        Replicas = replicas;
-        InSyncReplicas = inSyncReplicas;
-        OfflineReplicas = offlineReplicas;
+        Replicas = replicas ?? throw new ArgumentNullException(nameof(replicas));
+        InSyncReplicas = inSyncReplicas ?? throw new ArgumentNullException(nameof(inSyncReplicas));
+        OfflineReplicas = offlineReplicas ?? throw new ArgumentNullException(nameof(offlineReplicas));
     }
 
     /// <summary>The topic name.</summary>
@@ -59,6 +97,39 @@ public sealed class PartitionInfo
     /// <summary>The subset of <see cref="Replicas"/> that are offline.</summary>
     public IReadOnlyList<Node> OfflineReplicas { get; }
 
+    /// <summary>
+    /// Value equality over the topic, the partition, the leader and the three replica lists in order, Java's
+    /// <c>equals</c>.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two describe the same partition.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is PartitionInfo other
+            && string.Equals(Topic, other.Topic, StringComparison.Ordinal)
+            && Partition == other.Partition
+            && Equals(Leader, other.Leader)
+            && Replicas.SequenceEqual(other.Replicas)
+            && InSyncReplicas.SequenceEqual(other.InSyncReplicas)
+            && OfflineReplicas.SequenceEqual(other.OfflineReplicas));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + (Topic is null ? 0 : StringComparer.Ordinal.GetHashCode(Topic));
+            hash = (hash * 31) + Partition;
+            hash = (hash * 31) + (Leader?.GetHashCode() ?? 0);
+            hash = (hash * 31) + NodesHash(Replicas);
+            hash = (hash * 31) + NodesHash(InSyncReplicas);
+            hash = (hash * 31) + NodesHash(OfflineReplicas);
+            return hash;
+        }
+    }
+
     /// <inheritdoc/>
     public override string ToString() =>
         string.Format(
@@ -70,6 +141,17 @@ public sealed class PartitionInfo
             FormatNodeIds(Replicas),
             FormatNodeIds(InSyncReplicas),
             FormatNodeIds(OfflineReplicas));
+
+    private static int NodesHash(IReadOnlyList<Node> nodes)
+    {
+        int hash = 1;
+        foreach (Node node in nodes)
+        {
+            hash = unchecked((31 * hash) + (node?.GetHashCode() ?? 0));
+        }
+
+        return hash;
+    }
 
     private static string FormatNodeIds(IReadOnlyList<Node> nodes)
     {

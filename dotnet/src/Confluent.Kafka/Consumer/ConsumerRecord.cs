@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
+
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Record;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -38,6 +41,9 @@ public sealed class ConsumerRecord<TKey, TValue>
 {
     /// <summary>The timestamp of a record with no timestamp, Java's <c>NO_TIMESTAMP</c>.</summary>
     public const long NO_TIMESTAMP = -1;
+
+    /// <summary>The serialized size of a null key or value, Java's <c>NULL_SIZE</c>.</summary>
+    public const int NULL_SIZE = -1;
 
     internal ConsumerRecord(
         string topic,
@@ -113,4 +119,31 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// <see langword="null"/> (Java's <c>serializedValueSize()</c>).
     /// </summary>
     public int SerializedValueSize { get; }
+
+    /// <summary>
+    /// A diagnostic rendering in Java's <c>toString()</c> form: the timestamp is named by Java's
+    /// <c>TimestampType</c> text (<c>CreateTime</c>), and the delivery count, which only a share group's records
+    /// carry, is <c>null</c>.
+    /// </summary>
+    /// <returns>The rendering.</returns>
+    public override string ToString() =>
+        "ConsumerRecord(topic = " + Topic
+        + ", partition = " + Partition.ToString(CultureInfo.InvariantCulture)
+        + ", leaderEpoch = " + JavaText.ValueOf(LeaderEpoch)
+        + ", offset = " + Offset.ToString(CultureInfo.InvariantCulture)
+        + ", " + TimestampTypeText(TimestampType) + " = " + Timestamp.ToString(CultureInfo.InvariantCulture)
+        + ", deliveryCount = null"
+        + ", serialized key size = " + SerializedKeySize.ToString(CultureInfo.InvariantCulture)
+        + ", serialized value size = " + SerializedValueSize.ToString(CultureInfo.InvariantCulture)
+        + ", headers = " + Headers
+        + ", key = " + JavaText.ValueOf(Key)
+        + ", value = " + JavaText.ValueOf(Value) + ")";
+
+    private static string TimestampTypeText(TimestampType type) => type switch
+    {
+        TimestampType.NO_TIMESTAMP_TYPE => "NoTimestampType",
+        TimestampType.CREATE_TIME => "CreateTime",
+        TimestampType.LOG_APPEND_TIME => "LogAppendTime",
+        _ => ((int)type).ToString(CultureInfo.InvariantCulture),
+    };
 }

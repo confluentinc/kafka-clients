@@ -46,15 +46,15 @@ public sealed class TopicDescription
     /// <see cref="Uuid.ZERO_UUID"/> as the topic id — Java's three-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="partitions"/> is null.
     /// </exception>
-    public TopicDescription(string name, bool isInternal, IEnumerable<TopicPartitionInfo> partitions)
-        : this(name, isInternal, partitions, Array.Empty<AclOperation>())
+    public TopicDescription(string name, bool @internal, IEnumerable<TopicPartitionInfo> partitions)
+        : this(name, @internal, partitions, Array.Empty<AclOperation>())
     {
     }
 
@@ -63,7 +63,7 @@ public sealed class TopicDescription
     /// four-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
@@ -75,16 +75,16 @@ public sealed class TopicDescription
     /// </exception>
     public TopicDescription(
         string name,
-        bool isInternal,
+        bool @internal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations)
-        : this(name, isInternal, partitions, authorizedOperations, Uuid.ZERO_UUID)
+        : this(name, @internal, partitions, authorizedOperations, Uuid.ZERO_UUID)
     {
     }
 
     /// <summary>Creates a description — Java's five-argument constructor.</summary>
     /// <param name="name">The topic name.</param>
-    /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
+    /// <param name="internal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
@@ -97,7 +97,7 @@ public sealed class TopicDescription
     /// </exception>
     public TopicDescription(
         string name,
-        bool isInternal,
+        bool @internal,
         IEnumerable<TopicPartitionInfo> partitions,
         IEnumerable<AclOperation>? authorizedOperations,
         Uuid topicId)
@@ -108,7 +108,7 @@ public sealed class TopicDescription
         }
 
         Name = name ?? throw new ArgumentNullException(nameof(name));
-        IsInternal = isInternal;
+        IsInternal = @internal;
         _partitions = new List<TopicPartitionInfo>(partitions);
 
         _authorizedOperations =
@@ -145,6 +145,39 @@ public sealed class TopicDescription
     /// </remarks>
     public IReadOnlyCollection<AclOperation>? AuthorizedOperations => _authorizedOperations;
 
+    /// <summary>
+    /// Value equality over the name, the internal flag, the partitions and the authorized operations (as a set),
+    /// Java's <c>equals</c>; the topic id is not compared, as in Java.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two describe the same topic.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is TopicDescription other
+            && IsInternal == other.IsInternal
+            && string.Equals(Name, other.Name, StringComparison.Ordinal)
+            && _partitions.SequenceEqual(other._partitions)
+            && OperationsMatch(_authorizedOperations, other._authorizedOperations));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + StringComparer.Ordinal.GetHashCode(Name);
+            hash = (hash * 31) + IsInternal.GetHashCode();
+            foreach (TopicPartitionInfo partition in _partitions)
+            {
+                hash = (hash * 31) + partition.GetHashCode();
+            }
+
+            hash = (hash * 31) + OperationsHash(_authorizedOperations);
+            return hash;
+        }
+    }
+
     /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
@@ -155,4 +188,25 @@ public sealed class TopicDescription
             IsInternal ? "true" : "false",
             string.Join(",", _partitions.Select(static partition => partition.ToString())),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]");
+
+    private static bool OperationsMatch(List<AclOperation>? left, List<AclOperation>? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : new HashSet<AclOperation>(left).SetEquals(right);
+
+    private static int OperationsHash(List<AclOperation>? operations)
+    {
+        if (operations is null)
+        {
+            return 0;
+        }
+
+        int hash = 0;
+        foreach (AclOperation operation in new HashSet<AclOperation>(operations))
+        {
+            hash = unchecked(hash + ((int)operation).GetHashCode());
+        }
+
+        return hash;
+    }
 }
