@@ -240,7 +240,7 @@ public sealed class PublicProducerSendStringTests
 
         internal int HistoryCount() => _historyCount!();
 
-        internal abstract ArgumentException Reject(ProducerRecord<string, string> record, IDeliveryCallback? callback);
+        internal abstract ArgumentException Reject(ProducerRecord<string, string> record, ICallback? callback);
 
         internal abstract Task<RecordMetadata?> Deliver(ProducerRecord<string, string> record);
 
@@ -255,7 +255,7 @@ public sealed class PublicProducerSendStringTests
         internal SyncSubject(IProducer<string, string> producer, Func<int>? historyCount)
             : base(historyCount) => _producer = producer;
 
-        internal override ArgumentException Reject(ProducerRecord<string, string> record, IDeliveryCallback? callback) =>
+        internal override ArgumentException Reject(ProducerRecord<string, string> record, ICallback? callback) =>
             Assert.Throws<ArgumentException>(
                 () => callback is null ? _producer.Send(record) : _producer.Send(record, callback));
 
@@ -288,7 +288,7 @@ public sealed class PublicProducerSendStringTests
         internal AsyncSubject(IAsyncProducer<string, string> producer, Func<int>? historyCount)
             : base(historyCount) => _producer = producer;
 
-        internal override ArgumentException Reject(ProducerRecord<string, string> record, IDeliveryCallback? callback) =>
+        internal override ArgumentException Reject(ProducerRecord<string, string> record, ICallback? callback) =>
             Assert.Throws<ArgumentException>(
                 () => { _ = callback is null ? _producer.Send(record) : _producer.Send(record, callback); });
 
@@ -309,7 +309,7 @@ public sealed class PublicProducerSendStringTests
     }
 
     /// <summary>A delivery callback that counts its calls.</summary>
-    private sealed class CountingCallback : IDeliveryCallback
+    private sealed class CountingCallback : ICallback
     {
         private int _count;
 

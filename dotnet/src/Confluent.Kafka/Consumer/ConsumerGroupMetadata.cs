@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using System.Globalization;
+
 namespace Confluent.Kafka.Consumer;
 
 /// <summary>
@@ -53,4 +56,46 @@ public sealed class ConsumerGroupMetadata
     /// <see langword="null"/> when the consumer is not a static member.
     /// </summary>
     public string? GroupInstanceId { get; }
+
+    /// <summary>
+    /// Value equality over the group id, the generation id, the member id and the group instance id, Java's
+    /// <c>equals</c>.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two are the same group membership.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is ConsumerGroupMetadata other
+            && GenerationId == other.GenerationId
+            && string.Equals(GroupId, other.GroupId, StringComparison.Ordinal)
+            && string.Equals(MemberId, other.MemberId, StringComparison.Ordinal)
+            && string.Equals(GroupInstanceId, other.GroupInstanceId, StringComparison.Ordinal));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + (GroupId is null ? 0 : StringComparer.Ordinal.GetHashCode(GroupId));
+            hash = (hash * 31) + GenerationId;
+            hash = (hash * 31) + (MemberId is null ? 0 : StringComparer.Ordinal.GetHashCode(MemberId));
+            hash = (hash * 31) + (GroupInstanceId is null ? 0 : StringComparer.Ordinal.GetHashCode(GroupInstanceId));
+            return hash;
+        }
+    }
+
+    /// <summary>
+    /// A diagnostic rendering in Java's <c>toString()</c> form, an absent group instance id printed empty.
+    /// </summary>
+    /// <returns>The rendering.</returns>
+    public override string ToString() =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "GroupMetadata(groupId = {0}, generationId = {1}, memberId = {2}, groupInstanceId = {3})",
+            GroupId,
+            GenerationId,
+            MemberId,
+            GroupInstanceId ?? string.Empty);
 }

@@ -406,7 +406,7 @@ public sealed class PublicProducerSerializerFailureTests
                 _ => new AsyncKafkaProducer<string, string>(Unreachable(), key, value),
             };
 
-        internal Task<RecordMetadata> Send(ProducerRecord<string, string> record, IDeliveryCallback? callback)
+        internal Task<RecordMetadata> Send(ProducerRecord<string, string> record, ICallback? callback)
         {
             if (_producer is IProducer<string, string> sync)
             {
@@ -433,7 +433,7 @@ public sealed class PublicProducerSerializerFailureTests
         public void Dispose() => TestTimeout.Dispose((IDisposable)_producer);
     }
 
-    private sealed class RecordingCallback : IDeliveryCallback
+    private sealed class RecordingCallback : ICallback
     {
         private readonly List<(RecordMetadata Metadata, Exception? Exception, int ThreadId)> _completions =
             new List<(RecordMetadata Metadata, Exception? Exception, int ThreadId)>();
@@ -458,7 +458,7 @@ public sealed class PublicProducerSerializerFailureTests
         }
     }
 
-    private sealed class ThrowingCallback : IDeliveryCallback
+    private sealed class ThrowingCallback : ICallback
     {
         private readonly Exception _thrown;
 
@@ -470,7 +470,7 @@ public sealed class PublicProducerSerializerFailureTests
         public void OnCompletion(RecordMetadata metadata, Exception? exception) => throw _thrown;
     }
 
-    private sealed class NestingAsyncCallback : IAsyncDeliveryCallback
+    private sealed class NestingAsyncCallback : IAsyncCallback
     {
         private readonly IAsyncProducer<string, string> _producer;
         private readonly TaskCompletionSource<bool> _ended = new TaskCompletionSource<bool>(
@@ -501,7 +501,7 @@ public sealed class PublicProducerSerializerFailureTests
         }
     }
 
-    private sealed class GatedAsyncCallback : IAsyncDeliveryCallback
+    private sealed class GatedAsyncCallback : IAsyncCallback
     {
         private readonly Task _gate;
         private int _calls;

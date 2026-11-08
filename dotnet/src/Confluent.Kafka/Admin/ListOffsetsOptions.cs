@@ -30,6 +30,22 @@ public sealed class ListOffsetsOptions
 
     private IsolationLevel _isolationLevel = IsolationLevel.READ_UNCOMMITTED;
 
+    /// <summary>
+    /// Creates options that read <see cref="Confluent.Kafka.Common.IsolationLevel.READ_UNCOMMITTED"/>, Java's
+    /// <c>ListOffsetsOptions()</c>.
+    /// </summary>
+    public ListOffsetsOptions()
+    {
+    }
+
+    /// <summary>Creates options with an isolation level, Java's <c>ListOffsetsOptions(IsolationLevel)</c>.</summary>
+    /// <param name="isolationLevel">The read isolation the query observes.</param>
+    public ListOffsetsOptions(IsolationLevel isolationLevel)
+    {
+        _isolationLevel = isolationLevel;
+        Setters.Ran(nameof(IsolationLevel));
+    }
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
     public int? TimeoutMs
     {

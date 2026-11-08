@@ -605,17 +605,17 @@ internal sealed partial class NativeAdminClient
     internal (
         IReadOnlyDictionary<string, KafkaFutureImpl<object?>>? ByName,
         IReadOnlyDictionary<Uuid, KafkaFutureImpl<object?>>? ById,
-        SafeAdminResultHandle Result) DeleteTopics(IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options)
+        SafeAdminResultHandle Result) DeleteTopics(IReadOnlyCollection<string> topics, DeleteTopicsOptions? options)
     {
         EnterUse();
         try
         {
-            List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(topicNames.Count);
+            List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(topics.Count);
             IntPtr list = IntPtr.Zero;
             SafeAdminResultHandle result;
             try
             {
-                list = NewTopicNameList(topicNames, nameof(topicNames), pins);
+                list = NewTopicNameList(topics, nameof(topics), pins);
                 result = CallWithOptions(
                     NewDeleteTopicsOptions(options),
                     s_destroyDeleteTopicsOptions,

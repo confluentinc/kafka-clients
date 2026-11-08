@@ -25,14 +25,15 @@ namespace Confluent.Kafka.Common.Security.Token.Delegation;
 /// <c>org.apache.kafka.common.security.token.delegation.TokenInformation</c>.
 /// </summary>
 /// <remarks>
-/// A recorded deviation: <see cref="Equals(object)"/> and <see cref="GetHashCode"/> cover the same
-/// fields, <see cref="ExpiryTimestamp"/> included, where Java's <c>equals</c> leaves it out and its
-/// <c>hashCode</c> does not. The type is immutable (Java has <c>setExpiryTimestamp</c>), and Java's
-/// <c>fromRecord</c> is not bound, as it duplicates the seven-argument constructor.
+/// A recorded deviation: <see cref="Equals(object)"/> and <see cref="GetHashCode"/> cover the same fields, those
+/// of Java's <c>equals</c>, which leaves <see cref="ExpiryTimestamp"/> out; Java's <c>hashCode</c> includes it.
+/// So <see cref="SetExpiryTimestamp"/> changes neither equality nor the hash.
 /// </remarks>
 public sealed class TokenInformation
 {
     private readonly KafkaPrincipal[] _renewers;
+
+    private long _expiryTimestamp;
 
     /// <summary>
     /// Creates token metadata whose requester is its owner — Java's six-argument constructor.
@@ -84,8 +85,31 @@ public sealed class TokenInformation
         _renewers = renewers.ToArray();
         IssueTimestamp = issueTimestamp;
         MaxTimestamp = maxTimestamp;
-        ExpiryTimestamp = expiryTimestamp;
+        _expiryTimestamp = expiryTimestamp;
     }
+
+    /// <summary>
+    /// Converts record elements into token metadata — Java's <c>TokenInformation.fromRecord</c>, the
+    /// seven-argument constructor.
+    /// </summary>
+    /// <param name="tokenId">The token id.</param>
+    /// <param name="owner">The token owner.</param>
+    /// <param name="tokenRequester">The principal that requested the token.</param>
+    /// <param name="renewers">The principals allowed to renew the token.</param>
+    /// <param name="issueTimestamp">When the token was issued, in ms since the epoch.</param>
+    /// <param name="maxTimestamp">The token's maximum lifetime, in ms since the epoch.</param>
+    /// <param name="expiryTimestamp">When the token expires, in ms since the epoch.</param>
+    /// <returns>The token metadata.</returns>
+    /// <exception cref="ArgumentNullException">A reference argument is null.</exception>
+    public static TokenInformation FromRecord(
+        string tokenId,
+        KafkaPrincipal owner,
+        KafkaPrincipal tokenRequester,
+        IEnumerable<KafkaPrincipal> renewers,
+        long issueTimestamp,
+        long maxTimestamp,
+        long expiryTimestamp) =>
+        new TokenInformation(tokenId, owner, tokenRequester, renewers, issueTimestamp, maxTimestamp, expiryTimestamp);
 
     /// <summary>The token id — Java's <c>tokenId()</c>.</summary>
     public string TokenId { get; }
@@ -103,7 +127,11 @@ public sealed class TokenInformation
     public long IssueTimestamp { get; }
 
     /// <summary>When the token expires — Java's <c>expiryTimestamp()</c>.</summary>
-    public long ExpiryTimestamp { get; }
+    public long ExpiryTimestamp => _expiryTimestamp;
+
+    /// <summary>Sets when the token expires — Java's <c>setExpiryTimestamp(long)</c>.</summary>
+    /// <param name="expiryTimestamp">When the token expires, in ms since the epoch.</param>
+    public void SetExpiryTimestamp(long expiryTimestamp) => _expiryTimestamp = expiryTimestamp;
 
     /// <summary>The token's maximum lifetime — Java's <c>maxTimestamp()</c>.</summary>
     public long MaxTimestamp { get; }
@@ -132,8 +160,7 @@ public sealed class TokenInformation
         || Array.IndexOf(_renewers, principal) >= 0;
 
     /// <summary>
-    /// Value equality over every field, <see cref="ExpiryTimestamp"/> included, unlike Java's
-    /// <c>equals</c>.
+    /// Value equality over every field but <see cref="ExpiryTimestamp"/>, as Java's <c>equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same token.</returns>
@@ -144,10 +171,9 @@ public sealed class TokenInformation
         && TokenRequester.Equals(other.TokenRequester)
         && IssueTimestamp == other.IssueTimestamp
         && MaxTimestamp == other.MaxTimestamp
-        && ExpiryTimestamp == other.ExpiryTimestamp
         && _renewers.SequenceEqual(other._renewers);
 
-    /// <summary>The hash of the same field set — Java's <c>hashCode</c>.</summary>
+    /// <summary>The hash of the fields <see cref="Equals(object)"/> compares.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -159,7 +185,6 @@ public sealed class TokenInformation
             hash = (hash * 31) + TokenRequester.GetHashCode();
             hash = (hash * 31) + IssueTimestamp.GetHashCode();
             hash = (hash * 31) + MaxTimestamp.GetHashCode();
-            hash = (hash * 31) + ExpiryTimestamp.GetHashCode();
             foreach (KafkaPrincipal renewer in _renewers)
             {
                 hash = (hash * 31) + renewer.GetHashCode();

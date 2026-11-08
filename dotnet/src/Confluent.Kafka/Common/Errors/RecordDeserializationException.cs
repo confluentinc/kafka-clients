@@ -27,7 +27,7 @@ public class RecordDeserializationException : SerializationException
 {
     /// <summary>
     /// Initializes an exception for the record at <paramref name="offset"/> of <paramref name="partition"/>, with
-    /// its timestamp, key and value bytes and headers, a message and a cause.
+    /// its timestamp, key and value bytes and headers, a message and an inner exception.
     /// </summary>
     public RecordDeserializationException(
         DeserializationExceptionOrigin? origin,
@@ -39,8 +39,8 @@ public class RecordDeserializationException : SerializationException
         byte[]? valueBuffer,
         Headers? headers,
         string? message,
-        Exception? cause)
-        : base(message, cause)
+        Exception? innerException)
+        : base(message, innerException)
     {
         Origin = origin;
         TopicPartition = partition;

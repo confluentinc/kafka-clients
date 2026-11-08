@@ -26,12 +26,12 @@ public sealed class DelegationToken
     private readonly byte[] _hmac;
 
     /// <summary>Creates a token — Java's constructor.</summary>
-    /// <param name="tokenInfo">The token metadata.</param>
+    /// <param name="tokenInformation">The token metadata.</param>
     /// <param name="hmac">The raw MAC bytes. May contain interior zero bytes.</param>
     /// <exception cref="ArgumentNullException">Either argument is null.</exception>
-    public DelegationToken(TokenInformation tokenInfo, byte[] hmac)
+    public DelegationToken(TokenInformation tokenInformation, byte[] hmac)
     {
-        TokenInfo = tokenInfo ?? throw new ArgumentNullException(nameof(tokenInfo));
+        TokenInfo = tokenInformation ?? throw new ArgumentNullException(nameof(tokenInformation));
         _hmac = hmac ?? throw new ArgumentNullException(nameof(hmac));
     }
 

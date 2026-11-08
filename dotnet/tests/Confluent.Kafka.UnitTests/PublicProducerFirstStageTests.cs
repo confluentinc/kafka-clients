@@ -292,7 +292,7 @@ public sealed class PublicProducerFirstStageTests
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (ValueTask<AsyncKafkaFuture<RecordMetadata>> Stage, WeakReference Value) SendUnreferenced(
-        AsyncKafkaProducer<byte[], byte[]> producer, string topic, IDeliveryCallback callback, CancellationToken token)
+        AsyncKafkaProducer<byte[], byte[]> producer, string topic, ICallback callback, CancellationToken token)
     {
         byte[] value = Encoding.UTF8.GetBytes("value-" + topic);
         return (producer.Send(new ProducerRecord<byte[], byte[]>(topic, value), callback, token), new WeakReference(value));
@@ -342,7 +342,7 @@ public sealed class PublicProducerFirstStageTests
     }
 
     /// <summary>Records every delivery callback, with the thread it ran on.</summary>
-    internal sealed class RecordingCallback : IDeliveryCallback
+    internal sealed class RecordingCallback : ICallback
     {
         private readonly List<(RecordMetadata Metadata, Exception? Exception)> _calls =
             new List<(RecordMetadata Metadata, Exception? Exception)>();

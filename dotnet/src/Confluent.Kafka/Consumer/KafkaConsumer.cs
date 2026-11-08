@@ -88,8 +88,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
 
     /// <inheritdoc/>
-    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
-        _native.Subscribe(topics, listener);
+    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener callback) =>
+        _native.Subscribe(topics, callback);
 
     /// <inheritdoc/>
     public void Unsubscribe() => _native.Unsubscribe();
@@ -192,8 +192,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
         _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
 
     /// <inheritdoc/>
-    public long? CurrentLag(TopicPartition partition) =>
-        _native.CurrentLag(partition.Topic, partition.Partition);
+    public long? CurrentLag(TopicPartition topicPartition) =>
+        _native.CurrentLag(topicPartition.Topic, topicPartition.Partition);
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();

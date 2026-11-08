@@ -87,6 +87,61 @@ public sealed class AdminP4Stage2SubmitArgumentTests
     }
 
     [Fact]
+    public void ThePublicConstructors_BuildTheFactoriesCSpecs_AndABareOrUnknownSpecIsLatest()
+    {
+        (OffsetSpec Spec, int Kind)[] cases =
+        {
+            (new OffsetSpec.LatestSpec(), 1),
+            (new OffsetSpec.EarliestSpec(), 0),
+            (new OffsetSpec.MaxTimestampSpec(), 2),
+            (new OffsetSpec.EarliestLocalSpec(), 3),
+            (new OffsetSpec.LatestTieredSpec(), 4),
+            (new OffsetSpec.EarliestPendingUploadSpec(), 5),
+            (new OffsetSpec(), 1),
+            (new UnknownSpec(), 1),
+        };
+
+        foreach ((OffsetSpec spec, int kind) in cases)
+        {
+            IntPtr native = NativeAdminClient.NativeOffsetSpec(spec, out IntPtr owned);
+            try
+            {
+                Assert.Equal(kind, Kind(native));
+                Assert.Equal(IntPtr.Zero, owned);
+                Assert.Equal(Singleton(kind), native);
+            }
+            finally
+            {
+                NativeAdminClient.DestroyOffsetSpec(owned);
+            }
+        }
+    }
+
+    [Fact]
+    public void ListOffsets_TakesABareOrUnknownSpec_AsLatest()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        TopicPartition partition = new TopicPartition("p4s2-bare", 0);
+
+        long latest = Offset(admin, partition, OffsetSpec.Latest());
+
+        Assert.Equal(latest, Offset(admin, partition, new OffsetSpec()));
+        Assert.Equal(latest, Offset(admin, partition, new UnknownSpec()));
+    }
+
+    [Fact]
+    public void ListOffsetsOptions_TheIsolationLevelConstructor_ReachesTheCOptions()
+    {
+        ListOffsetsOptions committed = new ListOffsetsOptions(IsolationLevel.READ_COMMITTED);
+
+        Assert.Equal(IsolationLevel.READ_COMMITTED, committed.IsolationLevel);
+        Assert.Equal(new[] { nameof(ListOffsetsOptions.IsolationLevel) }, committed.Setters.InOrder);
+        Assert.Equal((-1, ReadCommitted()), ReadBack(committed));
+        Assert.Equal((-1, ReadUncommitted()), ReadBack(new ListOffsetsOptions(IsolationLevel.READ_UNCOMMITTED)));
+    }
+
+    [Fact]
     public void ListOffsetsOptions_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
         Assert.Equal((-1, ReadUncommitted()), ReadBack(null));
@@ -140,6 +195,10 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         var listed = admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullSpec] = null! }, null);
         Assert.Equal(-1L, listed.Futures[nullSpec].Get(TimeSpan.FromSeconds(30)).Offset);
     }
+
+    private static long Offset(NativeAdminClient admin, TopicPartition partition, OffsetSpec spec) =>
+        admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec }, null)
+            .Futures[partition].Get(TimeSpan.FromSeconds(30)).Offset;
 
     private static OffsetSpec? Spec(string kind) => kind switch
     {
@@ -225,5 +284,9 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         [DllImport(DllName, EntryPoint = "kafka_admin_ListOffsetsOptions_isolation_level_err", CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr ListOffsetsOptionsIsolationLevel(IntPtr self, ref IntPtr outErr);
+    }
+
+    private sealed class UnknownSpec : OffsetSpec
+    {
     }
 }

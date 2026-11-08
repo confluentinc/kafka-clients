@@ -27,16 +27,16 @@ public sealed class TransactionListing
     /// <summary>Creates a transaction listing — Java's constructor.</summary>
     /// <param name="transactionalId">The transactional id.</param>
     /// <param name="producerId">The producer id.</param>
-    /// <param name="state">The transaction state.</param>
+    /// <param name="transactionState">The transaction state.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="transactionalId"/> is null: stricter than Java, whose constructor stores
     /// it unchecked, a recorded deviation.
     /// </exception>
-    public TransactionListing(string transactionalId, long producerId, TransactionState state)
+    public TransactionListing(string transactionalId, long producerId, TransactionState transactionState)
     {
         TransactionalId = transactionalId ?? throw new ArgumentNullException(nameof(transactionalId));
         ProducerId = producerId;
-        State = state;
+        State = transactionState;
     }
 
     /// <summary>The transactional id — Java's <c>transactionalId()</c>.</summary>

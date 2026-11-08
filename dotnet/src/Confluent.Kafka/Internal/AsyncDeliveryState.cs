@@ -45,8 +45,8 @@ internal sealed class AsyncDeliveryState : DeliveryState
 
     internal AsyncDeliveryState(
         DeliveryReporter reporter,
-        IDeliveryCallback? callback,
-        IAsyncDeliveryCallback? asyncCallback,
+        ICallback? callback,
+        IAsyncCallback? asyncCallback,
         string topic,
         int partition,
         CancellationToken cancellationToken)

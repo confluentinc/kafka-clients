@@ -118,7 +118,7 @@ internal sealed class ChaosRecordOutcomes
     /// One record's delivery callback and settlement state. It fires on the producer's completion thread,
     /// so it only builds the event and queues it.
     /// </summary>
-    internal sealed class RecordCallback : IDeliveryCallback
+    internal sealed class RecordCallback : ICallback
     {
         private readonly ChaosRecordOutcomes _owner;
 
