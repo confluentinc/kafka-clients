@@ -154,6 +154,18 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     public void Clear() => _native.MockClear();
 
+    /// <summary>Whether the producer has been closed (Java <c>MockProducer.closed()</c>).</summary>
+    /// <returns><see langword="true"/> once the producer is closed or disposed.</returns>
+    public bool Closed() => _native.MockClosed();
+
+    /// <summary>
+    /// Whether every sent record has completed, none still waiting for <c>CompleteNext</c> or <c>ErrorNext</c> (Java
+    /// <c>MockProducer.flushed()</c>).
+    /// </summary>
+    /// <returns><see langword="true"/> when no completion is pending.</returns>
+    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    public bool Flushed() => _native.MockFlushed();
+
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 }
