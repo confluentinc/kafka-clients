@@ -253,8 +253,6 @@ missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.r
 missing T:Confluent.Kafka.Common.Resource.ResourceType org.apache.kafka.common.resource.ResourceType#isUnknown()
 missing T:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal org.apache.kafka.common.security.auth.KafkaPrincipal#getName()
 missing T:Confluent.Kafka.Common.Security.Auth.KafkaPrincipal org.apache.kafka.common.security.auth.KafkaPrincipal#getPrincipalType()
-missing T:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation org.apache.kafka.common.security.token.delegation.TokenInformation#fromRecord(String,KafkaPrincipal,KafkaPrincipal,Collection,long,long,long)
-missing T:Confluent.Kafka.Common.Security.Token.Delegation.TokenInformation org.apache.kafka.common.security.token.delegation.TokenInformation#setExpiryTimestamp(long)
 missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
 missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#configure(Map,boolean)
 missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
