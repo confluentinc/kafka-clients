@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 
 namespace Confluent.Kafka.Common;
@@ -21,7 +24,6 @@ namespace Confluent.Kafka.Common;
 /// Metadata about one partition of a topic, Java's <c>PartitionInfo</c>, as <c>PartitionsFor</c> and
 /// <c>ListTopics</c> return it.
 /// </summary>
-/// <remarks>Unlike Java's <c>PartitionInfo</c>, it has no value equality.</remarks>
 public sealed class PartitionInfo
 {
     private readonly string _topic;
@@ -71,6 +73,39 @@ public sealed class PartitionInfo
     /// <returns>The subset of <see cref="Replicas()"/> that are offline.</returns>
     public Node[] OfflineReplicas() => _offlineReplicas;
 
+    /// <summary>
+    /// Value equality over the topic, the partition, the leader and the three replica lists in order, Java's
+    /// <c>equals</c>.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two describe the same partition.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is PartitionInfo other
+            && string.Equals(_topic, other._topic, StringComparison.Ordinal)
+            && _partition == other._partition
+            && Equals(_leader, other._leader)
+            && _replicas.SequenceEqual(other._replicas)
+            && _inSyncReplicas.SequenceEqual(other._inSyncReplicas)
+            && _offlineReplicas.SequenceEqual(other._offlineReplicas));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + (_topic is null ? 0 : StringComparer.Ordinal.GetHashCode(_topic));
+            hash = (hash * 31) + _partition;
+            hash = (hash * 31) + (_leader?.GetHashCode() ?? 0);
+            hash = (hash * 31) + NodesHash(_replicas);
+            hash = (hash * 31) + NodesHash(_inSyncReplicas);
+            hash = (hash * 31) + NodesHash(_offlineReplicas);
+            return hash;
+        }
+    }
+
     /// <inheritdoc/>
     public override string ToString() =>
         string.Format(
@@ -82,6 +117,17 @@ public sealed class PartitionInfo
             FormatNodeIds(_replicas),
             FormatNodeIds(_inSyncReplicas),
             FormatNodeIds(_offlineReplicas));
+
+    private static int NodesHash(Node[] nodes)
+    {
+        int hash = 1;
+        foreach (Node node in nodes)
+        {
+            hash = unchecked((31 * hash) + (node?.GetHashCode() ?? 0));
+        }
+
+        return hash;
+    }
 
     private static string FormatNodeIds(Node[] nodes)
     {

@@ -27,9 +27,7 @@ namespace Confluent.Kafka.Common;
 /// <remarks>
 /// <see cref="Elr()"/> and <see cref="LastKnownElr()"/> are <see langword="null"/> when the broker
 /// reported no eligible-leader-replica set, which differs from an empty set. A partition reported
-/// with only one of the two sets reads both as absent, as Python's binding does. Value equality
-/// is deliberately not implemented, although Java's class overrides <c>equals</c>, as for
-/// <see cref="Node"/> and <see cref="PartitionInfo"/>.
+/// with only one of the two sets reads both as absent, as Python's binding does.
 /// </remarks>
 public sealed class TopicPartitionInfo
 {
@@ -158,6 +156,37 @@ public sealed class TopicPartitionInfo
     public IReadOnlyList<Node>? LastKnownElr() => _lastKnownElr;
 
     /// <summary>
+    /// Value equality over the partition, the leader and the four replica lists in order, Java's <c>equals</c>.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two describe the same partition.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is TopicPartitionInfo other
+            && _partition == other._partition
+            && Equals(_leader, other._leader)
+            && _replicas.SequenceEqual(other._replicas)
+            && _isr.SequenceEqual(other._isr)
+            && NodesMatch(_elr, other._elr)
+            && NodesMatch(_lastKnownElr, other._lastKnownElr));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int result = _partition;
+            result = (31 * result) + (_leader?.GetHashCode() ?? 0);
+            result = (31 * result) + NodesHash(_replicas);
+            result = (31 * result) + NodesHash(_isr);
+            result = (31 * result) + NodesHash(_elr);
+            result = (31 * result) + NodesHash(_lastKnownElr);
+            return result;
+        }
+    }
+
+    /// <summary>
     /// A diagnostic rendering matching Java's <c>toString()</c>, including its
     /// <c>N/A</c> spelling for an absent ELR set.
     /// </summary>
@@ -175,4 +204,23 @@ public sealed class TopicPartitionInfo
 
     private static string Join(IEnumerable<Node> nodes) =>
         string.Join(", ", nodes.Select(static node => node.ToString()));
+
+    private static bool NodesMatch(List<Node>? left, List<Node>? right) =>
+        left is null || right is null ? left is null && right is null : left.SequenceEqual(right);
+
+    private static int NodesHash(List<Node>? nodes)
+    {
+        if (nodes is null)
+        {
+            return 0;
+        }
+
+        int hash = 1;
+        foreach (Node node in nodes)
+        {
+            hash = unchecked((31 * hash) + (node?.GetHashCode() ?? 0));
+        }
+
+        return hash;
+    }
 }

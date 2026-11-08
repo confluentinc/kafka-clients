@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
+
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Record;
+using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -141,4 +144,31 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// <returns>The size of the serialized, uncompressed value in bytes, or <c>-1</c> if the value is
     /// <see langword="null"/>.</returns>
     public int SerializedValueSize() => _serializedValueSize;
+
+    /// <summary>
+    /// A diagnostic rendering in Java's <c>toString()</c> form: the timestamp is named by Java's
+    /// <c>TimestampType</c> text (<c>CreateTime</c>), and the delivery count, which only a share group's records
+    /// carry, is <c>null</c>.
+    /// </summary>
+    /// <returns>The rendering.</returns>
+    public override string ToString() =>
+        "ConsumerRecord(topic = " + _topic
+        + ", partition = " + _partition.ToString(CultureInfo.InvariantCulture)
+        + ", leaderEpoch = " + JavaText.ValueOf(_leaderEpoch)
+        + ", offset = " + _offset.ToString(CultureInfo.InvariantCulture)
+        + ", " + TimestampTypeText(_timestampType) + " = " + _timestamp.ToString(CultureInfo.InvariantCulture)
+        + ", deliveryCount = null"
+        + ", serialized key size = " + _serializedKeySize.ToString(CultureInfo.InvariantCulture)
+        + ", serialized value size = " + _serializedValueSize.ToString(CultureInfo.InvariantCulture)
+        + ", headers = " + _headers
+        + ", key = " + JavaText.ValueOf(_key)
+        + ", value = " + JavaText.ValueOf(_value) + ")";
+
+    private static string TimestampTypeText(TimestampType type) => type switch
+    {
+        Common.Record.TimestampType.NO_TIMESTAMP_TYPE => "NoTimestampType",
+        Common.Record.TimestampType.CREATE_TIME => "CreateTime",
+        Common.Record.TimestampType.LOG_APPEND_TIME => "LogAppendTime",
+        _ => ((int)type).ToString(CultureInfo.InvariantCulture),
+    };
 }
