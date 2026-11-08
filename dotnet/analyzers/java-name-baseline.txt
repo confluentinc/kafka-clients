@@ -202,8 +202,6 @@ missing T:Confluent.Kafka.Admin.OffsetSpec.LatestSpec org.apache.kafka.clients.a
 missing T:Confluent.Kafka.Admin.OffsetSpec.LatestTieredSpec org.apache.kafka.clients.admin.OffsetSpec$LatestTieredSpec#LatestTieredSpec()
 missing T:Confluent.Kafka.Admin.OffsetSpec.MaxTimestampSpec org.apache.kafka.clients.admin.OffsetSpec$MaxTimestampSpec#MaxTimestampSpec()
 missing T:Confluent.Kafka.Admin.ScramMechanism org.apache.kafka.clients.admin.ScramMechanism#type()
-missing T:Confluent.Kafka.Admin.TopicDescription org.apache.kafka.clients.admin.TopicDescription#equals(Object)
-missing T:Confluent.Kafka.Admin.TopicDescription org.apache.kafka.clients.admin.TopicDescription#hashCode()
 missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#parse(String)
 missing T:Confluent.Kafka.Common.Acl.AccessControlEntryFilter org.apache.kafka.common.acl.AccessControlEntryFilter#findIndefiniteField()
 missing T:Confluent.Kafka.Common.Acl.AccessControlEntryFilter org.apache.kafka.common.acl.AccessControlEntryFilter#matches(AccessControlEntry)
@@ -245,13 +243,10 @@ missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.met
 missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#measurable()
 missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#metricName()
 missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#metricValue()
-missing T:Confluent.Kafka.Common.Metrics.KafkaMetric org.apache.kafka.common.metrics.KafkaMetric#toString()
 missing T:Confluent.Kafka.Common.Metrics.QuotaViolationException org.apache.kafka.common.metrics.QuotaViolationException#fillInStackTrace()
 missing T:Confluent.Kafka.Common.Metrics.QuotaViolationException org.apache.kafka.common.metrics.QuotaViolationException#toString()
 missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#PartitionInfo(String,int,Node,Node[],Node[])
 missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#PartitionInfo(String,int,Node,Node[],Node[],Node[])
-missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#equals(Object)
-missing T:Confluent.Kafka.Common.PartitionInfo org.apache.kafka.common.PartitionInfo#hashCode()
 missing T:Confluent.Kafka.Common.Quota.ClientQuotaFilterComponent org.apache.kafka.common.quota.ClientQuotaFilterComponent#match()
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#forName(String)
 missing T:Confluent.Kafka.Common.Resource.PatternType org.apache.kafka.common.resource.PatternType#code()
@@ -308,8 +303,6 @@ missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.se
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$UUIDSerde
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$VoidSerde
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$WrapperSerde
-missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#equals(Object)
-missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#hashCode()
 missing T:Confluent.Kafka.Common.TopicPartitionInfo org.apache.kafka.common.TopicPartitionInfo#isr()
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#getLeastSignificantBits()
 missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#getMostSignificantBits()
@@ -350,15 +343,11 @@ missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateDurationOffsets(Map)
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets(Map)
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updatePartitions(String,List)
-missing T:Confluent.Kafka.Consumer.ConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#equals(Object)
-missing T:Confluent.Kafka.Consumer.ConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#hashCode()
-missing T:Confluent.Kafka.Consumer.ConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#toString()
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,K,V)
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional)
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional,Optional)
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#NULL_SIZE
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount()
-missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#toString()
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#EMPTY
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#empty()
@@ -423,8 +412,6 @@ missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consu
 missing T:Confluent.Kafka.Consumer.OffsetAndMetadata org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)
 missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp(long,long)
 missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp(long,long,Optional)
-missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#equals(Object)
-missing T:Confluent.Kafka.Consumer.OffsetAndTimestamp org.apache.kafka.clients.consumer.OffsetAndTimestamp#hashCode()
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map)
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME

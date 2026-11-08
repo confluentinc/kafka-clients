@@ -150,6 +150,37 @@ public sealed class TopicPartitionInfo
     public IReadOnlyList<Node>? LastKnownElr => _lastKnownElr;
 
     /// <summary>
+    /// Value equality over the partition, the leader and the four replica lists in order, Java's <c>equals</c>.
+    /// </summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two describe the same partition.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is TopicPartitionInfo other
+            && Partition == other.Partition
+            && Equals(Leader, other.Leader)
+            && _replicas.SequenceEqual(other._replicas)
+            && _inSyncReplicas.SequenceEqual(other._inSyncReplicas)
+            && NodesMatch(_elr, other._elr)
+            && NodesMatch(_lastKnownElr, other._lastKnownElr));
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int result = Partition;
+            result = (31 * result) + (Leader?.GetHashCode() ?? 0);
+            result = (31 * result) + NodesHash(_replicas);
+            result = (31 * result) + NodesHash(_inSyncReplicas);
+            result = (31 * result) + NodesHash(_elr);
+            result = (31 * result) + NodesHash(_lastKnownElr);
+            return result;
+        }
+    }
+
+    /// <summary>
     /// A diagnostic rendering matching Java's <c>toString()</c>, including its
     /// <c>N/A</c> spelling for an absent ELR set.
     /// </summary>
@@ -167,4 +198,23 @@ public sealed class TopicPartitionInfo
 
     private static string Join(IEnumerable<Node> nodes) =>
         string.Join(", ", nodes.Select(static node => node.ToString()));
+
+    private static bool NodesMatch(List<Node>? left, List<Node>? right) =>
+        left is null || right is null ? left is null && right is null : left.SequenceEqual(right);
+
+    private static int NodesHash(List<Node>? nodes)
+    {
+        if (nodes is null)
+        {
+            return 0;
+        }
+
+        int hash = 1;
+        foreach (Node node in nodes)
+        {
+            hash = unchecked((31 * hash) + node.GetHashCode());
+        }
+
+        return hash;
+    }
 }

@@ -43,6 +43,30 @@ public sealed class OffsetAndTimestamp
     /// </summary>
     public int? LeaderEpoch { get; }
 
+    /// <summary>Value equality over the timestamp, the offset and the leader epoch, Java's <c>equals</c>.</summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns>Whether the two are the same offset and timestamp.</returns>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is OffsetAndTimestamp other
+            && Timestamp == other.Timestamp
+            && Offset == other.Offset
+            && LeaderEpoch == other.LeaderEpoch);
+
+    /// <summary>The hash of the members <see cref="Equals(object)"/> compares, Java's <c>hashCode</c>.</summary>
+    /// <returns>The hash code.</returns>
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            int hash = 1;
+            hash = (hash * 31) + Timestamp.GetHashCode();
+            hash = (hash * 31) + Offset.GetHashCode();
+            hash = (hash * 31) + (LeaderEpoch?.GetHashCode() ?? 0);
+            return hash;
+        }
+    }
+
     /// <summary>
     /// Returns a debug string of the form
     /// <c>"OffsetAndTimestamp{offset=…, timestamp=…, leaderEpoch=…}"</c>.
