@@ -266,8 +266,6 @@ missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.se
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$UUIDSerde
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$VoidSerde
 missing T:Confluent.Kafka.Common.Serialization.Serdes org.apache.kafka.common.serialization.Serdes$WrapperSerde
-missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toArray(List)
-missing T:Confluent.Kafka.Common.Uuid org.apache.kafka.common.Uuid#toList(Uuid[])
 missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map)
 missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#clientInstanceId(Duration)
 missing T:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2 org.apache.kafka.clients.consumer.KafkaConsumer#commitSync()
@@ -306,7 +304,6 @@ missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,K,V)
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional)
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord(String,int,long,long,TimestampType,int,int,K,V,Headers,Optional,Optional)
-missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#NULL_SIZE
 missing T:Confluent.Kafka.Consumer.ConsumerRecord`2 org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount()
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)
 missing T:Confluent.Kafka.Consumer.ConsumerRecords`2 org.apache.kafka.clients.consumer.ConsumerRecords#EMPTY
@@ -371,8 +368,6 @@ missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consu
 missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#updatePartitions(String,List)
 missing T:Confluent.Kafka.Consumer.OffsetAndMetadata org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map)
-missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
-missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#abortTransaction()
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#beginTransaction()
 missing T:Confluent.Kafka.Producer.AsyncKafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#clientInstanceId(Duration)
@@ -436,8 +431,6 @@ missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer
 missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#sendOffsetsToTransaction(Map,ConsumerGroupMetadata)
 missing T:Confluent.Kafka.Producer.IProducer`2 org.apache.kafka.clients.producer.Producer#unregisterMetricFromSubscription(KafkaMetric)
 missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#KafkaProducer(Map)
-missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#NETWORK_THREAD_PREFIX
-missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#PRODUCER_METRIC_GROUP_NAME
 missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#abortTransaction()
 missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#beginTransaction()
 missing T:Confluent.Kafka.Producer.KafkaProducer`2 org.apache.kafka.clients.producer.KafkaProducer#clientInstanceId(Duration)

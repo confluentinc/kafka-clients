@@ -42,6 +42,9 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// <summary>The timestamp of a record with no timestamp, Java's <c>NO_TIMESTAMP</c>.</summary>
     public const long NO_TIMESTAMP = -1;
 
+    /// <summary>The serialized size of a null key or value, Java's <c>NULL_SIZE</c>.</summary>
+    public const int NULL_SIZE = -1;
+
     private readonly string _topic;
     private readonly int _partition;
     private readonly long _offset;
