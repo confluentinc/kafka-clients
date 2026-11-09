@@ -72,7 +72,7 @@ public sealed class PublicAdminP8Tests
         Assert.Null(Record.Exception(
             () => admin.AbortTransaction(
                 new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1),
-                new AbortTransactionOptions { TimeoutMs = -1 })));
+                new AbortTransactionOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -118,7 +118,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Null(Record.Exception(
             () => admin.ForceTerminateTransaction(
-                "txn-a", new TerminateTransactionOptions { TimeoutMs = -1 })));
+                "txn-a", new TerminateTransactionOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -138,8 +138,8 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-y", "txn-x" });
 
-        Assert.Equal(2, result.FencedProducers.Count);
-        foreach (AsyncKafkaFuture fenced in result.FencedProducers.Values)
+        Assert.Equal(2, result.FencedProducers().Count);
+        foreach (AsyncKafkaFuture fenced in result.FencedProducers().Values)
         {
             UnsupportedOperationException error = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => fenced.Get());
             Assert.Equal("Not implemented yet", error.Message);
@@ -164,7 +164,7 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(Array.Empty<string>());
 
-        Assert.Empty(result.FencedProducers);
+        Assert.Empty(result.FencedProducers());
         await result.All().Get();
     }
 
@@ -176,7 +176,7 @@ public sealed class PublicAdminP8Tests
 
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
 
-        Assert.Equal(new[] { "txn-a" }, result.FencedProducers.Keys);
+        Assert.Equal(new[] { "txn-a" }, result.FencedProducers().Keys);
         AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
 
@@ -229,7 +229,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Null(Record.Exception(
             () => admin.FenceProducers(
-                new[] { "txn-a" }, new FenceProducersOptions { TimeoutMs = -1 })));
+                new[] { "txn-a" }, new FenceProducersOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -312,7 +312,7 @@ public sealed class PublicAdminP8Tests
 
         Assert.Null(Record.Exception(
             () => admin.DescribeTransactions(
-                new[] { "txn-a" }, new DescribeTransactionsOptions { TimeoutMs = -1 })));
+                new[] { "txn-a" }, new DescribeTransactionsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -416,7 +416,7 @@ public sealed class PublicAdminP8Tests
         Assert.Null(Record.Exception(
             () => admin.DescribeProducers(
                 new[] { new TopicPartition("alpha", 0) },
-                new DescribeProducersOptions { TimeoutMs = -1 })));
+                new DescribeProducersOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -427,7 +427,7 @@ public sealed class PublicAdminP8Tests
 
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0) },
-            new DescribeProducersOptions { BrokerId = -1 });
+            new DescribeProducersOptions().BrokerId(-1));
 
         AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
@@ -462,13 +462,11 @@ public sealed class PublicAdminP8Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result = admin.ListTransactions(
-            new ListTransactionsOptions
-            {
-                FilteredStates = new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT },
-                FilteredProducerIds = new[] { 11L, 22L, 33L },
-                FilteredDuration = 60_000L,
-                FilteredTransactionalIdPattern = "txn-.*",
-            });
+            new ListTransactionsOptions()
+                .FilterStates(new[] { TransactionState.ONGOING, TransactionState.PREPARE_ABORT })
+                .FilterProducerIds(new[] { 11L, 22L, 33L })
+                .FilterOnDuration(60_000L)
+                .FilterOnTransactionalIdPattern("txn-.*"));
 
         AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }
@@ -480,7 +478,7 @@ public sealed class PublicAdminP8Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
-            () => admin.ListTransactions(new ListTransactionsOptions { TimeoutMs = -1 })));
+            () => admin.ListTransactions(new ListTransactionsOptions().TimeoutMs(-1))));
     }
 
     [Fact]
@@ -490,7 +488,7 @@ public sealed class PublicAdminP8Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListTransactionsResult result =
-            admin.ListTransactions(new ListTransactionsOptions { FilteredDuration = -5L });
+            admin.ListTransactions(new ListTransactionsOptions().FilterOnDuration(-5L));
 
         AssertNotImplemented(await FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()));
     }

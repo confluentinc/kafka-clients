@@ -29,10 +29,12 @@ namespace Confluent.Kafka.Common.Errors;
 /// </summary>
 public class InvalidTopicException : global::Confluent.Kafka.Common.Errors.InvalidConfigurationException
 {
+    private readonly IReadOnlyCollection<string> _invalidTopics;
+
     /// <summary>Initializes the exception, as Java's <c>InvalidTopicException()</c>.</summary>
     public InvalidTopicException()
     {
-        InvalidTopics = Array.Empty<string>();
+        _invalidTopics = Array.Empty<string>();
     }
 
     /// <summary>
@@ -41,21 +43,21 @@ public class InvalidTopicException : global::Confluent.Kafka.Common.Errors.Inval
     public InvalidTopicException(string? message, Exception? innerException)
         : base(message, innerException)
     {
-        InvalidTopics = Array.Empty<string>();
+        _invalidTopics = Array.Empty<string>();
     }
 
     /// <summary>Initializes the exception, as Java's <c>InvalidTopicException(String message)</c>.</summary>
     public InvalidTopicException(string? message)
         : base(message)
     {
-        InvalidTopics = Array.Empty<string>();
+        _invalidTopics = Array.Empty<string>();
     }
 
     /// <summary>Initializes the exception, as Java's <c>InvalidTopicException(Throwable cause)</c>.</summary>
     public InvalidTopicException(Exception? innerException)
         : base(innerException)
     {
-        InvalidTopics = Array.Empty<string>();
+        _invalidTopics = Array.Empty<string>();
     }
 
     /// <summary>
@@ -64,7 +66,7 @@ public class InvalidTopicException : global::Confluent.Kafka.Common.Errors.Inval
     public InvalidTopicException(IReadOnlyCollection<string> invalidTopics)
         : base("Invalid topics: " + JavaText.ValueOf(invalidTopics))
     {
-        InvalidTopics = invalidTopics;
+        _invalidTopics = invalidTopics;
     }
 
     /// <summary>
@@ -74,17 +76,18 @@ public class InvalidTopicException : global::Confluent.Kafka.Common.Errors.Inval
     public InvalidTopicException(string? message, IReadOnlyCollection<string> invalidTopics)
         : base(message)
     {
-        InvalidTopics = invalidTopics;
+        _invalidTopics = invalidTopics;
     }
 
     internal InvalidTopicException(CoreError _, string? message, Exception? innerException, IReadOnlyCollection<string> invalidTopics)
         : base(_, message, innerException)
     {
-        InvalidTopics = invalidTopics;
+        _invalidTopics = invalidTopics;
     }
 
     /// <summary>Java's <c>invalidTopics()</c>.</summary>
-    public IReadOnlyCollection<string> InvalidTopics { get; }
+    /// <returns>The invalid topics.</returns>
+    public IReadOnlyCollection<string> InvalidTopics() => _invalidTopics;
 
     internal override int FfiId => 17;
 }

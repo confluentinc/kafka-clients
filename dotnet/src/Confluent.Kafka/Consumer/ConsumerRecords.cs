@@ -35,8 +35,12 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
         _records = records;
     }
 
-    /// <summary>The number of records in the batch (<c>0</c> for an empty poll).</summary>
-    public int Count => _records.Count;
+    /// <summary>The number of records for all topics.</summary>
+    /// <returns>The number of records for all topics (<c>0</c> for an empty poll).</returns>
+    public int Count() => _records.Count;
+
+    /// <summary>The number of records for all topics, the same as <see cref="Count()"/>.</summary>
+    int IReadOnlyCollection<ConsumerRecord<TKey, TValue>>.Count => _records.Count;
 
     /// <summary>Enumerates the records in batch insertion order.</summary>
     public IEnumerator<ConsumerRecord<TKey, TValue>> GetEnumerator() => _records.GetEnumerator();

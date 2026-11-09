@@ -72,5 +72,6 @@ public sealed class NewPartitionReassignment
     /// The broker ids the partition's replicas are to move to — Java's
     /// <c>targetReplicas()</c>. Never empty, and read-only, as Java's <c>List.copyOf</c> result.
     /// </summary>
-    public IReadOnlyList<int> TargetReplicas => _targetReplicas;
+    /// <returns>The broker ids the partition's replicas are to move to.</returns>
+    public IReadOnlyList<int> TargetReplicas() => _targetReplicas;
 }

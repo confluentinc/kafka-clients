@@ -49,17 +49,17 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
         IReadOnlyDictionary<string, LogDirDescription> directories =
-            await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Descriptions()[0].Get(), s_deadline);
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
-        Assert.Null(description.Error);
-        Assert.Equal(2, description.ReplicaInfos.Count);
-        Assert.Contains(new TopicPartition(Topic, 0), description.ReplicaInfos);
-        Assert.Contains(new TopicPartition(Topic, 1), description.ReplicaInfos);
+        Assert.Null(description.Error());
+        Assert.Equal(2, description.ReplicaInfos().Count);
+        Assert.Contains(new TopicPartition(Topic, 0), description.ReplicaInfos());
+        Assert.Contains(new TopicPartition(Topic, 1), description.ReplicaInfos());
 
         IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>> all =
             await TestTimeout.Run(() => result.AllDescriptions().Get(), s_deadline);
-        Assert.Equal(2, all[0][DefaultLogDir].ReplicaInfos.Count);
+        Assert.Equal(2, all[0][DefaultLogDir].ReplicaInfos().Count);
     }
 
     [Fact]
@@ -73,10 +73,10 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
         IReadOnlyDictionary<string, LogDirDescription> directories =
-            await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Descriptions()[0].Get(), s_deadline);
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
-        Assert.False(description.IsCordoned);
+        Assert.False(description.IsCordoned());
         Assert.Contains("isCordoned=false", description.ToString(), StringComparison.Ordinal);
     }
 
@@ -89,7 +89,7 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeLogDirsResult result = admin.DescribeLogDirs(new[] { 0 });
 
         IReadOnlyDictionary<string, LogDirDescription> directories =
-            await TestTimeout.Run(() => result.Descriptions[0].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Descriptions()[0].Get(), s_deadline);
         Assert.Empty(directories);
     }
 
@@ -106,12 +106,12 @@ public sealed class PublicAdminLogDirsTests
         AsyncAlterReplicaLogDirsResult moved = admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir });
 
-        await TestTimeout.Run(() => moved.Values[replica].Get(), s_deadline);
+        await TestTimeout.Run(() => moved.Values()[replica].Get(), s_deadline);
         await TestTimeout.Run(() => moved.All().Get(), s_deadline);
 
         AsyncDescribeReplicaLogDirsResult described = admin.DescribeReplicaLogDirs(new[] { replica });
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info =
-            await TestTimeout.Run(() => described.Values[replica].Get(), s_deadline);
+            await TestTimeout.Run(() => described.Values()[replica].Get(), s_deadline);
 
         Assert.Equal(DefaultLogDir, info.GetCurrentReplicaLogDir());
         Assert.Equal(DefaultLogDir, info.GetFutureReplicaLogDir());
@@ -135,7 +135,7 @@ public sealed class PublicAdminLogDirsTests
         AsyncDescribeReplicaLogDirsResult result = admin.DescribeReplicaLogDirs(new[] { replica });
 
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info =
-            await TestTimeout.Run(() => result.Values[replica].Get(), s_deadline);
+            await TestTimeout.Run(() => result.Values()[replica].Get(), s_deadline);
 
         Assert.Null(info.GetFutureReplicaLogDir());
         Assert.Equal("ReplicaLogDirInfo(currentReplicaLogDir=/tmp/kafka-logs)", info.ToString());
@@ -158,7 +158,7 @@ public sealed class PublicAdminLogDirsTests
             new Dictionary<TopicPartitionReplica, string> { [replica] = "/mnt/absent" });
 
         KafkaStorageException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => result.Values[replica].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<KafkaStorageException>(() => result.Values()[replica].Get()), s_deadline);
         Assert.Equal("Log directory /mnt/absent is offline", failure.Message);
     }
 
@@ -175,7 +175,7 @@ public sealed class PublicAdminLogDirsTests
             new Dictionary<TopicPartitionReplica, string> { [replica] = DefaultLogDir });
 
         ReplicaNotAvailableException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values[replica].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<ReplicaNotAvailableException>(() => result.Values()[replica].Get()), s_deadline);
 
         // The core renders the replica into this message, which is why ToString is topic-partition-brokerId.
         Assert.Equal($"Can't find {replica}", failure.Message);
@@ -194,7 +194,7 @@ public sealed class PublicAdminLogDirsTests
             admin.DescribeReplicaLogDirs(new[] { new TopicPartitionReplica(Topic, 0, 0) });
 
         DescribeReplicaLogDirsResult.ReplicaLogDirInfo info = await TestTimeout.Run(
-            () => result.Values[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
+            () => result.Values()[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
         Assert.Equal(DefaultLogDir, info.GetCurrentReplicaLogDir());
 
         AsyncAlterReplicaLogDirsResult moved = admin.AlterReplicaLogDirs(
@@ -202,7 +202,7 @@ public sealed class PublicAdminLogDirsTests
             {
                 [new TopicPartitionReplica(Topic, 0, 0)] = DefaultLogDir,
             });
-        await TestTimeout.Run(() => moved.Values[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
+        await TestTimeout.Run(() => moved.Values()[new TopicPartitionReplica(Topic, 0, 0)].Get(), s_deadline);
     }
 
     [Fact]
@@ -278,32 +278,32 @@ public sealed class PublicAdminLogDirsTests
         };
 
         LogDirDescription two = new LogDirDescription(error, replicas);
-        Assert.Same(error, two.Error);
+        Assert.Same(error, two.Error());
 
         // A read-only view over the caller's map, not the map itself.
-        Assert.Equal(replicas, two.ReplicaInfos);
-        Assert.Null(two.TotalBytes);
-        Assert.Null(two.UsableBytes);
-        Assert.False(two.IsCordoned);
+        Assert.Equal(replicas, two.ReplicaInfos());
+        Assert.Null(two.TotalBytes());
+        Assert.Null(two.UsableBytes());
+        Assert.False(two.IsCordoned());
 
         LogDirDescription four = new LogDirDescription(null, replicas, 100, 0);
-        Assert.Null(four.Error);
-        Assert.Equal(100, four.TotalBytes);
-        Assert.Equal(0, four.UsableBytes);
-        Assert.False(four.IsCordoned);
+        Assert.Null(four.Error());
+        Assert.Equal(100, four.TotalBytes());
+        Assert.Equal(0, four.UsableBytes());
+        Assert.False(four.IsCordoned());
 
         LogDirDescription javaUnknown = new LogDirDescription(null, replicas, -1, -1, true);
-        Assert.Null(javaUnknown.TotalBytes);
-        Assert.Null(javaUnknown.UsableBytes);
-        Assert.True(javaUnknown.IsCordoned);
+        Assert.Null(javaUnknown.TotalBytes());
+        Assert.Null(javaUnknown.UsableBytes());
+        Assert.True(javaUnknown.IsCordoned());
 
         LogDirDescription fourUnknown = new LogDirDescription(null, replicas, -1, 5);
-        Assert.Null(fourUnknown.TotalBytes);
-        Assert.Equal(5, fourUnknown.UsableBytes);
+        Assert.Null(fourUnknown.TotalBytes());
+        Assert.Equal(5, fourUnknown.UsableBytes());
 
         LogDirDescription otherNegative = new LogDirDescription(null, replicas, -2, 7, false);
-        Assert.Equal(-2, otherNegative.TotalBytes);
-        Assert.Equal(7, otherNegative.UsableBytes);
+        Assert.Equal(-2, otherNegative.TotalBytes());
+        Assert.Equal(7, otherNegative.UsableBytes());
     }
 
     [Theory]

@@ -35,8 +35,8 @@ public sealed class PublicTopicPartitionTests
     {
         TopicPartition tp = new TopicPartition("t", partition);
 
-        Assert.Equal("t", tp.Topic);
-        Assert.Equal(partition, tp.Partition);
+        Assert.Equal("t", tp.Topic());
+        Assert.Equal(partition, tp.Partition());
 
         Assert.Equal("t-" + partition.ToString(CultureInfo.InvariantCulture), tp.ToString());
     }
@@ -50,8 +50,8 @@ public sealed class PublicTopicPartitionTests
     {
         TopicPartition constructed = new TopicPartition(null!, 0);
 
-        Assert.Null(constructed.Topic);
-        Assert.Equal(0, constructed.Partition);
+        Assert.Null(constructed.Topic());
+        Assert.Equal(0, constructed.Partition());
 
         Assert.Equal(default(TopicPartition), constructed);
         Assert.True(constructed == default(TopicPartition));
@@ -95,8 +95,8 @@ public sealed class PublicTopicPartitionTests
         Assert.Equal("partition", parameters[1].Name);
         Assert.Equal(typeof(int), parameters[1].ParameterType);
 
-        PropertyInfo topic = typeof(TopicPartition).GetProperty(nameof(TopicPartition.Topic))!;
-        Assert.Equal(typeof(string), topic.PropertyType);
+        MethodInfo topic = typeof(TopicPartition).GetMethod(nameof(TopicPartition.Topic), Type.EmptyTypes)!;
+        Assert.Equal(typeof(string), topic.ReturnType);
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(topic));
     }
 }

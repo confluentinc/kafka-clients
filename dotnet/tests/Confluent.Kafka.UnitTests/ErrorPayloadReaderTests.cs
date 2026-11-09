@@ -64,7 +64,7 @@ public sealed class ErrorPayloadReaderTests
                 TopicAuthorizationException e =
                     Assert.IsType<TopicAuthorizationException>(KafkaException.FromFfiError(error, owned: false));
                 Assert.Equal(coreMessage, e.Message);
-                Assert.Equal(new HashSet<string> { NonAsciiTopic, OtherTopic }, new HashSet<string>(e.UnauthorizedTopics));
+                Assert.Equal(new HashSet<string> { NonAsciiTopic, OtherTopic }, new HashSet<string>(e.UnauthorizedTopics()));
                 Assert.Equal(29, e.Code);
                 Assert.Null(e.InnerException);
             }
@@ -90,7 +90,7 @@ public sealed class ErrorPayloadReaderTests
             Assert.IsType<TopicAuthorizationException>(KafkaException.FromFfiError(error, owned: true));
 
         Assert.Equal(NonAsciiMessage, e.Message);
-        Assert.Equal(new[] { NonAsciiTopic }, e.UnauthorizedTopics.ToArray());
+        Assert.Equal(new[] { NonAsciiTopic }, e.UnauthorizedTopics().ToArray());
     }
 
     [Fact]
@@ -117,8 +117,8 @@ public sealed class ErrorPayloadReaderTests
                     Assert.IsType<InvalidTopicException>(KafkaException.FromFfiError(withMessage, owned: false));
                 Assert.Equal(coreMessage, fromPlain.Message);
                 Assert.Equal(NonAsciiMessage, fromMessage.Message);
-                Assert.Equal(new HashSet<string> { NonAsciiTopic, OtherTopic }, new HashSet<string>(fromPlain.InvalidTopics));
-                Assert.Equal(new HashSet<string> { NonAsciiTopic, OtherTopic }, new HashSet<string>(fromMessage.InvalidTopics));
+                Assert.Equal(new HashSet<string> { NonAsciiTopic, OtherTopic }, new HashSet<string>(fromPlain.InvalidTopics()));
+                Assert.Equal(new HashSet<string> { NonAsciiTopic, OtherTopic }, new HashSet<string>(fromMessage.InvalidTopics()));
             }
         }
         finally
@@ -156,11 +156,11 @@ public sealed class ErrorPayloadReaderTests
                 GroupAuthorizationException c =
                     Assert.IsType<GroupAuthorizationException>(KafkaException.FromFfiError(withoutGroup, owned: false));
                 Assert.Equal(forGroupMessage, a.Message);
-                Assert.Equal(NonAsciiTopic, a.GroupId);
+                Assert.Equal(NonAsciiTopic, a.GroupId());
                 Assert.Equal(NonAsciiMessage, b.Message);
-                Assert.Equal(NonAsciiTopic, b.GroupId);
+                Assert.Equal(NonAsciiTopic, b.GroupId());
                 Assert.Equal(NonAsciiMessage, c.Message);
-                Assert.Null(c.GroupId);
+                Assert.Null(c.GroupId());
             }
         }
         finally
@@ -188,7 +188,7 @@ public sealed class ErrorPayloadReaderTests
                 ThrottlingQuotaExceededException e =
                     Assert.IsType<ThrottlingQuotaExceededException>(KafkaException.FromFfiError(error, owned: false));
                 Assert.Equal(NonAsciiMessage, e.Message);
-                Assert.Equal(1234, e.ThrottleTimeMs);
+                Assert.Equal(1234, e.ThrottleTimeMs());
             }
         }
         finally
@@ -212,8 +212,8 @@ public sealed class ErrorPayloadReaderTests
             CorrelationIdMismatchException e =
                 Assert.IsType<CorrelationIdMismatchException>(KafkaException.FromFfiError(error, owned: false));
             Assert.Equal(NonAsciiMessage, e.Message);
-            Assert.Equal(-1, e.RequestCorrelationId);
-            Assert.Equal(-1, e.ResponseCorrelationId);
+            Assert.Equal(-1, e.RequestCorrelationId());
+            Assert.Equal(-1, e.ResponseCorrelationId());
         }
         finally
         {
@@ -238,7 +238,7 @@ public sealed class ErrorPayloadReaderTests
                 RecordTooLargeException e =
                     Assert.IsType<RecordTooLargeException>(KafkaException.FromFfiError(error, owned: false));
                 Assert.Equal(NonAsciiMessage, e.Message);
-                Assert.Null(e.RecordTooLargePartitions);
+                Assert.Null(e.RecordTooLargePartitions());
             }
         }
         finally
@@ -313,7 +313,7 @@ public sealed class ErrorPayloadReaderTests
                     ErrorPayloadMarshal.ReadResourceNotFoundException("m", cause, s_sentinelError, views));
                 Assert.Equal("m", e.Message);
                 Assert.Same(cause, e.InnerException);
-                Assert.Equal(NonAsciiTopic, e.Resource);
+                Assert.Equal(NonAsciiTopic, e.Resource());
             }
 
             views.AssertOnlyAsked(View.ResourceNotFound);
@@ -344,7 +344,7 @@ public sealed class ErrorPayloadReaderTests
                     ErrorPayloadMarshal.ReadDuplicateResourceException("m", null, s_sentinelError, views));
                 Assert.Equal("m", e.Message);
                 Assert.Null(e.InnerException);
-                Assert.Equal(NonAsciiTopic, e.Resource);
+                Assert.Equal(NonAsciiTopic, e.Resource());
             }
 
             views.AssertOnlyAsked(View.DuplicateResource);
@@ -380,7 +380,7 @@ public sealed class ErrorPayloadReaderTests
                         [new TopicPartition(NonAsciiTopic, 0)] = 100L,
                         [new TopicPartition(OtherTopic, 3)] = 7L,
                     },
-                    e.RecordTooLargePartitions!.ToDictionary(entry => entry.Key, entry => entry.Value));
+                    e.RecordTooLargePartitions()!.ToDictionary(entry => entry.Key, entry => entry.Value));
             }
 
             views.AssertOnlyAsked(View.RecordTooLarge);
@@ -423,13 +423,13 @@ public sealed class ErrorPayloadReaderTests
                     + "tags={client-id=c-日本}]' violated quota. Actual: 12.5, Threshold: 10.0",
                     e.Message);
                 Assert.Same(cause, e.InnerException);
-                Assert.Equal(12.5, e.Value);
-                Assert.Equal(10.0, e.Bound);
-                Assert.Equal("produce-throttle-Ω", e.Metric.Name.Name);
-                Assert.Equal("producer-metrics", e.Metric.Name.Group);
-                Assert.Equal("d-é", e.Metric.Name.Description);
-                Assert.Equal(new Dictionary<string, string> { ["client-id"] = "c-日本" }, e.Metric.Name.Tags);
-                Assert.Equal(12.5, e.Metric.Value);
+                Assert.Equal(12.5, e.Value());
+                Assert.Equal(10.0, e.Bound());
+                Assert.Equal("produce-throttle-Ω", e.Metric().MetricName().Name());
+                Assert.Equal("producer-metrics", e.Metric().MetricName().Group());
+                Assert.Equal("d-é", e.Metric().MetricName().Description());
+                Assert.Equal(new Dictionary<string, string> { ["client-id"] = "c-日本" }, e.Metric().MetricName().Tags());
+                Assert.Equal(12.5, e.Metric().MetricValue());
             }
 
             views.AssertOnlyAsked(View.QuotaViolation);
@@ -465,10 +465,10 @@ public sealed class ErrorPayloadReaderTests
                         [new TopicPartition(NonAsciiTopic, 0)] = 42L,
                         [new TopicPartition(OtherTopic, 1)] = 9L,
                     },
-                    e.OffsetOutOfRangePartitions.ToDictionary(entry => entry.Key, entry => entry.Value));
+                    e.OffsetOutOfRangePartitions().ToDictionary(entry => entry.Key, entry => entry.Value));
                 Assert.Equal(
                     new HashSet<TopicPartition> { new TopicPartition(NonAsciiTopic, 0), new TopicPartition(OtherTopic, 1) },
-                    new HashSet<TopicPartition>(e.Partitions));
+                    new HashSet<TopicPartition>(e.Partitions()));
             }
 
             views.AssertOnlyAsked(View.ConsumerOffsetOutOfRange);
@@ -503,11 +503,11 @@ public sealed class ErrorPayloadReaderTests
                 TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
                 Assert.Equal(
                     new Dictionary<TopicPartition, long> { [tp] = 50L },
-                    e.OffsetOutOfRangePartitions.ToDictionary(entry => entry.Key, entry => entry.Value));
-                Assert.Equal(new[] { tp }, e.Partitions.ToArray());
+                    e.OffsetOutOfRangePartitions().ToDictionary(entry => entry.Key, entry => entry.Value));
+                Assert.Equal(new[] { tp }, e.Partitions().ToArray());
                 Assert.Equal(
                     new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(40L, "m-Ω", 7) },
-                    e.DivergentOffsets.ToDictionary(entry => entry.Key, entry => entry.Value));
+                    e.DivergentOffsets().ToDictionary(entry => entry.Key, entry => entry.Value));
             }
 
             views.AssertOnlyAsked(View.ConsumerLogTruncation);
@@ -536,11 +536,11 @@ public sealed class ErrorPayloadReaderTests
                 NoOffsetForPartitionException e = Assert.IsType<NoOffsetForPartitionException>(
                     ErrorPayloadMarshal.ReadNoOffsetForPartitionException("core text", null, s_sentinelError, views));
                 Assert.Equal("core text", e.Message);
-                Assert.IsAssignableFrom<ISet<TopicPartition>>(e.Partitions);
-                Assert.Equal(2, e.Partitions.Count);
+                Assert.IsAssignableFrom<ISet<TopicPartition>>(e.Partitions());
+                Assert.Equal(2, e.Partitions().Count);
                 Assert.Equal(
                     new HashSet<TopicPartition> { new TopicPartition(NonAsciiTopic, 2), new TopicPartition(OtherTopic, 1) },
-                    new HashSet<TopicPartition>(e.Partitions));
+                    new HashSet<TopicPartition>(e.Partitions()));
             }
 
             views.AssertOnlyAsked(View.ConsumerNoOffsetForPartition);
@@ -558,15 +558,15 @@ public sealed class ErrorPayloadReaderTests
         var cause = new InvalidOperationException("cause");
 
         Assert.Empty(Assert.IsType<TopicAuthorizationException>(
-            ErrorPayloadMarshal.ReadTopicAuthorizationException("m", cause, s_sentinelError, views)).UnauthorizedTopics);
+            ErrorPayloadMarshal.ReadTopicAuthorizationException("m", cause, s_sentinelError, views)).UnauthorizedTopics());
         Assert.Null(Assert.IsType<GroupAuthorizationException>(
-            ErrorPayloadMarshal.ReadGroupAuthorizationException("m", cause, s_sentinelError, views)).GroupId);
+            ErrorPayloadMarshal.ReadGroupAuthorizationException("m", cause, s_sentinelError, views)).GroupId());
         Assert.Null(Assert.IsType<RecordTooLargeException>(
-            ErrorPayloadMarshal.ReadRecordTooLargeException("m", cause, s_sentinelError, views)).RecordTooLargePartitions);
+            ErrorPayloadMarshal.ReadRecordTooLargeException("m", cause, s_sentinelError, views)).RecordTooLargePartitions());
         Assert.Equal(0, Assert.IsType<ThrottlingQuotaExceededException>(
-            ErrorPayloadMarshal.ReadThrottlingQuotaExceededException("m", cause, s_sentinelError, views)).ThrottleTimeMs);
+            ErrorPayloadMarshal.ReadThrottlingQuotaExceededException("m", cause, s_sentinelError, views)).ThrottleTimeMs());
         Assert.Empty(Assert.IsType<NoOffsetForPartitionException>(
-            ErrorPayloadMarshal.ReadNoOffsetForPartitionException("m", cause, s_sentinelError, views)).Partitions);
+            ErrorPayloadMarshal.ReadNoOffsetForPartitionException("m", cause, s_sentinelError, views)).Partitions());
         Exception quota = ErrorPayloadMarshal.ReadQuotaViolationException("m", cause, s_sentinelError, views);
         Assert.Equal("m", quota.Message);
         Assert.Same(cause, quota.InnerException);
@@ -577,14 +577,14 @@ public sealed class ErrorPayloadReaderTests
     {
         TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "none");
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "none");
         consumer.Assign(new[] { tp });
 
         NoOffsetForPartitionException e =
             Assert.Throws<NoOffsetForPartitionException>(() => consumer.Poll(TimeSpan.Zero));
 
         Assert.Equal("Undefined offset with no reset policy for partition: " + NonAsciiTopic + "-0", e.Message);
-        Assert.Equal(new[] { tp }, e.Partitions.ToArray());
+        Assert.Equal(new[] { tp }, e.Partitions().ToArray());
     }
 
     [Fact]
@@ -592,7 +592,7 @@ public sealed class ErrorPayloadReaderTests
     {
         TopicPartition tp = new TopicPartition(NonAsciiTopic, 0);
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Assign(new[] { tp });
         consumer.UpdateBeginningOffset(NonAsciiTopic, 0, 5);
         consumer.Seek(tp, 2);
@@ -603,8 +603,8 @@ public sealed class ErrorPayloadReaderTests
 
         Assert.Equal(
             new Dictionary<TopicPartition, long> { [tp] = 2L },
-            e.OffsetOutOfRangePartitions.ToDictionary(entry => entry.Key, entry => entry.Value));
-        Assert.Equal(new[] { tp }, e.Partitions.ToArray());
+            e.OffsetOutOfRangePartitions().ToDictionary(entry => entry.Key, entry => entry.Value));
+        Assert.Equal(new[] { tp }, e.Partitions().ToArray());
     }
 
     private delegate IntPtr Factory(ref IntPtr outErr);

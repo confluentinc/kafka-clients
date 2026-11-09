@@ -137,7 +137,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
-        Assert.Null(new ListConsumerGroupOffsetsSpec().TopicPartitions);
+        Assert.Null(new ListConsumerGroupOffsetsSpec().TopicPartitions());
 
         foreach (IReadOnlyCollection<TopicPartition>? selection in
             new IReadOnlyCollection<TopicPartition>?[] { null, Array.Empty<TopicPartition>() })
@@ -145,10 +145,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             AsyncListConsumerGroupOffsetsResult result = admin.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
-                    ["p5-lcgo-sel"] = new ListConsumerGroupOffsetsSpec
-                    {
-                        TopicPartitions = selection,
-                    },
+                    ["p5-lcgo-sel"] = new ListConsumerGroupOffsetsSpec()
+                        .TopicPartitions(selection),
                 });
 
             IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets =
@@ -160,14 +158,12 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncListConsumerGroupOffsetsResult selected = admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
-                ["p5-lcgo-sel-2"] = new ListConsumerGroupOffsetsSpec
-                {
-                    TopicPartitions = new[]
+                ["p5-lcgo-sel-2"] = new ListConsumerGroupOffsetsSpec()
+                    .TopicPartitions(new[]
                     {
                         new TopicPartition("p5-lcgo-topic", 0),
                         new TopicPartition("p5-lcgo-topic", 1),
-                    },
-                },
+                    }),
             });
 
         Assert.Empty(
@@ -234,10 +230,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                 admin.ListConsumerGroupOffsets(
                     new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                     {
-                        ["p5-lcgo-bad-tp"] = new ListConsumerGroupOffsetsSpec
-                        {
-                            TopicPartitions = new[] { default(TopicPartition) },
-                        },
+                        ["p5-lcgo-bad-tp"] = new ListConsumerGroupOffsetsSpec()
+                            .TopicPartitions(new[] { default(TopicPartition) }),
                     });
             });
         Assert.Equal("groupSpecs", nullTopic.ParamName);
@@ -258,7 +252,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             {
                 admin.ListConsumerGroupOffsets(
                     "p5-lcgo-timeout",
-                    new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 });
+                    new ListConsumerGroupOffsetsOptions().TimeoutMs(-1));
             }));
         Assert.Null(Record.Exception(
             () =>
@@ -268,7 +262,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     {
                         ["p5-lcgo-timeout-2"] = new ListConsumerGroupOffsetsSpec(),
                     },
-                    new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 });
+                    new ListConsumerGroupOffsetsOptions().TimeoutMs(-1));
             }));
     }
 
@@ -278,7 +272,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
         AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
-        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 };
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions().TimeoutMs(-1);
 
         KafkaTimeoutException batched = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(

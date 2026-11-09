@@ -44,8 +44,8 @@ internal static unsafe class DelegationTokenMarshal
 
     internal static IntPtr NewPrincipal(KafkaPrincipal principal)
     {
-        using Utf8Marshal.PinnedUtf8String principalType = Utf8Marshal.Pin(principal.PrincipalType);
-        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(principal.Name);
+        using Utf8Marshal.PinnedUtf8String principalType = Utf8Marshal.Pin(principal.GetPrincipalType());
+        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(principal.GetName());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native = NativeMethods.KafkaPrincipalNew(principalType.Pointer, name.Pointer, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);

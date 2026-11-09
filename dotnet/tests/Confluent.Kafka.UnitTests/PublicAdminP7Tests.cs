@@ -52,21 +52,19 @@ public sealed class PublicAdminP7Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await admin.CreateDelegationToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[] { new KafkaPrincipal("User", "alice") },
-                MaxLifetimeMs = 86_400_000L,
-            }).DelegationToken().Get();
+            new CreateDelegationTokenOptions()
+                .Renewers(new[] { new KafkaPrincipal("User", "alice") })
+                .MaxLifetimeMs(86_400_000L)).DelegationToken().Get();
 
-        Assert.NotEmpty(token.Hmac);
-        Assert.NotEmpty(token.TokenInfo.TokenId);
-        Assert.Equal(new[] { "User:alice" }, token.TokenInfo.RenewersAsString);
-        Assert.Equal("User:alice", token.TokenInfo.OwnerAsString);
-        Assert.True(token.TokenInfo.IssueTimestamp > 0);
-        Assert.Equal(86_400_000L, token.TokenInfo.MaxTimestamp);
+        Assert.NotEmpty(token.Hmac());
+        Assert.NotEmpty(token.TokenInfo().TokenId());
+        Assert.Equal(new[] { "User:alice" }, token.TokenInfo().RenewersAsString());
+        Assert.Equal("User:alice", token.TokenInfo().OwnerAsString());
+        Assert.True(token.TokenInfo().IssueTimestamp() > 0);
+        Assert.Equal(86_400_000L, token.TokenInfo().MaxTimestamp());
 
         // The mock mints with the ABI's `-1` expiry sentinel; renew is what sets one.
-        Assert.Equal(-1L, token.TokenInfo.ExpiryTimestamp);
+        Assert.Equal(-1L, token.TokenInfo().ExpiryTimestamp());
     }
 
     [Fact]
@@ -82,8 +80,8 @@ public sealed class PublicAdminP7Tests
             await admin.DescribeDelegationToken().DelegationTokens().Get();
 
         Assert.Equal(
-            new[] { first.TokenInfo.TokenId, second.TokenInfo.TokenId }.OrderBy(id => id, StringComparer.Ordinal),
-            described.Select(token => token.TokenInfo.TokenId).OrderBy(id => id, StringComparer.Ordinal));
+            new[] { first.TokenInfo().TokenId(), second.TokenInfo().TokenId() }.OrderBy(id => id, StringComparer.Ordinal),
+            described.Select(token => token.TokenInfo().TokenId()).OrderBy(id => id, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -95,11 +93,11 @@ public sealed class PublicAdminP7Tests
         DelegationToken token = await Create(admin, "alice");
 
         long renewed = await admin.RenewDelegationToken(
-            token.Hmac, new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L }).ExpiryTimestamp().Get();
+            token.Hmac(), new RenewDelegationTokenOptions().RenewTimePeriodMs(3_600_000L)).ExpiryTimestamp().Get();
         Assert.Equal(3_600_000L, renewed);
 
         long expired = await admin.ExpireDelegationToken(
-            token.Hmac, new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L }).ExpiryTimestamp().Get();
+            token.Hmac(), new ExpireDelegationTokenOptions().ExpiryTimePeriodMs(0L)).ExpiryTimestamp().Get();
         Assert.Equal(0L, expired);
 
         Assert.Empty(await admin.DescribeDelegationToken().DelegationTokens().Get());
@@ -166,16 +164,16 @@ public sealed class PublicAdminP7Tests
         FeatureMetadata? metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
 
         Assert.NotNull(metadata);
-        Assert.NotNull(metadata.FinalizedFeatures);
-        Assert.NotNull(metadata.SupportedFeatures);
-        Assert.NotNull(metadata.FinalizedFeaturesEpoch);
+        Assert.NotNull(metadata.FinalizedFeatures());
+        Assert.NotNull(metadata.SupportedFeatures());
+        Assert.NotNull(metadata.FinalizedFeaturesEpoch());
     }
 
     [Fact]
     public async Task DescribeFeatures_AcceptsANodeId() =>
         Assert.NotNull(
             await AsyncMockAdminClient.Create().Build()
-                .DescribeFeatures(new DescribeFeaturesOptions { NodeId = 0 })
+                .DescribeFeatures(new DescribeFeaturesOptions().NodeId(0))
                 .FeatureMetadata().Get());
 
     [Fact]
@@ -187,16 +185,16 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["metadata.version"] = new FeatureUpdate(9, FeatureUpdate.UpgradeType.UPGRADE),
-                ["group.version"] = new FeatureUpdate(2, FeatureUpdate.UpgradeType.UPGRADE),
+                ["metadata.version"] = new FeatureUpdate(9, UpgradeType.UPGRADE),
+                ["group.version"] = new FeatureUpdate(2, UpgradeType.UPGRADE),
             });
 
         Assert.Equal(
             new[] { "group.version", "metadata.version" },
-            result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
 
         await FutureAssert.ThrowsAsync<InvalidRequestException>(() => result.All().Get());
-        foreach (AsyncKafkaFuture value in result.Values.Values)
+        foreach (AsyncKafkaFuture value in result.Values().Values)
         {
             await FutureAssert.ThrowsAsync<InvalidRequestException>(() => value.Get());
         }
@@ -211,7 +209,7 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result =
             admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal));
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -238,7 +236,7 @@ public sealed class PublicAdminP7Tests
             () => admin.UpdateFeatures(
                 new FeatureUpdateEntries(
                     new KeyValuePair<string, FeatureUpdate>(
-                        null!, new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE)))));
+                        null!, new FeatureUpdate(1, UpgradeType.UPGRADE)))));
 
         Assert.Equal("Provided feature can not be empty.", thrown.Message);
     }
@@ -258,7 +256,7 @@ public sealed class PublicAdminP7Tests
             () => admin.UpdateFeatures(
                 new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
                 {
-                    [feature] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.UPGRADE),
+                    [feature] = new FeatureUpdate(1, UpgradeType.UPGRADE),
                 }));
 
         Assert.Contains("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
@@ -273,10 +271,10 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["a b"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                ["a b"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
-        Assert.Equal(new[] { "a b" }, result.Values.Keys);
+        Assert.Equal(new[] { "a b" }, result.Values().Keys);
     }
 
     [Theory]
@@ -292,10 +290,10 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                [feature] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                [feature] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
-        Assert.Equal(new[] { feature }, result.Values.Keys);
+        Assert.Equal(new[] { feature }, result.Values().Keys);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
@@ -308,18 +306,18 @@ public sealed class PublicAdminP7Tests
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
             new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
             {
-                ["metadata.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
-                ["group.version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE),
+                ["metadata.version"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
+                ["group.version"] = new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE),
             });
 
         Assert.Equal(
             new[] { "group.version", "metadata.version" },
-            result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+            result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
 
         // A null per-key error is the success of a KafkaFuture<Void> result. Status, as IsCompletedSuccessfully post-dates
         // netstandard2.0.
         await result.All().Get();
-        foreach (AsyncKafkaFuture value in result.Values.Values)
+        foreach (AsyncKafkaFuture value in result.Values().Values)
         {
             Assert.Equal(TaskStatus.RanToCompletion, value.Get().Status);
         }
@@ -409,9 +407,9 @@ public sealed class PublicAdminP7Tests
         DelegationToken token = await Create(admin, "alice");
         string text = token.ToString();
 
-        Assert.DoesNotContain(token.HmacAsBase64String, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(token.HmacAsBase64String(), text, StringComparison.Ordinal);
         Assert.DoesNotContain(
-            BitConverter.ToString(token.Hmac), text, StringComparison.OrdinalIgnoreCase);
+            BitConverter.ToString(token.Hmac()), text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("[*******]", text, StringComparison.Ordinal);
     }
 
@@ -469,15 +467,15 @@ public sealed class PublicAdminP7Tests
     [Fact]
     public void EqualBounds_AreAccepted()
     {
-        Assert.Equal(0, new FinalizedVersionRange(0, 0).MaxVersionLevel);
-        Assert.Equal(0, new SupportedVersionRange(0, 0).MaxVersion);
+        Assert.Equal(0, new FinalizedVersionRange(0, 0).MaxVersionLevel());
+        Assert.Equal(0, new SupportedVersionRange(0, 0).MaxVersion());
     }
 
     [Fact]
     public void FeatureUpdate_RejectsADowngradeWithoutADowngradeType()
     {
         IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
-            () => new FeatureUpdate(0, FeatureUpdate.UpgradeType.UPGRADE));
+            () => new FeatureUpdate(0, UpgradeType.UPGRADE));
 
         Assert.Contains(
             "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the "
@@ -490,22 +488,22 @@ public sealed class PublicAdminP7Tests
     public void FeatureUpdate_RejectsANegativeLevel()
     {
         IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(
-            () => new FeatureUpdate(-1, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE));
+            () => new FeatureUpdate(-1, UpgradeType.SAFE_DOWNGRADE));
 
         Assert.Contains("Cannot specify a negative version level.", thrown.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public void FeatureUpdate_AcceptsADeletion() =>
-        Assert.Equal(0, new FeatureUpdate(0, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE).MaxVersionLevel);
+        Assert.Equal(0, new FeatureUpdate(0, UpgradeType.SAFE_DOWNGRADE).MaxVersionLevel());
 
     [Theory]
-    [InlineData(FeatureUpdate.UpgradeType.UNKNOWN, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
-    [InlineData(FeatureUpdate.UpgradeType.UPGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
-    [InlineData(FeatureUpdate.UpgradeType.SAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
-    [InlineData(FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
-    [InlineData((FeatureUpdate.UpgradeType)9, "FeatureUpdate{maxVersionLevel:1, upgradeType:9}")]
-    public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(FeatureUpdate.UpgradeType type, string expected) =>
+    [InlineData(UpgradeType.UNKNOWN, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
+    [InlineData(UpgradeType.UPGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
+    [InlineData(UpgradeType.SAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}")]
+    [InlineData(UpgradeType.UNSAFE_DOWNGRADE, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNSAFE_DOWNGRADE}")]
+    [InlineData((UpgradeType)9, "FeatureUpdate{maxVersionLevel:1, upgradeType:9}")]
+    public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(UpgradeType type, string expected) =>
         Assert.Equal(expected, new FeatureUpdate(1, type).ToString());
 
     [Fact]
@@ -535,6 +533,26 @@ public sealed class PublicAdminP7Tests
     }
 
     [Fact]
+    public void KafkaPrincipal_TokenAuthenticated_DefaultsToFalse_AndItsSetterLeavesEqualityAlone()
+    {
+        KafkaPrincipal principal = new KafkaPrincipal("User", "alice");
+        KafkaPrincipal unflagged = new KafkaPrincipal("User", "alice", false);
+        int hashBefore = principal.GetHashCode();
+
+        Assert.False(principal.TokenAuthenticated());
+
+        principal.TokenAuthenticated(true);
+
+        Assert.True(principal.TokenAuthenticated());
+        Assert.Equal(unflagged, principal);
+        Assert.Equal(hashBefore, principal.GetHashCode());
+        Assert.Equal(unflagged.GetHashCode(), principal.GetHashCode());
+        Assert.Equal(
+            typeof(void),
+            typeof(KafkaPrincipal).GetMethod(nameof(KafkaPrincipal.TokenAuthenticated), new[] { typeof(bool) })!.ReturnType);
+    }
+
+    [Fact]
     public void ScramMechanism_RoundTripsItsName()
     {
         Assert.Equal("SCRAM-SHA-256", ScramMechanism.SCRAM_SHA_256.MechanismName());
@@ -552,10 +570,8 @@ public sealed class PublicAdminP7Tests
 
     private static Task<DelegationToken> Create(AsyncMockAdminClient admin, string renewer) =>
         admin.CreateDelegationToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[] { new KafkaPrincipal("User", renewer) },
-            }).DelegationToken().Get();
+            new CreateDelegationTokenOptions()
+                .Renewers(new[] { new KafkaPrincipal("User", renewer) })).DelegationToken().Get();
 
     /// <summary>
     /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary cannot, a null key, so the

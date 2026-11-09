@@ -101,11 +101,11 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         // The mock seeds no offsets, so -1 is expected: what is under test is that the kind is accepted.
         ListOffsetsResult.ListOffsetsResultInfo info =
             await TestTimeout.Run(() => result.PartitionResult(partition).Get(), s_deadline);
-        Assert.Equal(-1, info.Offset);
-        Assert.Equal(-1, info.Timestamp);
+        Assert.Equal(-1, info.Offset());
+        Assert.Equal(-1, info.Timestamp());
 
         // The mock builds every info without a leader epoch, so it reads as null.
-        Assert.Null(info.LeaderEpoch);
+        Assert.Null(info.LeaderEpoch());
     }
 
     [Fact]
@@ -175,10 +175,10 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 () => admin.ListPartitionReassignments(new[] { partition }).Reassignments().Get(), s_deadline);
 
         PartitionReassignment reassignment = Assert.Contains(partition, reassignments);
-        Assert.NotEmpty(reassignment.Replicas);
+        Assert.NotEmpty(reassignment.Replicas());
 
-        Assert.All(reassignment.AddingReplicas, broker => Assert.DoesNotContain(broker, reassignment.Replicas));
-        Assert.All(reassignment.RemovingReplicas, broker => Assert.Contains(broker, reassignment.Replicas));
+        Assert.All(reassignment.AddingReplicas(), broker => Assert.DoesNotContain(broker, reassignment.Replicas()));
+        Assert.All(reassignment.RemovingReplicas(), broker => Assert.Contains(broker, reassignment.Replicas()));
     }
 
     [Fact]
@@ -309,7 +309,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         Assert.Equal(new[] { partition }, explicitNull.Keys);
         Assert.Equal(new[] { partition }, zeroArg.Keys);
         Assert.Equal(new[] { partition }, optionsOnly.Keys);
-        Assert.Equal(explicitNull[partition].Replicas, optionsOnly[partition].Replicas);
+        Assert.Equal(explicitNull[partition].Replicas(), optionsOnly[partition].Replicas());
 
         // The control: an empty selection is a different request, and lists nothing.
         Assert.Empty(await TestTimeout.Run(
@@ -323,7 +323,7 @@ public sealed class PublicAdminReassignmentsOffsetsTests
         AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "127.0.0.1:1" });
         using IDisposable realDisposal = TestTimeout.Disposal(real);
-        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions { TimeoutMs = -1 };
+        ListPartitionReassignmentsOptions options = new ListPartitionReassignmentsOptions().TimeoutMs(-1);
 
         KafkaTimeoutException explicitNull = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<KafkaTimeoutException>(() => real.ListPartitionReassignments(null, options).Reassignments().Get()),

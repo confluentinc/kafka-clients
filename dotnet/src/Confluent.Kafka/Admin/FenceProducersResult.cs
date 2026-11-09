@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> but never publishes that
-/// pair: <see cref="FencedProducers"/> erases it and <see cref="ProducerId"/> /
+/// pair: <see cref="FencedProducers()"/> erases it and <see cref="ProducerId"/> /
 /// <see cref="EpochId"/> project one field each, so there is no public <c>ProducerIdAndEpoch</c>
 /// type here.
 /// </remarks>
@@ -51,26 +51,24 @@ public sealed class FenceProducersResult
     /// One payload-free future per requested transactional id — Java's
     /// <c>fencedProducers()</c>, whose values are <see cref="KafkaFuture"/>s, as here.
     /// </summary>
-    /// <remarks>Each access builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
-    public IReadOnlyDictionary<string, KafkaFuture> FencedProducers
+    /// <returns>One payload-free future per requested transactional id.</returns>
+    /// <remarks>Each call builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
+    public IReadOnlyDictionary<string, KafkaFuture> FencedProducers()
     {
-        get
+        Dictionary<string, KafkaFuture> fenced = new Dictionary<string, KafkaFuture>(_futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
         {
-            Dictionary<string, KafkaFuture> fenced = new Dictionary<string, KafkaFuture>(_futures.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
-            {
-                fenced.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
-            }
-
-            return fenced;
+            fenced.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
         }
+
+        return fenced;
     }
 
     /// <summary>
     /// The producer id generated while initializing that transaction — Java's
     /// <c>producerId(String)</c>.
     /// </summary>
-    /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
+    /// <param name="transactionalId">An id from <see cref="FencedProducers()"/>.</param>
     /// <returns>A new future over that id's producer id.</returns>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="transactionalId"/> was not included in the request, or is null, thrown synchronously
@@ -83,7 +81,7 @@ public sealed class FenceProducersResult
     /// The epoch generated while initializing that transaction — Java's
     /// <c>epochId(String)</c>, a <see langword="short"/> as Java's is.
     /// </summary>
-    /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
+    /// <param name="transactionalId">An id from <see cref="FencedProducers()"/>.</param>
     /// <returns>A new future over that id's epoch.</returns>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="transactionalId"/> was not included in the request, or is null — see

@@ -47,7 +47,7 @@ var config = new Dictionary<string, object?>
     ["bootstrap.servers"] = "localhost:9092",
     ["linger.ms"] = 5,
 };
-using var producer = new KafkaProducer<string, string>(config, Serdes.String, Serdes.String);
+using var producer = new KafkaProducer<string, string>(config, Serdes.String(), Serdes.String());
 var record = new ProducerRecord<string, string>("orders", value: "value", key: "key");
 RecordMetadata metadata = producer.Send(record).Get();
 ```
@@ -69,11 +69,11 @@ var config = new Dictionary<string, object?>
     ["group.id"] = "orders-reader",
     ["group.protocol"] = "consumer",
 };
-using var consumer = new KafkaConsumer<string, string>(config, Serdes.String, Serdes.String);
+using var consumer = new KafkaConsumer<string, string>(config, Serdes.String(), Serdes.String());
 consumer.Subscribe(new[] { "orders" });
 foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 {
-    Console.WriteLine($"{record.Key}: {record.Value}");
+    Console.WriteLine($"{record.Key()}: {record.Value()}");
 }
 ```
 

@@ -57,7 +57,8 @@ public sealed class AsyncDescribeReplicaLogDirsResult
     /// <summary>
     /// One future per requested replica — Java's <c>values()</c>.
     /// </summary>
-    public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values => _futures;
+    /// <returns>One future per requested replica.</returns>
+    public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values() => _futures;
 
     /// <summary>
     /// Every replica's log-directory information in one map, succeeding only if every

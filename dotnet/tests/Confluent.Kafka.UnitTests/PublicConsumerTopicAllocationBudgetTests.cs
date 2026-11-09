@@ -79,7 +79,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
     private static long MeasurePoll(string topic, int recordCount, byte[] key, byte[] value)
     {
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(topic, Partition) });
         consumer.Seek(new TopicPartition(topic, Partition), offset: 0);
@@ -96,7 +96,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetAllocatedBytesForCurrentThread();
 
-        Assert.Equal(recordCount, records.Count);
+        Assert.Equal(recordCount, records.Count());
         return after - before;
     }
 
@@ -108,7 +108,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         byte[] value = MakeBytes(ValueSize, 0xEE);
 
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(topic, Partition) });
         consumer.Seek(new TopicPartition(topic, Partition), offset: 0);
@@ -118,21 +118,21 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         }
 
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
-        Assert.Equal(8, records.Count);
+        Assert.Equal(8, records.Count());
 
         string? first = null;
         foreach (ConsumerRecord<byte[], byte[]> record in records)
         {
-            Assert.Equal(topic, record.Topic);
+            Assert.Equal(topic, record.Topic());
             if (first is null)
             {
-                first = record.Topic;
+                first = record.Topic();
             }
             else
             {
                 // ReferenceEquals: a per-record decode gives equal but distinct strings.
                 Assert.True(
-                    ReferenceEquals(first, record.Topic),
+                    ReferenceEquals(first, record.Topic()),
                     "Each record decoded its own topic string — the per-batch topic memo is not being hit.");
             }
         }

@@ -40,7 +40,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public async Task AsyncMockProducer_SendWithCallback_RoundTrips()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
@@ -52,20 +52,20 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
                 callback).Delivery(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(0, metadata.Partition);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
 
         // The callback runs on the completion thread; a bounded wait for it.
         await TestTimeout.Run(() => WaitForCompletions(callback, 1), s_deadline);
         Assert.Null(callback.LastException);
-        Assert.Equal(Topic, callback.LastMetadata!.Topic);
+        Assert.Equal(Topic, callback.LastMetadata!.Topic());
     }
 
     [Fact]
     public void MockProducer_SendWithCallback_RoundTrips()
     {
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
@@ -76,19 +76,19 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
                 callback).Get(),
             s_deadline);
 
-        Assert.Equal(Topic, metadata.Topic);
+        Assert.Equal(Topic, metadata.Topic());
 
         // The sync flavor runs the callback on the completion thread, before Get returns.
         Assert.Equal(1, callback.Count);
         Assert.Null(callback.LastException);
-        Assert.Equal(Topic, callback.LastMetadata!.Topic);
+        Assert.Equal(Topic, callback.LastMetadata!.Topic());
     }
 
     [Fact]
     public async Task AsyncMockProducer_SendWithCallback_FailurePath_DeliversPlaceholderMetadata()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
@@ -103,9 +103,9 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
 
         // The user callback never sees a null metadata, as Java's Callback contract states.
         Assert.NotNull(callback.LastMetadata);
-        Assert.Equal(Topic, callback.LastMetadata!.Topic);
-        Assert.Equal(1, callback.LastMetadata.Partition);
-        Assert.Equal(-1L, callback.LastMetadata.Offset);
+        Assert.Equal(Topic, callback.LastMetadata!.Topic());
+        Assert.Equal(1, callback.LastMetadata.Partition());
+        Assert.Equal(-1L, callback.LastMetadata.Offset());
         Assert.NotNull(callback.LastException);
         Assert.Equal(2, Assert.IsType<CorruptRecordException>(callback.LastException).Code);
     }
@@ -117,10 +117,10 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
         Dictionary<string, object?> config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
 
         AsyncKafkaProducer<byte[], byte[]> asyncProducer =
-            new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable asyncProducerDisposal = TestTimeout.Disposal(asyncProducer);
         KafkaProducer<byte[], byte[]> syncProducer =
-            new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable syncProducerDisposal = TestTimeout.Disposal(syncProducer);
 
         Assert.NotNull(typeof(AsyncKafkaProducer<byte[], byte[]>).GetMethod(

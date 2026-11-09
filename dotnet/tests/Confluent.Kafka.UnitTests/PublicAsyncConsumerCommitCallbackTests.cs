@@ -414,7 +414,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             Assert.Equal(expected, Snapshot(seen));
             if (kind == "mock")
             {
-                Assert.Equal(1, Assert.Single(delivered!).Value.Offset);
+                Assert.Equal(1, Assert.Single(delivered!).Value.Offset());
             }
             else
             {
@@ -861,7 +861,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         }
 
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+            new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }
@@ -869,7 +869,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> NewMockConsumer()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), "earliest");
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         consumer.UpdateBeginningOffset(Topic, 0, 0);
         return consumer;

@@ -158,7 +158,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(DescribeLogDirsOptions.TimeoutMs):
-                NativeMethods.DescribeLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.DescribeLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeLogDirsOptions has no C setter for " + setter + ".");
@@ -188,7 +188,7 @@ internal sealed partial class NativeAdminClient
                         "The replica assignment must not contain a null replica.", nameof(replicaAssignment));
                 }
 
-                AdminStrings.Validate(entry.Key.Topic, nameof(replicaAssignment));
+                AdminStrings.Validate(entry.Key.Topic(), nameof(replicaAssignment));
                 if (entry.Value is null)
                 {
                     throw new ArgumentException(
@@ -268,7 +268,7 @@ internal sealed partial class NativeAdminClient
         switch (setter)
         {
             case nameof(AlterReplicaLogDirsOptions.TimeoutMs):
-                NativeMethods.AlterReplicaLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                NativeMethods.AlterReplicaLogDirsOptionsSetTimeoutMs(native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("AlterReplicaLogDirsOptions has no C setter for " + setter + ".");
@@ -297,7 +297,7 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentException("The replicas must not contain a null element.", nameof(replicas));
                 }
 
-                AdminStrings.Validate(replica.Topic, nameof(replicas));
+                AdminStrings.Validate(replica.Topic(), nameof(replicas));
                 if (seen.Add(replica))
                 {
                     keys.Add(replica);
@@ -364,7 +364,7 @@ internal sealed partial class NativeAdminClient
         {
             case nameof(DescribeReplicaLogDirsOptions.TimeoutMs):
                 NativeMethods.DescribeReplicaLogDirsOptionsSetTimeoutMs(
-                    native, ToNativeTimeoutMs(options.TimeoutMs), ref outErr);
+                    native, ToNativeTimeoutMs(options.TimeoutMs()), ref outErr);
                 break;
             default:
                 throw new InvalidOperationException("DescribeReplicaLogDirsOptions has no C setter for " + setter + ".");

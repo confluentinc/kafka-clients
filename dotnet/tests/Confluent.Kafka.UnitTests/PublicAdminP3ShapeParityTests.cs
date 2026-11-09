@@ -164,12 +164,12 @@ public sealed class PublicAdminP3ShapeParityTests
             only.GetParameters().Select(parameter => parameter.ParameterType));
 
         Assert.Equal(
-            typeof(ConfigResourceType), typeof(ConfigResource).GetProperty(nameof(ConfigResource.Type))!.PropertyType);
-        Assert.Equal(typeof(string), typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!.PropertyType);
-        Assert.Equal(typeof(bool), typeof(ConfigResource).GetProperty(nameof(ConfigResource.IsDefault))!.PropertyType);
+            typeof(ConfigResourceType), typeof(ConfigResource).GetMethod(nameof(ConfigResource.Type), Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(string), typeof(ConfigResource).GetMethod(nameof(ConfigResource.Name), Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(bool), typeof(ConfigResource).GetMethod(nameof(ConfigResource.IsDefault), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             NullableAnnotation.NotAnnotated,
-            NullableFlag(typeof(ConfigResource).GetProperty(nameof(ConfigResource.Name))!));
+            NullableFlag(typeof(ConfigResource).GetMethod(nameof(ConfigResource.Name), Type.EmptyTypes)!));
 
         ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "t");
         ConfigResource sameTopic = new ConfigResource(ConfigResourceType.TOPIC, "t");
@@ -191,8 +191,8 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Equal(1, byResource[sameTopic]);
 
         // isDefault(): the default resource of a type has an empty name.
-        Assert.True(new ConfigResource(ConfigResourceType.BROKER, string.Empty).IsDefault);
-        Assert.False(topic.IsDefault);
+        Assert.True(new ConfigResource(ConfigResourceType.BROKER, string.Empty).IsDefault());
+        Assert.False(topic.IsDefault());
 
         Assert.Equal("ConfigResource(type=TOPIC, name='t')", topic.ToString());
         Assert.Throws<ArgumentNullException>(() => new ConfigResource(ConfigResourceType.TOPIC, null!));
@@ -212,8 +212,8 @@ public sealed class PublicAdminP3ShapeParityTests
 
         ConfigResource resource = new ConfigResource((ConfigResourceType)undefinedId, "x");
 
-        Assert.Equal(ConfigResourceType.UNKNOWN, resource.Type);
-        Assert.Equal("x", resource.Name);
+        Assert.Equal(ConfigResourceType.UNKNOWN, resource.Type());
+        Assert.Equal("x", resource.Name());
     }
 
     [Fact]
@@ -224,7 +224,7 @@ public sealed class PublicAdminP3ShapeParityTests
 
         foreach (ConfigResourceType type in defined)
         {
-            Assert.Equal(type, new ConfigResource(type, "x").Type);
+            Assert.Equal(type, new ConfigResource(type, "x").Type());
         }
     }
 
@@ -250,9 +250,9 @@ public sealed class PublicAdminP3ShapeParityTests
     public void Options_MatchJavasFieldsAndDefaults()
     {
         DescribeClusterOptions cluster = new DescribeClusterOptions();
-        Assert.Null(cluster.TimeoutMs);
-        Assert.False(cluster.IncludeAuthorizedOperations);
-        Assert.False(cluster.IncludeFencedBrokers);
+        Assert.Null(cluster.TimeoutMs());
+        Assert.False(cluster.IncludeAuthorizedOperations());
+        Assert.False(cluster.IncludeFencedBrokers());
         AssertOptionNames(
             typeof(DescribeClusterOptions),
             nameof(DescribeClusterOptions.IncludeAuthorizedOperations),
@@ -261,7 +261,7 @@ public sealed class PublicAdminP3ShapeParityTests
 
         // Java's ListConfigResourcesOptions declares no members of its own, so the inherited timeout is the whole surface.
         ListConfigResourcesOptions configResources = new ListConfigResourcesOptions();
-        Assert.Null(configResources.TimeoutMs);
+        Assert.Null(configResources.TimeoutMs());
         AssertOptionNames(typeof(ListConfigResourcesOptions), nameof(configResources.TimeoutMs));
 
         foreach (Type type in new[]
@@ -270,9 +270,8 @@ public sealed class PublicAdminP3ShapeParityTests
                      typeof(ListConfigResourcesOptions),
                  })
         {
-            PropertyInfo timeout = type.GetProperty("TimeoutMs")!;
-            Assert.Equal(typeof(int?), timeout.PropertyType);
-            Assert.NotNull(timeout.SetMethod);
+            Assert.Equal(typeof(int?), Getters.Get(type, "TimeoutMs").ReturnType);
+            Assert.Equal(typeof(int?), SetterMethods.ParameterTypeOf(type, "TimeoutMs"));
         }
     }
 
@@ -280,9 +279,7 @@ public sealed class PublicAdminP3ShapeParityTests
         type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
 
     private static void AssertOptionNames(Type optionsType, params string[] expected) =>
-        Assert.Equal(
-            expected.OrderBy(name => name, StringComparer.Ordinal),
-            optionsType.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
+        SetterMethods.AssertGettersAndSetters(optionsType, expected);
 
     private static byte NullableFlag(MemberInfo member) => NullableAnnotation.Flag(member);
 

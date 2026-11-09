@@ -58,25 +58,25 @@ public sealed class AdminLogDirsSubmitArgumentTests
     [Fact]
     public void TheTimeoutSetter_ReachesTheCOptions_AndItsLastValueWins()
     {
-        Assert.Equal(0, ReadBack(new DescribeLogDirsOptions { TimeoutMs = -5 }));
-        DescribeLogDirsOptions describe = new DescribeLogDirsOptions { TimeoutMs = 10 };
-        describe.TimeoutMs = 20;
+        Assert.Equal(0, ReadBack(new DescribeLogDirsOptions().TimeoutMs(-5)));
+        DescribeLogDirsOptions describe = new DescribeLogDirsOptions().TimeoutMs(10);
+        describe.TimeoutMs(20);
         Assert.Equal(20, ReadBack(describe));
-        describe.TimeoutMs = null;
+        describe.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(describe));
 
-        Assert.Equal(0, ReadBack(new AlterReplicaLogDirsOptions { TimeoutMs = -5 }));
-        AlterReplicaLogDirsOptions alter = new AlterReplicaLogDirsOptions { TimeoutMs = 10 };
-        alter.TimeoutMs = 30;
+        Assert.Equal(0, ReadBack(new AlterReplicaLogDirsOptions().TimeoutMs(-5)));
+        AlterReplicaLogDirsOptions alter = new AlterReplicaLogDirsOptions().TimeoutMs(10);
+        alter.TimeoutMs(30);
         Assert.Equal(30, ReadBack(alter));
-        alter.TimeoutMs = null;
+        alter.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(alter));
 
-        Assert.Equal(0, ReadBack(new DescribeReplicaLogDirsOptions { TimeoutMs = -5 }));
-        DescribeReplicaLogDirsOptions replicas = new DescribeReplicaLogDirsOptions { TimeoutMs = 0 };
-        replicas.TimeoutMs = 40;
+        Assert.Equal(0, ReadBack(new DescribeReplicaLogDirsOptions().TimeoutMs(-5)));
+        DescribeReplicaLogDirsOptions replicas = new DescribeReplicaLogDirsOptions().TimeoutMs(0);
+        replicas.TimeoutMs(40);
         Assert.Equal(40, ReadBack(replicas));
-        replicas.TimeoutMs = null;
+        replicas.TimeoutMs(null);
         Assert.Equal(-1, ReadBack(replicas));
     }
 
@@ -116,8 +116,8 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
         AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(request, null));
 
-        Assert.Single(result.Values);
-        KafkaStorageException failure = FutureAssert.Throws<KafkaStorageException>(() => result.Values[second].Get(s_deadline));
+        Assert.Single(result.Values());
+        KafkaStorageException failure = FutureAssert.Throws<KafkaStorageException>(() => result.Values()[second].Get(s_deadline));
         Assert.Equal(KafkaStorageErrorCode, failure.Code);
         Assert.Equal("Log directory /first is offline", failure.Message);
     }

@@ -95,13 +95,13 @@ public sealed class PublicProducerSendWithCallbackTests
         }
 
         List<(RecordMetadata Metadata, Exception? Exception)> calls = callback.Calls();
-        Assert.Equal(topics.OrderBy(t => t, StringComparer.Ordinal), calls.Select(c => c.Metadata.Topic).OrderBy(t => t, StringComparer.Ordinal));
+        Assert.Equal(topics.OrderBy(t => t, StringComparer.Ordinal), calls.Select(c => c.Metadata.Topic()).OrderBy(t => t, StringComparer.Ordinal));
         foreach ((RecordMetadata metadata, Exception? exception) in calls)
         {
             KafkaException timeout = Assert.IsAssignableFrom<KafkaException>(exception);
-            Assert.Same(failures[metadata.Topic], timeout);
+            Assert.Same(failures[metadata.Topic()], timeout);
             Assert.Equal(7, timeout.Code);
-            Assert.Equal($"Topic {metadata.Topic} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
+            Assert.Equal($"Topic {metadata.Topic()} not present in metadata after {MaxBlockMs} ms.", timeout.Message);
         }
     }
 
@@ -228,7 +228,7 @@ public sealed class PublicProducerSendWithCallbackTests
         Assert.Equal(1, throwing.Count);
 
         (RecordMetadata otherMetadata, Exception? otherDelivered) = Assert.Single(next.Calls());
-        Assert.Equal(other, otherMetadata.Topic);
+        Assert.Equal(other, otherMetadata.Topic());
         Assert.Same(FutureAssert.Unwrapped(otherOutcome), otherDelivered);
 
         Assert.Single(trace.LinesContaining(marker));
@@ -283,9 +283,9 @@ public sealed class PublicProducerSendWithCallbackTests
         await Task.Delay(s_settle);
         (RecordMetadata metadata, Exception? delivered) = Assert.Single(callback.Calls());
         Assert.Same(timeout, delivered);
-        Assert.Equal(topic, metadata.Topic);
-        Assert.Equal(-1, metadata.Partition);
-        Assert.Equal(-1L, metadata.Offset);
+        Assert.Equal(topic, metadata.Topic());
+        Assert.Equal(-1, metadata.Partition());
+        Assert.Equal(-1L, metadata.Offset());
     }
 
     [Theory]
@@ -322,7 +322,7 @@ public sealed class PublicProducerSendWithCallbackTests
             Assert.Equal(NativeProducer.CompletionThreadName, outer.ThreadName);
             Assert.Equal(NativeProducer.CompletionThreadName, middle.ThreadName);
             (RecordMetadata metadata, Exception? delivered) = Assert.Single(last.Calls());
-            Assert.Equal(prefix + "3", metadata.Topic);
+            Assert.Equal(prefix + "3", metadata.Topic());
             Assert.Same(FutureAssert.Unwrapped(thirdOutcome), delivered);
         }
         finally
@@ -346,10 +346,10 @@ public sealed class PublicProducerSendWithCallbackTests
         };
 
     private static KafkaProducer<byte[], byte[]> SyncUnreachable(int maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static AsyncKafkaProducer<byte[], byte[]> AsyncUnreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray, Serdes.ByteArray);
+        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray(), Serdes.ByteArray());
 
     private static Exception Capture(Action action)
     {
@@ -438,7 +438,7 @@ public sealed class PublicProducerSendWithCallbackTests
                 return;
             }
 
-            DoneInsideTheCallback = _future.IsDone;
+            DoneInsideTheCallback = _future.IsDone();
             GetReturnedInsideTheCallback = Volatile.Read(ref GetReturned);
         }
     }

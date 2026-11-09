@@ -75,24 +75,24 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     [Fact]
     public void TypeAndGroupState_AreNonOptionalHere_UnlikeOnTheListing()
     {
-        Assert.Equal(typeof(GroupType), PropertyType("Type"));
-        Assert.Equal(typeof(GroupState), PropertyType("GroupState"));
+        Assert.Equal(typeof(GroupType), ReturnType("Type"));
+        Assert.Equal(typeof(GroupState), ReturnType("GroupState"));
 
-        Assert.Equal(typeof(GroupType?), typeof(GroupListing).GetProperty("Type")!.PropertyType);
-        Assert.Equal(typeof(GroupState?), typeof(GroupListing).GetProperty("GroupState")!.PropertyType);
+        Assert.Equal(typeof(GroupType?), typeof(GroupListing).GetMethod("Type", Type.EmptyTypes)!.ReturnType);
+        Assert.Equal(typeof(GroupState?), typeof(GroupListing).GetMethod("GroupState", Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]
-    public void Properties_AreJavasShapes()
+    public void Getters_AreJavasShapes()
     {
-        Assert.Equal(typeof(string), PropertyType("GroupId"));
-        Assert.Equal(typeof(bool), PropertyType("IsSimpleConsumerGroup"));
-        Assert.Equal(typeof(IReadOnlyCollection<MemberDescription>), PropertyType("Members"));
-        Assert.Equal(typeof(string), PropertyType("PartitionAssignor"));
-        Assert.Equal(typeof(Node), PropertyType("Coordinator"));
-        Assert.Equal(typeof(IReadOnlyCollection<AclOperation>), PropertyType("AuthorizedOperations"));
-        Assert.Equal(typeof(int?), PropertyType("GroupEpoch"));
-        Assert.Equal(typeof(int?), PropertyType("TargetAssignmentEpoch"));
+        Assert.Equal(typeof(string), ReturnType("GroupId"));
+        Assert.Equal(typeof(bool), ReturnType("IsSimpleConsumerGroup"));
+        Assert.Equal(typeof(IReadOnlyCollection<MemberDescription>), ReturnType("Members"));
+        Assert.Equal(typeof(string), ReturnType("PartitionAssignor"));
+        Assert.Equal(typeof(Node), ReturnType("Coordinator"));
+        Assert.Equal(typeof(IReadOnlyCollection<AclOperation>), ReturnType("AuthorizedOperations"));
+        Assert.Equal(typeof(int?), ReturnType("GroupEpoch"));
+        Assert.Equal(typeof(int?), ReturnType("TargetAssignmentEpoch"));
     }
 
     [Fact]
@@ -100,17 +100,17 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     {
         var description = Canonical();
 
-        Assert.Equal("g-1", description.GroupId);
-        Assert.False(description.IsSimpleConsumerGroup);
-        Assert.Equal(new[] { s_memberOne, s_memberTwo }, description.Members);
-        Assert.Equal("range", description.PartitionAssignor);
-        Assert.Equal(GroupType.CONSUMER, description.Type);
-        Assert.Equal(GroupState.STABLE, description.GroupState);
-        Assert.Same(s_coordinatorNode, description.Coordinator);
-        Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
-        Assert.Equal(7, description.GroupEpoch);
-        Assert.Equal(9, description.TargetAssignmentEpoch);
+        Assert.Equal("g-1", description.GroupId());
+        Assert.False(description.IsSimpleConsumerGroup());
+        Assert.Equal(new[] { s_memberOne, s_memberTwo }, description.Members());
+        Assert.Equal("range", description.PartitionAssignor());
+        Assert.Equal(GroupType.CONSUMER, description.Type());
+        Assert.Equal(GroupState.STABLE, description.GroupState());
+        Assert.Same(s_coordinatorNode, description.Coordinator());
+        Assert.NotNull(description.AuthorizedOperations());
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations()!);
+        Assert.Equal(7, description.GroupEpoch());
+        Assert.Equal(9, description.TargetAssignmentEpoch());
     }
 
     [Fact]
@@ -119,14 +119,14 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         var description = new ConsumerGroupDescription(
             null, false, null, null, GroupType.UNKNOWN, GroupState.UNKNOWN, null, null, null, null);
 
-        Assert.Equal(string.Empty, description.GroupId);
-        Assert.Empty(description.Members);
-        Assert.Equal(string.Empty, description.PartitionAssignor);
+        Assert.Equal(string.Empty, description.GroupId());
+        Assert.Empty(description.Members());
+        Assert.Equal(string.Empty, description.PartitionAssignor());
 
-        Assert.Null(description.Coordinator);
-        Assert.Null(description.AuthorizedOperations);
-        Assert.Null(description.GroupEpoch);
-        Assert.Null(description.TargetAssignmentEpoch);
+        Assert.Null(description.Coordinator());
+        Assert.Null(description.AuthorizedOperations());
+        Assert.Null(description.GroupEpoch());
+        Assert.Null(description.TargetAssignmentEpoch());
     }
 
     [Fact]
@@ -138,16 +138,16 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
 
         source.Add(s_memberTwo);
 
-        Assert.Equal(new[] { s_memberOne }, description.Members);
+        Assert.Equal(new[] { s_memberOne }, description.Members());
     }
 
     [Fact]
     public void State_IsNotTranslated_AndGroupStateAndTheClassAreNotObsolete()
     {
-        Assert.Null(typeof(ConsumerGroupDescription).GetProperty("State"));
+        Assert.Null(typeof(ConsumerGroupDescription).GetMethod("State", Type.EmptyTypes));
 
         Assert.Null(typeof(ConsumerGroupDescription)
-            .GetProperty("GroupState")!
+            .GetMethod("GroupState", Type.EmptyTypes)!
             .GetCustomAttribute<ObsoleteAttribute>());
         Assert.Null(typeof(ConsumerGroupDescription).GetCustomAttribute<ObsoleteAttribute>());
     }
@@ -158,10 +158,10 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         var absent = WithOperations(null);
         var empty = WithOperations(Array.Empty<AclOperation>());
 
-        Assert.Null(absent.AuthorizedOperations);
+        Assert.Null(absent.AuthorizedOperations());
 
-        Assert.NotNull(empty.AuthorizedOperations);
-        Assert.Empty(empty.AuthorizedOperations!);
+        Assert.NotNull(empty.AuthorizedOperations());
+        Assert.Empty(empty.AuthorizedOperations()!);
 
         Assert.False(absent.Equals(empty));
         Assert.False(empty.Equals(absent));
@@ -176,8 +176,8 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         var description = WithOperations(
             new[] { AclOperation.READ, AclOperation.WRITE, AclOperation.READ });
 
-        Assert.NotNull(description.AuthorizedOperations);
-        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations!);
+        Assert.NotNull(description.AuthorizedOperations());
+        Assert.Equal(new[] { AclOperation.READ, AclOperation.WRITE }, description.AuthorizedOperations()!);
     }
 
     [Fact]
@@ -185,8 +185,8 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     {
         var absent = WithEpochs(null, null);
 
-        Assert.Null(absent.GroupEpoch);
-        Assert.Null(absent.TargetAssignmentEpoch);
+        Assert.Null(absent.GroupEpoch());
+        Assert.Null(absent.TargetAssignmentEpoch());
 
         Assert.False(absent.Equals(WithEpochs(0, 0)));
         Assert.False(absent.Equals(WithEpochs(-1, -1)));
@@ -196,8 +196,8 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Contains("groupEpoch=0, targetAssignmentEpoch=0)", WithEpochs(0, 0).ToString(), StringComparison.Ordinal);
 
         var present = WithEpochs(7, 9);
-        Assert.Equal(7, present.GroupEpoch);
-        Assert.Equal(9, present.TargetAssignmentEpoch);
+        Assert.Equal(7, present.GroupEpoch());
+        Assert.Equal(9, present.TargetAssignmentEpoch());
     }
 
     [Fact]
@@ -205,7 +205,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     {
         var absent = WithCoordinator(null);
 
-        Assert.Null(absent.Coordinator);
+        Assert.Null(absent.Coordinator());
         Assert.Contains("coordinator=null,", absent.ToString(), StringComparison.Ordinal);
         Assert.False(absent.Equals(Canonical()));
 
@@ -365,6 +365,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             groupEpoch,
             targetAssignmentEpoch);
 
-    private static Type PropertyType(string name) =>
-        typeof(ConsumerGroupDescription).GetProperty(name)!.PropertyType;
+    private static Type ReturnType(string name) =>
+        typeof(ConsumerGroupDescription).GetMethod(name, Type.EmptyTypes)!.ReturnType;
 }

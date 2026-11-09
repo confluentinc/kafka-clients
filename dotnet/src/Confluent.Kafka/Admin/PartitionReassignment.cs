@@ -72,19 +72,22 @@ public sealed class PartitionReassignment
     }
 
     /// <summary>The brokers this partition currently resides on — Java's <c>replicas()</c>.</summary>
-    public IReadOnlyList<int> Replicas => _replicas;
+    /// <returns>The brokers this partition currently resides on.</returns>
+    public IReadOnlyList<int> Replicas() => _replicas;
 
     /// <summary>
     /// The brokers being added as part of the reassignment, a subset of
-    /// <see cref="Replicas"/> — Java's <c>addingReplicas()</c>.
+    /// <see cref="Replicas()"/> — Java's <c>addingReplicas()</c>.
     /// </summary>
-    public IReadOnlyList<int> AddingReplicas => _addingReplicas;
+    /// <returns>The brokers being added as part of the reassignment, a subset of <see cref="Replicas()"/>.</returns>
+    public IReadOnlyList<int> AddingReplicas() => _addingReplicas;
 
     /// <summary>
     /// The brokers being removed as part of the reassignment, a subset of
-    /// <see cref="Replicas"/> — Java's <c>removingReplicas()</c>.
+    /// <see cref="Replicas()"/> — Java's <c>removingReplicas()</c>.
     /// </summary>
-    public IReadOnlyList<int> RemovingReplicas => _removingReplicas;
+    /// <returns>The brokers being removed as part of the reassignment, a subset of <see cref="Replicas()"/>.</returns>
+    public IReadOnlyList<int> RemovingReplicas() => _removingReplicas;
 
     /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>

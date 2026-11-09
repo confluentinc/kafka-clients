@@ -27,6 +27,9 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class SupportedVersionRange
 {
+    private readonly short _minVersion;
+    private readonly short _maxVersion;
+
     /// <summary>Creates a supported range — Java's constructor.</summary>
     /// <param name="minVersion">The minimum supported version.</param>
     /// <param name="maxVersion">The maximum supported version.</param>
@@ -45,23 +48,25 @@ public sealed class SupportedVersionRange
                     maxVersion));
         }
 
-        MinVersion = minVersion;
-        MaxVersion = maxVersion;
+        _minVersion = minVersion;
+        _maxVersion = maxVersion;
     }
 
     /// <summary>The minimum version — Java's <c>minVersion()</c>.</summary>
-    public short MinVersion { get; }
+    /// <returns>The minimum version.</returns>
+    public short MinVersion() => _minVersion;
 
     /// <summary>The maximum version — Java's <c>maxVersion()</c>.</summary>
-    public short MaxVersion { get; }
+    /// <returns>The maximum version.</returns>
+    public short MaxVersion() => _maxVersion;
 
     /// <summary>Value equality over both versions — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same range.</returns>
     public override bool Equals(object? obj) =>
         obj is SupportedVersionRange other
-        && MinVersion == other.MinVersion
-        && MaxVersion == other.MaxVersion;
+        && MinVersion() == other.MinVersion()
+        && MaxVersion() == other.MaxVersion();
 
     /// <summary>The hash of both versions — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -69,7 +74,7 @@ public sealed class SupportedVersionRange
     {
         unchecked
         {
-            return (((int)MinVersion * 31) + 1) * 31 + MaxVersion;
+            return (((int)MinVersion() * 31) + 1) * 31 + MaxVersion();
         }
     }
 
@@ -79,6 +84,6 @@ public sealed class SupportedVersionRange
         string.Format(
             CultureInfo.InvariantCulture,
             "SupportedVersionRange[min_version:{0}, max_version:{1}]",
-            MinVersion,
-            MaxVersion);
+            MinVersion(),
+            MaxVersion());
 }

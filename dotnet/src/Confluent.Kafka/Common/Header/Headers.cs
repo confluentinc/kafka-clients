@@ -148,7 +148,7 @@ public sealed class Headers : IEnumerable<Header>
         }
 
         int first = 0;
-        while (first < headers.Count && !string.Equals(headers[first].Key, key, StringComparison.Ordinal))
+        while (first < headers.Count && !string.Equals(headers[first].Key(), key, StringComparison.Ordinal))
         {
             first++;
         }
@@ -162,7 +162,7 @@ public sealed class Headers : IEnumerable<Header>
         for (int i = first + 1; i < headers.Count; i++)
         {
             Header header = headers[i];
-            if (!string.Equals(header.Key, key, StringComparison.Ordinal))
+            if (!string.Equals(header.Key(), key, StringComparison.Ordinal))
             {
                 headers[kept++] = header;
             }
@@ -187,7 +187,7 @@ public sealed class Headers : IEnumerable<Header>
 
         for (int i = headers.Count - 1; i >= 0; i--)
         {
-            if (string.Equals(headers[i].Key, key, StringComparison.Ordinal))
+            if (string.Equals(headers[i].Key(), key, StringComparison.Ordinal))
             {
                 return headers[i];
             }
@@ -314,7 +314,7 @@ public sealed class Headers : IEnumerable<Header>
 
         foreach (Header header in headers)
         {
-            if (string.Equals(header.Key, key, StringComparison.Ordinal))
+            if (string.Equals(header.Key(), key, StringComparison.Ordinal))
             {
                 yield return header;
             }

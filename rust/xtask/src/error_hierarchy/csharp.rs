@@ -61,7 +61,13 @@ const CSHARP_JDK_BASES: &[(&str, &str)] = &[
     ("java.lang.IndexOutOfBoundsException", "System.ArgumentOutOfRangeException"),
 ];
 
-/// Members of `System.Exception` and `KafkaException` a property must not hide.
+/// The names a getter method, which takes no arguments, cannot take. A getter would clash by name
+/// with a property or an event, and would hide a parameterless method, of any class it can inherit
+/// from: `object`, `System.Exception`, `KafkaException` (whose members are internal, but visible to
+/// the generated classes in its assembly), and the .NET built-ins of `CSHARP_JDK_BASES`. Of those,
+/// `System.ArgumentException` adds `ParamName`, and `System.ArgumentOutOfRangeException` inherits it
+/// and adds `ActualValue`; both are reserved under every root, as no Java 4.4 getter has either
+/// name.
 const RESERVED_MEMBERS: &[&str] = &[
     "Message",
     "Data",
@@ -71,9 +77,18 @@ const RESERVED_MEMBERS: &[&str] = &[
     "StackTrace",
     "TargetSite",
     "InnerException",
+    "SerializeObjectState",
+    "ParamName",
+    "ActualValue",
     "Code",
-    "IsRetriable",
     "FfiId",
+    "GetBaseException",
+    "GetType",
+    "GetHashCode",
+    "ToString",
+    "MemberwiseClone",
+    "Finalize",
+    "TypeAndMessage",
 ];
 
 /// C# keywords that are not Java keywords, so a Java parameter may carry one.
@@ -293,6 +308,23 @@ fn doc_text(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// A getter's `<returns>` text, naming what it returns from Java's getter name: `groupId` is "The
+/// group id.", `throttleTimeMs` "The throttle time, in milliseconds.".
+fn getter_returns(java_getter: &str) -> String {
+    let (stem, unit) = match java_getter.strip_suffix("Ms") {
+        Some(stem) if !stem.is_empty() => (stem, ", in milliseconds"),
+        _ => (java_getter, ""),
+    };
+    let mut words = String::new();
+    for c in stem.chars() {
+        if c.is_ascii_uppercase() {
+            words.push(' ');
+        }
+        words.push(c.to_ascii_lowercase());
+    }
+    format!("The {words}{unit}.")
 }
 
 /// `/// <summary>…</summary>` lines, wrapped under 120 columns.
@@ -537,29 +569,25 @@ fn empty_map(t: CsTy, usings: &mut BTreeSet<&'static str>) -> anyhow::Result<Str
 // The class model
 // ---------------------------------------------------------------------------
 
-/// One property: a Java getter.
+/// One getter method: a Java getter, with Java's name.
 #[derive(Debug)]
-struct CsProperty {
+struct CsGetter {
     java_getter: String,
     name: String,
     ty: String,
     modifier: &'static str,
-    /// `None` for an abstract property; else the expression body, or `None` with
-    /// `auto` for a get-only auto-property.
+    /// `None` for an abstract method; else the expression body.
     body: Option<String>,
-    auto: bool,
 }
 
 /// What a Java instance field becomes.
 #[derive(Debug)]
 struct CsField {
     java_name: String,
-    /// The member a constructor assigns: the auto-property, or the backing field.
+    /// The private backing field a constructor assigns (`private readonly T _x;`).
     member: String,
     ty: CsTy,
     nullable: bool,
-    /// A private backing field (`private readonly T _x;`), when the getter is named otherwise.
-    backing: bool,
 }
 
 /// The chain of `fqn` and its ancestors in the graph, `fqn` first.
@@ -780,14 +808,14 @@ fn class_fields(
                 );
             }
         }
-        let getter = info
+        if !info
             .java
             .getters
             .iter()
-            .find(|gt| matches!(&gt.body, GetterBody::Field(x) if *x == f.name))
-            .ok_or_else(|| {
-                anyhow::anyhow!("error hierarchy (C#): {}: the field `{}` has no getter", info.java_fqn, f.name)
-            })?;
+            .any(|gt| matches!(&gt.body, GetterBody::Field(x) if *x == f.name))
+        {
+            anyhow::bail!("error hierarchy (C#): {}: the field `{}` has no getter", info.java_fqn, f.name);
+        }
         let ty = cs_type(&f.ty, usings)?;
         let mut nullable = matches!(f.init, Some(Expr::Null));
         for idx in kept_ctors(info)? {
@@ -802,18 +830,11 @@ fn class_fields(
                 Some((_, e)) => nullable |= may_be_null(e, &scope),
             }
         }
-        let backing = getter.name != f.name;
-        let member = if backing {
-            format!("_{}", f.name)
-        } else {
-            pascal(&f.name)
-        };
         out.push(CsField {
             java_name: f.name.clone(),
-            member,
+            member: format!("_{}", f.name),
             ty,
             nullable: nullable && f.init != Some(Expr::Int(0)),
-            backing,
         });
     }
     Ok(out)
@@ -834,12 +855,12 @@ fn chain_fields(g: &Graph, fqn: &str, usings: &mut BTreeSet<&'static str>) -> an
     Ok(out)
 }
 
-fn properties(
+fn getters(
     g: &Graph,
     info: &ClassInfo,
     fields: &[CsField],
     usings: &mut BTreeSet<&'static str>,
-) -> anyhow::Result<Vec<CsProperty>> {
+) -> anyhow::Result<Vec<CsGetter>> {
     let mut out = Vec::new();
     for gt in &info.java.getters {
         let name = pascal(&gt.name);
@@ -859,8 +880,8 @@ fn properties(
                 && c.java.getters.iter().any(|x| x.name == gt.name)
         });
         let ret = cs_type(&gt.ret, usings)?;
-        let (modifier, body, auto, ty) = match &gt.body {
-            GetterBody::Abstract => ("abstract", None, false, ret.decl(false)),
+        let (modifier, body, ty) = match &gt.body {
+            GetterBody::Abstract => ("abstract", None, ret.decl(false)),
             GetterBody::Field(f) => {
                 let field = fields.iter().find(|x| x.java_name == *f).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -876,13 +897,11 @@ fn properties(
                         gt.name
                     );
                 }
-                let m = override_modifier(in_ancestor, in_descendant);
-                let ty = field.ty.decl(field.nullable);
-                if field.backing {
-                    (m, Some(field.member.clone()), false, ty)
-                } else {
-                    (m, None, true, ty)
-                }
+                (
+                    override_modifier(in_ancestor, in_descendant),
+                    Some(field.member.clone()),
+                    field.ty.decl(field.nullable),
+                )
             },
             GetterBody::KeySet(f) => {
                 let field = fields.iter().find(|x| x.java_name == *f).ok_or_else(|| {
@@ -902,12 +921,11 @@ fn properties(
                 (
                     override_modifier(in_ancestor, in_descendant),
                     Some(format!("new KeySetView<{k}, {v}>({})", field.member)),
-                    false,
                     ret.decl(false),
                 )
             },
         };
-        out.push(CsProperty { java_getter: gt.name.clone(), name, ty, modifier, body, auto });
+        out.push(CsGetter { java_getter: gt.name.clone(), name, ty, modifier, body });
     }
     Ok(out)
 }
@@ -970,7 +988,10 @@ fn to_string_message(
             None => p.name.clone(),
             Some("metricName()") if base_type(&p.java_ty) == "KafkaMetric" => {
                 usings.insert(NS_SYSTEM);
-                format!("({} ?? throw new ArgumentNullException(nameof({}))).Name", p.name, p.name)
+                format!(
+                    "({} ?? throw new ArgumentNullException(nameof({}))).MetricName()",
+                    p.name, p.name
+                )
             },
             Some(m) => anyhow::bail!("error hierarchy (C#): {fqn}: unsupported call `{m}` in `toString()`"),
         };
@@ -1177,7 +1198,7 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
     let base = base_of(g, info)?;
     let null_fed = null_fed_params(g, info)?;
     let fields = class_fields(g, info, &null_fed, usings)?;
-    let props = properties(g, info, &fields, usings)?;
+    let props = getters(g, info, &fields, usings)?;
     let is_api = is_ancestor_or_self(g, "org.apache.kafka.common.errors.ApiException", fqn);
 
     let mut lines = class_summary(info);
@@ -1198,16 +1219,17 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
             doc.push_str(" .NET records a stack trace on every throw, where Java's <c>ApiException</c> records none.");
         }
         lines.extend(summary(&doc, "    "));
-        let name: String = s.name.split('_').map(|w| pascal(&w.to_lowercase())).collect();
+        // Java's own name and spelling, as for every `public static final` field (`INSTANCE`).
         lines.push(format!(
-            "    public static readonly {simple} {name} = new {simple}({});",
+            "    public static readonly {simple} {} = new {simple}({});",
+            s.name,
             args.join(", ")
         ));
         lines.push(String::new());
     }
 
     // Backing fields.
-    for f in fields.iter().filter(|f| f.backing) {
+    for f in &fields {
         lines.push(format!("    private readonly {} {};", f.ty.decl(f.nullable), f.member));
         lines.push(String::new());
     }
@@ -1298,7 +1320,7 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
         &own,
     );
 
-    // Properties, keeping the Java getters' order; factories where Java declares them.
+    // Getter methods, keeping the Java getters' order; factories where Java declares them.
     let mut factories: Vec<&crate::java_parse::Factory> = info.java.factories.iter().collect();
     factories.sort_by_key(|f| f.after_getters);
     let mut fi = 0;
@@ -1310,7 +1332,9 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
         let doc = if p.modifier == "override" {
             vec!["    /// <inheritdoc/>".to_string()]
         } else {
-            summary(&format!("Java's <c>{}()</c>.", p.java_getter), "    ")
+            let mut doc = summary(&format!("Java's <c>{}()</c>.", p.java_getter), "    ");
+            doc.push(format!("    /// <returns>{}</returns>", getter_returns(&p.java_getter)));
+            doc
         };
         lines.extend(doc);
         let m = if p.modifier.is_empty() {
@@ -1318,12 +1342,9 @@ fn render_kafka(g: &Graph, info: &ClassInfo, usings: &mut BTreeSet<&'static str>
         } else {
             format!("{} ", p.modifier)
         };
-        let decl = match (&p.body, p.auto) {
-            (None, true) | (None, false) if p.modifier == "abstract" || p.auto => {
-                format!("    public {m}{} {} {{ get; }}", p.ty, p.name)
-            },
-            (Some(b), _) => format!("    public {m}{} {} => {b};", p.ty, p.name),
-            _ => unreachable!("a property is abstract, auto or computed"),
+        let decl = match &p.body {
+            None => format!("    public {m}{} {}();", p.ty, p.name),
+            Some(b) => format!("    public {m}{} {}() => {b};", p.ty, p.name),
         };
         lines.push(decl);
         lines.push(String::new());
@@ -1551,7 +1572,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::super::{build_graph, ClassInfo, Graph};
-    use super::{cs_namespace, render_class};
+    use super::{cs_namespace, getter_returns, render_class};
     use crate::java_parse::{Ctor, Param, Visibility};
 
     fn repo_root() -> PathBuf {
@@ -1615,10 +1636,25 @@ mod tests {
     fn a_payload_class_assigns_its_field_and_takes_it_on_the_core_path() {
         let c = graph();
         let cs = render(&c, &errors("GroupAuthorizationException"));
-        assert!(cs.contains("    public GroupAuthorizationException(string? message, string? groupId)\n        : base(message)\n    {\n        GroupId = groupId;\n    }"));
+        assert!(cs.contains("    private readonly string? _groupId;"));
+        assert!(cs.contains("    public GroupAuthorizationException(string? message, string? groupId)\n        : base(message)\n    {\n        _groupId = groupId;\n    }"));
         assert!(cs.contains("    public GroupAuthorizationException(string? message)\n        : this(message, null)"));
         assert!(cs.contains("    internal GroupAuthorizationException(CoreError _, string? message, Exception? innerException, string? groupId)"));
-        assert!(cs.contains("    public string? GroupId { get; }"));
+        assert!(cs.contains(
+            "    /// <summary>Java's <c>groupId()</c>.</summary>\n    /// <returns>The group id.</returns>\n    public string? GroupId() => _groupId;"
+        ));
+        assert!(!cs.contains("{ get; }"));
+    }
+
+    #[test]
+    fn a_getters_returns_names_what_it_returns() {
+        assert_eq!(getter_returns("groupId"), "The group id.");
+        assert_eq!(getter_returns("throttleTimeMs"), "The throttle time, in milliseconds.");
+        assert_eq!(getter_returns("partitions"), "The partitions.");
+        assert_eq!(
+            getter_returns("offsetOutOfRangePartitions"),
+            "The offset out of range partitions."
+        );
     }
 
     #[test]
@@ -1629,10 +1665,10 @@ mod tests {
     }
 
     #[test]
-    fn a_singleton_is_instance_and_keeps_a_private_constructor() {
+    fn a_singleton_keeps_javas_name_and_a_private_constructor() {
         let c = graph();
         let cs = render(&c, &errors("CoordinatorNotAvailableException"));
-        assert!(cs.contains("    public static readonly CoordinatorNotAvailableException Instance = new CoordinatorNotAvailableException();"));
+        assert!(cs.contains("    public static readonly CoordinatorNotAvailableException INSTANCE = new CoordinatorNotAvailableException();"));
         assert!(cs.contains("    private CoordinatorNotAvailableException()\n"));
         assert!(cs.contains("compare by"));
     }
@@ -1641,9 +1677,10 @@ mod tests {
     fn an_abstract_getter_and_its_key_set_override() {
         let c = graph();
         let base = render(&c, "org.apache.kafka.clients.consumer.InvalidOffsetException");
-        assert!(base.contains("    public abstract IReadOnlyCollection<TopicPartition> Partitions { get; }"));
+        assert!(base.contains("    public abstract IReadOnlyCollection<TopicPartition> Partitions();"));
         let sub = render(&c, "org.apache.kafka.clients.consumer.OffsetOutOfRangeException");
-        assert!(sub.contains("    /// <inheritdoc/>\n    public override IReadOnlyCollection<TopicPartition> Partitions => new KeySetView<TopicPartition, long>(OffsetOutOfRangePartitions);"));
+        assert!(sub.contains("    public IReadOnlyDictionary<TopicPartition, long> OffsetOutOfRangePartitions() => _offsetOutOfRangePartitions;"));
+        assert!(sub.contains("    /// <inheritdoc/>\n    public override IReadOnlyCollection<TopicPartition> Partitions() => new KeySetView<TopicPartition, long>(_offsetOutOfRangePartitions);"));
     }
 
     #[test]
@@ -1689,6 +1726,7 @@ mod tests {
         assert!(double.contains(
             "\"' violated quota. Actual: \" + JavaText.ValueOf(value) + \", Threshold: \" + JavaText.ValueOf(bound)"
         ));
+        assert!(double.contains("(metric ?? throw new ArgumentNullException(nameof(metric))).MetricName()"));
         assert!(double.contains("internal override string TypeAndMessage() => JavaText.TypeAndMessage(this, Message);"));
     }
 
@@ -1709,5 +1747,21 @@ mod tests {
         let cs = render(&c, "org.apache.kafka.common.requests.CorrelationIdMismatchException");
         assert!(cs.contains(": global::Confluent.Kafka.IllegalStateException"));
         assert!(!cs.contains("FfiId"));
+    }
+
+    #[test]
+    fn a_getter_named_like_an_inherited_method_stops_generation() {
+        for (java, cs) in [
+            ("getType", "GetType"),
+            ("typeAndMessage", "TypeAndMessage"),
+            ("paramName", "ParamName"),
+        ] {
+            let mut c = graph();
+            let fqn = errors("GroupAuthorizationException");
+            c.get_mut(&fqn).unwrap().java.getters[0].name = java.into();
+            let g = Graph { classes: &c };
+            let err = render_class(&g, &c[&fqn], &repo_root()).unwrap_err().to_string();
+            assert!(err.contains(&format!("would hide `{cs}`")), "{err}");
+        }
     }
 }
