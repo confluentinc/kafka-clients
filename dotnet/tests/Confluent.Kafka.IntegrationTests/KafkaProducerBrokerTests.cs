@@ -27,6 +27,7 @@ using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
 
 using Confluent.Kafka.Producer;
+using Confluent.Kafka.UnitTests;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -35,16 +36,21 @@ namespace Confluent.Kafka.IntegrationTests;
 /// <summary>
 /// The producer's send against a broker: a record taken on the calling thread once its topic's metadata is
 /// cached, a record taken at once while another waits for a partition the topic does not have yet, the
-/// serialized sizes and timestamp a delivery reports, and the record headers the broker receives.
+/// serialized sizes and timestamp a delivery reports, the record headers the broker receives, and the bytes a
+/// serializer's memory gives: an array slice, native memory freed once the record is taken, and an empty key or value
+/// kept apart from a null one.
 /// </summary>
 public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 {
+    private const int NativeValueLength = 1024;
+
     private static readonly TimeSpan s_get = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_partitionWait = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan s_readBackWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan s_readBackPoll = TimeSpan.FromSeconds(0.5);
     private static readonly TimeSpan s_firstSendStarts = TimeSpan.FromSeconds(1);
     private static readonly long s_timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private static readonly byte[] s_sliceKey = { 0xA3, 0xA4, 0xA5, 0xA6 };
 
     private static readonly (string Key, byte[]? Value)[] s_headers =
     {
@@ -213,6 +219,137 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         AssertHeaders(s_headers, ConsumedHeaders(topic));
     }
 
+    [SkippableFact]
+    public async Task Send_DeliversAnArraySliceAndNativeMemoryUnchanged()
+    {
+        string topic = await TopicAsync();
+        using NativeMemoryManager value = new NativeMemoryManager(NativeValueLength);
+        using (KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
+        {
+            RecordMetadata metadata = producer.Send(MemoryRecord(topic, SliceKey(), value.Memory)).Get(s_get);
+            Assert.Equal(4, metadata.SerializedKeySize());
+            Assert.Equal(NativeValueLength, metadata.SerializedValueSize());
+        }
+
+        (byte[]? Key, byte[]? Value) consumed = Assert.Single(ConsumedKeysAndValues(topic, count: 1));
+        Assert.Equal(s_sliceKey, consumed.Key);
+        Assert.Equal(IndexPattern(NativeValueLength), consumed.Value);
+    }
+
+    [SkippableFact]
+    public async Task AsyncSend_NativeMemoryOverwrittenAndFreedAfterTheFirstStage_IsDeliveredUnchanged()
+    {
+        string topic = await TopicAsync();
+        using NativeMemoryManager value = new NativeMemoryManager(NativeValueLength);
+        await using (AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
+        {
+            AsyncKafkaFuture<RecordMetadata> delivery =
+                await producer.Send(MemoryRecord(topic, SliceKey(), value.Memory));
+
+            OverwriteAndFree(value);
+            RecordMetadata metadata = await delivery.Get(s_get);
+            Assert.Equal(4, metadata.SerializedKeySize());
+            Assert.Equal(NativeValueLength, metadata.SerializedValueSize());
+        }
+
+        (byte[]? Key, byte[]? Value) consumed = Assert.Single(ConsumedKeysAndValues(topic, count: 1));
+        Assert.Equal(s_sliceKey, consumed.Key);
+        Assert.Equal(IndexPattern(NativeValueLength), consumed.Value);
+    }
+
+    [SkippableFact]
+    public async Task Send_KeepsAnEmptyKeyOrValueApartFromANullOne()
+    {
+        string topic = await TopicAsync();
+        using (KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
+        {
+            RecordMetadata emptyKey = producer.Send(MemoryRecord(topic, ReadOnlyMemory<byte>.Empty, null)).Get(s_get);
+            RecordMetadata emptyValue = producer.Send(MemoryRecord(topic, null, ReadOnlyMemory<byte>.Empty)).Get(s_get);
+            AssertSizes(emptyKey, keySize: 0, valueSize: -1);
+            AssertSizes(emptyValue, keySize: -1, valueSize: 0);
+        }
+
+        AssertEmptyApartFromNull(ConsumedKeysAndValues(topic, count: 2));
+    }
+
+    [SkippableFact]
+    public async Task AsyncSend_KeepsAnEmptyKeyOrValueApartFromANullOne()
+    {
+        string topic = await TopicAsync();
+        await using (AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
+        {
+            AsyncKafkaFuture<RecordMetadata> emptyKey =
+                await producer.Send(MemoryRecord(topic, ReadOnlyMemory<byte>.Empty, null));
+            AsyncKafkaFuture<RecordMetadata> emptyValue =
+                await producer.Send(MemoryRecord(topic, null, ReadOnlyMemory<byte>.Empty));
+            AssertSizes(await emptyKey.Get(s_get), keySize: 0, valueSize: -1);
+            AssertSizes(await emptyValue.Get(s_get), keySize: -1, valueSize: 0);
+        }
+
+        AssertEmptyApartFromNull(ConsumedKeysAndValues(topic, count: 2));
+    }
+
+    private static void AssertSizes(RecordMetadata metadata, int keySize, int valueSize)
+    {
+        Assert.Equal(keySize, metadata.SerializedKeySize());
+        Assert.Equal(valueSize, metadata.SerializedValueSize());
+    }
+
+    private static void AssertEmptyApartFromNull(List<(byte[]? Key, byte[]? Value)> consumed)
+    {
+        Assert.Equal(2, consumed.Count);
+        Assert.Equal(Array.Empty<byte>(), consumed[0].Key);
+        Assert.Null(consumed[0].Value);
+        Assert.Null(consumed[1].Key);
+        Assert.Equal(Array.Empty<byte>(), consumed[1].Value);
+    }
+
+    private static ReadOnlyMemory<byte> SliceKey()
+    {
+        byte[] array = new byte[16];
+        for (int i = 0; i < array.Length; i++)
+        {
+            array[i] = unchecked((byte)(0xA0 + i));
+        }
+
+        return array.AsMemory(3, 4);
+    }
+
+    private static byte[] IndexPattern(int length)
+    {
+        byte[] bytes = new byte[length];
+        for (int i = 0; i < length; i++)
+        {
+            bytes[i] = unchecked((byte)i);
+        }
+
+        return bytes;
+    }
+
+    private static void OverwriteAndFree(NativeMemoryManager value)
+    {
+        Span<byte> bytes = value.GetSpan();
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = unchecked((byte)~i);
+        }
+
+        ((IDisposable)value).Dispose();
+        Assert.Equal(IntPtr.Zero, value.Pointer);
+    }
+
+    private static ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> MemoryRecord(
+        string topic, ReadOnlyMemory<byte>? key, ReadOnlyMemory<byte>? value) =>
+        new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(topic, value, key, partition: 0);
+
     private static void AssertHeaders((string Key, byte[]? Value)[] expected, (string Key, byte[]? Value)[] actual)
     {
         Assert.Equal(Array.ConvertAll(expected, header => header.Key), Array.ConvertAll(actual, header => header.Key));
@@ -272,18 +409,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 
     private (string Key, byte[]? Value)[] ConsumedHeaders(string topic)
     {
-        Dictionary<string, object?> configs = new Dictionary<string, object?>
-        {
-            ["bootstrap.servers"] = _broker.ExternalBootstrap!,
-            ["group.protocol"] = "consumer",
-            ["group.id"] = "dotnet-headers-" + Guid.NewGuid().ToString("N").Substring(0, 12),
-            ["enable.auto.commit"] = "false",
-        };
-        using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
-        TopicPartition tp = new TopicPartition(topic, 0);
-        consumer.Assign(new[] { tp });
-        consumer.Seek(tp, 0);
+        using KafkaConsumer<byte[], byte[]> consumer = ReadBackConsumer(topic, partition: 0, fromOffset: 0);
         Stopwatch elapsed = Stopwatch.StartNew();
         while (elapsed.Elapsed < s_partitionWait)
         {
@@ -298,18 +424,7 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
 
     private List<(long Offset, string? Value)> RecordsOf(string topic, int partition, long fromOffset)
     {
-        Dictionary<string, object?> configs = new Dictionary<string, object?>
-        {
-            ["bootstrap.servers"] = _broker.ExternalBootstrap!,
-            ["group.protocol"] = "consumer",
-            ["group.id"] = "dotnet-records-" + Guid.NewGuid().ToString("N").Substring(0, 12),
-            ["enable.auto.commit"] = "false",
-        };
-        using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
-        TopicPartition tp = new TopicPartition(topic, partition);
-        consumer.Assign(new[] { tp });
-        consumer.Seek(tp, fromOffset);
+        using KafkaConsumer<byte[], byte[]> consumer = ReadBackConsumer(topic, partition, fromOffset);
         List<(long Offset, string? Value)> records = new List<(long Offset, string? Value)>();
         Stopwatch elapsed = Stopwatch.StartNew();
         while (elapsed.Elapsed < s_readBackWindow)
@@ -321,5 +436,46 @@ public sealed class KafkaProducerBrokerTests : IClassFixture<KafkaBrokerFixture>
         }
 
         return records;
+    }
+
+    private List<(byte[]? Key, byte[]? Value)> ConsumedKeysAndValues(string topic, int count)
+    {
+        using KafkaConsumer<byte[], byte[]> consumer = ReadBackConsumer(topic, partition: 0, fromOffset: 0);
+        List<(byte[]? Key, byte[]? Value)> records = new List<(byte[]? Key, byte[]? Value)>();
+        Stopwatch elapsed = Stopwatch.StartNew();
+        while (records.Count < count && elapsed.Elapsed < s_partitionWait)
+        {
+            foreach (ConsumerRecord<byte[], byte[]> record in consumer.Poll(s_readBackPoll))
+            {
+                records.Add((record.Key(), record.Value()));
+            }
+        }
+
+        return records;
+    }
+
+    private KafkaConsumer<byte[], byte[]> ReadBackConsumer(string topic, int partition, long fromOffset)
+    {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = _broker.ExternalBootstrap!,
+            ["group.protocol"] = "consumer",
+            ["group.id"] = "dotnet-read-back-" + Guid.NewGuid().ToString("N").Substring(0, 12),
+            ["enable.auto.commit"] = "false",
+        };
+        KafkaConsumer<byte[], byte[]> consumer =
+            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+        TopicPartition tp = new TopicPartition(topic, partition);
+        consumer.Assign(new[] { tp });
+        consumer.Seek(tp, fromOffset);
+        return consumer;
+    }
+
+    /// <summary>Returns the memory it is given unchanged, <see langword="null"/> included.</summary>
+    private sealed class MemorySerializer : ISerializer<ReadOnlyMemory<byte>?>
+    {
+        internal static readonly MemorySerializer Instance = new MemorySerializer();
+
+        public ReadOnlyMemory<byte>? Serialize(string topic, ReadOnlyMemory<byte>? data) => data;
     }
 }
