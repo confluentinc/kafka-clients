@@ -73,9 +73,9 @@ public sealed class PublicAdminShapeParityTests
             new[] { typeof(Uuid), typeof(int), typeof(int), typeof(Config) })!;
         Assert.NotNull(metadataCtor);
 
-        // The request side is not widened: Java's NewTopic carries a short.
+        // The request side is not widened: Java's NewTopic.replicationFactor() returns a short.
         Assert.Equal(
-            typeof(short?),
+            typeof(short),
             Getters.Get(typeof(NewTopic), nameof(NewTopic.ReplicationFactor)).ReturnType);
     }
 

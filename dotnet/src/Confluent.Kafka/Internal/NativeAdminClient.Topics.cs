@@ -228,7 +228,7 @@ internal sealed partial class NativeAdminClient
         {
             native = topic.ReplicasAssignments() is not { } assignments
                 ? NativeMethods.NewTopicWithNumPartitionsReplicationFactor(
-                    name.Pointer, topic.NumPartitions() ?? -1, topic.ReplicationFactor() ?? (short)-1, ref outErr)
+                    name.Pointer, topic.NumPartitions(), topic.ReplicationFactor(), ref outErr)
                 : NewAssignedTopic(name.Pointer, assignments, ref outErr);
         }
 

@@ -91,7 +91,7 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
         ConsumerRecords<byte[], int> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetAllocatedBytesForCurrentThread();
 
-        Assert.Equal(recordCount, records.Count);
+        Assert.Equal(recordCount, records.Count());
         foreach (ConsumerRecord<byte[], int> record in records)
         {
             Assert.Equal(valueSize, record.Value());

@@ -210,7 +210,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
     public IReadOnlyList<PolledRecord> PollBatch()
     {
         ConsumerRecords<byte[], byte[]> records = _consumer.Poll(_timeout);
-        var list = new List<PolledRecord>(records.Count);
+        var list = new List<PolledRecord>(records.Count());
         foreach (ConsumerRecord<byte[], byte[]> r in records)
         {
             list.Add(new PolledRecord(r.Timestamp(), PolledRecordBytes(r)));
@@ -262,7 +262,7 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
     public async Task<IReadOnlyList<PolledRecord>> PollBatch()
     {
         ConsumerRecords<byte[], byte[]> records = await _consumer.Poll(_timeout).ConfigureAwait(false);
-        var list = new List<PolledRecord>(records.Count);
+        var list = new List<PolledRecord>(records.Count());
         foreach (ConsumerRecord<byte[], byte[]> r in records)
         {
             list.Add(new PolledRecord(r.Timestamp(), V3SyncConsumerBackend.PolledRecordBytes(r)));

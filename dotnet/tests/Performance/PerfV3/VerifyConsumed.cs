@@ -104,7 +104,7 @@ internal static class VerifyConsumed
             while (!CaughtUp(partitionIds, current, targets))
             {
                 ConsumerRecords<byte[], byte[]> records = consumer.Poll(pollTimeout);
-                if (records.Count == 0)
+                if (records.Count() == 0)
                 {
                     if (Monotonic() - lastProgress > EmptyBudgetSeconds)
                     {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
@@ -48,13 +47,9 @@ public sealed class DescribeFeaturesOptions
     /// <summary>Set the node id to which the request should be sent.</summary>
     /// <param name="nodeId">The node id.</param>
     /// <returns>This instance, so calls can be chained.</returns>
-    /// <exception cref="ArgumentNullException">
-    /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set node id cannot be
-    /// unset again.
-    /// </exception>
-    public DescribeFeaturesOptions NodeId(int? nodeId)
+    public DescribeFeaturesOptions NodeId(int nodeId)
     {
-        _nodeId = nodeId ?? throw new ArgumentNullException(nameof(nodeId));
+        _nodeId = nodeId;
         Setters.Ran(nameof(NodeId));
         return this;
     }

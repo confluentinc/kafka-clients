@@ -1286,7 +1286,7 @@ internal sealed partial class NativeConsumer
         if (error is not null)
         {
             await SeekBackAsync(rewind, completion.UseOwner).ConfigureAwait(false);
-            if (copied!.Count == 0)
+            if (copied!.Count() == 0)
             {
                 throw error;
             }

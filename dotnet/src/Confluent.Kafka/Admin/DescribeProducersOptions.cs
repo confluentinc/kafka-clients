@@ -55,13 +55,9 @@ public sealed class DescribeProducersOptions
     /// <summary>Sets the broker to query, in place of each partition's leader.</summary>
     /// <param name="brokerId">The broker id.</param>
     /// <returns>This instance, so calls can be chained.</returns>
-    /// <exception cref="ArgumentNullException">
-    /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set broker id cannot be
-    /// unset again.
-    /// </exception>
-    public DescribeProducersOptions BrokerId(int? brokerId)
+    public DescribeProducersOptions BrokerId(int brokerId)
     {
-        _brokerId = brokerId ?? throw new ArgumentNullException(nameof(brokerId));
+        _brokerId = brokerId;
         Setters.Ran(nameof(BrokerId));
         return this;
     }

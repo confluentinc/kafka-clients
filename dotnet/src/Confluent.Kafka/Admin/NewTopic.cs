@@ -28,10 +28,10 @@ namespace Confluent.Kafka.Admin;
 /// Java; with an assignment no partition count or replication factor is sent.
 /// </para>
 /// <para>
-/// A <see langword="null"/> <see cref="NumPartitions()"/> or <see cref="ReplicationFactor()"/> is
-/// Java's <c>Optional.empty()</c> and <c>-1</c> is Java's <c>Optional.of(-1)</c>: both leave the
-/// broker default, and <see cref="Equals(object?)"/> and <see cref="ToString"/> tell them apart,
-/// as Java's do.
+/// An unset partition count or replication factor (Java's <c>Optional.empty()</c>) and <c>-1</c>
+/// (Java's <c>Optional.of(-1)</c>) both leave the broker default, and both read <c>-1</c> through
+/// <see cref="NumPartitions()"/> and <see cref="ReplicationFactor()"/>, as Java's getters do;
+/// only <see cref="Equals(object?)"/> and <see cref="ToString"/> tell them apart, as Java's do.
 /// </para>
 /// <para>
 /// Two recorded deviations: a value below <c>-1</c> throws, where Java sends it and the broker
@@ -164,22 +164,20 @@ public sealed class NewTopic
     public string Name() => _name;
 
     /// <summary>
-    /// The number of partitions, or <see langword="null"/> for the broker default
-    /// (Java's <c>numPartitions()</c>). <c>-1</c> when the caller passed <c>-1</c>, which
-    /// also means the broker default and is kept apart from <see langword="null"/>, as in Java.
-    /// Always <see langword="null"/> when <see cref="ReplicasAssignments()"/> is set.
+    /// The number of partitions, or <c>-1</c> for the broker default — Java's
+    /// <c>numPartitions()</c>: <c>-1</c> when it is unset or the caller passed <c>-1</c>, and
+    /// always when <see cref="ReplicasAssignments()"/> is set.
     /// </summary>
-    /// <returns>The number of partitions, or <see langword="null"/> for the broker default.</returns>
-    public int? NumPartitions() => _numPartitions;
+    /// <returns>The number of partitions, or <c>-1</c> for the broker default.</returns>
+    public int NumPartitions() => _numPartitions ?? -1;
 
     /// <summary>
-    /// The replication factor, or <see langword="null"/> for the broker default
-    /// (Java's <c>replicationFactor()</c>). <c>-1</c> when the caller passed <c>-1</c>,
-    /// which also means the broker default. Always <see langword="null"/> when
-    /// <see cref="ReplicasAssignments()"/> is set.
+    /// The replication factor, or <c>-1</c> for the broker default — Java's
+    /// <c>replicationFactor()</c>: <c>-1</c> when it is unset or the caller passed <c>-1</c>, and
+    /// always when <see cref="ReplicasAssignments()"/> is set.
     /// </summary>
-    /// <returns>The replication factor, or <see langword="null"/> for the broker default.</returns>
-    public short? ReplicationFactor() => _replicationFactor;
+    /// <returns>The replication factor, or <c>-1</c> for the broker default.</returns>
+    public short ReplicationFactor() => _replicationFactor ?? -1;
 
     /// <summary>
     /// The explicit replica assignment, or <see langword="null"/> when the topic was

@@ -427,8 +427,8 @@ public sealed class PublicAdminCreateTopicsTests
             "assigned-topic",
             new Dictionary<int, IReadOnlyList<int>> { [0] = new[] { 0 } });
 
-        Assert.Null(assigned.NumPartitions());
-        Assert.Null(assigned.ReplicationFactor());
+        Assert.Equal(-1, assigned.NumPartitions());
+        Assert.Equal((short)-1, assigned.ReplicationFactor());
         Assert.NotNull(assigned.ReplicasAssignments());
 
         NewTopic counted = new NewTopic("counted-topic", 1, 1);
@@ -585,8 +585,8 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor());
 
         NewTopic unset = new NewTopic("t", (int?)null, (short?)null);
-        Assert.Null(unset.NumPartitions());
-        Assert.Null(unset.ReplicationFactor());
+        Assert.Equal(-1, unset.NumPartitions());
+        Assert.Equal((short)-1, unset.ReplicationFactor());
 
         foreach (Func<NewTopic> belowMinusOne in new Func<NewTopic>[]
         {

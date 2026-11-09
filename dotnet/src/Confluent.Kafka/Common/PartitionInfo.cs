@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
@@ -28,17 +27,17 @@ public sealed class PartitionInfo
     private readonly string _topic;
     private readonly int _partition;
     private readonly Node? _leader;
-    private readonly IReadOnlyList<Node> _replicas;
-    private readonly IReadOnlyList<Node> _inSyncReplicas;
-    private readonly IReadOnlyList<Node> _offlineReplicas;
+    private readonly Node[] _replicas;
+    private readonly Node[] _inSyncReplicas;
+    private readonly Node[] _offlineReplicas;
 
     internal PartitionInfo(
         string topic,
         int partition,
         Node? leader,
-        IReadOnlyList<Node> replicas,
-        IReadOnlyList<Node> inSyncReplicas,
-        IReadOnlyList<Node> offlineReplicas)
+        Node[] replicas,
+        Node[] inSyncReplicas,
+        Node[] offlineReplicas)
     {
         _topic = topic;
         _partition = partition;
@@ -62,15 +61,15 @@ public sealed class PartitionInfo
 
     /// <summary>The partition's replicas.</summary>
     /// <returns>The partition's replicas.</returns>
-    public IReadOnlyList<Node> Replicas() => _replicas;
+    public Node[] Replicas() => _replicas;
 
     /// <summary>The subset of <see cref="Replicas()"/> that are in sync with the leader.</summary>
     /// <returns>The subset of <see cref="Replicas()"/> that are in sync with the leader.</returns>
-    public IReadOnlyList<Node> InSyncReplicas() => _inSyncReplicas;
+    public Node[] InSyncReplicas() => _inSyncReplicas;
 
     /// <summary>The subset of <see cref="Replicas()"/> that are offline.</summary>
     /// <returns>The subset of <see cref="Replicas()"/> that are offline.</returns>
-    public IReadOnlyList<Node> OfflineReplicas() => _offlineReplicas;
+    public Node[] OfflineReplicas() => _offlineReplicas;
 
     /// <inheritdoc/>
     public override string ToString() =>
@@ -84,13 +83,13 @@ public sealed class PartitionInfo
             FormatNodeIds(_inSyncReplicas),
             FormatNodeIds(_offlineReplicas));
 
-    private static string FormatNodeIds(IReadOnlyList<Node> nodes)
+    private static string FormatNodeIds(Node[] nodes)
     {
         StringBuilder builder = new StringBuilder("[");
-        for (int i = 0; i < nodes.Count; i++)
+        for (int i = 0; i < nodes.Length; i++)
         {
             builder.Append(nodes[i].Id().ToString(CultureInfo.InvariantCulture));
-            if (i < nodes.Count - 1)
+            if (i < nodes.Length - 1)
             {
                 builder.Append(',');
             }

@@ -96,7 +96,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetAllocatedBytesForCurrentThread();
 
-        Assert.Equal(recordCount, records.Count);
+        Assert.Equal(recordCount, records.Count());
         return after - before;
     }
 
@@ -118,7 +118,7 @@ public sealed class PublicConsumerTopicAllocationBudgetTests
         }
 
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
-        Assert.Equal(8, records.Count);
+        Assert.Equal(8, records.Count());
 
         string? first = null;
         foreach (ConsumerRecord<byte[], byte[]> record in records)

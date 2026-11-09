@@ -21,6 +21,8 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Serialization;
@@ -42,15 +44,12 @@ namespace Confluent.Kafka.UnitTests;
 public class PublicJavaMemberShapeTests
 {
     /// <summary>
-    /// The public properties .NET requires, each with its reason: <c>ConsumerRecords.Count</c> implements
-    /// <see cref="IReadOnlyCollection{T}.Count"/>, which <see cref="ConsumerRecords{TKey, TValue}"/> implements as
-    /// Java's <c>ConsumerRecords</c> implements <c>Iterable</c>, and Java's <c>count()</c> is that property. Add a
-    /// name only for a property that a .NET interface the type implements requires, and give the reason here.
+    /// The public properties .NET requires, each with its reason. None is left: a member a .NET interface requires
+    /// as a property is implemented explicitly, beside Java's method (<c>ConsumerRecords.Count()</c> and
+    /// <see cref="IReadOnlyCollection{T}.Count"/>). Add a name only for a property no explicit implementation can
+    /// give, and give the reason here.
     /// </summary>
-    private static readonly HashSet<string> s_requiredProperties = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "Confluent.Kafka.Consumer.ConsumerRecords`2.Count",
-    };
+    private static readonly HashSet<string> s_requiredProperties = new HashSet<string>(StringComparer.Ordinal);
 
     [Fact]
     public void NoPublicType_DeclaresAPublicProperty_ExceptTheOnesDotNetRequires()
@@ -70,12 +69,26 @@ public class PublicJavaMemberShapeTests
     }
 
     [Fact]
-    public void TheRequiredProperties_StillExist()
+    public void ConsumerRecordsCount_IsJavasMethod_AndImplementsTheCollectionCountExplicitly()
     {
-        PropertyInfo count = typeof(ConsumerRecords<,>).GetProperty(
-            nameof(ConsumerRecords<byte[], byte[]>.Count), BindingFlags.Public | BindingFlags.Instance)!;
+        MethodInfo count = typeof(ConsumerRecords<,>).GetMethod(
+            "Count", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null)!;
         Assert.NotNull(count);
-        Assert.Equal(typeof(int), count.PropertyType);
+        Assert.Equal(typeof(int), count.ReturnType);
+        Assert.Null(typeof(ConsumerRecords<,>).GetProperty("Count", BindingFlags.Public | BindingFlags.Instance));
+
+        ConsumerRecords<byte[], byte[]> records = new ConsumerRecords<byte[], byte[]>(
+            new[]
+            {
+                Record(0),
+                Record(1),
+            });
+        Assert.Equal(2, records.Count());
+        Assert.Equal(2, ((IReadOnlyCollection<ConsumerRecord<byte[], byte[]>>)records).Count);
+
+        static ConsumerRecord<byte[], byte[]> Record(long offset) => new ConsumerRecord<byte[], byte[]>(
+            "t", 0, offset, 0, TimestampType.CREATE_TIME, new byte[] { 1 }, new byte[] { 2 }, new Headers(),
+            leaderEpoch: null, serializedKeySize: 1, serializedValueSize: 1);
     }
 
     [Fact]

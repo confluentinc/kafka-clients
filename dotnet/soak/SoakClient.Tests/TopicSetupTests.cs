@@ -71,9 +71,10 @@ public sealed class TopicSetupTests
     private static string[] Lines(StringWriter output) =>
         output.ToString().Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
 
-    private static IEnumerable<(string Name, int? Partitions, short? ReplicationFactor)> Created(object? newTopics) =>
-        Assert.IsAssignableFrom<IEnumerable<NewTopic>>(newTopics)
-            .Select(topic => (topic.Name(), topic.NumPartitions(), topic.ReplicationFactor()));
+    // Compared with NewTopic.Equals, which, as Java's equals, tells an unset count (null) from -1;
+    // the getters read -1 for both, as Java's do.
+    private static IEnumerable<NewTopic> Created(object? newTopics) =>
+        Assert.IsAssignableFrom<IEnumerable<NewTopic>>(newTopics);
 
     private static async Task<int> PartitionCount(IAsyncAdmin admin, string topic)
     {
@@ -90,7 +91,7 @@ public sealed class TopicSetupTests
         await CreateTopic(recorder, Options(3, 1, recreate: false));
 
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
-        Assert.Equal(new[] { ("t", (int?)3, (short?)1) }, Created(recorder.Arguments[0][0]));
+        Assert.Equal(new[] { new NewTopic("t", (int?)3, (short?)1) }, Created(recorder.Arguments[0][0]));
     }
 
     [Theory]
@@ -108,7 +109,7 @@ public sealed class TopicSetupTests
         await CreateTopic(recorder, Options(partitions, 1, recreate: false));
 
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
-        Assert.Equal(new[] { ("t", sentPartitions, (short?)1) }, Created(recorder.Arguments[0][0]));
+        Assert.Equal(new[] { new NewTopic("t", sentPartitions, (short?)1) }, Created(recorder.Arguments[0][0]));
         Assert.Equal(createdPartitions, await PartitionCount(mock, "t"));
     }
 
@@ -127,7 +128,7 @@ public sealed class TopicSetupTests
         await CreateTopic(recorder, Options(1, replicationFactor, recreate: false));
 
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
-        Assert.Equal(new[] { ("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
+        Assert.Equal(new[] { new NewTopic("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
         IReadOnlyDictionary<string, TopicDescription> described =
             await mock.DescribeTopics(new[] { "t" }).AllTopicNames()!.Value.Get();
         Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions()).Replicas().Count);
@@ -205,7 +206,7 @@ public sealed class TopicSetupTests
             Assert.IsType<TopicCollection.TopicNameCollection>(recorder.Arguments[0][0]);
         Assert.Equal(new[] { "t" }, deleted.TopicNames());
         Assert.Equal(30000, Assert.IsType<DeleteTopicsOptions>(recorder.Arguments[0][1]).TimeoutMs());
-        Assert.Equal(new[] { ("t", sentPartitions, (short?)null) }, Created(recorder.Arguments[1][0]));
+        Assert.Equal(new[] { new NewTopic("t", sentPartitions, (short?)null) }, Created(recorder.Arguments[1][0]));
         Assert.Equal(createdPartitions, await PartitionCount(mock, "t"));
         Assert.Equal(new[] { TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10) }, delays);
         Assert.Equal(

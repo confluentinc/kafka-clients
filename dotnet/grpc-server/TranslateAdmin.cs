@@ -1174,11 +1174,12 @@ internal static class TranslateAdmin
                 continue;
             }
 
-            alterations.Add(new UserScramCredentialUpsertion(
-                proto.User,
-                new ScramCredentialInfo((ScramMechanism)proto.Mechanism, proto.Iterations),
-                proto.HasPassword ? proto.Password.ToByteArray() : Array.Empty<byte>(),
-                proto.HasSalt ? proto.Salt.ToByteArray() : null));
+            ScramCredentialInfo info = new ScramCredentialInfo((ScramMechanism)proto.Mechanism, proto.Iterations);
+            byte[] password = proto.HasPassword ? proto.Password.ToByteArray() : Array.Empty<byte>();
+            alterations.Add(
+                proto.HasSalt
+                    ? new UserScramCredentialUpsertion(proto.User, info, password, proto.Salt.ToByteArray())
+                    : new UserScramCredentialUpsertion(proto.User, info, password));
         }
 
         return alterations;

@@ -43,7 +43,7 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     {
         _script.ApplyPendingAsync(this).GetAwaiter().GetResult();
         ConsumerRecords<byte[], byte[]> records = _inner.Poll(timeout);
-        if (records.Count == 0)
+        if (records.Count() == 0)
         {
             // The mock returns at once when it has nothing, where a real consumer waits out the
             // timeout: waiting here keeps an idle loop from spinning, without changing what any

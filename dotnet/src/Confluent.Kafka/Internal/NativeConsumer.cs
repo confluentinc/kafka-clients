@@ -452,7 +452,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         SeekBack(rewind);
-        if (copied.Count == 0)
+        if (copied.Count() == 0)
         {
             throw error;
         }

@@ -206,17 +206,22 @@ public sealed class PublicAdminP7ShapeParityTests
     }
 
     [Fact]
-    public void Salt_IsNullableOnTheUpsertion()
+    public void Salt_IsNeverNull_AsInJava()
     {
-        UserScramCredentialUpsertion generated = new UserScramCredentialUpsertion(
-            "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 }, null);
+        ScramCredentialInfo info = new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096);
+        UserScramCredentialUpsertion generated = new UserScramCredentialUpsertion("u", info, new byte[] { 1 });
+        UserScramCredentialUpsertion fromString = new UserScramCredentialUpsertion("u", info, "p");
         UserScramCredentialUpsertion literal = new UserScramCredentialUpsertion(
-            "u", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), new byte[] { 1 },
-            Array.Empty<byte>());
+            "u", info, new byte[] { 1 }, Array.Empty<byte>());
 
-        Assert.Null(generated.Salt());
-        Assert.NotNull(literal.Salt());
-        Assert.Empty(literal.Salt()!);
+        Assert.NotEmpty(generated.Salt());
+        Assert.NotEmpty(fromString.Salt());
+        Assert.NotEqual(generated.Salt(), fromString.Salt());
+        Assert.Empty(literal.Salt());
+        Assert.Equal(
+            "salt",
+            Assert.Throws<ArgumentNullException>(
+                () => new UserScramCredentialUpsertion("u", info, new byte[] { 1 }, null!)).ParamName);
     }
 
     [Fact]
