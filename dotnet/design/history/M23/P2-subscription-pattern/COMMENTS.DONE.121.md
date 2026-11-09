@@ -286,3 +286,48 @@ Notes for the comment-only commit (S4):
    the first subscribe cannot be held unsettled by an existing hook, STOP and report.
 
    Resolved in 4dc2c457 / bcff7deb.
+
+## Row 441 guard (4dc2c457, bcff7deb, 6876b1e4)
+
+1. **minor — the six new `ConcurrentModificationException` entries are wrong on `AsyncMockConsumer` across threads** —
+   `dotnet/src/Confluent.Kafka/Consumer/IAsyncConsumer.cs:100-103`, `140-143`, `172-175`, `213-216`, `269-272`,
+   `313-316`. On the mock another thread's call, its `Subscribe` included, waits for this thread's use instead of
+   throwing (`TryEnterUse`, `NativeConsumer.cs` ~2662-2717; refused only while `RefusedWhileBusy`, ~2748: an async
+   callback runs or an async `Rebalance` / `LosePartitions` holds the window), and the commit's own
+   `PublicMockConsumerOwnerWaitTests.AsyncMock_AnotherThreadsSubscribe_WaitsForThisThreadsSubscribe_ThenIsAccepted`
+   pins exactly that, so the new clause "another `Subscribe` on this consumer has not completed" is false there (the
+   first clause is the type remark's `AsyncKafkaConsumer` case, `IAsyncConsumer.cs:33-35`; the in-callback clause is
+   right on both, the closed case being the `IllegalStateException` entry). **Fix:** in the six entries, "Another
+   thread is inside a call on this consumer, the call is made inside a callback of this consumer, or another
+   <c>Subscribe</c> made on this thread has not completed. On an <see cref="AsyncMockConsumer{TKey, TValue}"/> a call
+   from another thread waits instead." (The Close entries at `1054-1057` / `1075-1078` share clause 1's shorthand;
+   pre-existing, not asked.)
+
+   Resolved in da5e36f1.
+
+2. **minor — the release in `Submit`'s catch is unpinned** — `NativeConsumer.Async.cs:1142`. With that
+   `EndSubscribe(subscribing)` removed, the new class and `PublicMockConsumerOwnerWaitTests` stay 162 / 162 green
+   (archive of `6876b1e4`, net10.0). It is reached only when `Start` throws after the mark (the subscribe P/Invoke
+   refusing the handle, `NewHandle` / `SubscriptionPatternNew` failing), which the public API cannot drive; the commit
+   records "not reachable" only for the Dispose path, while STATUS states the release "when `Submit` throws". The
+   settle's `finally` (`:1175`, a throwing settle) is likewise unpinned and unreachable. **Fix:** pin it (call
+   `Submit<bool>` by reflection with `subscribes: true` and a `submit` that throws, then assert a real `Subscribe` is
+   accepted; red on the mutant), or record both as not reachable through the public API beside the Dispose note.
+
+   Resolved in da5e36f1.
+
+3. **minor — decision 23's tests-required line has no case for the guard** — `dotnet/.claude/rules/ffi-marshalling.md`
+   `2356-2363` ("**Listener:** …"). Rows 436 and 437 each added their case there in this phase; row 441's sentence
+   (`2256-2259`) has none. **Fix:** append "on `AsyncKafkaConsumer` / `AsyncMockConsumer` a subscribe started while
+   another has not settled is refused with -2's text before the call, with no registration, and the next is accepted
+   once the first has settled, whether it succeeded or failed".
+
+   Resolved in ba8452ff.
+
+4. **minor — STATUS says "every form pair"** — `dotnet/design/current/STATUS.md:18`. The overlap theory holds the six
+   non-empty forms first and all nine second (54 of 81 pairs per consumer), as the commit message says. The empty-topic
+   form as the held first matters on the mock, which registers its listener (`Unsubscribes` is false there).
+   **Fix:** say "each non-empty form held, every form second", or add the three empty forms to the first position (the
+   final assertion then expects no current registration for them on `AsyncKafkaConsumer`).
+
+   Resolved in da5e36f1 (every form held first); the STATUS line in the commit that archives this item.
