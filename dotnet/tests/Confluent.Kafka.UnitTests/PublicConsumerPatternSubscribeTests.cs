@@ -200,7 +200,7 @@ public sealed class PublicConsumerPatternSubscribeTests
         await TestTimeout.Run(() => Rebalance(consumer, tp0, tp1), s_deadline);
 
         Assert.Empty(recording.Revoked);
-        Assert.Equal(new[] { tp0, tp1 }, Assert.Single(recording.Assigned).OrderBy(tp => tp.Partition));
+        Assert.Equal(new[] { tp0, tp1 }, Assert.Single(recording.Assigned).OrderBy(tp => tp.Partition()));
 
         await TestTimeout.Run(() => Subscribe(consumer, pattern), s_deadline);
         await TestTimeout.Run(() => Rebalance(consumer, tp0), s_deadline);
@@ -239,7 +239,7 @@ public sealed class PublicConsumerPatternSubscribeTests
 
         Assert.Empty(first.Assigned);
         Assert.Empty(recording.Revoked);
-        Assert.Equal(new[] { tp0, tp1 }, Assert.Single(recording.Assigned).OrderBy(tp => tp.Partition));
+        Assert.Equal(new[] { tp0, tp1 }, Assert.Single(recording.Assigned).OrderBy(tp => tp.Partition()));
     }
 
     [Theory]
@@ -283,10 +283,10 @@ public sealed class PublicConsumerPatternSubscribeTests
 
     private static object Create(string kind, bool groupId) => kind switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray, Serdes.ByteArray),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray, Serdes.ByteArray),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray),
-        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray),
+        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
+        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray(), Serdes.ByteArray()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
+        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray()),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)
