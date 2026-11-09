@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal.Interop;
+
 namespace Confluent.Kafka.Consumer;
 
 /// <summary>
@@ -22,6 +24,8 @@ namespace Confluent.Kafka.Consumer;
 /// Before the consumer has joined a group, <see cref="GroupId()"/> is the configured <c>group.id</c>,
 /// <see cref="GenerationId()"/> is <c>-1</c>, <see cref="MemberId()"/> is empty, and <see cref="GroupInstanceId()"/> is
 /// the configured <c>group.instance.id</c>, or <see langword="null"/>. A mock consumer returns Java's mock values.
+/// An instance can be passed to a producer's <c>SendOffsetsToTransaction</c>, also after its consumer is closed: it
+/// keeps the client's own copy of the metadata, released when the instance is garbage-collected.
 /// </remarks>
 public sealed class ConsumerGroupMetadata
 {
@@ -30,8 +34,14 @@ public sealed class ConsumerGroupMetadata
     private readonly string _memberId;
     private readonly string? _groupInstanceId;
 
-    internal ConsumerGroupMetadata(string groupId, int generationId, string memberId, string? groupInstanceId)
+    internal ConsumerGroupMetadata(
+        string groupId,
+        int generationId,
+        string memberId,
+        string? groupInstanceId,
+        SafeConsumerGroupMetadataHandle handle)
     {
+        Handle = handle;
         _groupId = groupId;
         _generationId = generationId;
         _memberId = memberId;
@@ -65,4 +75,7 @@ public sealed class ConsumerGroupMetadata
     /// <returns>The static group instance id (the configured <c>group.instance.id</c>), or <see langword="null"/>
     /// when the consumer is not a static member.</returns>
     public string? GroupInstanceId() => _groupInstanceId;
+
+    // The core's metadata, which a producer's SendOffsetsToTransaction passes on. Not disposable: the finalizer frees it.
+    internal SafeConsumerGroupMetadataHandle Handle { get; }
 }

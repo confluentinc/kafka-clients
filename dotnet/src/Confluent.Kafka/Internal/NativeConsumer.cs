@@ -323,7 +323,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IOffsetCommitCallback? callback)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         if (RoutesToTheHandle)
         {
             Route(handle => handle.CommitAsync(snapshot, callback));
@@ -708,7 +708,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         if (RoutesToTheHandle)
         {
             Route(handle => handle.CommitSync(snapshot, timeoutMs: null));
@@ -720,7 +720,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         long timeoutMs = CommitTimeoutMs(timeout);
         if (RoutesToTheHandle)
         {
@@ -886,8 +886,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             return timeoutMs;
         });
 
-    private CommitOffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
-        CheckWhenOpen(() => SnapshotCommitOffsets(offsets));
+    private OffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        CheckWhenOpen(() => OffsetsSnapshot.Of(offsets));
 
     // Java checks these before acquire(), so on a KafkaConsumer they come after the closed check and before the owner
     // check, as in Python; on the mocks they come inside the use, after the owner wait, as Python's mock takes its
@@ -1043,7 +1043,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
 
-    private void CommitSyncOffsets(CommitOffsetsSnapshot snapshot, long? timeoutMs) =>
+    private void CommitSyncOffsets(OffsetsSnapshot snapshot, long? timeoutMs) =>
         CallSync(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -1833,7 +1833,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr outErr = IntPtr.Zero;
             IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            return ConsumerGroupMetadataMarshal.CopyOutAndDestroy(metadata);
+            return ConsumerGroupMetadataMarshal.CopyOutAndKeep(metadata);
         }
         finally
         {
@@ -2064,73 +2064,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         _uses.WaitForNoneThenMarkDestroyed();
         _handle.CloseExplicitly();
-    }
-
-    /// <summary>The validated commit offsets, as the parallel arrays the offset map is built from.</summary>
-    internal readonly struct CommitOffsetsSnapshot
-    {
-        internal CommitOffsetsSnapshot(
-            string[] topics, int[] partitions, long[] offsets, int[] leaderEpochs, string[] metadata, int count)
-        {
-            Topics = topics;
-            Partitions = partitions;
-            Offsets = offsets;
-            LeaderEpochs = leaderEpochs;
-            Metadata = metadata;
-            Count = count;
-        }
-
-        internal string[] Topics { get; }
-
-        internal int[] Partitions { get; }
-
-        internal long[] Offsets { get; }
-
-        internal int[] LeaderEpochs { get; }
-
-        internal string[] Metadata { get; }
-
-        internal int Count { get; }
-    }
-
-    internal static CommitOffsetsSnapshot SnapshotCommitOffsets(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
-    {
-        if (offsets is null)
-        {
-            throw new ArgumentNullException(nameof(offsets));
-        }
-
-        int count = offsets.Count;
-        string[] topics = new string[count];
-        int[] partitions = new int[count];
-        long[] offsetValues = new long[count];
-        int[] leaderEpochs = new int[count];
-        string[] metadata = new string[count];
-        int index = 0;
-        foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
-        {
-            TopicPartition tp = entry.Key;
-            if (tp.Topic() is null)
-            {
-                throw new ArgumentException("Topic names must not be null.", nameof(offsets));
-            }
-
-            OffsetAndMetadata value = entry.Value;
-            if (value is null)
-            {
-                throw new ArgumentException("Offset value must not be null.", nameof(offsets));
-            }
-
-            topics[index] = tp.Topic();
-            partitions[index] = tp.Partition();
-            offsetValues[index] = value.Offset();
-            leaderEpochs[index] = value.LeaderEpoch() ?? -1;
-            metadata[index] = value.Metadata() ?? string.Empty;
-            index++;
-        }
-
-        return new CommitOffsetsSnapshot(topics, partitions, offsetValues, leaderEpochs, metadata, count);
     }
 
     // KafkaConsumer refuses a null collection, or a partition with a null topic, with Java's messages, and the core

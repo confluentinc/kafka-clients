@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,6 +24,8 @@ using Confluent.Kafka.Producer;
 using Xunit;
 
 using static Confluent.Kafka.UnitTests.UnreachableProducers;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 
 namespace Confluent.Kafka.UnitTests;
 
@@ -150,9 +153,54 @@ public sealed class PublicProducerCloseWithTimeoutTests
         }
     }
 
-    [Fact(Skip = "transactions are not exposed (dotnet/CLAUDE.md:65)")]
-    public void OnlyCanExecuteCloseAfterInitTransactionsTimeout()
+    [Theory]
+    [InlineData(SyncFlavor)]
+    [InlineData(AsyncFlavor)]
+    public async Task OnlyCanExecuteCloseAfterInitTransactionsTimeout(string flavor)
     {
+        const string initTransactionsTimeout =
+            "InitTransactions timed out - did not complete coordinator discovery or receive the InitProducerId " +
+            "response within max.block.ms.";
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["transactional.id"] = "bad-transaction",
+            ["max.block.ms"] = 5,
+            ["bootstrap.servers"] = "localhost:1",
+        };
+
+        if (flavor == SyncFlavor)
+        {
+            KafkaProducer<byte[], byte[]> producer =
+                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            using IDisposable disposal = TestTimeout.Disposal(producer);
+            KafkaTimeoutException timeout = Assert.Throws<KafkaTimeoutException>(producer.InitTransactions);
+            Assert.Contains(initTransactionsTimeout, timeout.Message);
+            try
+            {
+                Assert.Throws<IllegalStateException>(producer.BeginTransaction);
+            }
+            finally
+            {
+                TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
+            }
+        }
+        else
+        {
+            AsyncKafkaProducer<byte[], byte[]> producer =
+                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
+            await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
+            KafkaTimeoutException timeout = await Assert.ThrowsAsync<KafkaTimeoutException>(
+                () => TestTimeout.Run(() => producer.InitTransactions(), Deadline));
+            Assert.Contains(initTransactionsTimeout, timeout.Message);
+            try
+            {
+                Assert.Throws<IllegalStateException>(producer.BeginTransaction);
+            }
+            finally
+            {
+                await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
+            }
+        }
     }
 
     private static void AssertNegativeTimeout(IllegalArgumentException thrown)

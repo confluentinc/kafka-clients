@@ -14,8 +14,11 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 
 using Proto = Confluent.Kafka.Test;
@@ -34,26 +37,31 @@ internal sealed class ProducerServer : IDisposable
 
     private object? _pending;
 
-    private ProducerServer(Proto.ProducerService.ProducerServiceBase service, IDisposable servicer)
+    private ProducerServer(Proto.ProducerService.ProducerServiceBase service, IDisposable servicer, GroupMetadataStore groupMetadata)
     {
         Service = service;
         _servicer = servicer;
+        GroupMetadata = groupMetadata;
     }
 
     internal Proto.ProducerService.ProducerServiceBase Service { get; }
+
+    /// <summary>The store the servicer reads <c>SendOffsetsToTransaction</c>'s group metadata from.</summary>
+    internal GroupMetadataStore GroupMetadata { get; }
 
     internal TestServerCallContext Context { get; } = new TestServerCallContext(new RecordingStreamWriter());
 
     internal static ProducerServer Create(string flavour)
     {
+        GroupMetadataStore store = new GroupMetadataStore();
         switch (flavour)
         {
             case "sync":
-                ProducerServiceImpl sync = new ProducerServiceImpl();
-                return new ProducerServer(sync, sync);
+                ProducerServiceImpl sync = new ProducerServiceImpl(store);
+                return new ProducerServer(sync, sync, store);
             case "async":
-                AsyncProducerServiceImpl async = new AsyncProducerServiceImpl();
-                return new ProducerServer(async, async);
+                AsyncProducerServiceImpl async = new AsyncProducerServiceImpl(store);
+                return new ProducerServer(async, async, store);
             default:
                 throw new ArgumentOutOfRangeException(nameof(flavour), flavour, "sync or async");
         }
@@ -74,6 +82,30 @@ internal sealed class ProducerServer : IDisposable
             : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         return Register(_pending);
     }
+
+    /// <summary>Registers a mock producer of the servicer's flavour, kept for the transaction-state reads.</summary>
+    internal ulong RegisterTransactionalMock()
+    {
+        _pending = _servicer is ProducerServiceImpl
+            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray())
+            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
+        return Register(_pending);
+    }
+
+    internal (bool InFlight, bool Committed, bool Aborted) MockTransactionState() => _pending switch
+    {
+        MockProducer<byte[], byte[]> sync => (sync.TransactionInFlight(), sync.TransactionCommitted(), sync.TransactionAborted()),
+        AsyncMockProducer<byte[], byte[]> async => (async.TransactionInFlight(), async.TransactionCommitted(), async.TransactionAborted()),
+        _ => throw new InvalidOperationException("no mock registered"),
+    };
+
+    internal IReadOnlyList<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>>>
+        MockConsumerGroupOffsetsHistory() => _pending switch
+        {
+            MockProducer<byte[], byte[]> sync => sync.ConsumerGroupOffsetsHistory(),
+            AsyncMockProducer<byte[], byte[]> async => async.ConsumerGroupOffsetsHistory(),
+            _ => throw new InvalidOperationException("no mock registered"),
+        };
 
     internal int PendingHistoryCount() => _pending switch
     {
