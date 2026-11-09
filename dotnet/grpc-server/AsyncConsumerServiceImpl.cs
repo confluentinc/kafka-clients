@@ -115,8 +115,8 @@ internal sealed class AsyncConsumerServiceImpl
         return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = id });
     }
 
-    // A request with a pattern subscribes with it, else with its topics; without with_listener the plain
-    // Subscribe replaces, and so releases, a listener an earlier subscribe registered, as in Python.
+    // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe
+    // registered, as in Python.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
         if (request.HasPattern)
