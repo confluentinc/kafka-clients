@@ -99,7 +99,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
-    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// another <c>Subscribe</c> made on this thread has not completed. On an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
     /// </exception>
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
 
@@ -139,7 +140,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
-    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// another <c>Subscribe</c> made on this thread has not completed. On an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
     /// </exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
@@ -171,7 +173,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
-    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// another <c>Subscribe</c> made on this thread has not completed. On an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
     /// </exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
@@ -212,7 +215,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
-    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// another <c>Subscribe</c> made on this thread has not completed. On an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
     /// </exception>
     Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default);
 
@@ -268,7 +272,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
-    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// another <c>Subscribe</c> made on this thread has not completed. On an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
     /// </exception>
     Task Subscribe(
         SubscriptionPattern pattern,
@@ -312,7 +317,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ConcurrentModificationException">
     /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
-    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// another <c>Subscribe</c> made on this thread has not completed. On an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/> a call from another thread waits instead.
     /// </exception>
     Task Subscribe(
         SubscriptionPattern pattern,

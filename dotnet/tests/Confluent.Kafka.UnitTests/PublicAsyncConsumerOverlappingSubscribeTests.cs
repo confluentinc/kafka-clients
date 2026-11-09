@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -25,6 +26,7 @@ using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
@@ -87,12 +89,13 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
 
     public static TheoryData<Kind, Form, Form> Overlaps()
     {
+        Form[] forms = (Form[])Enum.GetValues(typeof(Form));
         TheoryData<Kind, Form, Form> data = new TheoryData<Kind, Form, Form>();
         foreach (Kind kind in new[] { Kind.AsyncKafkaConsumer, Kind.AsyncMockConsumer })
         {
-            foreach (Form first in s_subscribingForms)
+            foreach (Form first in forms)
             {
-                foreach (Form second in (Form[])Enum.GetValues(typeof(Form)))
+                foreach (Form second in forms)
                 {
                     data.Add(kind, first, second);
                 }
@@ -151,7 +154,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
             }
 
             await TestTimeout.Run(() => firstSubscribe, s_deadline);
-            Assert.Equal(HasAListener(first), native.CurrentListenerRegistration is not null);
+            Assert.Equal(KeepsItsListener(kind, first), native.CurrentListenerRegistration is not null);
             Assert.Equal(0, native.RetainedListenerRegistrationCount);
 
             await TestTimeout.Run(() => Subscribe(consumer, first, NewListener(first)), s_deadline);
@@ -282,6 +285,71 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
         }
     }
 
+    [Theory]
+    [InlineData(Kind.AsyncKafkaConsumer)]
+    [InlineData(Kind.AsyncMockConsumer)]
+    public async Task AfterASubscribeWhoseNativeCallThrew_TheNextIsAccepted(Kind kind)
+    {
+        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        try
+        {
+            NativeConsumer native = Native(consumer);
+            InvalidOperationException thrown = new InvalidOperationException("the native call threw");
+            bool markedWhenThrown = false;
+            TargetInvocationException failed = Assert.Throws<TargetInvocationException>(() => Submit(
+                native,
+                (_, _) =>
+                {
+                    markedWhenThrown = SubscribeInFlight(native) is not null;
+                    throw thrown;
+                },
+                settle: null));
+
+            Assert.Same(thrown, failed.InnerException);
+            Assert.True(markedWhenThrown);
+            await TestTimeout.Run(
+                () => Subscribe(consumer, Form.TopicsWithAListener, NewListener(Form.TopicsWithAListener)), s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.DisposeAsync(consumer);
+        }
+    }
+
+    [Theory]
+    [InlineData(Kind.AsyncKafkaConsumer)]
+    [InlineData(Kind.AsyncMockConsumer)]
+    public async Task AfterASubscribeWhoseSettleThrew_TheNextIsAccepted(Kind kind)
+    {
+        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        try
+        {
+            NativeConsumer native = Native(consumer);
+            int settles = 0;
+            bool markedWhenThrown = false;
+            ConsumerCompletion<bool> completion = Submit(
+                native,
+                (arguments, opaque) => NativeMethods.ConsumerSubscribeWithTopicsCb(
+                    native.Handle, arguments.StringList(s_topics), ConsumerCompletion.Void, opaque),
+                _ =>
+                {
+                    markedWhenThrown = SubscribeInFlight(native) is not null;
+                    Interlocked.Increment(ref settles);
+                    throw new InvalidOperationException("the settle threw");
+                });
+
+            await TestTimeout.Run(() => Finish(native, completion), s_deadline);
+            Assert.Equal(1, Volatile.Read(ref settles));
+            Assert.True(markedWhenThrown);
+            await TestTimeout.Run(
+                () => Subscribe(consumer, Form.TopicsWithAListener, NewListener(Form.TopicsWithAListener)), s_deadline);
+        }
+        finally
+        {
+            await TestTimeout.DisposeAsync(consumer);
+        }
+    }
+
     private static IAsyncConsumer<byte[], byte[]> Create(Kind kind, bool groupId = true)
     {
         if (kind == Kind.AsyncMockConsumer)
@@ -307,6 +375,43 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
             .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
             .GetValue(consumer)!;
 
+    private static ConsumerCompletion<bool> Submit(
+        NativeConsumer native,
+        Action<NativeCallArguments, IntPtr> submit,
+        Action<IntPtr>? settle)
+    {
+        Dictionary<string, object?> given = new Dictionary<string, object?>
+        {
+            ["cancellationToken"] = CancellationToken.None,
+            ["convert"] = new Func<IntPtr, long, bool>((_, _) => true),
+            ["submit"] = submit,
+            ["settle"] = settle,
+            ["subscribes"] = true,
+        };
+        MethodInfo method = PrivateGeneric("Submit");
+        ParameterInfo[] parameters = method.GetParameters();
+        Assert.Equal(given.Count, parameters.Count(parameter => given.ContainsKey(parameter.Name!)));
+        object?[] arguments = parameters
+            .Select(parameter => given.TryGetValue(parameter.Name!, out object? value) ? value : parameter.DefaultValue)
+            .ToArray();
+        return (ConsumerCompletion<bool>)method.Invoke(native, arguments)!;
+    }
+
+    private static Task Finish(NativeConsumer native, ConsumerCompletion<bool> completion) =>
+        (Task)PrivateGeneric("Finish").Invoke(
+            native, new object[] { completion, NativeConsumer.AsyncOperation.Subscribe, CancellationToken.None })!;
+
+    private static MethodInfo PrivateGeneric(string name) =>
+        Assert.Single(
+                typeof(NativeConsumer).GetMethods(BindingFlags.NonPublic | BindingFlags.Instance),
+                method => method.Name == name && method.IsGenericMethodDefinition)
+            .MakeGenericMethod(typeof(bool));
+
+    private static object? SubscribeInFlight(NativeConsumer native) =>
+        typeof(NativeConsumer)
+            .GetField("_subscribeInFlight", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(native);
+
     private static bool IsPattern(Form form) =>
         form is Form.Pattern or Form.PatternWithAListener or Form.PatternWithAnAsyncListener;
 
@@ -317,6 +422,11 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
             or Form.PatternWithAnAsyncListener
             or Form.NoTopicsWithAListener
             or Form.NoTopicsWithAnAsyncListener;
+
+    private static bool KeepsItsListener(Kind kind, Form form) =>
+        HasAListener(form)
+            && !(kind == Kind.AsyncKafkaConsumer
+                && form is Form.NoTopics or Form.NoTopicsWithAListener or Form.NoTopicsWithAnAsyncListener);
 
     private static object? NewListener(Form form) => form switch
     {
