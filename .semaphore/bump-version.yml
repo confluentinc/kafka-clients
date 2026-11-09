@@ -23,10 +23,18 @@ name: Bump version
 #                      version stays as it is; it only moves up. To change
 #                      only the .NET version, give VERSION and
 #                      PYTHON_VERSION their current values.
+#   JAVASCRIPT_VERSION -- a version for the Node.js client's npm package, in
+#                      semver form and 4.0.0 or higher (e.g. 4.4.0-beta.2),
+#                      written to javascript/package.json and
+#                      package-lock.json. Without it the JavaScript version
+#                      stays as it is; it only moves up. To change only the
+#                      JavaScript version, give VERSION and PYTHON_VERSION
+#                      their current values.
 #   BASE_BRANCH     -- the branch to bump and the PR's base; default master.
 #
-# The branch is bump-version/<VERSION>, plus -py<PYTHON_VERSION> and
-# -dotnet<DOTNET_VERSION> when those are given; the job fails if it already
+# The branch is bump-version/<VERSION>, plus -py<PYTHON_VERSION>,
+# -dotnet<DOTNET_VERSION> and -javascript<JAVASCRIPT_VERSION> when those are
+# given; the job fails if it already
 # exists on origin. Like the translation agent's jobs, it pushes and runs `gh`
 # with the agent's GitHub credentials.
 
@@ -38,7 +46,7 @@ blocks:
   - name: Bump version
     task:
       # No task-level env_vars: declaring VERSION, PYTHON_VERSION,
-      # DOTNET_VERSION or BASE_BRANCH here would shadow the Task parameters supplied at trigger
+      # DOTNET_VERSION, JAVASCRIPT_VERSION or BASE_BRANCH here would shadow the Task parameters supplied at trigger
       # time. Defaults are applied shell-side below.
       jobs:
         - name: bump-version
@@ -52,7 +60,7 @@ blocks:
             # the whole value, a line break included, which grep, reading line
             # by line, would not.
             - |
-              for v in "${VERSION}" "${PYTHON_VERSION:-0}" "${DOTNET_VERSION:-0}"; do
+              for v in "${VERSION}" "${PYTHON_VERSION:-0}" "${DOTNET_VERSION:-0}" "${JAVASCRIPT_VERSION:-0}"; do
                 case "$v" in
                   ''|*[!0-9A-Za-z.+!-]*)
                     echo "Refusing to bump: '$v' is not a version" >&2
@@ -61,7 +69,7 @@ blocks:
                 esac
               done
             - export BASE_BRANCH="${BASE_BRANCH:-master}"
-            - export BUMP_BRANCH="bump-version/${VERSION}${PYTHON_VERSION:+-py${PYTHON_VERSION}}${DOTNET_VERSION:+-dotnet${DOTNET_VERSION}}"
+            - export BUMP_BRANCH="bump-version/${VERSION}${PYTHON_VERSION:+-py${PYTHON_VERSION}}${DOTNET_VERSION:+-dotnet${DOTNET_VERSION}}${JAVASCRIPT_VERSION:+-javascript${JAVASCRIPT_VERSION}}"
             - |
               if git ls-remote --exit-code --heads origin "${BUMP_BRANCH}" >/dev/null; then
                 echo "Refusing to bump: ${BUMP_BRANCH} already exists on origin; close its PR and delete it first" >&2
@@ -73,7 +81,7 @@ blocks:
             - git checkout -B "${BUMP_BRANCH}" FETCH_HEAD
             # Installs rustup, which installs the toolchain rust/rust-toolchain.toml pins.
             - ./.semaphore/dependencies.sh
-            - export VERSION PYTHON_VERSION="${PYTHON_VERSION:-}" DOTNET_VERSION="${DOTNET_VERSION:-}"
+            - export VERSION PYTHON_VERSION="${PYTHON_VERSION:-}" DOTNET_VERSION="${DOTNET_VERSION:-}" JAVASCRIPT_VERSION="${JAVASCRIPT_VERSION:-}"
             - make bump-version
             - |
               if git diff --quiet; then
@@ -94,10 +102,14 @@ blocks:
               if [ -n "${DOTNET_VERSION:-}" ]; then
                 DOTNET_NOTE=" The .NET package is at ${DOTNET_VERSION}."
               fi
+              JAVASCRIPT_NOTE=""
+              if [ -n "${JAVASCRIPT_VERSION:-}" ]; then
+                JAVASCRIPT_NOTE=" The JavaScript package is at ${JAVASCRIPT_VERSION}."
+              fi
               git commit --no-verify -a -q -F - <<EOF
               Version ${VERSION}
 
-              Set by the "Bump version" Semaphore Task with \`make bump-version\`.${PYTHON_NOTE}${DOTNET_NOTE}
+              Set by the "Bump version" Semaphore Task with \`make bump-version\`.${PYTHON_NOTE}${DOTNET_NOTE}${JAVASCRIPT_NOTE}
               EOF
             - git push origin "HEAD:refs/heads/${BUMP_BRANCH}"
             - |
@@ -114,6 +126,12 @@ blocks:
                   echo "The .NET package gets \`${DOTNET_VERSION}\`, given as DOTNET_VERSION."
                 else
                   echo "The .NET package keeps its version (no DOTNET_VERSION given)."
+                fi
+                echo
+                if [ -n "${JAVASCRIPT_VERSION:-}" ]; then
+                  echo "The JavaScript package gets \`${JAVASCRIPT_VERSION}\`, given as JAVASCRIPT_VERSION."
+                else
+                  echo "The JavaScript package keeps its version (no JAVASCRIPT_VERSION given)."
                 fi
                 echo
                 echo '```'
