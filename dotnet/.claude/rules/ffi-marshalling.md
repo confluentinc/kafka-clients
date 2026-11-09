@@ -2243,9 +2243,15 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     that reported an error may already have registered its listener (the core's
     `SubscriptionState` registers it before the subscription-type check, as Java's), so
     the new one becomes the current one and the one it replaced is kept; a failed
-    listener-less `subscribe_*` changes nothing (row 431 (a)). Free a new one at once
-    only when no `subscribe_*` call was made, and the current and every kept one after
-    the consumer's destroy has returned. Keep it across `unsubscribe`:
+    listener-less `subscribe_*` changes nothing (row 431 (a)). A `subscribe_*` refused for
+    an invalid argument (-3), a missing `group.id` (24) or concurrent use (-2) does not
+    register its listener, as the core raises those three only before the registration:
+    free its own at once and change nothing else. Any other refused `subscribe_*` (-4, -5,
+    a bare `KafkaException`, any other id) keeps both until a `subscribe_*` succeeds or the
+    consumer is destroyed (row 437). The id is read by the error-table helper
+    (`KafkaException.RefusedBeforeRegistering`) before the error is freed. Free a new one
+    at once also when no `subscribe_*` call was made, and the current and every kept one
+    after the consumer's destroy has returned. Keep it across `unsubscribe`:
     the header says `unsubscribe` releases the listener (BH:29392-29394 at `3f8a5bc6`), but
     Java's `unsubscribe()` leaves it registered (`SubscriptionState.java:347-355`), and
     Python keeps its context across it (`python/_confluentkafka.c:3870-3879`, `:3947-3954`
@@ -2351,9 +2357,11 @@ synchronous call.
   - **Listener:** the registration survives **N** fires (a churn loop); a replacing
     subscribe frees the old `self_`; a refused subscribe frees neither, its listener is
     the one a mock's next rebalance fires, and the next successful subscribe frees both;
-    an `unsubscribe` frees nothing; on `KafkaConsumer` / `AsyncKafkaConsumer` a subscribe
-    to no topics frees only its own; destroy frees the current and every kept one after
-    it returns; and teardown with a live registration returns without hanging.
+    one refused for an invalid argument or a missing `group.id` frees only its own, on
+    every retry, and a table over every id the header lists classifies only -3, 24 and -2
+    so; an `unsubscribe` frees nothing; on `KafkaConsumer` / `AsyncKafkaConsumer` a
+    subscribe to no topics frees only its own; destroy frees the current and every kept
+    one after it returns; and teardown with a live registration returns without hanging.
   - **Commit callback:** after `on_complete` reports, `self_` is freed once; after an
     initiation error it is kept until destroy, then freed once; a throwing callback's
     exception surfaces from the call that ran it; `CommitAsync(offsets)` with no callback
