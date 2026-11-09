@@ -75,8 +75,12 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     private readonly long _maxBlockMs;
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
+    private readonly object _closeLock = new object();
     private int _closed;
     private int _disposing;
+
+    // A mock's close in progress, whose outcome a concurrent Close shares, as Java's synchronized close() makes it wait.
+    private TaskCompletionSource<bool>? _mockClose;
 
     private NativeProducer(SafeProducerHandle handle, string completionThreadName, long maxBlockMs)
     {
@@ -848,6 +852,12 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     // waiting for the reports, which the core queues to run after the calling callback returns.
     private void CompletePending()
     {
+        Exception? flushError = Volatile.Read(ref _mockFlushError);
+        if (flushError is not null)
+        {
+            throw flushError;
+        }
+
         while (MockCompleteNext())
         {
         }
@@ -923,42 +933,117 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     private Task CloseWithCallbackWithin(long? timeoutMs, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!TryBeginClose())
+        if (!TryBeginCloseCall(out TaskCompletionSource<bool>? outcome, out Task? inProgress))
         {
-            return Task.CompletedTask;
+            return inProgress ?? Task.CompletedTask;
         }
 
         if (InCallback)
         {
             CloseFromCallback(timeoutMs);
+            EndMockClose(outcome, null);
             return Task.CompletedTask;
         }
 
+        Task close = CloseAndTearDownAsync(timeoutMs, keepMockOpenOnError: true);
         return _failureCallbacks.After(
-            CloseAndTearDownAsync(timeoutMs, keepMockOpenOnError: true), CancellationToken.None);
+            outcome is null ? close : EndingMockClose(close, outcome), CancellationToken.None);
     }
 
     private void CloseWithin(long? timeoutMs)
     {
-        if (!TryBeginClose())
+        if (!TryBeginCloseCall(out TaskCompletionSource<bool>? outcome, out Task? inProgress))
         {
+            inProgress?.GetAwaiter().GetResult();
             return;
         }
 
         if (InCallback)
         {
             CloseFromCallback(timeoutMs);
+            EndMockClose(outcome, null);
             return;
         }
 
         try
         {
             CloseAndTearDown(timeoutMs, keepMockOpenOnError: true);
+            EndMockClose(outcome, null);
+        }
+        catch (Exception exception)
+        {
+            EndMockClose(outcome, exception);
+            throw;
         }
         finally
         {
             _failureCallbacks.Wait();
         }
+    }
+
+    // A Close that loses the race on a mock waits for the close in progress and throws what it throws; from a
+    // callback it returns at once, since the close in progress may wait for that callback's report.
+    private bool TryBeginCloseCall(out TaskCompletionSource<bool>? outcome, out Task? inProgress)
+    {
+        outcome = null;
+        inProgress = null;
+        if (!IsMock)
+        {
+            return TryBeginClose();
+        }
+
+        lock (_closeLock)
+        {
+            if (!TryBeginClose())
+            {
+                inProgress = InCallback ? null : _mockClose?.Task;
+                return false;
+            }
+
+            outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _mockClose = outcome;
+            return true;
+        }
+    }
+
+    private void EndMockClose(TaskCompletionSource<bool>? outcome, Exception? failure)
+    {
+        if (outcome is null)
+        {
+            return;
+        }
+
+        lock (_closeLock)
+        {
+            if (ReferenceEquals(_mockClose, outcome))
+            {
+                _mockClose = null;
+            }
+        }
+
+        if (failure is null)
+        {
+            outcome.TrySetResult(true);
+        }
+        else
+        {
+            outcome.TrySetException(failure);
+        }
+    }
+
+    private async Task EndingMockClose(Task close, TaskCompletionSource<bool> outcome)
+    {
+        try
+        {
+            await close.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            EndMockClose(outcome, exception);
+            throw;
+        }
+
+        EndMockClose(outcome, null);
     }
 
     private void SubmitClose(long? timeoutMs, Action<IntPtr> onClosed) =>
