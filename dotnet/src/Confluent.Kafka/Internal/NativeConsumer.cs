@@ -544,7 +544,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithTopics(_handle, arguments.StringList(topicArray), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            SettleListener(null, subscribed: true);
+            SettleListener(null, subscribed: true, Unsubscribes(topicArray));
         });
     }
 
@@ -553,7 +553,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         RequireListener(listener);
         string[] topicArray = CheckAfterAcquire(() => SnapshotTopics(topics));
         SubscribeWithListener(
-            arguments => arguments.StringList(topicArray), NativeMethods.ConsumerSubscribeWithTopicsListener, listener);
+            arguments => arguments.StringList(topicArray),
+            NativeMethods.ConsumerSubscribeWithTopicsListener,
+            listener,
+            Unsubscribes(topicArray));
     }
 
     internal void Subscribe(SubscriptionPattern pattern)
@@ -565,7 +568,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithPattern(_handle, arguments.SubscriptionPattern(patternText), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            SettleListener(null, subscribed: true);
+            SettleListener(null, subscribed: true, unsubscribes: false);
         });
     }
 
@@ -576,13 +579,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         SubscribeWithListener(
             arguments => arguments.SubscriptionPattern(patternText),
             NativeMethods.ConsumerSubscribeWithPatternListener,
-            listener);
+            listener,
+            unsubscribes: false);
     }
 
     private void SubscribeWithListener(
         Func<NativeCallArguments, IntPtr> subscription,
         NativeSubscribeWithListener subscribe,
-        IConsumerRebalanceListener listener)
+        IConsumerRebalanceListener listener,
+        bool unsubscribes)
     {
         RefuseInsideACallback();
         CallSync(arguments =>
@@ -611,7 +616,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 if (called)
                 {
-                    SettleListener(registration, subscribed);
+                    SettleListener(registration, subscribed, unsubscribes);
                 }
                 else
                 {
@@ -643,8 +648,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    private void SettleListener(ListenerRegistration? registration, bool subscribed)
+    private void SettleListener(ListenerRegistration? registration, bool subscribed, bool unsubscribes)
     {
+        if (unsubscribes)
+        {
+            registration?.Release();
+            return;
+        }
+
         if (!subscribed && registration is null)
         {
             return;
@@ -678,6 +689,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             _retainedListenerRegistrations.Clear();
         }
     }
+
+    // On KafkaConsumer a subscribe to no topics is unsubscribe(): whatever its outcome, the core keeps the registered
+    // listener and never stores the subscribe's own. MockConsumer registers it, as Java's does.
+    private bool Unsubscribes(string[] topics) => topics.Length == 0 && !IsMock;
 
     // Java checks the listener before the topics.
     private static void RequireListener(object listener)

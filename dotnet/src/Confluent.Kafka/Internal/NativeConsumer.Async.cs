@@ -109,7 +109,7 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) =>
                     NativeMethods.ConsumerSubscribeWithTopicsCb(
                         _handle, arguments.StringList(snapshot), ConsumerCompletion.Void, opaque),
-                failed => SettleListener(null, !failed)),
+                failed => SettleListener(null, !failed, Unsubscribes(snapshot))),
             AsyncOperation.Subscribe,
             cancellationToken);
     }
@@ -147,7 +147,7 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) =>
                     NativeMethods.ConsumerSubscribeWithPatternCb(
                         _handle, arguments.SubscriptionPattern(patternText), ConsumerCompletion.Void, opaque),
-                failed => SettleListener(null, !failed)),
+                failed => SettleListener(null, !failed, unsubscribes: false)),
             AsyncOperation.Subscribe,
             cancellationToken);
     }
@@ -193,6 +193,7 @@ internal sealed partial class NativeConsumer
             arguments => arguments.StringList(snapshot),
             NativeMethods.ConsumerSubscribeWithTopicsListenerCb,
             root,
+            Unsubscribes(snapshot),
             cancellationToken);
     }
 
@@ -206,6 +207,7 @@ internal sealed partial class NativeConsumer
             arguments => arguments.SubscriptionPattern(patternText),
             NativeMethods.ConsumerSubscribeWithPatternListenerCb,
             root,
+            unsubscribes: false,
             cancellationToken);
     }
 
@@ -213,6 +215,7 @@ internal sealed partial class NativeConsumer
         Func<NativeCallArguments, IntPtr> subscription,
         NativeSubscribeWithListenerCb subscribe,
         Func<ListenerRegistration> root,
+        bool unsubscribes,
         CancellationToken cancellationToken)
     {
         RefuseInsideACallback();
@@ -237,7 +240,7 @@ internal sealed partial class NativeConsumer
                         ListenerRegistration.DestroyHandle(listenerHandle);
                     }
                 },
-                failed => SettleListener(registration, !failed));
+                failed => SettleListener(registration, !failed, unsubscribes));
         }
         catch
         {
