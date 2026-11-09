@@ -2258,6 +2258,10 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     at `3f8a5bc6`). On `KafkaConsumer` / `AsyncKafkaConsumer` a subscribe to no topics is
     `unsubscribe`: keep the current and every kept one, and free its own once the call has
     returned or completed.
+    On `AsyncKafkaConsumer` / `AsyncMockConsumer` a `subscribe_*` started while another one's
+    completion has not run is refused before the call, with -2's text and no registration: the core
+    frees its busy flag before it queues the completion, so two could settle out of order (row 441
+    (A)); the guard goes when the core queues first (row 442).
   - Destroy the `ConsumerRebalanceListener_t` handle right after the `subscribe_*` call:
     the call copied the registration (BH:29283-29287 at `3f8a5bc6`).
 
