@@ -292,7 +292,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
     /// <summary>
     /// Sets the exception that the task of <c>Close</c> fails with, as Java's <c>MockProducer.closeException</c> field: every
-    /// later call fails with this same instance and leaves the producer open (<see cref="Closed"/> stays
+    /// later call fails with this same instance and leaves the producer open (<see cref="Closed()"/> stays
     /// <see langword="false"/>). A <c>Close</c> from inside a delivery callback returns at once and closes the producer
     /// without it, and <c>Dispose</c> releases the producer whatever it is set to.
     /// </summary>
@@ -312,36 +312,36 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
     /// <summary>Whether <see cref="InitTransactions"/> succeeded (Java <c>MockProducer.transactionInitialized()</c>).</summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool TransactionInitialized => _native.MockTransactionInitialized();
+    public bool TransactionInitialized() => _native.MockTransactionInitialized();
 
     /// <summary>Whether a transaction is open (Java <c>MockProducer.transactionInFlight()</c>).</summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool TransactionInFlight => _native.MockTransactionInFlight();
+    public bool TransactionInFlight() => _native.MockTransactionInFlight();
 
     /// <summary>
     /// Whether the last transaction was committed (Java <c>MockProducer.transactionCommitted()</c>); reset when a
     /// transaction begins.
     /// </summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool TransactionCommitted => _native.MockTransactionCommitted();
+    public bool TransactionCommitted() => _native.MockTransactionCommitted();
 
     /// <summary>
     /// Whether the last transaction was aborted (Java <c>MockProducer.transactionAborted()</c>); reset when a
     /// transaction begins.
     /// </summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool TransactionAborted => _native.MockTransactionAborted();
+    public bool TransactionAborted() => _native.MockTransactionAborted();
 
     /// <summary>
     /// Whether the open transaction, or the last one, sent offsets (Java <c>MockProducer.sentOffsets()</c>); reset when
     /// a transaction begins and by <see cref="Clear"/>. An empty <c>offsets</c> map sends none.
     /// </summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public bool SentOffsets => _native.MockSentOffsets();
+    public bool SentOffsets() => _native.MockSentOffsets();
 
     /// <summary>The number of committed transactions (Java <c>MockProducer.commitCount()</c>).</summary>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
-    public long CommitCount => _native.MockCommitCount();
+    public long CommitCount() => _native.MockCommitCount();
 
     /// <summary>
     /// The consumer group offsets of each committed transaction that sent offsets, since the last <see cref="Clear"/>

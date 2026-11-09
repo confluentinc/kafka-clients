@@ -261,6 +261,6 @@ public sealed class KafkaProducerTransactionTests
     private static KafkaProducer<byte[], byte[]> Producer(Dictionary<string, object?> configs)
     {
         configs["bootstrap.servers"] = "localhost:1";
-        return new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray);
+        return new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
     }
 }
