@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -306,6 +307,53 @@ public sealed class PublicMockProducerTransactionControlTests
         await producer.CloseAsTask();
     }
 
+    // Java's MockProducer.close() is synchronized: a close made while another runs waits for it, and with a
+    // closeException set both throw it and the producer stays open. The first close waits for a blocked callback.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task Close_DuringAFailingClose_WaitsForItAndThrowsTheSameInstance(bool async)
+    {
+        using Mock producer = new Mock(async, autoComplete: false);
+        KafkaException injected = new KafkaException("close");
+        producer.SetCloseException(injected);
+        using Blocking blocking = new Blocking();
+        await producer.Send(blocking);
+        Assert.True(producer.CompleteNext());
+        Assert.True(blocking.Entered.Wait(BlockingCall.Deadline), "the callback did not start");
+
+        Task first = Task.Run(() => producer.CloseAsTask());
+        Assert.True(SpinWait.SpinUntil(() => producer.Closed, BlockingCall.Deadline), "the first close did not begin");
+        Task second = Task.Run(() => producer.CloseAsTask());
+        await Task.Delay(BlockingCall.StillBlocked);
+        Assert.False(second.IsCompleted, "the second close did not wait for the first");
+
+        blocking.Release.Set();
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Within(first)));
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Within(second)));
+        Assert.False(producer.Closed);
+    }
+
+    // Java's MockProducer.flush() throws its flushException first, also from a callback the core cannot see.
+    [Fact]
+    public async Task SetFlushException_FlushFromAnAsyncCallbackAfterAnAwait_ThrowsTheSameInstance()
+    {
+        AsyncMockProducer<byte[], byte[]> producer =
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+        await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
+        IllegalStateException injected = new IllegalStateException("flush");
+        producer.SetFlushException(injected);
+        FlushingAfterAnAwait flushing = new FlushingAfterAnAwait(producer);
+        _ = await producer.Send(Record(), flushing);
+        _ = await producer.Send(Record());
+
+        Assert.True(producer.CompleteNext());
+        Exception? thrown = await Within(flushing.Thrown);
+
+        Assert.Same(injected, thrown);
+        Assert.False(producer.Flushed);
+        producer.SetFlushException(null);
+    }
+
     [Theory]
     [MemberData(nameof(Flavors))]
     public void Closed_IsFalseUntilClose(bool async)
@@ -393,6 +441,60 @@ public sealed class PublicMockProducerTransactionControlTests
     }
 
     // One of the two mocks, behind the sync shape; an async operation's Task is awaited.
+    private static Task Within(Task task) => TestTimeout.Run(() => task, BlockingCall.Deadline);
+
+    private static Task<T> Within<T>(Task<T> task) => TestTimeout.Run(() => task, BlockingCall.Deadline);
+
+    private static ProducerRecord<byte[], byte[]> Record() =>
+        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"));
+
+    /// <summary>A delivery callback that blocks the producer's completion thread until the test releases it.</summary>
+    private sealed class Blocking : IDeliveryCallback, IDisposable
+    {
+        internal ManualResetEventSlim Entered { get; } = new ManualResetEventSlim();
+
+        internal ManualResetEventSlim Release { get; } = new ManualResetEventSlim();
+
+        public void OnCompletion(RecordMetadata metadata, Exception? exception)
+        {
+            Entered.Set();
+            _ = Release.Wait(BlockingCall.Deadline);
+        }
+
+        public void Dispose()
+        {
+            Release.Set();
+            Entered.Dispose();
+            Release.Dispose();
+        }
+    }
+
+    /// <summary>An async delivery callback that flushes its producer after an await and records what it threw.</summary>
+    private sealed class FlushingAfterAnAwait : IAsyncDeliveryCallback
+    {
+        private readonly AsyncMockProducer<byte[], byte[]> _producer;
+        private readonly TaskCompletionSource<Exception?> _thrown =
+            new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal FlushingAfterAnAwait(AsyncMockProducer<byte[], byte[]> producer) => _producer = producer;
+
+        internal Task<Exception?> Thrown => _thrown.Task;
+
+        public async Task OnCompletion(RecordMetadata metadata, Exception? exception)
+        {
+            await Task.Yield();
+            try
+            {
+                await _producer.Flush().ConfigureAwait(false);
+                _thrown.SetResult(null);
+            }
+            catch (Exception failure)
+            {
+                _thrown.SetResult(failure);
+            }
+        }
+    }
+
     private sealed class Mock : IDisposable
     {
         private readonly MockProducer<byte[], byte[]>? _sync;
@@ -420,6 +522,13 @@ public sealed class PublicMockProducerTransactionControlTests
             Run(
                 () => _sync!.Send(Record()),
                 async () => await _async!.Send(Record()).ConfigureAwait(false));
+
+        internal Task Send(IDeliveryCallback callback) =>
+            Run(
+                () => _sync!.Send(Record(), callback),
+                async () => await _async!.Send(Record(), callback).ConfigureAwait(false));
+
+        internal bool CompleteNext() => _sync?.CompleteNext() ?? _async!.CompleteNext();
 
         internal Task Flush() => Run(() => _sync!.Flush(), () => _async!.Flush());
 
