@@ -23,7 +23,9 @@ namespace Confluent.Kafka.Internal.Serialization;
 /// </summary>
 internal sealed class ByteArraySerde : ISerde<byte[]>
 {
-    public byte[]? Serialize(string topic, byte[] data) => data;
+    // The explicit null: a null array would convert to an empty value, not to null.
+    public ReadOnlyMemory<byte>? Serialize(string topic, byte[] data) =>
+        data is null ? (ReadOnlyMemory<byte>?)null : data;
 
     public byte[] Deserialize(string topic, ReadOnlySpan<byte> data) => data.ToArray();
 }
