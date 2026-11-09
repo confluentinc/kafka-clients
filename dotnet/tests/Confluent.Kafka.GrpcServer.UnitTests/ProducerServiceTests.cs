@@ -195,7 +195,7 @@ public sealed class ProducerServiceTests
     {
         using ProducerServer server = ProducerServer.Create(flavour);
         ulong producerId = server.RegisterTransactionalMock();
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         ulong groupMetadataId = server.GroupMetadata.Add(consumer.GroupMetadata());
         Proto.TransactionRequest request = new Proto.TransactionRequest { ProducerId = producerId };
         Assert.Null((await server.Service.InitTransactions(request, server.Context)).Error);

@@ -341,19 +341,19 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public void SetSendOffsetsToTransactionException(Exception? exception);
     public void SetCommitTransactionException(Exception? exception);
     public void SetAbortTransactionException(Exception? exception);
-    public void SetSendException(Exception? exception);                      // Java sendException, flushException, …
+    public void SetSendException(Exception? exception);                      // Java's public fields sendException, …: a setter each (allowlisted)
     public void SetFlushException(Exception? exception);                     // also fails CommitTransaction / AbortTransaction
     public void SetPartitionsForException(Exception? exception);
     public void SetCloseException(Exception? exception);                     // Close throws it and leaves the producer open
     public void FenceProducer();
-    public bool Closed { get; }                   // Java closed(), read from the binding's state
-    public bool TransactionInitialized { get; }   // Java transactionInitialized(), and likewise below
-    public bool TransactionInFlight { get; }
-    public bool TransactionCommitted { get; }
-    public bool TransactionAborted { get; }
-    public bool Flushed { get; }
-    public bool SentOffsets { get; }
-    public long CommitCount { get; }
+    public bool Closed();                   // Java closed(), read from the binding's state
+    public bool TransactionInitialized();   // Java transactionInitialized(), and likewise below
+    public bool TransactionInFlight();
+    public bool TransactionCommitted();
+    public bool TransactionAborted();
+    public bool Flushed();
+    public bool SentOffsets();
+    public long CommitCount();
     public IReadOnlyList<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>>>
         ConsumerGroupOffsetsHistory();                                       // METHOD: a fresh copy per call
     public IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> UncommittedOffsets();
@@ -1262,9 +1262,12 @@ The mocks carry Java's `MockProducer` transaction controls (§3 sketch), over th
 `kafka_producer_MockProducer_*` functions:
 - The five setters take `Exception?`, as `ErrorNext` does, since Java's fields are
   `RuntimeException`; the call throws the same instance, and `null` clears it.
-- The flags and `CommitCount` are properties, as Java's getters read state.
-  `ConsumerGroupOffsetsHistory()` and `UncommittedOffsets()` are methods: each copies a native
-  container out, so every call returns a fresh copy.
+- The flags, `CommitCount()`, `ConsumerGroupOffsetsHistory()` and `UncommittedOffsets()` are
+  methods, as every Java getter is (ledger 365); the last two copy a native container out, so
+  every call returns a fresh copy.
+- Java's public fields `sendException`, `flushException`, `partitionsForException` and
+  `closeException` are setters `Set<Field>(Exception?)`, as Python's `set_<field>`; CKRDA0013
+  allowlists them, with the five transaction setters.
 - `UncommittedRecords()` and `History()` are left out: the ABI gives no record list
   (`HistoryCount()` stands in). So the ports of Java's history tests check `HistoryCount()`, not
   the records.

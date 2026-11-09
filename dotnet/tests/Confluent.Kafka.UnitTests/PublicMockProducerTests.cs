@@ -86,12 +86,12 @@ public sealed class PublicMockProducerTests : IDisposable
     public void GroupMetadata_FromANeverConnectedConsumer_IsTheConfiguredGroupId()
     {
         using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(ConsumerConfig("g1"), Serdes.ByteArray, Serdes.ByteArray);
+            new KafkaConsumer<byte[], byte[]>(ConsumerConfig("g1"), Serdes.ByteArray(), Serdes.ByteArray());
 
         ConsumerGroupMetadata metadata = consumer.GroupMetadata();
 
-        Assert.Equal("g1", metadata.GroupId);
-        Assert.Equal("g2", GroupMetadata("g2").GroupId);
+        Assert.Equal("g1", metadata.GroupId());
+        Assert.Equal("g2", GroupMetadata("g2").GroupId());
     }
 
     // Checks the history's count, not its records (the class remarks). The future completes on the producer's
@@ -102,9 +102,9 @@ public sealed class PublicMockProducerTests : IDisposable
         BuildMockProducer(true);
         KafkaFuture<RecordMetadata> metadata = Producer.Send(_record1);
         Assert.False(IsError(metadata), "Send should be successful");
-        Assert.True(metadata.IsDone, "Send should be complete");
-        Assert.Equal(0L, metadata.Get(s_bound).Offset);
-        Assert.Equal(Topic, metadata.Get(s_bound).Topic);
+        Assert.True(metadata.IsDone(), "Send should be complete");
+        Assert.Equal(0L, metadata.Get(s_bound).Offset());
+        Assert.Equal(Topic, metadata.Get(s_bound).Topic());
         Assert.Equal(1, Producer.HistoryCount());
         Producer.Clear();
         Assert.Equal(0, Producer.HistoryCount());
@@ -121,12 +121,12 @@ public sealed class PublicMockProducerTests : IDisposable
     {
         BuildMockProducer(false);
         KafkaFuture<RecordMetadata> md1 = Producer.Send(_record1);
-        Assert.False(md1.IsDone, "Send shouldn't have completed");
+        Assert.False(md1.IsDone(), "Send shouldn't have completed");
         KafkaFuture<RecordMetadata> md2 = Producer.Send(_record2);
-        Assert.False(md2.IsDone, "Send shouldn't have completed");
+        Assert.False(md2.IsDone(), "Send shouldn't have completed");
         Assert.True(Producer.CompleteNext(), "Complete the first request");
         Assert.False(IsError(md1), "Request should be successful");
-        Assert.False(md2.IsDone, "Second request still incomplete");
+        Assert.False(md2.IsDone(), "Second request still incomplete");
         IllegalArgumentException e = new IllegalArgumentException("blah");
         Assert.True(Producer.ErrorNext(e), "Complete the second request with an error");
         ExecutionException err = Assert.Throws<ExecutionException>(() => md2.Get(s_bound));
@@ -135,9 +135,9 @@ public sealed class PublicMockProducerTests : IDisposable
 
         KafkaFuture<RecordMetadata> md3 = Producer.Send(_record1);
         KafkaFuture<RecordMetadata> md4 = Producer.Send(_record2);
-        Assert.True(!md3.IsDone && !md4.IsDone, "Requests should not be completed.");
+        Assert.True(!md3.IsDone() && !md4.IsDone(), "Requests should not be completed.");
         Producer.Flush();
-        Assert.True(md3.IsDone && md4.IsDone, "Requests should be completed.");
+        Assert.True(md3.IsDone() && md4.IsDone(), "Requests should be completed.");
     }
 
     [Fact]
@@ -145,7 +145,7 @@ public sealed class PublicMockProducerTests : IDisposable
     {
         BuildMockProducer(true);
         Producer.InitTransactions();
-        Assert.True(Producer.TransactionInitialized);
+        Assert.True(Producer.TransactionInitialized());
     }
 
     [Fact]
@@ -169,7 +169,7 @@ public sealed class PublicMockProducerTests : IDisposable
         BuildMockProducer(true);
         Producer.InitTransactions();
         Producer.BeginTransaction();
-        Assert.True(Producer.TransactionInFlight);
+        Assert.True(Producer.TransactionInFlight());
     }
 
     [Fact]
@@ -224,9 +224,9 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.InitTransactions();
         Producer.BeginTransaction();
         Producer.CommitTransaction();
-        Assert.False(Producer.TransactionInFlight);
-        Assert.True(Producer.TransactionCommitted);
-        Assert.False(Producer.TransactionAborted);
+        Assert.False(Producer.TransactionInFlight());
+        Assert.True(Producer.TransactionCommitted());
+        Assert.False(Producer.TransactionAborted());
     }
 
     [Fact]
@@ -236,9 +236,9 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.InitTransactions();
         Producer.BeginTransaction();
 
-        Assert.Equal(0L, Producer.CommitCount);
+        Assert.Equal(0L, Producer.CommitCount());
         Producer.CommitTransaction();
-        Assert.Equal(1L, Producer.CommitCount);
+        Assert.Equal(1L, Producer.CommitCount());
     }
 
     [Fact]
@@ -252,7 +252,7 @@ public sealed class PublicMockProducerTests : IDisposable
 
         Producer.BeginTransaction();
         Producer.CommitTransaction();
-        Assert.Equal(1L, Producer.CommitCount);
+        Assert.Equal(1L, Producer.CommitCount());
     }
 
     [Fact]
@@ -277,9 +277,9 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.InitTransactions();
         Producer.BeginTransaction();
         Producer.AbortTransaction();
-        Assert.False(Producer.TransactionInFlight);
-        Assert.True(Producer.TransactionAborted);
-        Assert.False(Producer.TransactionCommitted);
+        Assert.False(Producer.TransactionInFlight());
+        Assert.True(Producer.TransactionAborted());
+        Assert.False(Producer.TransactionCommitted());
     }
 
     [Fact]
@@ -377,13 +377,13 @@ public sealed class PublicMockProducerTests : IDisposable
         KafkaFuture<RecordMetadata> md1 = Producer.Send(_record1);
         KafkaFuture<RecordMetadata> md2 = Producer.Send(_record2);
 
-        Assert.False(md1.IsDone);
-        Assert.False(md2.IsDone);
+        Assert.False(md1.IsDone());
+        Assert.False(md2.IsDone());
 
         Producer.CommitTransaction();
 
-        Assert.True(md1.IsDone);
-        Assert.True(md2.IsDone);
+        Assert.True(md1.IsDone());
+        Assert.True(md2.IsDone());
     }
 
     // Checks the history's count (the class remarks).
@@ -412,10 +412,10 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.BeginTransaction();
 
         KafkaFuture<RecordMetadata> md1 = Producer.Send(_record1);
-        Assert.False(md1.IsDone);
+        Assert.False(md1.IsDone());
 
         Producer.AbortTransaction();
-        Assert.True(md1.IsDone);
+        Assert.True(md1.IsDone());
     }
 
     // Checks the history's count, not that it holds record1 and record2 in order (the class remarks).
@@ -485,7 +485,7 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.InitTransactions();
         Producer.BeginTransaction();
         Producer.SendOffsetsToTransaction(s_noOffsets, GroupMetadata("groupId"));
-        Assert.False(Producer.SentOffsets);
+        Assert.False(Producer.SentOffsets());
     }
 
     [Fact]
@@ -495,14 +495,14 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.InitTransactions();
         Producer.BeginTransaction();
 
-        Assert.False(Producer.SentOffsets);
+        Assert.False(Producer.SentOffsets());
 
         Dictionary<TopicPartition, OffsetAndMetadata> groupCommit = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
             [new TopicPartition(Topic, 0)] = new OffsetAndMetadata(42L),
         };
         Producer.SendOffsetsToTransaction(groupCommit, GroupMetadata("groupId"));
-        Assert.True(Producer.SentOffsets);
+        Assert.True(Producer.SentOffsets());
     }
 
     [Fact]
@@ -512,7 +512,7 @@ public sealed class PublicMockProducerTests : IDisposable
         Producer.InitTransactions();
         Producer.BeginTransaction();
 
-        Assert.False(Producer.SentOffsets);
+        Assert.False(Producer.SentOffsets());
 
         Dictionary<TopicPartition, OffsetAndMetadata> groupCommit = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
@@ -520,17 +520,17 @@ public sealed class PublicMockProducerTests : IDisposable
         };
         Producer.SendOffsetsToTransaction(groupCommit, GroupMetadata("groupId"));
         Producer.CommitTransaction(); // commit should not reset "sentOffsets" flag
-        Assert.True(Producer.SentOffsets);
+        Assert.True(Producer.SentOffsets());
 
         Producer.BeginTransaction();
-        Assert.False(Producer.SentOffsets);
+        Assert.False(Producer.SentOffsets());
 
         Producer.SendOffsetsToTransaction(groupCommit, GroupMetadata("groupId"));
         Producer.CommitTransaction(); // commit should not reset "sentOffsets" flag
-        Assert.True(Producer.SentOffsets);
+        Assert.True(Producer.SentOffsets());
 
         Producer.BeginTransaction();
-        Assert.False(Producer.SentOffsets);
+        Assert.False(Producer.SentOffsets());
     }
 
     [Fact]
@@ -748,7 +748,7 @@ public sealed class PublicMockProducerTests : IDisposable
     public void ShouldThrowClassCastException()
     {
         using MockProducer<object, string> customProducer =
-            new MockProducer<object, string>(new IntegerKeySerializer(), Serdes.String);
+            new MockProducer<object, string>(new IntegerKeySerializer(), Serdes.String());
         Assert.Throws<InvalidCastException>(
             () => customProducer.Send(new ProducerRecord<object, string>(Topic, "value1", "key1")));
     }
@@ -757,7 +757,7 @@ public sealed class PublicMockProducerTests : IDisposable
     public void ShouldBeFlushedIfNoBufferedRecords()
     {
         BuildMockProducer(true);
-        Assert.True(Producer.Flushed);
+        Assert.True(Producer.Flushed());
     }
 
     [Fact]
@@ -765,7 +765,7 @@ public sealed class PublicMockProducerTests : IDisposable
     {
         BuildMockProducer(true);
         Producer.Send(_record1);
-        Assert.True(Producer.Flushed);
+        Assert.True(Producer.Flushed());
     }
 
     [Fact]
@@ -773,7 +773,7 @@ public sealed class PublicMockProducerTests : IDisposable
     {
         BuildMockProducer(false);
         Producer.Send(_record1);
-        Assert.False(Producer.Flushed);
+        Assert.False(Producer.Flushed());
     }
 
     [Fact]
@@ -782,7 +782,7 @@ public sealed class PublicMockProducerTests : IDisposable
         BuildMockProducer(false);
         Producer.Send(_record1);
         Producer.Flush();
-        Assert.True(Producer.Flushed);
+        Assert.True(Producer.Flushed());
     }
 
     [Fact]
@@ -798,10 +798,10 @@ public sealed class PublicMockProducerTests : IDisposable
 
         // Get returns after the callback has run, so its metadata is already recorded.
         RecordMetadata md = Assert.IsType<RecordMetadata>(callback.Metadata);
-        Assert.Equal(-1L, md.Offset);
-        Assert.Equal(-1L, md.Timestamp);
-        Assert.Equal(-1L, md.SerializedKeySize);
-        Assert.Equal(-1L, md.SerializedValueSize);
+        Assert.Equal(-1L, md.Offset());
+        Assert.Equal(-1L, md.Timestamp());
+        Assert.Equal(-1L, md.SerializedKeySize());
+        Assert.Equal(-1L, md.SerializedValueSize());
         Assert.Same(e, callback.Exception);
     }
 
@@ -817,7 +817,7 @@ public sealed class PublicMockProducerTests : IDisposable
         s_groupMetadata.GetOrAdd(groupId, id =>
         {
             using KafkaConsumer<byte[], byte[]> consumer =
-                new KafkaConsumer<byte[], byte[]>(ConsumerConfig(id), Serdes.ByteArray, Serdes.ByteArray);
+                new KafkaConsumer<byte[], byte[]>(ConsumerConfig(id), Serdes.ByteArray(), Serdes.ByteArray());
             return consumer.GroupMetadata();
         });
 
@@ -863,11 +863,11 @@ public sealed class PublicMockProducerTests : IDisposable
     }
 
     private void BuildMockProducer(bool autoComplete) =>
-        _producer = new MockProducer<string, string>(Serdes.String, Serdes.String, autoComplete);
+        _producer = new MockProducer<string, string>(Serdes.String(), Serdes.String(), autoComplete);
 
     private sealed class IntegerKeySerializer : ISerializer<object>
     {
-        public byte[]? Serialize(string topic, object data) => Serdes.Int32.Serialize(topic, (int)data);
+        public byte[]? Serialize(string topic, object data) => Serdes.Integer().Serialize(topic, (int)data);
     }
 
     private sealed class RecordingCallback : IDeliveryCallback
