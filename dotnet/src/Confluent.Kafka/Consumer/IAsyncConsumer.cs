@@ -97,6 +97,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
+    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// </exception>
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -133,6 +137,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
+    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// </exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
         IConsumerRebalanceListener callback,
@@ -161,6 +169,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
+    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// </exception>
     Task Subscribe(
         IReadOnlyCollection<string> topics,
         IAsyncConsumerRebalanceListener callback,
@@ -197,6 +209,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
     /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
+    /// another <c>Subscribe</c> on this consumer has not completed.
     /// </exception>
     Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default);
 
@@ -250,6 +266,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
     /// partitions and pattern are mutually exclusive").
     /// </exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
+    /// another <c>Subscribe</c> on this consumer has not completed.
+    /// </exception>
     Task Subscribe(
         SubscriptionPattern pattern,
         IConsumerRebalanceListener callback,
@@ -289,6 +309,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or it is subscribed to topics or has partitions assigned ("Subscription to topics,
     /// partitions and pattern are mutually exclusive").
+    /// </exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// Another thread is inside a call on this consumer, the call is made inside a callback of this consumer, or
+    /// another <c>Subscribe</c> on this consumer has not completed.
     /// </exception>
     Task Subscribe(
         SubscriptionPattern pattern,

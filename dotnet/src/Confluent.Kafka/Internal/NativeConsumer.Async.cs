@@ -47,6 +47,11 @@ internal sealed partial class NativeConsumer
 
     private readonly CompletionThread? _pump;
 
+    // The core frees its busy flag before it queues a completion, so a second subscribe could settle before the
+    // first and release the listener the core holds. Until the core queues first, a subscribe started before
+    // another has settled is refused with the core's concurrent-use error, before the native call.
+    private object? _subscribeInFlight;
+
     /// <summary>The async operations, named for the Java methods they translate.</summary>
     internal enum AsyncOperation
     {
@@ -109,7 +114,8 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) =>
                     NativeMethods.ConsumerSubscribeWithTopicsCb(
                         _handle, arguments.StringList(snapshot), ConsumerCompletion.Void, opaque),
-                error => SettleListener(null, error == IntPtr.Zero, Unsubscribes(snapshot))),
+                error => SettleListener(null, error == IntPtr.Zero, Unsubscribes(snapshot)),
+                subscribes: true),
             AsyncOperation.Subscribe,
             cancellationToken);
     }
@@ -147,7 +153,8 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) =>
                     NativeMethods.ConsumerSubscribeWithPatternCb(
                         _handle, arguments.SubscriptionPattern(patternText), ConsumerCompletion.Void, opaque),
-                error => SettleListener(null, error == IntPtr.Zero, notRegistered: false)),
+                error => SettleListener(null, error == IntPtr.Zero, notRegistered: false),
+                subscribes: true),
             AsyncOperation.Subscribe,
             cancellationToken);
     }
@@ -243,7 +250,8 @@ internal sealed partial class NativeConsumer
                 error => SettleListener(
                     registration,
                     error == IntPtr.Zero,
-                    unsubscribes || KafkaException.RefusedBeforeRegistering(error)));
+                    unsubscribes || KafkaException.RefusedBeforeRegistering(error)),
+                subscribes: true);
         }
         catch
         {
@@ -1103,7 +1111,8 @@ internal sealed partial class NativeConsumer
         Action<IntPtr>? settle = null,
         UseKind kind = UseKind.Owned,
         bool refusesOtherThreads = false,
-        bool atPoll = false)
+        bool atPoll = false,
+        bool subscribes = false)
     {
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
@@ -1114,8 +1123,15 @@ internal sealed partial class NativeConsumer
             RefuseOtherThreads(true);
         }
 
+        object? subscribing = null;
         try
         {
+            if (subscribes)
+            {
+                subscribing = BeginSubscribe();
+                settle = EndingTheSubscribe(settle, subscribing);
+            }
+
             ConsumerCompletion<T> completion = Start(convert, submit, settle);
             completion.UseOwner = owner;
             completion.RefusesOtherThreads = refusesOtherThreads;
@@ -1123,10 +1139,42 @@ internal sealed partial class NativeConsumer
         }
         catch
         {
+            EndSubscribe(subscribing);
             EndUse(owner, refusesOtherThreads);
             throw;
         }
     }
+
+    private object BeginSubscribe()
+    {
+        object subscribing = new object();
+        if (Interlocked.CompareExchange(ref _subscribeInFlight, subscribing, null) is not null)
+        {
+            throw new ConcurrentModificationException(ConcurrentAccessMessage);
+        }
+
+        return subscribing;
+    }
+
+    private void EndSubscribe(object? subscribing)
+    {
+        if (subscribing is not null)
+        {
+            Interlocked.CompareExchange(ref _subscribeInFlight, null, subscribing);
+        }
+    }
+
+    private Action<IntPtr> EndingTheSubscribe(Action<IntPtr>? settle, object subscribing) => error =>
+    {
+        try
+        {
+            settle?.Invoke(error);
+        }
+        finally
+        {
+            EndSubscribe(subscribing);
+        }
+    };
 
     private static ConsumerCompletion<T> Start<T>(
         Func<IntPtr, long, T> convert,
