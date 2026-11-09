@@ -356,6 +356,46 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public void SetPollException(KafkaException? exception) => _native.SetPollException(exception);
 
     /// <summary>
+    /// Makes the offset queries throw <paramref name="exception"/>, the same instance (Java
+    /// <c>MockConsumer.setOffsetsException</c>); <see langword="null"/> clears a pending one.
+    /// </summary>
+    /// <param name="exception">The exception for the offset queries, or <see langword="null"/> to clear a pending one.</param>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void SetOffsetsException(KafkaException? exception) => _native.SetOffsetsException(exception);
+
+    /// <summary>
+    /// Sets the offsets the <c>by_duration</c> reset strategy resets to (Java
+    /// <c>MockConsumer.updateDurationOffsets(Map)</c>).
+    /// </summary>
+    /// <param name="newOffsets">The offset of each partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A partition in <paramref name="newOffsets"/> has a null topic.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateDurationOffsets(newOffsets);
+
+    /// <summary>Schedules a poll task that does nothing (Java <c>MockConsumer.scheduleNopPollTask()</c>).</summary>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void ScheduleNopPollTask() => _native.ScheduleNopPollTask();
+
+    /// <summary>
+    /// Sets the most records one poll returns (Java <c>MockConsumer.setMaxPollRecords(long)</c>).
+    /// </summary>
+    /// <param name="maxPollRecords">The most records one poll returns, at least <c>1</c>.</param>
+    /// <exception cref="IllegalArgumentException"><paramref name="maxPollRecords"/> is less than <c>1</c>.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public void SetMaxPollRecords(long maxPollRecords) => _native.SetMaxPollRecords(maxPollRecords);
+
+    /// <summary>The timeout of the last poll (Java <c>MockConsumer.lastPollTimeout()</c>).</summary>
+    /// <returns>The last poll's timeout, or <see langword="null"/> before the first poll.</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    public TimeSpan? LastPollTimeout() => _native.LastPollTimeout();
+
+    /// <summary>Whether the consumer has been closed (Java <c>MockConsumer.closed()</c>).</summary>
+    /// <returns><see langword="true"/> once the consumer is closed or disposed.</returns>
+    public bool Closed() => _native.MockClosed();
+
+    /// <summary>
     /// Simulates a rebalance to the new full assignment <paramref name="newAssignment"/> (Java
     /// <c>MockConsumer.rebalance(Collection)</c>).
     /// </summary>

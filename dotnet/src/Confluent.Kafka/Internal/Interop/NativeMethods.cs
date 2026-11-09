@@ -723,6 +723,24 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MockConsumerSetPollError(IntPtr self, IntPtr error, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_offsets_error_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockConsumerSetOffsetsError(IntPtr self, IntPtr error, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_duration_offsets_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockConsumerUpdateDurationOffsets(IntPtr self, IntPtr newOffsets, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_schedule_nop_poll_task_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockConsumerScheduleNopPollTask(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_max_poll_records", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockConsumerSetMaxPollRecords(IntPtr self, long maxPollRecords, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_last_poll_timeout_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long MockConsumerLastPollTimeout(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_closed_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern sbyte MockConsumerClosed(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_rebalance", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MockConsumerRebalance(IntPtr self, IntPtr newAssignment, ref IntPtr outErr);
 
