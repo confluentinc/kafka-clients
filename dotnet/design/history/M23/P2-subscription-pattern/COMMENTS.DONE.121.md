@@ -331,3 +331,15 @@ Notes for the comment-only commit (S4):
    final assertion then expects no current registration for them on `AsyncKafkaConsumer`).
 
    Resolved in da5e36f1 (every form held first); the STATUS line in the commit that archives this item.
+
+## Rebase onto 09aa4888 (653bd2f2)
+
+1. **minor**: `dotnet/design/current/STATUS.md:10` and `:12`. Besides the hashes, two facts in our entry describe the
+   pre-rebase branch: "from `3afba0a7` (PR #325 head)" (now `09aa4888`) and "Six P/Invokes, 967 → 973" (now
+   968 → 974, `NativeMethodsPrelinkTests.cs:32`). **Fix:** correct both in the Manager's hash refresh, and record the
+   rebase gate once (prelink 974; baseline 505 → 493 entries, 12 removed; the UnitTests totals). The per-step gate lines
+   (13, 15–18: prelink 973, "Wrote 942") are dated records and can stay. If `b95977a4` is kept as a commit, its
+   message's "prelink 967 -> 973" should be fixed at the squash. PLAN.md's `3afba0a7` / 967 / 942 figures are the plan's
+   dated record and need no change.
+
+   Resolved in the fixup of 04808736 (STATUS refresh after the rebase).
