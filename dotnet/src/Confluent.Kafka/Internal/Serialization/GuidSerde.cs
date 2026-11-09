@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Internal.Serialization;
 /// </summary>
 internal sealed class GuidSerde : ISerde<System.Guid>
 {
-    public byte[]? Serialize(string topic, System.Guid data) =>
+    public ReadOnlyMemory<byte>? Serialize(string topic, System.Guid data) =>
         Encoding.UTF8.GetBytes(data.ToString("D", CultureInfo.InvariantCulture));
 
     public System.Guid Deserialize(string topic, ReadOnlySpan<byte> data)
