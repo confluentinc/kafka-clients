@@ -41,7 +41,7 @@ public sealed class PublicSyncConsumerRoundTripTests
 
     private static MockConsumer<byte[], byte[]> ReadyToPoll(string topic = Topic, int partition = Partition)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         consumer.Assign(new[] { new TopicPartition(topic, partition) });
         consumer.Seek(new TopicPartition(topic, partition), offset: 0);
         return consumer;
@@ -59,14 +59,14 @@ public sealed class PublicSyncConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(Topic, record.Topic);
-        Assert.Equal(Partition, record.Partition);
-        Assert.Equal(42, record.Offset);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
-        Assert.Empty(record.Headers);
+        Assert.Equal(Topic, record.Topic());
+        Assert.Equal(Partition, record.Partition());
+        Assert.Equal(42, record.Offset());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
+        Assert.Empty(record.Headers());
         Assert.True(
-            record.TimestampType is TimestampType.NO_TIMESTAMP_TYPE
+            record.TimestampType() is TimestampType.NO_TIMESTAMP_TYPE
                 or TimestampType.CREATE_TIME
                 or TimestampType.LOG_APPEND_TIME);
     }
@@ -84,9 +84,9 @@ public sealed class PublicSyncConsumerRoundTripTests
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(nonAsciiTopic, record.Topic);
-        Assert.Equal(key, record.Key);
-        Assert.Equal(value, record.Value);
+        Assert.Equal(nonAsciiTopic, record.Topic());
+        Assert.Equal(key, record.Key());
+        Assert.Equal(value, record.Value());
     }
 
     [Fact]
@@ -97,8 +97,8 @@ public sealed class PublicSyncConsumerRoundTripTests
         consumer.AddRecord(Topic, Partition, offset: 1, key: null, value: null);
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
-        Assert.Null(record.Key);
-        Assert.Null(record.Value);
+        Assert.Null(record.Key());
+        Assert.Null(record.Value());
     }
 
     [Fact]
@@ -109,10 +109,10 @@ public sealed class PublicSyncConsumerRoundTripTests
         consumer.AddRecord(Topic, Partition, offset: 2, key: Array.Empty<byte>(), value: Array.Empty<byte>());
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
-        Assert.NotNull(record.Key);
-        Assert.NotNull(record.Value);
-        Assert.Empty(record.Key!);
-        Assert.Empty(record.Value!);
+        Assert.NotNull(record.Key());
+        Assert.NotNull(record.Value());
+        Assert.Empty(record.Key()!);
+        Assert.Empty(record.Value()!);
     }
 
     [Fact]
@@ -127,8 +127,8 @@ public sealed class PublicSyncConsumerRoundTripTests
 
         ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
-        Assert.Equal(5, records.Count);
-        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset).ToArray());
+        Assert.Equal(5, records.Count());
+        Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset()).ToArray());
     }
 
     [Fact]
@@ -265,7 +265,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Seek_ThenPosition_RoundTrips()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
@@ -278,7 +278,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Commit_NoOffsets_BrokerFree_Succeeds()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
@@ -288,7 +288,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Commit_EmptyOffsets_BrokerFree_Succeeds()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
@@ -298,7 +298,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void CommitAsync_FireAndForget_BrokerFree_Succeeds()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
@@ -308,7 +308,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Subscribe_ThenSubscription_ReflectsTopics()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         consumer.Subscribe(new[] { "a", "b" });
@@ -319,7 +319,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Unsubscribe_AfterSubscribe_ClearsSubscription()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { "a" });
 
@@ -331,7 +331,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Assign_ThenAssignment_ReflectsPartitions()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
@@ -343,7 +343,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Assign_Empty_ClearsAssignment()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
@@ -355,7 +355,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Pause_ThenPaused_ReflectsPartitions_ResumeClears()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
@@ -370,7 +370,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void SeekToBeginning_ResetsPositionObservedViaPoll()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
@@ -386,7 +386,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void SeekToEnd_ResetsPositionObservedViaPoll()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });

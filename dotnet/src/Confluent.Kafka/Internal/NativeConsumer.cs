@@ -257,7 +257,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 _handle,
                 arguments.TopicPartition(topic, partition),
                 arguments.OffsetAndMetadata(
-                    offsetAndMetadata.Offset, offsetAndMetadata.LeaderEpoch ?? -1, offsetAndMetadata.Metadata),
+                    offsetAndMetadata.Offset(), offsetAndMetadata.LeaderEpoch() ?? -1, offsetAndMetadata.Metadata()),
                 ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
@@ -452,7 +452,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         SeekBack(rewind);
-        if (copied.Count == 0)
+        if (copied.Count() == 0)
         {
             throw error;
         }
@@ -488,7 +488,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     IntPtr outErr = IntPtr.Zero;
                     NativeMethods.ConsumerSeekWithOffset(
                         _handle,
-                        arguments.TopicPartition(position.Key.Topic, position.Key.Partition),
+                        arguments.TopicPartition(position.Key.Topic(), position.Key.Partition()),
                         position.Value,
                         ref outErr);
                     KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -1015,11 +1015,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private long Position(TopicPartition partition, long? timeoutMs) =>
         RoutesToTheHandle
-            ? Route(handle => handle.Position(partition.Topic, partition.Partition, timeoutMs))
+            ? Route(handle => handle.Position(partition.Topic(), partition.Partition(), timeoutMs))
             : QuerySync(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
-            IntPtr topicPartition = arguments.TopicPartition(partition.Topic, partition.Partition);
+            IntPtr topicPartition = arguments.TopicPartition(partition.Topic(), partition.Partition());
             long position = timeoutMs is long ms
                 ? NativeMethods.ConsumerPositionWithTimeout(_handle, topicPartition, ms, ref outErr)
                 : NativeMethods.ConsumerPosition(_handle, topicPartition, ref outErr);
@@ -1326,7 +1326,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // IllegalArgumentException.
     private void RequirePositionPartition(TopicPartition partition)
     {
-        if (partition.Topic is null)
+        if (partition.Topic() is null)
         {
             throw IsMock
                 ? new IllegalArgumentException(PositionNotAssigned)
@@ -2111,7 +2111,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
         {
             TopicPartition tp = entry.Key;
-            if (tp.Topic is null)
+            if (tp.Topic() is null)
             {
                 throw new ArgumentException("Topic names must not be null.", nameof(offsets));
             }
@@ -2122,11 +2122,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 throw new ArgumentException("Offset value must not be null.", nameof(offsets));
             }
 
-            topics[index] = tp.Topic;
-            partitions[index] = tp.Partition;
-            offsetValues[index] = value.Offset;
-            leaderEpochs[index] = value.LeaderEpoch ?? -1;
-            metadata[index] = value.Metadata ?? string.Empty;
+            topics[index] = tp.Topic();
+            partitions[index] = tp.Partition();
+            offsetValues[index] = value.Offset();
+            leaderEpochs[index] = value.LeaderEpoch() ?? -1;
+            metadata[index] = value.Metadata() ?? string.Empty;
             index++;
         }
 
@@ -2147,7 +2147,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
             foreach (TopicPartition tp in partitions)
             {
-                if (tp.Topic is null)
+                if (tp.Topic() is null)
                 {
                     throw new IllegalArgumentException(NullAssignTopicMessage);
                 }
@@ -2185,14 +2185,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         int index = 0;
         foreach (TopicPartition tp in partitions)
         {
-            if (tp.Topic is null)
+            if (tp.Topic() is null)
             {
                 throw nullTopicIsUnassigned
-                    ? new IllegalStateException(NoCurrentAssignment(tp.Partition))
+                    ? new IllegalStateException(NoCurrentAssignment(tp.Partition()))
                     : new ArgumentException("Topic names must not be null.", nameof(partitions));
             }
 
-            snapshot[index++] = (tp.Topic, tp.Partition);
+            snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
         }
 
         return snapshot;
@@ -2234,13 +2234,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
         {
             TopicPartition tp = entry.Key;
-            if (tp.Topic is null)
+            if (tp.Topic() is null)
             {
                 throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
             }
 
-            topics[index] = tp.Topic;
-            partitionArray[index] = tp.Partition;
+            topics[index] = tp.Topic();
+            partitionArray[index] = tp.Partition();
             timestamps[index] = entry.Value;
             index++;
         }

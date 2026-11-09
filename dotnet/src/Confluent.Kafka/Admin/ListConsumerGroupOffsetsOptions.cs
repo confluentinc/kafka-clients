@@ -28,15 +28,15 @@ public sealed class ListConsumerGroupOffsetsOptions
     private int? _timeoutMs;
     private bool _requireStable;
 
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs()"/>
+    public int? TimeoutMs() => _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs(int?)"/>
+    public ListConsumerGroupOffsetsOptions TimeoutMs(int? timeoutMs)
     {
-        get => _timeoutMs;
-        set
-        {
-            _timeoutMs = value;
-            Setters.Ran(nameof(TimeoutMs));
-        }
+        _timeoutMs = timeoutMs;
+        Setters.Ran(nameof(TimeoutMs));
+        return this;
     }
 
     /// <summary>
@@ -44,18 +44,24 @@ public sealed class ListConsumerGroupOffsetsOptions
     /// committed offset — Java's <c>requireStable()</c>. Defaults to
     /// <see langword="false"/>, as Java's explicitly initialized field does.
     /// </summary>
+    /// <returns>Wait for any in-progress transaction on a partition to resolve before reporting its committed
+    /// offset — Java's <c>requireStable()</c>. Defaults to <see langword="false"/>, as Java's explicitly
+    /// initialized field does.</returns>
     /// <remarks>
     /// While this is <see langword="false"/> the broker answers at once with the last
     /// committed offset, which an open transaction on the partition may still change.
     /// </remarks>
-    public bool RequireStable
+    public bool RequireStable() => _requireStable;
+
+    /// <summary>Sets an optional requireStable flag.</summary>
+    /// <param name="requireStable">Whether to wait for pending transactions to resolve. Defaults to
+    /// <see langword="false"/>.</param>
+    /// <returns>This instance, so calls can be chained.</returns>
+    public ListConsumerGroupOffsetsOptions RequireStable(bool requireStable)
     {
-        get => _requireStable;
-        set
-        {
-            _requireStable = value;
-            Setters.Ran(nameof(RequireStable));
-        }
+        _requireStable = requireStable;
+        Setters.Ran(nameof(RequireStable));
+        return this;
     }
 
     internal OptionSetters Setters { get; } = new OptionSetters();

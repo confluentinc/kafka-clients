@@ -32,10 +32,10 @@ public sealed class PublicConsumerOffsetValueTypeTests
     {
         OffsetAndMetadata value = new OffsetAndMetadata(42, "meta", 3);
 
-        Assert.Equal(42, value.Offset);
-        Assert.Equal("meta", value.Metadata);
-        Assert.True(value.LeaderEpoch.HasValue);
-        Assert.Equal(3, value.LeaderEpoch!.Value);
+        Assert.Equal(42, value.Offset());
+        Assert.Equal("meta", value.Metadata());
+        Assert.True(value.LeaderEpoch().HasValue);
+        Assert.Equal(3, value.LeaderEpoch()!.Value);
     }
 
     [Fact]
@@ -43,9 +43,9 @@ public sealed class PublicConsumerOffsetValueTypeTests
     {
         OffsetAndMetadata value = new OffsetAndMetadata(7, string.Empty, null);
 
-        Assert.Equal(7, value.Offset);
-        Assert.Equal(string.Empty, value.Metadata);
-        Assert.Null(value.LeaderEpoch);
+        Assert.Equal(7, value.Offset());
+        Assert.Equal(string.Empty, value.Metadata());
+        Assert.Null(value.LeaderEpoch());
     }
 
     [Fact]
@@ -66,11 +66,11 @@ public sealed class PublicConsumerOffsetValueTypeTests
     {
         OffsetAndMetadata value = new OffsetAndMetadata(5, "m", epoch);
 
-        Assert.Null(value.LeaderEpoch);
+        Assert.Null(value.LeaderEpoch());
         Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=null, metadata='m'}", value.ToString());
 
         OffsetAndMetadata zero = new OffsetAndMetadata(5, "m", 0);
-        Assert.Equal(0, zero.LeaderEpoch);
+        Assert.Equal(0, zero.LeaderEpoch());
         Assert.Equal("OffsetAndMetadata{offset=5, leaderEpoch=0, metadata='m'}", zero.ToString());
     }
 
@@ -120,10 +120,10 @@ public sealed class PublicConsumerOffsetValueTypeTests
     {
         OffsetAndTimestamp value = new OffsetAndTimestamp(100, 1_700_000_000_000L, 5);
 
-        Assert.Equal(100, value.Offset);
-        Assert.Equal(1_700_000_000_000L, value.Timestamp);
-        Assert.True(value.LeaderEpoch.HasValue);
-        Assert.Equal(5, value.LeaderEpoch!.Value);
+        Assert.Equal(100, value.Offset());
+        Assert.Equal(1_700_000_000_000L, value.Timestamp());
+        Assert.True(value.LeaderEpoch().HasValue);
+        Assert.Equal(5, value.LeaderEpoch()!.Value);
     }
 
     [Fact]
@@ -131,9 +131,9 @@ public sealed class PublicConsumerOffsetValueTypeTests
     {
         OffsetAndTimestamp value = new OffsetAndTimestamp(9, 123L, null);
 
-        Assert.Equal(9, value.Offset);
-        Assert.Equal(123L, value.Timestamp);
-        Assert.Null(value.LeaderEpoch);
+        Assert.Equal(9, value.Offset());
+        Assert.Equal(123L, value.Timestamp());
+        Assert.Null(value.LeaderEpoch());
     }
 
     [Fact]

@@ -41,13 +41,14 @@ public sealed class PublicAdminMemberAssignmentTests
     }
 
     [Fact]
-    public void Accessor_IsJavasSingleOne_AsAReadOnlyProperty()
+    public void Accessor_IsJavasSingleOne_AsAMethod()
     {
-        var property = typeof(MemberAssignment).GetProperty(nameof(MemberAssignment.TopicPartitions));
+        var getter = typeof(MemberAssignment).GetMethod(nameof(MemberAssignment.TopicPartitions), Type.EmptyTypes);
 
-        Assert.NotNull(property);
-        Assert.Equal(typeof(IReadOnlyCollection<TopicPartition>), property!.PropertyType);
-        Assert.Null(property.SetMethod);
+        Assert.NotNull(getter);
+        Assert.Equal(typeof(IReadOnlyCollection<TopicPartition>), getter!.ReturnType);
+        Assert.Equal(new[] { nameof(MemberAssignment.TopicPartitions) }, Getters.NamesOf(typeof(MemberAssignment)));
+        Assert.Empty(typeof(MemberAssignment).GetProperties());
     }
 
     [Fact]
@@ -61,7 +62,7 @@ public sealed class PublicAdminMemberAssignmentTests
     {
         var assignment = new MemberAssignment(null);
 
-        Assert.Empty(assignment.TopicPartitions);
+        Assert.Empty(assignment.TopicPartitions());
         Assert.Equal("(topicPartitions=)", assignment.ToString());
     }
 
@@ -73,7 +74,7 @@ public sealed class PublicAdminMemberAssignmentTests
 
         source.Add(new TopicPartition("orders", 1));
 
-        Assert.Equal(new[] { new TopicPartition("orders", 0) }, assignment.TopicPartitions);
+        Assert.Equal(new[] { new TopicPartition("orders", 0) }, assignment.TopicPartitions());
     }
 
     [Fact]
@@ -88,7 +89,7 @@ public sealed class PublicAdminMemberAssignmentTests
 
         Assert.Equal(
             new[] { new TopicPartition("orders", 0), new TopicPartition("orders", 1) },
-            assignment.TopicPartitions);
+            assignment.TopicPartitions());
     }
 
     [Fact]

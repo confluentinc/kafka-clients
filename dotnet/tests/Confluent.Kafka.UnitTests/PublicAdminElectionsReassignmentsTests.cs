@@ -149,13 +149,13 @@ public sealed class PublicAdminElectionsReassignmentsTests
                 [missing] = new NewPartitionReassignment(new[] { 0 }),
             });
 
-        Assert.Equal(3, result.Values.Count);
+        Assert.Equal(3, result.Values().Count);
 
-        await TestTimeout.Run(() => result.Values[zero].Get(), s_deadline);
-        await TestTimeout.Run(() => result.Values[one].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[zero].Get(), s_deadline);
+        await TestTimeout.Run(() => result.Values()[one].Get(), s_deadline);
 
         UnknownTopicOrPartitionException failure = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values[missing].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.Values()[missing].Get()), s_deadline);
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
 
         await TestTimeout.Run(() => FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(() => result.All().Get()), s_deadline);
@@ -180,7 +180,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
             });
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
-        Assert.Equal(2, result.Values.Count);
+        Assert.Equal(2, result.Values().Count);
     }
 
     [Theory]
@@ -198,7 +198,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
             {
                 [new TopicPartition("p4-apr-rf", 0)] = new NewPartitionReassignment(new[] { 0, 1 }),
             },
-            new AlterPartitionReassignmentsOptions { AllowReplicationFactorChange = allow });
+            new AlterPartitionReassignmentsOptions().AllowReplicationFactorChange(allow));
 
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
@@ -212,7 +212,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
         AsyncAlterPartitionReassignmentsResult result = admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>());
 
-        Assert.Empty(result.Values);
+        Assert.Empty(result.Values());
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 

@@ -34,7 +34,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task DisposeAsync_WhenIdle_Returns()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }
@@ -42,7 +42,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public void Dispose_WhenIdle_Returns()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -50,7 +50,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task DisposeAsync_WithFlushInFlight_Returns()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         // Not awaited: DisposeAsync must return with the flush still in flight.
         _ = producer.Flush();
@@ -61,7 +61,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public void Dispose_WithFlushInFlight_Returns()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         _ = producer.Flush();
 
@@ -71,7 +71,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task DisposeAsync_CalledTwice_IsSafe()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
         // The second call is a no-op: no double close or destroy.
@@ -81,7 +81,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task Dispose_ThenDisposeAsync_IsSafe()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
@@ -90,7 +90,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task Close_ThenDispose_IsSafe()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         // Close wins the latch; the following Dispose is a no-op.
         await TestTimeout.Run(async () => await producer.Close(), s_deadline);
@@ -100,7 +100,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task ConcurrentDispose_IsSafe()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
 
         // Many threads race Dispose: one wins the latch, the rest are no-ops.
         Task[] disposers = Enumerable
@@ -114,7 +114,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task Flush_AfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
         await Assert.ThrowsAsync<IllegalStateException>(() => producer.Flush());
@@ -127,7 +127,7 @@ public sealed class PublicProducerTeardownTests
         // use-after-free on a late callback crashes.
         for (int i = 0; i < 100; i++)
         {
-            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
             _ = producer.Flush();
 
             TestTimeout.Run(producer.Dispose, s_deadline);
@@ -147,8 +147,8 @@ public sealed class PublicProducerTeardownTests
             {
                 ["bootstrap.servers"] = "localhost:9092",
             },
-            Serdes.ByteArray,
-            Serdes.ByteArray);
+            Serdes.ByteArray(),
+            Serdes.ByteArray());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }

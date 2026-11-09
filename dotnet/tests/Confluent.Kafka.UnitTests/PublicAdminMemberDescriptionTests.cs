@@ -59,24 +59,22 @@ public sealed class PublicAdminMemberDescriptionTests
     }
 
     [Fact]
-    public void Accessors_AreJavasNine_AsReadOnlyProperties()
+    public void Accessors_AreJavasNine_AsMethods()
     {
-        var properties = typeof(MemberDescription).GetProperties();
+        Assert.Equal(9, Getters.Of(typeof(MemberDescription)).Count());
+        Assert.Empty(typeof(MemberDescription).GetProperties());
 
-        Assert.Equal(9, properties.Length);
-        Assert.All(properties, static property => Assert.Null(property.SetMethod));
-
-        Assert.Equal(typeof(string), PropertyType(nameof(MemberDescription.ConsumerId)));
-        Assert.Equal(typeof(string), PropertyType(nameof(MemberDescription.GroupInstanceId)));
-        Assert.Equal(typeof(string), PropertyType(nameof(MemberDescription.RackId)));
-        Assert.Equal(typeof(string), PropertyType(nameof(MemberDescription.ClientId)));
-        Assert.Equal(typeof(string), PropertyType(nameof(MemberDescription.Host)));
-        Assert.Equal(typeof(MemberAssignment), PropertyType(nameof(MemberDescription.Assignment)));
-        Assert.Equal(typeof(MemberAssignment), PropertyType(nameof(MemberDescription.TargetAssignment)));
+        Assert.Equal(typeof(string), ReturnType(nameof(MemberDescription.ConsumerId)));
+        Assert.Equal(typeof(string), ReturnType(nameof(MemberDescription.GroupInstanceId)));
+        Assert.Equal(typeof(string), ReturnType(nameof(MemberDescription.RackId)));
+        Assert.Equal(typeof(string), ReturnType(nameof(MemberDescription.ClientId)));
+        Assert.Equal(typeof(string), ReturnType(nameof(MemberDescription.Host)));
+        Assert.Equal(typeof(MemberAssignment), ReturnType(nameof(MemberDescription.Assignment)));
+        Assert.Equal(typeof(MemberAssignment), ReturnType(nameof(MemberDescription.TargetAssignment)));
 
         // The two ABI presence-flag members are nullable, never sentinel-valued.
-        Assert.Equal(typeof(int?), PropertyType(nameof(MemberDescription.MemberEpoch)));
-        Assert.Equal(typeof(bool?), PropertyType(nameof(MemberDescription.Upgraded)));
+        Assert.Equal(typeof(int?), ReturnType(nameof(MemberDescription.MemberEpoch)));
+        Assert.Equal(typeof(bool?), ReturnType(nameof(MemberDescription.Upgraded)));
     }
 
     [Fact]
@@ -97,15 +95,15 @@ public sealed class PublicAdminMemberDescriptionTests
     {
         var description = Canonical();
 
-        Assert.Equal("m-1", description.ConsumerId);
-        Assert.Equal("gi-1", description.GroupInstanceId);
-        Assert.Equal("rack-1", description.RackId);
-        Assert.Equal("c-1", description.ClientId);
-        Assert.Equal("h-1", description.Host);
-        Assert.Equal(s_current, description.Assignment);
-        Assert.Equal(s_target, description.TargetAssignment);
-        Assert.Equal(5, description.MemberEpoch);
-        Assert.True(description.Upgraded);
+        Assert.Equal("m-1", description.ConsumerId());
+        Assert.Equal("gi-1", description.GroupInstanceId());
+        Assert.Equal("rack-1", description.RackId());
+        Assert.Equal("c-1", description.ClientId());
+        Assert.Equal("h-1", description.Host());
+        Assert.Equal(s_current, description.Assignment());
+        Assert.Equal(s_target, description.TargetAssignment());
+        Assert.Equal(5, description.MemberEpoch());
+        Assert.True(description.Upgraded());
     }
 
     [Fact]
@@ -113,16 +111,16 @@ public sealed class PublicAdminMemberDescriptionTests
     {
         var description = new MemberDescription(null, null, null, null, null, null, null, null, null);
 
-        Assert.Equal(string.Empty, description.ConsumerId);
-        Assert.Null(description.GroupInstanceId);
-        Assert.Null(description.RackId);
-        Assert.Equal(string.Empty, description.ClientId);
-        Assert.Equal(string.Empty, description.Host);
-        Assert.Equal(new MemberAssignment(null), description.Assignment);
-        Assert.Empty(description.Assignment.TopicPartitions);
-        Assert.Null(description.TargetAssignment);
-        Assert.Null(description.MemberEpoch);
-        Assert.Null(description.Upgraded);
+        Assert.Equal(string.Empty, description.ConsumerId());
+        Assert.Null(description.GroupInstanceId());
+        Assert.Null(description.RackId());
+        Assert.Equal(string.Empty, description.ClientId());
+        Assert.Equal(string.Empty, description.Host());
+        Assert.Equal(new MemberAssignment(null), description.Assignment());
+        Assert.Empty(description.Assignment().TopicPartitions());
+        Assert.Null(description.TargetAssignment());
+        Assert.Null(description.MemberEpoch());
+        Assert.Null(description.Upgraded());
     }
 
     [Fact]
@@ -198,6 +196,6 @@ public sealed class PublicAdminMemberDescriptionTests
     private static MemberDescription Canonical() =>
         new MemberDescription("m-1", "gi-1", "rack-1", "c-1", "h-1", s_current, s_target, 5, true);
 
-    private static Type PropertyType(string name) =>
-        typeof(MemberDescription).GetProperty(name)!.PropertyType;
+    private static Type ReturnType(string name) =>
+        Getters.Get(typeof(MemberDescription), name).ReturnType;
 }

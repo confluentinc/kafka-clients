@@ -31,18 +31,18 @@ internal static class ClientQuotaMarshal
 
     internal static IntPtr NewFilter(ClientQuotaFilter filter)
     {
-        List<IntPtr> components = new List<IntPtr>(filter.Components.Count);
+        List<IntPtr> components = new List<IntPtr>(filter.Components().Count);
         IntPtr list = IntPtr.Zero;
         try
         {
-            foreach (ClientQuotaFilterComponent component in filter.Components)
+            foreach (ClientQuotaFilterComponent component in filter.Components())
             {
                 components.Add(NewComponent(component));
             }
 
             list = NewList(components);
             IntPtr outErr = IntPtr.Zero;
-            IntPtr native = filter.Strict
+            IntPtr native = filter.Strict()
                 ? NativeMethods.ClientQuotaFilterContainsOnly(list, ref outErr)
                 : NativeMethods.ClientQuotaFilterContains(list, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -62,14 +62,14 @@ internal static class ClientQuotaMarshal
 
     internal static IntPtr NewAlteration(ClientQuotaAlteration alteration)
     {
-        IntPtr entity = NewEntity(alteration.Entity);
+        IntPtr entity = NewEntity(alteration.Entity());
         try
         {
-            List<IntPtr> ops = new List<IntPtr>(alteration.Ops.Count);
+            List<IntPtr> ops = new List<IntPtr>(alteration.Ops().Count);
             IntPtr list = IntPtr.Zero;
             try
             {
-                foreach (ClientQuotaAlteration.Op op in alteration.Ops)
+                foreach (ClientQuotaAlteration.Op op in alteration.Ops())
                 {
                     ops.Add(NewOp(op));
                 }
@@ -100,14 +100,14 @@ internal static class ClientQuotaMarshal
 
     internal static IntPtr NewEntity(ClientQuotaEntity entity)
     {
-        List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(entity.Entries.Count * 2);
+        List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(entity.Entries().Count * 2);
         IntPtr map = IntPtr.Zero;
         try
         {
             IntPtr outErr = IntPtr.Zero;
             map = NativeMethods.MapNew(ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            foreach (KeyValuePair<string, string?> entry in entity.Entries)
+            foreach (KeyValuePair<string, string?> entry in entity.Entries())
             {
                 Utf8Marshal.PinnedUtf8String type = Utf8Marshal.Pin(entry.Key);
                 pins.Add(type);
@@ -219,13 +219,13 @@ internal static class ClientQuotaMarshal
 
     private static IntPtr NewComponent(ClientQuotaFilterComponent component)
     {
-        using Utf8Marshal.PinnedUtf8String entityType = Utf8Marshal.Pin(component.EntityType);
+        using Utf8Marshal.PinnedUtf8String entityType = Utf8Marshal.Pin(component.EntityType());
         IntPtr outErr = IntPtr.Zero;
         IntPtr native;
-        switch (component.MatchType)
+        switch (component.MatchType())
         {
             case ClientQuotaMatchType.Exact:
-                using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(component.MatchName ?? string.Empty))
+                using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(component.Match() ?? string.Empty))
                 {
                     native = NativeMethods.ClientQuotaFilterComponentOfEntity(entityType.Pointer, name.Pointer, ref outErr);
                 }
@@ -238,7 +238,7 @@ internal static class ClientQuotaMarshal
                 native = NativeMethods.ClientQuotaFilterComponentOfEntityType(entityType.Pointer, ref outErr);
                 break;
             default:
-                throw new InvalidOperationException("Unknown client quota match type " + component.MatchType + ".");
+                throw new InvalidOperationException("Unknown client quota match type " + component.MatchType() + ".");
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -247,11 +247,11 @@ internal static class ClientQuotaMarshal
 
     private static IntPtr NewOp(ClientQuotaAlteration.Op op)
     {
-        using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(op.Key);
+        using Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(op.Key());
         IntPtr outErr = IntPtr.Zero;
 
         // A null value removes the quota; the C ABI spells Java's null as NaN.
-        IntPtr native = NativeMethods.ClientQuotaAlterationOpNew(key.Pointer, op.Value ?? double.NaN, ref outErr);
+        IntPtr native = NativeMethods.ClientQuotaAlterationOpNew(key.Pointer, op.Value() ?? double.NaN, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return native;
     }

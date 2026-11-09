@@ -51,12 +51,12 @@ public sealed class PublicMetricNameTests
     public void Properties_RoundTrip()
     {
         MetricName name = new MetricName("records-lag", "consumer-fetch", "the lag", Tags(("topic", "t"), ("partition", "0")));
-        Assert.Equal("records-lag", name.Name);
-        Assert.Equal("consumer-fetch", name.Group);
-        Assert.Equal("the lag", name.Description);
-        Assert.Equal(2, name.Tags.Count);
-        Assert.Equal("t", name.Tags["topic"]);
-        Assert.Equal("0", name.Tags["partition"]);
+        Assert.Equal("records-lag", name.Name());
+        Assert.Equal("consumer-fetch", name.Group());
+        Assert.Equal("the lag", name.Description());
+        Assert.Equal(2, name.Tags().Count);
+        Assert.Equal("t", name.Tags()["topic"]);
+        Assert.Equal("0", name.Tags()["partition"]);
     }
 
     [Fact]
@@ -174,9 +174,9 @@ public sealed class PublicMetricNameTests
         MetricName a = new MetricName(name, "gruppe-Ω", "描述", Tags(("clé-Ω", "valeur-😀")));
         MetricName b = new MetricName(name, "gruppe-Ω", "another", Tags(("clé-Ω", "valeur-😀")));
 
-        Assert.Equal(name, a.Name);
-        Assert.Equal("gruppe-Ω", a.Group);
-        Assert.Equal("valeur-😀", a.Tags["clé-Ω"]);
+        Assert.Equal(name, a.Name());
+        Assert.Equal("gruppe-Ω", a.Group());
+        Assert.Equal("valeur-😀", a.Tags()["clé-Ω"]);
         Assert.True(a.Equals(b));
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
         Assert.Contains(name, a.ToString(), StringComparison.Ordinal);
@@ -190,7 +190,7 @@ public sealed class PublicMetricNameTests
         source["k"] = "mutated";
         source["added"] = "x";
 
-        Assert.Equal("v", name.Tags["k"]);
-        Assert.Single(name.Tags);
+        Assert.Equal("v", name.Tags()["k"]);
+        Assert.Single(name.Tags());
     }
 }

@@ -56,7 +56,7 @@ public sealed class AdminP2bResultMarshalTests
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        Assert.Equal(lowWatermark, copied.LowWatermark);
+        Assert.Equal(lowWatermark, copied.LowWatermark());
     }
 
     [Fact]

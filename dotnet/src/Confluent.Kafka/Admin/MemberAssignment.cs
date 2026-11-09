@@ -63,7 +63,8 @@ public sealed class MemberAssignment
     /// The partitions assigned to the group member — Java's <c>topicPartitions()</c>. Never
     /// <see langword="null"/>; empty means "assigned nothing".
     /// </summary>
-    public IReadOnlyCollection<TopicPartition> TopicPartitions => _topicPartitions;
+    /// <returns>The partitions assigned to the group member.</returns>
+    public IReadOnlyCollection<TopicPartition> TopicPartitions() => _topicPartitions;
 
     /// <summary>
     /// Compares the assigned partitions as a set — Java's <c>equals</c>, which delegates to

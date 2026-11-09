@@ -56,13 +56,14 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     [InlineData(typeof(AsyncDescribeClassicGroupsResult))]
     public void PublicShape_IsJavasTwoAccessors(Type result)
     {
-        Assert.Equal(new[] { "DescribedGroups" }, result.GetProperties().Select(property => property.Name));
+        Assert.Empty(result.GetProperties());
         Assert.Equal(
-            new[] { "All" },
+            new[] { "All", "DescribedGroups" },
             result
                 .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
                 .Where(method => !method.IsSpecialName)
-                .Select(method => method.Name));
+                .Select(method => method.Name)
+                .OrderBy(name => name, StringComparer.Ordinal));
         Assert.Empty(result.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
         Assert.Null(result.GetCustomAttribute<ObsoleteAttribute>());
     }
@@ -72,13 +73,13 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
     {
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>>),
-            typeof(DescribeClassicGroupsResult).GetProperty(nameof(DescribeClassicGroupsResult.DescribedGroups))!.PropertyType);
+            Getters.Get(typeof(DescribeClassicGroupsResult), nameof(DescribeClassicGroupsResult.DescribedGroups)).ReturnType);
         Assert.Equal(
             typeof(KafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>>),
             typeof(DescribeClassicGroupsResult).GetMethod(nameof(DescribeClassicGroupsResult.All))!.ReturnType);
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>),
-            typeof(AsyncDescribeClassicGroupsResult).GetProperty(nameof(AsyncDescribeClassicGroupsResult.DescribedGroups))!.PropertyType);
+            Getters.Get(typeof(AsyncDescribeClassicGroupsResult), nameof(AsyncDescribeClassicGroupsResult.DescribedGroups)).ReturnType);
         Assert.Equal(
             typeof(AsyncKafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>>),
             typeof(AsyncDescribeClassicGroupsResult).GetMethod(nameof(AsyncDescribeClassicGroupsResult.All))!.ReturnType);
@@ -94,9 +95,9 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         futures["g-2"] = KafkaFuture.CompletedFuture(Description("g-2"));
         futures.Remove("g-1");
 
-        Assert.NotSame(futures, result.DescribedGroups);
-        Assert.Equal(new[] { "g-1" }, result.DescribedGroups.Keys);
-        Assert.Equal(first, result.DescribedGroups["g-1"]);
+        Assert.NotSame(futures, result.DescribedGroups());
+        Assert.Equal(new[] { "g-1" }, result.DescribedGroups().Keys);
+        Assert.Equal(first, result.DescribedGroups()["g-1"]);
         Assert.Equal(new[] { "g-1" }, result.All().Get(s_deadline).Keys);
     }
 
@@ -111,9 +112,9 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
         futures["g-2"] = AsyncKafkaFuture.CompletedFuture(Description("g-2"));
         futures.Remove("g-1");
 
-        Assert.NotSame(futures, result.DescribedGroups);
-        Assert.Equal(new[] { "g-1" }, result.DescribedGroups.Keys);
-        Assert.Equal(first, result.DescribedGroups["g-1"]);
+        Assert.NotSame(futures, result.DescribedGroups());
+        Assert.Equal(new[] { "g-1" }, result.DescribedGroups().Keys);
+        Assert.Equal(first, result.DescribedGroups()["g-1"]);
         Assert.Equal(new[] { "g-1" }, (await result.All().Get()).Keys);
     }
 
@@ -176,7 +177,7 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
                 ["healthy"] = KafkaFuture.CompletedFuture(healthy),
                 ["broken"] = new KafkaFuture<ClassicGroupDescription>(broken),
             });
-        Assert.Same(healthy, result.DescribedGroups["healthy"].Get(s_deadline));
+        Assert.Same(healthy, result.DescribedGroups()["healthy"].Get(s_deadline));
         Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => result.All().Get(s_deadline)));
 
         AsyncDescribeClassicGroupsResult asyncResult = new AsyncDescribeClassicGroupsResult(
@@ -185,7 +186,7 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
                 ["healthy"] = AsyncKafkaFuture.CompletedFuture(healthy),
                 ["broken"] = new AsyncKafkaFuture<ClassicGroupDescription>(broken),
             });
-        Assert.Same(healthy, await asyncResult.DescribedGroups["healthy"].Get());
+        Assert.Same(healthy, await asyncResult.DescribedGroups()["healthy"].Get());
         Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => asyncResult.All().Get()));
     }
 
@@ -211,8 +212,8 @@ public sealed class PublicAdminDescribeClassicGroupsResultTests
             });
         KafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>> all = result.All();
         AsyncKafkaFuture<IReadOnlyDictionary<string, ClassicGroupDescription>> asyncAll = asyncResult.All();
-        Assert.False(all.IsDone);
-        Assert.False(asyncAll.IsDone);
+        Assert.False(all.IsDone());
+        Assert.False(asyncAll.IsDone());
 
         stillRunning.Complete(Description("still-running"));
 

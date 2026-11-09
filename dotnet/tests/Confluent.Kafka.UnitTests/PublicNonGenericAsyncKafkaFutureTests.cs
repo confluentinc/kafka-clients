@@ -159,9 +159,9 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
             future.GetNow();
             return null;
         });
-        AssertDefaultThrows(() => future.IsDone);
-        AssertDefaultThrows(() => future.IsCancelled);
-        AssertDefaultThrows(() => future.IsCompletedExceptionally);
+        AssertDefaultThrows(() => future.IsDone());
+        AssertDefaultThrows(() => future.IsCancelled());
+        AssertDefaultThrows(() => future.IsCompletedExceptionally());
         AssertDefaultThrows(() => future.Cancel(true));
         AssertDefaultThrows(() => future.ThenApply(() => 1));
         AssertDefaultThrows(() => future.WhenComplete(error => { }));
@@ -212,9 +212,9 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         });
         AsyncKafkaFuture all = AsyncKafkaFuture.AllOf(AsyncKafkaFuture.CompletedFuture(1), future);
 
-        Assert.True(applied.IsDone);
-        Assert.True(completed.IsDone);
-        Assert.True(all.IsDone);
+        Assert.True(applied.IsDone());
+        Assert.True(completed.IsDone());
+        Assert.True(all.IsDone());
         Assert.Equal(caller, completedOn);
         Assert.Same(future.Get(), future.Get(TimeSpan.Zero));
         Assert.Same(future.Get(), future.Get(TimeSpan.FromSeconds(1)));
@@ -226,8 +226,8 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
             Assert.Null(seenError);
             completed.GetNow();
             all.GetNow();
-            Assert.False(completed.IsCompletedExceptionally);
-            Assert.False(all.IsCompletedExceptionally);
+            Assert.False(completed.IsCompletedExceptionally());
+            Assert.False(all.IsCompletedExceptionally());
         }
         else
         {
@@ -305,8 +305,8 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         AsyncKafkaFuture<int> applied = future.ThenApply(() => Interlocked.Increment(ref calls) + 41);
         Exception? seen = new InvalidOperationException("The action did not run.");
         AsyncKafkaFuture completed = future.WhenComplete(error => seen = error);
-        Assert.False(applied.IsDone);
-        Assert.False(completed.IsDone);
+        Assert.False(applied.IsDone());
+        Assert.False(completed.IsDone());
 
         Assert.True(impl.Complete(null));
         Assert.Equal(42, await TestTimeout.Run(() => applied.Get(), BlockingCall.Deadline));
@@ -350,13 +350,13 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
             () => Assert.ThrowsAsync<OperationCanceledException>(() => waiting),
             BlockingCall.Deadline);
         Assert.Equal(cancellation.Token, ended.CancellationToken);
-        Assert.False(future.IsDone);
+        Assert.False(future.IsDone());
         Assert.Equal("KafkaFuture{value=null,exception=null,done=false}", future.ToString());
 
         Assert.True(future.Cancel(true));
-        Assert.True(future.IsDone);
-        Assert.True(future.IsCancelled);
-        Assert.True(future.IsCompletedExceptionally);
+        Assert.True(future.IsDone());
+        Assert.True(future.IsCancelled());
+        Assert.True(future.IsCompletedExceptionally());
         Assert.True(future.Cancel(false));
         await Assert.ThrowsAsync<TaskCanceledException>(() => future.Get());
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => future.Get(TimeSpan.FromSeconds(1)));
@@ -369,7 +369,7 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         await TestTimeout.Run(() => done.Get(TimeSpan.Zero), BlockingCall.Deadline);
         await TestTimeout.Run(() => done.Get(cancellation.Token), BlockingCall.Deadline);
         Assert.False(done.Cancel(true));
-        Assert.False(done.IsCancelled);
+        Assert.False(done.IsCancelled());
     }
 
     [Fact]
@@ -380,12 +380,12 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         AsyncKafkaFuture mixed = AsyncKafkaFuture.AllOf(
             new AsyncKafkaFuture<int>(number),
             new AsyncKafkaFuture<string>(text));
-        Assert.False(mixed.IsDone);
+        Assert.False(mixed.IsDone());
         Assert.True(number.Complete(1));
-        Assert.False(mixed.IsDone);
+        Assert.False(mixed.IsDone());
         Assert.True(text.Complete("one"));
         await TestTimeout.Run(() => mixed.Get(), BlockingCall.Deadline);
-        Assert.True(mixed.IsDone);
+        Assert.True(mixed.IsDone());
 
         KafkaFutureImpl<int> first = new KafkaFutureImpl<int>();
         KafkaFutureImpl<int> second = new KafkaFutureImpl<int>();
@@ -393,17 +393,17 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         AsyncKafkaFuture all = AsyncKafkaFuture.AllOf(oneType);
         KafkaException cause = new Common.Errors.TopicExistsException("The operation failed.");
         Assert.True(first.CompleteWithError(cause));
-        Assert.False(all.IsDone);
+        Assert.False(all.IsDone());
         Assert.True(second.Complete(2));
         Assert.Same(cause, await FutureAssert.ThrowsAsync<TopicExistsException>(() => all.Get()));
-        Assert.True(all.IsCompletedExceptionally);
-        Assert.False(all.IsCancelled);
+        Assert.True(all.IsCompletedExceptionally());
+        Assert.False(all.IsCancelled());
 
         AsyncKafkaFuture none = AsyncKafkaFuture.AllOf();
-        Assert.True(none.IsDone);
-        Assert.False(none.IsCompletedExceptionally);
+        Assert.True(none.IsDone());
+        Assert.False(none.IsCompletedExceptionally());
         await TestTimeout.Run(() => none.Get(), BlockingCall.Deadline);
-        Assert.True(AsyncKafkaFuture.AllOf<int>().IsDone);
+        Assert.True(AsyncKafkaFuture.AllOf<int>().IsDone());
 
         Assert.Equal(
             "futures",
@@ -435,9 +435,9 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
                 "System.Boolean Cancel(System.Boolean)",
                 "System.Boolean Equals(Confluent.Kafka.Common.AsyncKafkaFuture)",
                 "System.Boolean Equals(System.Object)",
-                "System.Boolean get_IsCancelled()",
-                "System.Boolean get_IsCompletedExceptionally()",
-                "System.Boolean get_IsDone()",
+                "System.Boolean IsCancelled()",
+                "System.Boolean IsCompletedExceptionally()",
+                "System.Boolean IsDone()",
                 "System.Int32 GetHashCode()",
                 "System.String ToString()",
                 "System.Threading.Tasks.Task Get()",
@@ -476,15 +476,7 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
                 .ToArray());
 
         Assert.Empty(type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
-        PropertyInfo[] properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
-        Assert.Equal(
-            new[] { "IsCancelled", "IsCompletedExceptionally", "IsDone" },
-            properties.Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
-        Assert.All(properties, property =>
-        {
-            Assert.Equal(typeof(bool), property.PropertyType);
-            Assert.False(property.CanWrite);
-        });
+        Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
         FieldInfo[] fields = type.GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.All(fields, field =>
         {

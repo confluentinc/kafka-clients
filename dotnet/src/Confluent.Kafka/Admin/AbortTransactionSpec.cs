@@ -22,11 +22,16 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.AbortTransactionSpec</c>.
 /// </summary>
 /// <remarks>
-/// <see cref="ProducerEpoch"/> is a <see langword="short"/>, as Java's is, although the same concept
+/// <see cref="ProducerEpoch()"/> is a <see langword="short"/>, as Java's is, although the same concept
 /// is an <see langword="int"/> on <see cref="ProducerState"/> and <see cref="TransactionDescription"/>.
 /// </remarks>
 public sealed class AbortTransactionSpec
 {
+    private readonly TopicPartition _topicPartition;
+    private readonly long _producerId;
+    private readonly short _producerEpoch;
+    private readonly int _coordinatorEpoch;
+
     /// <summary>Creates an abort specification — Java's constructor.</summary>
     /// <param name="topicPartition">The partition holding the hanging transaction.</param>
     /// <param name="producerId">The producer id of the hanging transaction.</param>
@@ -38,33 +43,37 @@ public sealed class AbortTransactionSpec
         short producerEpoch,
         int coordinatorEpoch)
     {
-        TopicPartition = topicPartition;
-        ProducerId = producerId;
-        ProducerEpoch = producerEpoch;
-        CoordinatorEpoch = coordinatorEpoch;
+        _topicPartition = topicPartition;
+        _producerId = producerId;
+        _producerEpoch = producerEpoch;
+        _coordinatorEpoch = coordinatorEpoch;
     }
 
     /// <summary>The partition — Java's <c>topicPartition()</c>.</summary>
-    public TopicPartition TopicPartition { get; }
+    /// <returns>The partition.</returns>
+    public TopicPartition TopicPartition() => _topicPartition;
 
     /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
-    public long ProducerId { get; }
+    /// <returns>The producer id.</returns>
+    public long ProducerId() => _producerId;
 
     /// <summary>The producer epoch — Java's <c>producerEpoch()</c>.</summary>
-    public short ProducerEpoch { get; }
+    /// <returns>The producer epoch.</returns>
+    public short ProducerEpoch() => _producerEpoch;
 
     /// <summary>The coordinator epoch — Java's <c>coordinatorEpoch()</c>.</summary>
-    public int CoordinatorEpoch { get; }
+    /// <returns>The coordinator epoch.</returns>
+    public int CoordinatorEpoch() => _coordinatorEpoch;
 
     /// <summary>Value equality over all four fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two identify the same transaction.</returns>
     public override bool Equals(object? obj) =>
         obj is AbortTransactionSpec other
-        && ProducerId == other.ProducerId
-        && ProducerEpoch == other.ProducerEpoch
-        && CoordinatorEpoch == other.CoordinatorEpoch
-        && TopicPartition == other.TopicPartition;
+        && ProducerId() == other.ProducerId()
+        && ProducerEpoch() == other.ProducerEpoch()
+        && CoordinatorEpoch() == other.CoordinatorEpoch()
+        && TopicPartition() == other.TopicPartition();
 
     /// <summary>The hash of all four fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
@@ -72,10 +81,10 @@ public sealed class AbortTransactionSpec
     {
         unchecked
         {
-            int hash = TopicPartition.GetHashCode();
-            hash = (hash * 31) + ProducerId.GetHashCode();
-            hash = (hash * 31) + ProducerEpoch;
-            return (hash * 31) + CoordinatorEpoch;
+            int hash = TopicPartition().GetHashCode();
+            hash = (hash * 31) + ProducerId().GetHashCode();
+            hash = (hash * 31) + ProducerEpoch();
+            return (hash * 31) + CoordinatorEpoch();
         }
     }
 
@@ -85,8 +94,8 @@ public sealed class AbortTransactionSpec
         string.Format(
             CultureInfo.InvariantCulture,
             "AbortTransactionSpec(topicPartition={0}, producerId={1}, producerEpoch={2}, coordinatorEpoch={3})",
-            TopicPartition,
-            ProducerId,
-            ProducerEpoch,
-            CoordinatorEpoch);
+            TopicPartition(),
+            ProducerId(),
+            ProducerEpoch(),
+            CoordinatorEpoch());
 }

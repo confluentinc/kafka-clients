@@ -42,13 +42,13 @@ internal static class VerifyConsumed
         var tps = new List<TopicPartition>(partitions.Count);
         foreach (PartitionInfo p in partitions)
         {
-            tps.Add(new TopicPartition(topic, p.Partition));
+            tps.Add(new TopicPartition(topic, p.Partition()));
         }
 
         IReadOnlyDictionary<TopicPartition, long> ends = consumer.EndOffsets(tps);
         foreach (TopicPartition tp in tps)
         {
-            baseline[tp.Partition] = ends.TryGetValue(tp, out long high) ? high : 0;
+            baseline[tp.Partition()] = ends.TryGetValue(tp, out long high) ? high : 0;
         }
 
         return baseline;
@@ -75,8 +75,8 @@ internal static class VerifyConsumed
             var partitionIds = new List<int>(numPartitions);
             foreach (PartitionInfo p in partitions)
             {
-                tps.Add(new TopicPartition(topic, p.Partition));
-                partitionIds.Add(p.Partition);
+                tps.Add(new TopicPartition(topic, p.Partition()));
+                partitionIds.Add(p.Partition());
             }
 
             IReadOnlyDictionary<TopicPartition, long> lows = consumer.BeginningOffsets(tps);
@@ -88,9 +88,9 @@ internal static class VerifyConsumed
             foreach (TopicPartition tp in tps)
             {
                 long low = lows.TryGetValue(tp, out long l) ? l : 0;
-                long start = Math.Max(low, baseline.TryGetValue(tp.Partition, out long b) ? b : 0);
-                targets[tp.Partition] = highs.TryGetValue(tp, out long h) ? h : 0;
-                current[tp.Partition] = start;
+                long start = Math.Max(low, baseline.TryGetValue(tp.Partition(), out long b) ? b : 0);
+                targets[tp.Partition()] = highs.TryGetValue(tp, out long h) ? h : 0;
+                current[tp.Partition()] = start;
                 consumer.Seek(tp, start);
             }
 
@@ -104,7 +104,7 @@ internal static class VerifyConsumed
             while (!CaughtUp(partitionIds, current, targets))
             {
                 ConsumerRecords<byte[], byte[]> records = consumer.Poll(pollTimeout);
-                if (records.Count == 0)
+                if (records.Count() == 0)
                 {
                     if (Monotonic() - lastProgress > EmptyBudgetSeconds)
                     {
@@ -117,8 +117,8 @@ internal static class VerifyConsumed
                 foreach (ConsumerRecord<byte[], byte[]> r in records)
                 {
                     consumedCount++;
-                    int p = r.Partition;
-                    current[p] = Math.Max(current.TryGetValue(p, out long c) ? c : 0, r.Offset + 1);
+                    int p = r.Partition();
+                    current[p] = Math.Max(current.TryGetValue(p, out long c) ? c : 0, r.Offset() + 1);
                     if (hasKeys)
                     {
                         CheckKeyPartition(r, p, numPartitions, ref mismatchCount, sampleMismatches);
@@ -162,13 +162,13 @@ internal static class VerifyConsumed
 
     private static void CheckKeyPartition(ConsumerRecord<byte[], byte[]> r, int partition, int numPartitions, ref long mismatchCount, List<string> samples)
     {
-        byte[]? key = r.Key;
+        byte[]? key = r.Key();
         if (key is null)
         {
             mismatchCount++;
             if (samples.Count < 5)
             {
-                samples.Add($"partition={partition} offset={r.Offset} key=null (expected non-null)");
+                samples.Add($"partition={partition} offset={r.Offset()} key=null (expected non-null)");
             }
 
             return;
@@ -180,7 +180,7 @@ internal static class VerifyConsumed
             mismatchCount++;
             if (samples.Count < 5)
             {
-                samples.Add($"partition={partition} expected={expectedPartition} offset={r.Offset}");
+                samples.Add($"partition={partition} expected={expectedPartition} offset={r.Offset()}");
             }
         }
     }
@@ -216,7 +216,7 @@ internal static class VerifyConsumed
             config[kv.Key] = kv.Value;
         }
 
-        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray);
+        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray(), Serdes.ByteArray());
     }
 
     private static double Monotonic() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;

@@ -96,7 +96,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
     {
         Observation seen = new Observation();
         MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         string topic = Topic("mock-flush-in-callback");
         Recording pending = new Recording(seen);
@@ -124,7 +124,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Assert.True(producer.CompleteNext());
         Assert.True(flushing.WaitEnded(Deadline), "the flushing callback did not end");
         _ = pendingFuture.Get(Deadline);
-        seen.PendingCompleted = pendingFuture.IsDone;
+        seen.PendingCompleted = pendingFuture.IsDone();
         return seen;
     }
 
@@ -133,7 +133,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
         Observation seen = new Observation();
         TaskCompletionSource<bool> gate = NewGate();
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         try
         {
@@ -199,7 +199,7 @@ public sealed class PublicProducerMockFlushInCallbackTests
 
             await TestTimeout.Run(() => flushingEnded, disposes ? s_quickly : Deadline);
             _ = await Within(pendingFuture.Get());
-            seen.PendingCompleted = pendingFuture.IsDone;
+            seen.PendingCompleted = pendingFuture.IsDone();
             if (disposes)
             {
                 seen.AfterClose = FailureOf(() => _ = producer.Flush());

@@ -89,7 +89,7 @@ public sealed class PublicAdminP14SyncCloseTests
             KafkaException woken = BlockingCall.AssertThrew(
                 blocked.Join(), 7, "The AdminClient thread has exited. Call: listTopics");
             Assert.IsAssignableFrom<Common.Errors.RetriableException>(woken);
-            Assert.True(result.NamesToListings().IsDone);
+            Assert.True(result.NamesToListings().IsDone());
             BlockingCall.AssertThrew(
                 BlockingCall.RunGet(() => result.Names().Get()), 7, "The AdminClient thread has exited. Call: listTopics");
         }

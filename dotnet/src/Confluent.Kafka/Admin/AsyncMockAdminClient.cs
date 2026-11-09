@@ -46,7 +46,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
     /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    public static IReadOnlyList<string> DEFAULT_LOG_DIRS { get; } = MockAdminClient.DEFAULT_LOG_DIRS;
+    public static readonly IReadOnlyList<string> DEFAULT_LOG_DIRS = MockAdminClient.DEFAULT_LOG_DIRS;
 
     private readonly NativeAdminClient _native;
 
@@ -341,7 +341,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
         CreateDelegationTokenOptions? options = null)
     {
         // Java's mock reads renewers().get(0) as the token's owner, out of bounds for its default LinkedList.
-        if (options is null || options.Renewers is { Count: 0 })
+        if (options is null || options.Renewers() is { Count: 0 })
         {
             throw new IndexOutOfBoundsException("Index: 0, Size: 0");
         }

@@ -27,7 +27,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// <see cref="ListConsumerGroupOffsetsSpec"/> against Java's
 /// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec</c>: the unset selection (every partition the group
-/// committed) stays apart from an empty one in the property, equality, the hash and the rendering.
+/// committed) stays apart from an empty one in the getter, equality, the hash and the rendering.
 /// </summary>
 public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
 {
@@ -40,75 +40,67 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
     {
         ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec();
 
-        Assert.Null(spec.TopicPartitions);
+        Assert.Null(spec.TopicPartitions());
     }
 
     [Fact]
-    public void PublicShape_IsJavasOneAccessorAsASettableNullableProperty()
+    public void PublicShape_IsJavasOneGetterAndSetterAsMethods()
     {
-        Assert.Equal(
-            new[] { "TopicPartitions" },
-            typeof(ListConsumerGroupOffsetsSpec)
-                .GetProperties()
-                .Select(property => property.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+        Type type = typeof(ListConsumerGroupOffsetsSpec);
+        Assert.Empty(type.GetProperties());
+        Assert.Equal(new[] { "TopicPartitions" }, Getters.NamesOf(type));
+        Assert.Equal(new[] { "TopicPartitions" }, SetterMethods.NamesOf(type));
 
-        Assert.Empty(
-            typeof(ListConsumerGroupOffsetsSpec)
-                .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        Assert.Empty(type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 
-        ConstructorInfo constructor = Assert.Single(typeof(ListConsumerGroupOffsetsSpec).GetConstructors());
+        ConstructorInfo constructor = Assert.Single(type.GetConstructors());
         Assert.Empty(constructor.GetParameters());
 
-        // The property stays nullable: null is the request for every partition.
-        PropertyInfo topicPartitions = typeof(ListConsumerGroupOffsetsSpec).GetProperty(
-            nameof(ListConsumerGroupOffsetsSpec.TopicPartitions))!;
-        Assert.Equal(typeof(IReadOnlyCollection<TopicPartition>), topicPartitions.PropertyType);
-        Assert.NotNull(topicPartitions.SetMethod);
-        Assert.NotNull(topicPartitions.GetMethod);
+        // Both stay nullable: null is the request for every partition.
+        Type collection = typeof(IReadOnlyCollection<TopicPartition>);
+        Assert.Equal(collection, Getters.Get(type, nameof(ListConsumerGroupOffsetsSpec.TopicPartitions)).ReturnType);
+        Assert.Equal(
+            collection,
+            SetterMethods.ParameterTypeOf(type, nameof(ListConsumerGroupOffsetsSpec.TopicPartitions)));
     }
 
     [Fact]
     public void TopicPartitions_RoundTripsIncludingBackToNull()
     {
-        ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec
-        {
-            TopicPartitions = new[] { s_ordersZero, s_payments },
-        };
+        ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec()
+            .TopicPartitions(new[] { s_ordersZero, s_payments });
 
-        Assert.Equal(new[] { s_ordersZero, s_payments }, spec.TopicPartitions);
+        Assert.Equal(new[] { s_ordersZero, s_payments }, spec.TopicPartitions());
 
-        spec.TopicPartitions = Array.Empty<TopicPartition>();
-        Assert.NotNull(spec.TopicPartitions);
-        Assert.Empty(spec.TopicPartitions!);
+        spec.TopicPartitions(Array.Empty<TopicPartition>());
+        Assert.NotNull(spec.TopicPartitions());
+        Assert.Empty(spec.TopicPartitions()!);
 
-        spec.TopicPartitions = null;
-        Assert.Null(spec.TopicPartitions);
+        spec.TopicPartitions(null);
+        Assert.Null(spec.TopicPartitions());
     }
 
     [Fact]
     public void TopicPartitions_KeepsDuplicatesAndOrder_BecauseJavaHoldsACollectionNotASet()
     {
-        ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec
-        {
-            TopicPartitions = new[] { s_ordersOne, s_ordersZero, s_ordersOne },
-        };
+        ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec()
+            .TopicPartitions(new[] { s_ordersOne, s_ordersZero, s_ordersOne });
 
-        Assert.Equal(new[] { s_ordersOne, s_ordersZero, s_ordersOne }, spec.TopicPartitions);
+        Assert.Equal(new[] { s_ordersOne, s_ordersZero, s_ordersOne }, spec.TopicPartitions());
     }
 
     [Fact]
     public void TopicPartitions_IsCopiedOnAssignment_NotAliased()
     {
         List<TopicPartition> source = new List<TopicPartition> { s_ordersZero };
-        ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec { TopicPartitions = source };
+        ListConsumerGroupOffsetsSpec spec = new ListConsumerGroupOffsetsSpec().TopicPartitions(source);
 
-        Assert.NotSame(source, spec.TopicPartitions);
+        Assert.NotSame(source, spec.TopicPartitions());
 
         int hashBefore = spec.GetHashCode();
         source.Add(s_payments);
 
-        Assert.Equal(new[] { s_ordersZero }, spec.TopicPartitions);
+        Assert.Equal(new[] { s_ordersZero }, spec.TopicPartitions());
         Assert.Equal(hashBefore, spec.GetHashCode());
         Assert.Equal("ListConsumerGroupOffsetsSpec(topicPartitions=[orders-0])", spec.ToString());
     }
@@ -178,12 +170,13 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
     {
         Assert.Null(typeof(ListConsumerGroupOffsetsSpec).GetCustomAttribute<ObsoleteAttribute>());
 
-        foreach (PropertyInfo property in typeof(ListConsumerGroupOffsetsSpec).GetProperties())
+        foreach (MemberInfo member in typeof(ListConsumerGroupOffsetsSpec).GetMembers(
+                     BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
         {
-            Assert.Null(property.GetCustomAttribute<ObsoleteAttribute>());
+            Assert.Null(member.GetCustomAttribute<ObsoleteAttribute>());
         }
     }
 
     private static ListConsumerGroupOffsetsSpec Spec(params TopicPartition[] topicPartitions) =>
-        new ListConsumerGroupOffsetsSpec { TopicPartitions = topicPartitions };
+        new ListConsumerGroupOffsetsSpec().TopicPartitions(topicPartitions);
 }

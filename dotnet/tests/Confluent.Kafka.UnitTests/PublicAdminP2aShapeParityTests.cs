@@ -88,26 +88,26 @@ public sealed class PublicAdminP2aShapeParityTests
     [Fact]
     public void AbsentVersusEmpty_IsVisibleInTheSignatures()
     {
-        AssertNullableProperty(typeof(TopicDescription), nameof(TopicDescription.AuthorizedOperations));
-        AssertNullableProperty(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Elr));
-        AssertNullableProperty(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.LastKnownElr));
-        AssertNullableProperty(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Leader));
+        AssertNullableGetter(typeof(TopicDescription), nameof(TopicDescription.AuthorizedOperations));
+        AssertNullableGetter(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Elr));
+        AssertNullableGetter(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.LastKnownElr));
+        AssertNullableGetter(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Leader));
 
-        AssertNonNullableProperty(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Replicas));
-        AssertNonNullableProperty(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.InSyncReplicas));
-        AssertNonNullableProperty(typeof(TopicDescription), nameof(TopicDescription.Partitions));
+        AssertNonNullableGetter(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Replicas));
+        AssertNonNullableGetter(typeof(TopicPartitionInfo), nameof(TopicPartitionInfo.Isr));
+        AssertNonNullableGetter(typeof(TopicDescription), nameof(TopicDescription.Partitions));
 
         // Java's partitions() is a List and authorizedOperations() a Set; IReadOnlySet post-dates netstandard2.0, so the set
         // becomes IReadOnlyCollection, but the list stays a list.
         Assert.Equal(
             typeof(IReadOnlyList<TopicPartitionInfo>),
-            typeof(TopicDescription).GetProperty(nameof(TopicDescription.Partitions))!.PropertyType);
+            typeof(TopicDescription).GetMethod(nameof(TopicDescription.Partitions), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(IReadOnlyCollection<AclOperation>),
-            typeof(TopicDescription).GetProperty(nameof(TopicDescription.AuthorizedOperations))!.PropertyType);
+            typeof(TopicDescription).GetMethod(nameof(TopicDescription.AuthorizedOperations), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
             typeof(IReadOnlyList<Node>),
-            typeof(TopicPartitionInfo).GetProperty(nameof(TopicPartitionInfo.Replicas))!.PropertyType);
+            typeof(TopicPartitionInfo).GetMethod(nameof(TopicPartitionInfo.Replicas), Type.EmptyTypes)!.ReturnType);
     }
 
     [Fact]
@@ -143,20 +143,24 @@ public sealed class PublicAdminP2aShapeParityTests
     {
         DescribeTopicsOptions options = new DescribeTopicsOptions();
 
-        Assert.Null(options.TimeoutMs);
-        Assert.False(options.IncludeAuthorizedOperations);
-        Assert.Equal(2000, options.PartitionSizeLimitPerResponse);
+        Assert.Null(options.TimeoutMs());
+        Assert.False(options.IncludeAuthorizedOperations());
+        Assert.Equal(2000, options.PartitionSizeLimitPerResponse());
 
         Assert.Equal(
             typeof(int),
-            typeof(DescribeTopicsOptions)
-                .GetProperty(nameof(DescribeTopicsOptions.PartitionSizeLimitPerResponse))!.PropertyType);
+            Getters.Get(typeof(DescribeTopicsOptions), nameof(DescribeTopicsOptions.PartitionSizeLimitPerResponse))
+                .ReturnType);
 
         DeleteTopicsOptions deleteOptions = new DeleteTopicsOptions();
-        Assert.Null(deleteOptions.TimeoutMs);
+        Assert.Null(deleteOptions.TimeoutMs());
 
         // The one option whose Java default is not the C# default for its type.
-        Assert.True(deleteOptions.RetryOnQuotaViolation);
+        Assert.True(deleteOptions.ShouldRetryOnQuotaViolation());
+        SetterMethods.AssertGettersAndSetters(
+            typeof(DeleteTopicsOptions),
+            getters: new[] { nameof(DeleteTopicsOptions.ShouldRetryOnQuotaViolation), nameof(deleteOptions.TimeoutMs) },
+            setters: new[] { nameof(DeleteTopicsOptions.RetryOnQuotaViolation), nameof(deleteOptions.TimeoutMs) });
     }
 
     [Fact]
@@ -167,9 +171,9 @@ public sealed class PublicAdminP2aShapeParityTests
 
         // Java's 3-arg TopicDescription passes an empty set: reported but empty, not null.
         TopicDescription bare = new TopicDescription("t", false, Array.Empty<TopicPartitionInfo>());
-        Assert.NotNull(bare.AuthorizedOperations);
-        Assert.Empty(bare.AuthorizedOperations!);
-        Assert.Equal(Uuid.ZERO_UUID, bare.TopicId);
+        Assert.NotNull(bare.AuthorizedOperations());
+        Assert.Empty(bare.AuthorizedOperations()!);
+        Assert.Equal(Uuid.ZERO_UUID, bare.TopicId());
 
         // Java renders the boolean in lowercase, where bool.ToString() gives "True" and "False".
         Assert.StartsWith("(name=t, internal=false, ", bare.ToString(), StringComparison.Ordinal);
@@ -181,8 +185,8 @@ public sealed class PublicAdminP2aShapeParityTests
         // Java's 4-arg TopicPartitionInfo leaves elr and lastKnownElr null.
         TopicPartitionInfo four = new TopicPartitionInfo(
             0, null, Array.Empty<Node>(), Array.Empty<Node>());
-        Assert.Null(four.Elr);
-        Assert.Null(four.LastKnownElr);
+        Assert.Null(four.Elr());
+        Assert.Null(four.LastKnownElr());
     }
 
     [Fact]
@@ -200,25 +204,25 @@ public sealed class PublicAdminP2aShapeParityTests
             () => new TopicPartitionInfo(0, null, none, null!, null!, null!)).ParamName);
 
         TopicPartitionInfo six = new TopicPartitionInfo(0, null, none, none, none, none);
-        Assert.NotNull(six.Elr);
-        Assert.Empty(six.Elr!);
-        Assert.NotNull(six.LastKnownElr);
-        Assert.Empty(six.LastKnownElr!);
+        Assert.NotNull(six.Elr());
+        Assert.Empty(six.Elr()!);
+        Assert.NotNull(six.LastKnownElr());
+        Assert.Empty(six.LastKnownElr()!);
     }
 
-    private static void AssertNullableDictionary<TKey, TValue>(Type declaring, string propertyName)
+    private static void AssertNullableDictionary<TKey, TValue>(Type declaring, string methodName)
     {
-        PropertyInfo property = declaring.GetProperty(propertyName)!;
+        MethodInfo getter = Getters.Get(declaring, methodName);
 
-        Assert.Equal(typeof(IReadOnlyDictionary<TKey, TValue>), property.PropertyType);
-        AssertNullableProperty(declaring, propertyName);
+        Assert.Equal(typeof(IReadOnlyDictionary<TKey, TValue>), getter.ReturnType);
+        AssertNullableGetter(declaring, methodName);
     }
 
-    private static void AssertNullableProperty(Type declaring, string propertyName) =>
-        Assert.Equal(2, NullableFlag(declaring.GetProperty(propertyName)!));
+    private static void AssertNullableGetter(Type declaring, string methodName) =>
+        Assert.Equal(2, NullableFlag(Getters.Get(declaring, methodName)));
 
-    private static void AssertNonNullableProperty(Type declaring, string propertyName) =>
-        Assert.Equal(1, NullableFlag(declaring.GetProperty(propertyName)!));
+    private static void AssertNonNullableGetter(Type declaring, string methodName) =>
+        Assert.Equal(1, NullableFlag(Getters.Get(declaring, methodName)));
 
     private static void AssertNullableFutureReturn<TValue>(MethodInfo method)
     {

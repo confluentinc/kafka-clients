@@ -43,9 +43,9 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b" });
 
-        Assert.Equal(2, result.DeletedGroups.Count);
+        Assert.Equal(2, result.DeletedGroups().Count);
 
-        foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.DeletedGroups)
+        foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.DeletedGroups())
         {
             UnsupportedOperationException thrown = await TestTimeout.Run(
                 () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => entry.Value.Get()), s_deadline);
@@ -65,7 +65,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b", "p5-group-a" });
 
-        Assert.Equal(new[] { "p5-group-a", "p5-group-b" }, result.DeletedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        Assert.Equal(new[] { "p5-group-a", "p5-group-b" }, result.DeletedGroups().Keys.OrderBy(key => key, StringComparer.Ordinal));
         UnsupportedOperationException fromAll = await TestTimeout.Run(
             () => FutureAssert.ThrowsAsync<UnsupportedOperationException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
@@ -102,10 +102,10 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         AsyncDeleteConsumerGroupsResult result = new AsyncDeleteConsumerGroupsResult(sources);
 
-        await TestTimeout.Run(() => result.DeletedGroups["good"].Get(), s_deadline);
+        await TestTimeout.Run(() => result.DeletedGroups()["good"].Get(), s_deadline);
 
         ControllerMovedException thrown = await TestTimeout.Run(
-            () => FutureAssert.ThrowsAsync<ControllerMovedException>(() => result.DeletedGroups["bad"].Get()), s_deadline);
+            () => FutureAssert.ThrowsAsync<ControllerMovedException>(() => result.DeletedGroups()["bad"].Get()), s_deadline);
         Assert.Same(error, thrown);
     }
 

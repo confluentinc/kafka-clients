@@ -103,7 +103,7 @@ public sealed class ConsumerHandle : IDisposable
         }
 
         RequireAssigned(partition);
-        _native.Seek(partition.Topic, partition.Partition, offset);
+        _native.Seek(partition.Topic(), partition.Partition(), offset);
     }
 
     /// <summary>
@@ -119,7 +119,7 @@ public sealed class ConsumerHandle : IDisposable
 
         RequireAssigned(partition);
 
-        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+        _native.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata);
     }
 
     /// <summary>Returns the offset the consumer fetches next from <paramref name="partition"/>.</summary>
@@ -127,7 +127,7 @@ public sealed class ConsumerHandle : IDisposable
     {
         ThrowIfDisposed();
         RequirePositionAssigned(partition);
-        return _native.Position(partition.Topic, partition.Partition, timeoutMs: null);
+        return _native.Position(partition.Topic(), partition.Partition(), timeoutMs: null);
     }
 
     /// <summary>
@@ -139,7 +139,7 @@ public sealed class ConsumerHandle : IDisposable
         ThrowIfDisposed();
         RequirePositionAssigned(partition);
         long timeoutMs = NativeConsumer.TimerTimeoutMs(timeout);
-        return _native.Position(partition.Topic, partition.Partition, timeoutMs);
+        return _native.Position(partition.Topic(), partition.Partition(), timeoutMs);
     }
 
     /// <summary>
@@ -150,7 +150,7 @@ public sealed class ConsumerHandle : IDisposable
     {
         ThrowIfDisposed();
         RequireAssigned(partition);
-        return _native.CurrentLag(partition.Topic, partition.Partition);
+        return _native.CurrentLag(partition.Topic(), partition.Partition());
     }
 
     /// <summary>
@@ -252,11 +252,11 @@ public sealed class ConsumerHandle : IDisposable
     // A null topic is never assigned and cannot cross the C ABI, so the handle throws what KafkaConsumer throws for a
     // partition that is not assigned; a partition number goes to the core.
     private static void RequireAssigned(TopicPartition partition) =>
-        NativeConsumer.RequireAssignedTopic(partition.Topic, partition.Partition);
+        NativeConsumer.RequireAssignedTopic(partition.Topic(), partition.Partition());
 
     private static void RequirePositionAssigned(TopicPartition partition)
     {
-        if (partition.Topic is null)
+        if (partition.Topic() is null)
         {
             throw new IllegalStateException(NativeConsumer.PositionNotAssigned);
         }

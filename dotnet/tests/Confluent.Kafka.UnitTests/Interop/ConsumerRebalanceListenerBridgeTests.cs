@@ -61,7 +61,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         Assert.Null(failure);
         Assert.Empty(listener.Lost);
-        TopicPartition[] revoked = Assert.Single(listener.Revoked).OrderBy(tp => tp.Partition).ToArray();
+        TopicPartition[] revoked = Assert.Single(listener.Revoked).OrderBy(tp => tp.Partition()).ToArray();
         Assert.Equal(new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 3) }, revoked);
     }
 
@@ -89,8 +89,8 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         Assert.Null(failure);
         TopicPartition delivered = Assert.Single(Assert.Single(listener.Assigned));
-        Assert.Equal(NonAscii, delivered.Topic);
-        Assert.Equal(2, delivered.Partition);
+        Assert.Equal(NonAscii, delivered.Topic());
+        Assert.Equal(2, delivered.Partition());
     }
 
     [Theory]
@@ -383,7 +383,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         try
         {
             using NativeCallArguments arguments = new NativeCallArguments();
-            IntPtr list = arguments.TopicPartitionList(partitions.Select(tp => (tp.Topic, tp.Partition)).ToArray());
+            IntPtr list = arguments.TopicPartitionList(partitions.Select(tp => (Topic: tp.Topic(), Partition: tp.Partition())).ToArray());
             IntPtr handle = registration.NewHandle();
             IntPtr outErr = IntPtr.Zero;
             try

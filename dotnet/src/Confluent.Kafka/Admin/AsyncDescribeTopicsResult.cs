@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Admin;
 /// by whichever identifier the request used.
 /// </summary>
 /// <remarks>
-/// Exactly one of <see cref="TopicIdValues"/> and <see cref="TopicNameValues"/> is non-null, and
+/// Exactly one of <see cref="TopicIdValues()"/> and <see cref="TopicNameValues()"/> is non-null, and
 /// exactly one of <see cref="AllTopicNames"/> and <see cref="AllTopicIds"/> returns a future; the
 /// other returns <see langword="null"/>, as in Java. As in Java, there is no <c>All()</c>.
 /// </remarks>
@@ -93,17 +93,19 @@ public sealed class AsyncDescribeTopicsResult
     /// One future per requested topic id, or <see langword="null"/> if the request used topic
     /// names — Java's <c>topicIdValues()</c>.
     /// </summary>
+    /// <returns>One future per requested topic id, or <see langword="null"/> if the request used topic
+    /// names.</returns>
     /// <remarks>
     /// A topic that failed faults only its own future.
     /// </remarks>
-    public IReadOnlyDictionary<Uuid, AsyncKafkaFuture<TopicDescription>>? TopicIdValues => _topicIdValues;
+    public IReadOnlyDictionary<Uuid, AsyncKafkaFuture<TopicDescription>>? TopicIdValues() => _topicIdValues;
 
     /// <summary>
     /// One future per requested topic name, or <see langword="null"/> if the request
     /// used topic <em>ids</em> — Java's <c>topicNameValues()</c>.
     /// </summary>
-    /// <inheritdoc cref="TopicIdValues" path="/remarks"/>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture<TopicDescription>>? TopicNameValues => _topicNameValues;
+    /// <inheritdoc cref="TopicIdValues()" path="/remarks"/>
+    public IReadOnlyDictionary<string, AsyncKafkaFuture<TopicDescription>>? TopicNameValues() => _topicNameValues;
 
     /// <summary>
     /// Every description keyed by topic name, or <see langword="null"/> if the request used topic
