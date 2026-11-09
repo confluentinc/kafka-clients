@@ -57,11 +57,11 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, await Assert.ThrowsAsync<IllegalStateException>(producer.InitTransactions));
         Assert.Same(injected, await Assert.ThrowsAsync<IllegalStateException>(producer.InitTransactions));
-        Assert.False(producer.TransactionInitialized);
+        Assert.False(producer.TransactionInitialized());
 
         producer.SetInitTransactionException(null);
         await producer.InitTransactions();
-        Assert.True(producer.TransactionInitialized);
+        Assert.True(producer.TransactionInitialized());
     }
 
     [Theory]
@@ -75,11 +75,11 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
         Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
-        Assert.False(producer.TransactionInFlight);
+        Assert.False(producer.TransactionInFlight());
 
         producer.SetBeginTransactionException(null);
         producer.BeginTransaction();
-        Assert.True(producer.TransactionInFlight);
+        Assert.True(producer.TransactionInFlight());
     }
 
     [Theory]
@@ -94,7 +94,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
         Assert.Same(injected, Assert.Throws<KafkaException>(producer.BeginTransaction));
-        Assert.True(producer.TransactionInFlight);
+        Assert.True(producer.TransactionInFlight());
 
         producer.SetBeginTransactionException(null);
         Assert.Equal(
@@ -114,12 +114,12 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, await Assert.ThrowsAsync<ProducerFencedException>(producer.SendOffsets));
         Assert.Same(injected, await Assert.ThrowsAsync<ProducerFencedException>(producer.SendOffsets));
-        Assert.False(producer.SentOffsets);
+        Assert.False(producer.SentOffsets());
         Assert.Empty(producer.UncommittedOffsets());
 
         producer.SetSendOffsetsToTransactionException(null);
         await producer.SendOffsets();
-        Assert.True(producer.SentOffsets);
+        Assert.True(producer.SentOffsets());
     }
 
     [Theory]
@@ -134,13 +134,13 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, await Assert.ThrowsAsync<InvalidOperationException>(producer.CommitTransaction));
         Assert.Same(injected, await Assert.ThrowsAsync<InvalidOperationException>(producer.CommitTransaction));
-        Assert.True(producer.TransactionInFlight);
-        Assert.Equal(0L, producer.CommitCount);
+        Assert.True(producer.TransactionInFlight());
+        Assert.Equal(0L, producer.CommitCount());
 
         producer.SetCommitTransactionException(null);
         await producer.CommitTransaction();
-        Assert.True(producer.TransactionCommitted);
-        Assert.Equal(1L, producer.CommitCount);
+        Assert.True(producer.TransactionCommitted());
+        Assert.Equal(1L, producer.CommitCount());
     }
 
     [Theory]
@@ -155,11 +155,11 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.AbortTransaction));
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.AbortTransaction));
-        Assert.True(producer.TransactionInFlight);
+        Assert.True(producer.TransactionInFlight());
 
         producer.SetAbortTransactionException(null);
         await producer.AbortTransaction();
-        Assert.True(producer.TransactionAborted);
+        Assert.True(producer.TransactionAborted());
     }
 
     [Theory]
@@ -241,11 +241,11 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, await Assert.ThrowsAsync<IllegalStateException>(producer.Flush));
         Assert.Same(injected, await Assert.ThrowsAsync<IllegalStateException>(producer.Flush));
-        Assert.False(producer.Flushed);
+        Assert.False(producer.Flushed());
 
         producer.SetFlushException(null);
         await producer.Flush();
-        Assert.True(producer.Flushed);
+        Assert.True(producer.Flushed());
     }
 
     // Java's MockProducer.commitTransaction() and abortTransaction() call flush() after their own checks.
@@ -261,13 +261,13 @@ public sealed class PublicMockProducerTransactionControlTests
 
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.CommitTransaction));
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(producer.AbortTransaction));
-        Assert.True(producer.TransactionInFlight);
-        Assert.Equal(0L, producer.CommitCount);
+        Assert.True(producer.TransactionInFlight());
+        Assert.Equal(0L, producer.CommitCount());
 
         producer.SetFlushException(null);
         await producer.CommitTransaction();
-        Assert.True(producer.TransactionCommitted);
-        Assert.Equal(1L, producer.CommitCount);
+        Assert.True(producer.TransactionCommitted());
+        Assert.Equal(1L, producer.CommitCount());
     }
 
     [Theory]
@@ -297,13 +297,13 @@ public sealed class PublicMockProducerTransactionControlTests
         Assert.Same(
             injected,
             await Assert.ThrowsAsync<KafkaException>(() => producer.CloseAsTask(TimeSpan.FromSeconds(1))));
-        Assert.False(producer.Closed);
+        Assert.False(producer.Closed());
         await producer.Send();
         Assert.Equal(1, producer.HistoryCount());
 
         producer.SetCloseException(null);
         await producer.CloseAsTask();
-        Assert.True(producer.Closed);
+        Assert.True(producer.Closed());
         await producer.CloseAsTask();
     }
 
@@ -322,7 +322,7 @@ public sealed class PublicMockProducerTransactionControlTests
         Assert.True(blocking.Entered.Wait(BlockingCall.Deadline), "the callback did not start");
 
         Task first = Task.Run(() => producer.CloseAsTask());
-        Assert.True(SpinWait.SpinUntil(() => producer.Closed, BlockingCall.Deadline), "the first close did not begin");
+        Assert.True(SpinWait.SpinUntil(() => producer.Closed(), BlockingCall.Deadline), "the first close did not begin");
         Task second = Task.Run(() => producer.CloseAsTask());
         await Task.Delay(BlockingCall.StillBlocked);
         Assert.False(second.IsCompleted, "the second close did not wait for the first");
@@ -330,7 +330,7 @@ public sealed class PublicMockProducerTransactionControlTests
         blocking.Release.Set();
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Within(first)));
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => Within(second)));
-        Assert.False(producer.Closed);
+        Assert.False(producer.Closed());
     }
 
     // Java's MockProducer.flush() throws its flushException first, also from a callback the core cannot see.
@@ -338,7 +338,7 @@ public sealed class PublicMockProducerTransactionControlTests
     public async Task SetFlushException_FlushFromAnAsyncCallbackAfterAnAwait_ThrowsTheSameInstance()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete: false);
         await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
         IllegalStateException injected = new IllegalStateException("flush");
         producer.SetFlushException(injected);
@@ -350,7 +350,7 @@ public sealed class PublicMockProducerTransactionControlTests
         Exception? thrown = await Within(flushing.Thrown);
 
         Assert.Same(injected, thrown);
-        Assert.False(producer.Flushed);
+        Assert.False(producer.Flushed());
         producer.SetFlushException(null);
     }
 
@@ -359,10 +359,10 @@ public sealed class PublicMockProducerTransactionControlTests
     public void Closed_IsFalseUntilClose(bool async)
     {
         using Mock producer = new Mock(async);
-        Assert.False(producer.Closed);
+        Assert.False(producer.Closed());
 
         producer.Close();
-        Assert.True(producer.Closed);
+        Assert.True(producer.Closed());
     }
 
     [Theory]
@@ -374,7 +374,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
         producer.Dispose();
 
-        Assert.True(producer.Closed);
+        Assert.True(producer.Closed());
         Assert.Equal(MockClosed, Assert.Throws<IllegalStateException>(() => producer.HistoryCount()).Message);
     }
 
@@ -397,13 +397,13 @@ public sealed class PublicMockProducerTransactionControlTests
             () => producer.SetPartitionsForException(null),
             () => producer.SetCloseException(null),
             producer.FenceProducer,
-            () => _ = producer.TransactionInitialized,
-            () => _ = producer.TransactionInFlight,
-            () => _ = producer.TransactionCommitted,
-            () => _ = producer.TransactionAborted,
-            () => _ = producer.Flushed,
-            () => _ = producer.SentOffsets,
-            () => _ = producer.CommitCount,
+            () => _ = producer.TransactionInitialized(),
+            () => _ = producer.TransactionInFlight(),
+            () => _ = producer.TransactionCommitted(),
+            () => _ = producer.TransactionAborted(),
+            () => _ = producer.Flushed(),
+            () => _ = producer.SentOffsets(),
+            () => _ = producer.CommitCount(),
             () => _ = producer.ConsumerGroupOffsetsHistory(),
             () => _ = producer.UncommittedOffsets(),
         })
@@ -436,7 +436,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
     private static ConsumerGroupMetadata GroupMetadata()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         return consumer.GroupMetadata();
     }
 
@@ -505,15 +505,15 @@ public sealed class PublicMockProducerTransactionControlTests
         {
             if (async)
             {
-                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete);
+                _async = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
             }
             else
             {
-                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete);
+                _sync = new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray(), autoComplete);
             }
         }
 
-        internal bool Closed => _sync?.Closed ?? _async!.Closed;
+        internal bool Closed() => _sync?.Closed() ?? _async!.Closed();
 
         internal int HistoryCount() => _sync?.HistoryCount() ?? _async!.HistoryCount();
 
@@ -594,19 +594,19 @@ public sealed class PublicMockProducerTransactionControlTests
             }
         }
 
-        internal bool TransactionInitialized => _sync?.TransactionInitialized ?? _async!.TransactionInitialized;
+        internal bool TransactionInitialized() => _sync?.TransactionInitialized() ?? _async!.TransactionInitialized();
 
-        internal bool TransactionInFlight => _sync?.TransactionInFlight ?? _async!.TransactionInFlight;
+        internal bool TransactionInFlight() => _sync?.TransactionInFlight() ?? _async!.TransactionInFlight();
 
-        internal bool TransactionCommitted => _sync?.TransactionCommitted ?? _async!.TransactionCommitted;
+        internal bool TransactionCommitted() => _sync?.TransactionCommitted() ?? _async!.TransactionCommitted();
 
-        internal bool TransactionAborted => _sync?.TransactionAborted ?? _async!.TransactionAborted;
+        internal bool TransactionAborted() => _sync?.TransactionAborted() ?? _async!.TransactionAborted();
 
-        internal bool Flushed => _sync?.Flushed ?? _async!.Flushed;
+        internal bool Flushed() => _sync?.Flushed() ?? _async!.Flushed();
 
-        internal bool SentOffsets => _sync?.SentOffsets ?? _async!.SentOffsets;
+        internal bool SentOffsets() => _sync?.SentOffsets() ?? _async!.SentOffsets();
 
-        internal long CommitCount => _sync?.CommitCount ?? _async!.CommitCount;
+        internal long CommitCount() => _sync?.CommitCount() ?? _async!.CommitCount();
 
         internal Task InitTransactions() => Run(() => _sync!.InitTransactions(), () => _async!.InitTransactions());
 

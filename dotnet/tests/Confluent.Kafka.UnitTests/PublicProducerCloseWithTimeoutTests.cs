@@ -171,7 +171,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         if (flavor == SyncFlavor)
         {
             KafkaProducer<byte[], byte[]> producer =
-                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray);
+                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
             using IDisposable disposal = TestTimeout.Disposal(producer);
             KafkaTimeoutException timeout = Assert.Throws<KafkaTimeoutException>(producer.InitTransactions);
             Assert.Contains(initTransactionsTimeout, timeout.Message);
@@ -187,7 +187,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer =
-                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray, Serdes.ByteArray);
+                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray(), Serdes.ByteArray());
             await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
             KafkaTimeoutException timeout = await Assert.ThrowsAsync<KafkaTimeoutException>(
                 () => TestTimeout.Run(() => producer.InitTransactions(), Deadline));

@@ -87,15 +87,15 @@ internal sealed class ProducerServer : IDisposable
     internal ulong RegisterTransactionalMock()
     {
         _pending = _servicer is ProducerServiceImpl
-            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray)
-            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+            ? new MockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray())
+            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray(), Serdes.ByteArray());
         return Register(_pending);
     }
 
     internal (bool InFlight, bool Committed, bool Aborted) MockTransactionState() => _pending switch
     {
-        MockProducer<byte[], byte[]> sync => (sync.TransactionInFlight, sync.TransactionCommitted, sync.TransactionAborted),
-        AsyncMockProducer<byte[], byte[]> async => (async.TransactionInFlight, async.TransactionCommitted, async.TransactionAborted),
+        MockProducer<byte[], byte[]> sync => (sync.TransactionInFlight(), sync.TransactionCommitted(), sync.TransactionAborted()),
+        AsyncMockProducer<byte[], byte[]> async => (async.TransactionInFlight(), async.TransactionCommitted(), async.TransactionAborted()),
         _ => throw new InvalidOperationException("no mock registered"),
     };
 
