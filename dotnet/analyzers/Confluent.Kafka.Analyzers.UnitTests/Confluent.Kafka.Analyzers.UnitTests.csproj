@@ -31,5 +31,9 @@
   <ItemGroup>
     <ProjectReference Include="..\Confluent.Kafka.Analyzers\Confluent.Kafka.Analyzers.csproj" />
   </ItemGroup>
+  <!-- The Java list `cargo xtask java-api` writes, read by the test that checks the analyzer parses it. -->
+  <ItemGroup>
+    <None Include="..\java-api.txt" Link="java-api.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>
