@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -47,6 +48,10 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     private const string EmptyPattern = "Topic pattern to subscribe to cannot be empty";
 
     private const string BlankTopic = "Topic collection to subscribe to cannot contain null or empty topic";
+
+    private const string BootstrapResolutionFailed =
+        "Failed to resolve bootstrap servers after 1000ms. Please check your bootstrap.servers configuration and DNS "
+        + "settings.";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
@@ -610,6 +615,41 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         Assert.Equal(GroupIdNotDefined, refused.Message);
         Assert.Null(consumer.CurrentListenerRegistration);
+        await AssertCollected(listener);
+    }
+
+    [Theory]
+    [InlineData(Form.Sync)]
+    [InlineData(Form.Async)]
+    [InlineData(Form.AsyncWithAnAsyncListener)]
+    public async Task OnAKafkaConsumer_AnEmptySubscribeWithAListenerAfterABootstrapFailure_ReleasesItsRegistration(Form form)
+    {
+        NativeConsumer consumer = NativeConsumer.Create(new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "unresolvable.invalid:9092",
+            ["bootstrap.resolve.timeout.ms"] = 1000,
+            ["group.protocol"] = "consumer",
+            ["group.id"] = "listener-bridge-group",
+        });
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        BootstrapResolutionException failed = Assert.Throws<BootstrapResolutionException>(() =>
+        {
+            consumer.Subscribe(new[] { Topic });
+            Stopwatch watch = Stopwatch.StartNew();
+            while (watch.Elapsed < s_deadline)
+            {
+                consumer.PollTyped(TimeSpan.FromMilliseconds(100), Serdes.ByteArray, Serdes.ByteArray);
+            }
+        });
+        Assert.Equal(BootstrapResolutionFailed, failed.Message);
+
+        (WeakReference listener, Task subscribed) = SubscribeAnUnreferencedListener(consumer, form, Array.Empty<string>());
+        BootstrapResolutionException refused = await Assert.ThrowsAsync<BootstrapResolutionException>(
+            () => TestTimeout.Run(() => subscribed, s_deadline));
+
+        Assert.Equal(BootstrapResolutionFailed, refused.Message);
+        Assert.Null(consumer.CurrentListenerRegistration);
+        Assert.Equal(0, consumer.RetainedListenerRegistrationCount);
         await AssertCollected(listener);
     }
 
