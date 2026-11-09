@@ -101,3 +101,24 @@ Notes for the comment-only commit (S4):
    "the 12 members" is the source. **Fix:** "15 members (Java's 12, plus the async-listener form, row 414): …".
 
    Resolved in the fixup of 670eb800.
+
+## PR #326 Copilot (ledger row 431, Agreed: option (a)) — approved for the Actor
+
+1. **must-fix — a refused subscribe frees a listener the core still holds** —
+   `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs` `SubscribeWithListener` / `SettleListener` (~576-640) and
+   `NativeConsumer.Async.cs` `SubscribeWithRegistration` (~205-260). On a failed native subscribe the binding releases
+   the new `ListenerRegistration` (its `GCHandle`), but the core registers the listener before its subscription-type
+   check (`rust/src/consumer/internals/subscription_state.rs` `subscribe_with_topics` / `subscribe_with_pattern`:
+   `register_rebalance_listener` then `set_subscription_type(...)?`, as Java's `SubscriptionState.subscribe`), so a
+   refused switch (a mock subscribed to topics, then `Subscribe(pattern, listener)` → "…mutually exclusive"; or
+   `Assign`, then `Subscribe(topics, listener)`) leaves the core with a freed handle, which a later `Rebalance` calls.
+   The C contract (`kafka_consumer_Consumer_subscribe_with_topics_listener` rustdoc) keeps the listener's `self` alive
+   "until the next `subscribe_*`, `unsubscribe` or the consumer's destruction releases it", with no exception for a
+   failed call. Pre-existing in the topics forms. **Fix (row 431 (a)):** never release a registration the core may still
+   hold: after a failed subscribe keep the new registration and the current one alive until a later successful
+   subscribe or the consumer's destruction, and release them there; the bookkeeping of the current registration
+   follows what the core holds after a refused switch (the new one); a successful subscribe still replaces and
+   releases, `Unsubscribe` and `Close` keep it; nothing changes when a subscribe succeeds. Not allowed: a .NET-side
+   subscription-type check (b), or any Rust/C/Python change (c).
+
+   Resolved in 8e46cfb4.
