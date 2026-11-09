@@ -1,0 +1,80 @@
+# CKRDA0013 findings kept on purpose, one key per line under a comment saying why.
+# A line that matches no finding is CKRDA0014: delete it.
+
+# T6: .NET-only consumer types. IConsumerCommon is the surface IConsumer and IAsyncConsumer share; its members
+# are compared through them. ConsumerHandle stays public (ledgers 104, 114, 163, 237).
+unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Handle
+unmatched M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Handle
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Handle
+unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Handle
+unmatched T:Confluent.Kafka.Consumer.ConsumerHandle
+unmatched T:Confluent.Kafka.Consumer.IConsumerCommon
+
+# M4: Java's Headers.headers(String); C# forbids a method named like its class (CS0542).
+missing T:Confluent.Kafka.Common.Header.Headers org.apache.kafka.common.header.Headers#headers(String)
+unmatched M:Confluent.Kafka.Common.Header.Headers.GetHeaders(System.String)
+
+# F1/F2: the non-generic futures are Java's KafkaFuture<Void>; GetNow() has no value to take or give.
+missing T:Confluent.Kafka.Common.AsyncKafkaFuture org.apache.kafka.common.KafkaFuture#getNow(T)
+missing T:Confluent.Kafka.Common.KafkaFuture org.apache.kafka.common.KafkaFuture#getNow(T)
+overload M:Confluent.Kafka.Common.AsyncKafkaFuture.GetNow
+overload M:Confluent.Kafka.Common.KafkaFuture.GetNow
+
+# M1: the implicit conversion of a generic future to its KafkaFuture<Void> form, so AllOf takes mixed types
+# (dotnet/CLAUDE.md §4, Futures).
+unmatched M:Confluent.Kafka.Common.AsyncKafkaFuture`1.op_Implicit(Confluent.Kafka.Common.AsyncKafkaFuture{`0})~Confluent.Kafka.Common.AsyncKafkaFuture
+unmatched M:Confluent.Kafka.Common.KafkaFuture`1.op_Implicit(Confluent.Kafka.Common.KafkaFuture{`0})~Confluent.Kafka.Common.KafkaFuture
+
+# AllOf<T>(params KafkaFuture<T>[]): an array of one type (dotnet/CLAUDE.md §4, Futures).
+overload M:Confluent.Kafka.Common.AsyncKafkaFuture.AllOf``1(Confluent.Kafka.Common.AsyncKafkaFuture{``0}[])
+overload M:Confluent.Kafka.Common.KafkaFuture.AllOf``1(Confluent.Kafka.Common.KafkaFuture{``0}[])
+
+# H1: Java's RecordHeader / RecordHeaders constructors, on the public Header / Headers (Python's deviation,
+# ledger 269).
+overload M:Confluent.Kafka.Common.Header.Header.#ctor(System.String,System.Byte[])
+overload M:Confluent.Kafka.Common.Header.Headers.#ctor
+overload M:Confluent.Kafka.Common.Header.Headers.#ctor(Confluent.Kafka.Common.Header.Header[])
+overload M:Confluent.Kafka.Common.Header.Headers.#ctor(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Header.Header})
+
+# C1: the mock consumer takes deserializers: it runs on the core's mock, which holds bytes (dotnet/CLAUDE.md §3).
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
+overload M:Confluent.Kafka.Consumer.MockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
+
+# M9: AddRecord takes bytes, which the mock deserializes on Poll, for the same reason.
+missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)
+missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.AddRecord(System.String,System.Int32,System.Int64,System.Byte[],System.Byte[])
+overload M:Confluent.Kafka.Consumer.MockConsumer`2.AddRecord(System.String,System.Int32,System.Int64,System.Byte[],System.Byte[])
+
+# N1: a Java enum's toString() override; a C# enum cannot override ToString() (ledger 285).
+missing T:Confluent.Kafka.Admin.TransactionState org.apache.kafka.clients.admin.TransactionState#toString()
+missing T:Confluent.Kafka.Common.ClassicGroupState org.apache.kafka.common.ClassicGroupState#toString()
+missing T:Confluent.Kafka.Common.GroupState org.apache.kafka.common.GroupState#toString()
+missing T:Confluent.Kafka.Common.GroupType org.apache.kafka.common.GroupType#toString()
+missing T:Confluent.Kafka.Common.IsolationLevel org.apache.kafka.common.IsolationLevel#toString()
+missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#toString()
+
+# N2: a Java enum's fields: the integer one is the enum's value, the others are reached through Java's
+# methods (Python's enum rule).
+missing T:Confluent.Kafka.Common.ElectionType org.apache.kafka.common.ElectionType#value
+missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#id
+missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#name
+
+# T4: Java's ConfigResource.Type; a bare `Type` would clash with System.Type (M15/P3 D16). See the pairs.
+unmatched T:Confluent.Kafka.Common.Config.ConfigResourceType
+
+# The async forms of a callback-taking overload: Python's async callbacks (ledgers 47 and 48).
+overload M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.CommitAsync(Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.CommitAsync(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IAsyncConsumerRebalanceListener,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.CommitAsync(Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.CommitAsync(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IAsyncConsumerRebalanceListener,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.IAsyncConsumer`2.CommitAsync(Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.IAsyncConsumer`2.CommitAsync(System.Collections.Generic.IReadOnlyDictionary{Confluent.Kafka.Common.TopicPartition,Confluent.Kafka.Consumer.OffsetAndMetadata},Confluent.Kafka.Consumer.IAsyncOffsetCommitCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Consumer.IAsyncConsumer`2.Subscribe(System.Collections.Generic.IReadOnlyCollection{System.String},Confluent.Kafka.Consumer.IAsyncConsumerRebalanceListener,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Producer.AsyncKafkaProducer`2.Send(Confluent.Kafka.Producer.ProducerRecord{`0,`1},Confluent.Kafka.Producer.IAsyncDeliveryCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.Send(Confluent.Kafka.Producer.ProducerRecord{`0,`1},Confluent.Kafka.Producer.IAsyncDeliveryCallback,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Producer.IAsyncProducer`2.Send(Confluent.Kafka.Producer.ProducerRecord{`0,`1},Confluent.Kafka.Producer.IAsyncDeliveryCallback,System.Threading.CancellationToken)

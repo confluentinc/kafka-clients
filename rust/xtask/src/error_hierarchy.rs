@@ -636,7 +636,7 @@ const KAFKA_EXCEPTION_FQN: &str = "org.apache.kafka.common.KafkaException";
 /// models none) and the constructors as `(type, name)` lists. The JDK source is
 /// not in the tree; the constructors are Java 11's, the release Kafka's clients
 /// compile for (`kafka/build.gradle`: `minClientJavaVersion = 11`).
-type JdkCtor = &'static [(&'static str, &'static str)];
+pub(crate) type JdkCtor = &'static [(&'static str, &'static str)];
 const JDK_FOUR: &[JdkCtor] = &[
     &[],
     &[("String", "s")],
@@ -711,6 +711,22 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
     // and the core's `LOCAL_NULL_POINTER` id is one of the `RUST_ONLY_IDS`, which the
     // binding maps to that `TypeError`.
 ];
+
+/// The Kafka exception classes the generator makes a class for, those of [`BRIDGE`]
+/// and [`ABSTRACT_CLASSES`], whether or not Kafka marks them public: the bindings
+/// have a class for each, so `cargo xtask java-api` lists them.
+pub(crate) fn generated_kafka_classes() -> impl Iterator<Item = &'static str> {
+    BRIDGE
+        .iter()
+        .map(|(_, fqn)| *fqn)
+        .chain(ABSTRACT_CLASSES.iter().copied())
+        .filter(|fqn| fqn.starts_with("org.apache.kafka."))
+}
+
+/// The Java built-in exceptions of [`JDK_BUILTINS`]: FQN, parent FQN and constructors.
+pub(crate) fn jdk_exceptions() -> impl Iterator<Item = (&'static str, &'static str, &'static [JdkCtor])> {
+    JDK_BUILTINS.iter().map(|(fqn, parent, _, ctors)| (*fqn, *parent, *ctors))
+}
 
 /// JDK classes at the top of every chain: `Throwable`'s constructors decide the
 /// message and the cause.
