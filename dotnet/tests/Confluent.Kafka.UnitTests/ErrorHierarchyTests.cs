@@ -416,7 +416,7 @@ public sealed class ErrorHierarchyTests
     }
 
     /// <summary>The C enum <c>kafka_common_Error_e</c>: each constant's name below the prefix, and its value.</summary>
-    private static IReadOnlyDictionary<string, int> CEnum()
+    internal static IReadOnlyDictionary<string, int> CEnum()
     {
         string header = NativeAbiConformanceTests.ReadHeader();
         int end = header.IndexOf(EnumEnd, StringComparison.Ordinal);

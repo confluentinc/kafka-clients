@@ -112,6 +112,16 @@ public class KafkaException : Exception, IExceptionText
         return null;
     }
 
+    // The ids the core refuses a subscribe with before it registers the subscribe's listener: an invalid argument, a
+    // missing group.id, concurrent use. Any other failure may come after the registration.
+    internal static bool RefusedBeforeRegistering(int code) =>
+        code == ErrorClasses.Ids[typeof(IllegalArgumentException)]
+        || code == ErrorClasses.Ids[typeof(InvalidGroupIdException)]
+        || code == ErrorClasses.Ids[typeof(ConcurrentModificationException)];
+
+    internal static bool RefusedBeforeRegistering(IntPtr error) =>
+        error != IntPtr.Zero && RefusedBeforeRegistering(NativeMethods.Code(error));
+
     internal virtual string TypeAndMessage() => JavaText.TypeAndMessage(this, _givenMessage);
 
     string IExceptionText.TypeAndMessage() => TypeAndMessage();

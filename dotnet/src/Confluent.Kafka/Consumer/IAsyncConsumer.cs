@@ -106,10 +106,12 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </summary>
     /// <remarks>
     /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
-    /// refused subscribe's listener, or none. A subscribe that succeeds releases the previous listener and those of the
-    /// subscribes refused before it, a listener-less
-    /// <see cref="Subscribe(IReadOnlyCollection{string}, CancellationToken)"/> included, as does disposing the
-    /// consumer. <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's
+    /// refused subscribe's listener, or none. A subscribe refused for an invalid argument, a missing <c>group.id</c> or
+    /// concurrent use does not register its listener and releases it; any other refused subscribe keeps both until a
+    /// subscribe succeeds or the consumer is disposed.
+    /// A subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
+    /// listener-less <see cref="Subscribe(IReadOnlyCollection{string}, CancellationToken)"/> included, as does
+    /// disposing the consumer. <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's
     /// <c>SubscriptionState.unsubscribe()</c> does. On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, a subscribe
     /// to no topics is <see cref="Unsubscribe"/> and keeps it too. <see cref="IConsumerRebalanceListener"/> describes
     /// where the listener runs, what throwing does, and what it may call on its own consumer.
@@ -210,9 +212,12 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </para>
     /// <para>
     /// A subscribe the consumer refuses can replace it too: on the mocks, as in Java, the next rebalance fires the
-    /// refused subscribe's listener, or none. A subscribe that succeeds releases the previous listener and those of the
-    /// subscribes refused before it, a listener-less <see cref="Subscribe(SubscriptionPattern, CancellationToken)"/>
-    /// included, as does disposing the consumer.
+    /// refused subscribe's listener, or none. A subscribe refused for an invalid argument, a missing <c>group.id</c> or
+    /// concurrent use does not register its listener and releases it; any other refused subscribe keeps both until a
+    /// subscribe succeeds or the consumer is disposed.
+    /// A subscribe that succeeds releases the previous listener and those of the subscribes refused before it, a
+    /// listener-less <see cref="Subscribe(SubscriptionPattern, CancellationToken)"/> included, as does disposing the
+    /// consumer.
     /// <see cref="Unsubscribe"/> and <c>Close</c> keep it, as Java's <c>SubscriptionState.unsubscribe()</c> does.
     /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, a subscribe to no topics is <see cref="Unsubscribe"/> and
     /// keeps it too.

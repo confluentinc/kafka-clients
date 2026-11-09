@@ -44,6 +44,10 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer "
         + "configuration.";
 
+    private const string EmptyPattern = "Topic pattern to subscribe to cannot be empty";
+
+    private const string BlankTopic = "Topic collection to subscribe to cannot contain null or empty topic";
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_notYetWindow = TimeSpan.FromMilliseconds(500);
@@ -645,6 +649,96 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.True(second.IsReleased);
     }
 
+    [Fact]
+    public void OnlyAnInvalidArgumentAMissingGroupIdOrConcurrentUse_IsRefusedBeforeRegistering()
+    {
+        IReadOnlyDictionary<string, int> cEnum = ErrorHierarchyTests.CEnum();
+        int[] known = cEnum.Values.Concat(ErrorClasses.Ids.Values).Concat(ErrorClasses.Factories.Keys).Distinct().ToArray();
+
+        Assert.Equal(
+            new[] { cEnum["LOCAL_ILLEGAL_ARGUMENT"], cEnum["LOCAL_CONCURRENT_MODIFICATION"], cEnum["INVALID_GROUP_ID"] }
+                .OrderBy(id => id),
+            known.Where(KafkaException.RefusedBeforeRegistering).OrderBy(id => id));
+    }
+
+    [Theory]
+    [InlineData(Form.Sync, false)]
+    [InlineData(Form.Async, false)]
+    [InlineData(Form.AsyncWithAnAsyncListener, false)]
+    [InlineData(Form.Sync, true)]
+    [InlineData(Form.Async, true)]
+    [InlineData(Form.AsyncWithAnAsyncListener, true)]
+    public async Task OnAKafkaConsumer_SubscribesRefusedForAMissingGroupId_ReleaseTheirRegistrations(Form form, bool pattern)
+    {
+        NativeConsumer consumer = NewKafkaConsumer(withGroupId: false);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        List<WeakReference> listeners = new List<WeakReference>();
+
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            (WeakReference listener, Task subscribed) = pattern
+                ? SubscribeAnUnreferencedListener(consumer, form, new SubscriptionPattern("t.*"))
+                : SubscribeAnUnreferencedListener(consumer, form, new[] { Topic });
+            listeners.Add(listener);
+            InvalidGroupIdException refused = await Assert.ThrowsAsync<InvalidGroupIdException>(
+                () => TestTimeout.Run(() => subscribed, s_deadline));
+
+            Assert.Equal(GroupIdNotDefined, refused.Message);
+            Assert.Null(consumer.CurrentListenerRegistration);
+            Assert.Equal(0, consumer.RetainedListenerRegistrationCount);
+        }
+
+        foreach (WeakReference listener in listeners)
+        {
+            await AssertCollected(listener);
+        }
+    }
+
+    [Theory]
+    [InlineData(Form.Sync)]
+    [InlineData(Form.Async)]
+    [InlineData(Form.AsyncWithAnAsyncListener)]
+    public async Task OnAKafkaConsumer_AnEmptyPatternSubscribe_ReleasesItsRegistration_AndKeepsTheCurrentOne(Form form)
+    {
+        NativeConsumer consumer = NewKafkaConsumer();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        await Subscribe(consumer, form, new SubscriptionPattern("t.*"), NewListener(form));
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+
+        (WeakReference listener, Task subscribed) =
+            SubscribeAnUnreferencedListener(consumer, form, new SubscriptionPattern(string.Empty));
+        IllegalArgumentException refused = await Assert.ThrowsAsync<IllegalArgumentException>(
+            () => TestTimeout.Run(() => subscribed, s_deadline));
+
+        Assert.Equal(EmptyPattern, refused.Message);
+        Assert.Same(first, consumer.CurrentListenerRegistration);
+        Assert.False(first.IsReleased);
+        Assert.Equal(0, consumer.RetainedListenerRegistrationCount);
+        await AssertCollected(listener);
+    }
+
+    [Theory]
+    [InlineData(Form.Sync)]
+    [InlineData(Form.Async)]
+    [InlineData(Form.AsyncWithAnAsyncListener)]
+    public async Task OnAKafkaConsumer_ABlankTopicSubscribe_ReleasesItsRegistration_AndKeepsTheCurrentOne(Form form)
+    {
+        NativeConsumer consumer = NewKafkaConsumer();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        await Subscribe(consumer, form, new[] { Topic }, NewListener(form));
+        ListenerRegistration first = consumer.CurrentListenerRegistration!;
+
+        (WeakReference listener, Task subscribed) = SubscribeAnUnreferencedListener(consumer, form, new[] { " " });
+        IllegalArgumentException refused = await Assert.ThrowsAsync<IllegalArgumentException>(
+            () => TestTimeout.Run(() => subscribed, s_deadline));
+
+        Assert.Equal(BlankTopic, refused.Message);
+        Assert.Same(first, consumer.CurrentListenerRegistration);
+        Assert.False(first.IsReleased);
+        Assert.Equal(0, consumer.RetainedListenerRegistrationCount);
+        await AssertCollected(listener);
+    }
+
     [Theory]
     [InlineData(Form.Sync)]
     [InlineData(Form.Async)]
@@ -742,25 +836,35 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     private static Task Subscribe(NativeConsumer consumer, Form form, IReadOnlyCollection<string> topics, object listener) =>
         TestTimeout.Run(() => StartSubscribe(consumer, form, topics, listener), s_deadline);
 
-    private static Task StartSubscribe(NativeConsumer consumer, Form form, IReadOnlyCollection<string> topics, object listener)
-    {
-        switch (form)
-        {
-            case Form.Sync:
-                try
-                {
-                    consumer.Subscribe(topics, (IConsumerRebalanceListener)listener);
-                    return Task.CompletedTask;
-                }
-                catch (Exception exception)
-                {
-                    return Task.FromException(exception);
-                }
+    private static Task Subscribe(NativeConsumer consumer, Form form, SubscriptionPattern pattern, object listener) =>
+        TestTimeout.Run(() => StartSubscribe(consumer, form, pattern, listener), s_deadline);
 
-            case Form.Async:
-                return consumer.SubscribeWithCallback(topics, (IConsumerRebalanceListener)listener);
-            default:
-                return consumer.SubscribeWithCallback(topics, (IAsyncConsumerRebalanceListener)listener);
+    private static Task StartSubscribe(NativeConsumer consumer, Form form, IReadOnlyCollection<string> topics, object listener) =>
+        form switch
+        {
+            Form.Sync => Started(() => consumer.Subscribe(topics, (IConsumerRebalanceListener)listener)),
+            Form.Async => consumer.SubscribeWithCallback(topics, (IConsumerRebalanceListener)listener),
+            _ => consumer.SubscribeWithCallback(topics, (IAsyncConsumerRebalanceListener)listener),
+        };
+
+    private static Task StartSubscribe(NativeConsumer consumer, Form form, SubscriptionPattern pattern, object listener) =>
+        form switch
+        {
+            Form.Sync => Started(() => consumer.Subscribe(pattern, (IConsumerRebalanceListener)listener)),
+            Form.Async => consumer.SubscribeWithCallback(pattern, (IConsumerRebalanceListener)listener),
+            _ => consumer.SubscribeWithCallback(pattern, (IAsyncConsumerRebalanceListener)listener),
+        };
+
+    private static Task Started(Action subscribe)
+    {
+        try
+        {
+            subscribe();
+            return Task.CompletedTask;
+        }
+        catch (Exception exception)
+        {
+            return Task.FromException(exception);
         }
     }
 
@@ -783,6 +887,16 @@ public sealed class ConsumerRebalanceListenerBridgeTests
     {
         object listener = NewListener(form);
         return (new WeakReference(listener), StartSubscribe(consumer, form, topics, listener));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Listener, Task Subscribed) SubscribeAnUnreferencedListener(
+        NativeConsumer consumer,
+        Form form,
+        SubscriptionPattern pattern)
+    {
+        object listener = NewListener(form);
+        return (new WeakReference(listener), StartSubscribe(consumer, form, pattern, listener));
     }
 
     private static async Task AssertCollected(WeakReference listener)
