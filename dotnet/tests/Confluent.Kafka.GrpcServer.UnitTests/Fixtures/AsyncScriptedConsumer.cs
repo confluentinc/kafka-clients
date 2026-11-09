@@ -82,6 +82,30 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Subscribe(topics, listener, cancellationToken);
     }
 
+    public Task Subscribe(SubscriptionPattern pattern, CancellationToken cancellationToken = default)
+    {
+        _script.Tokens.Record(nameof(Subscribe), cancellationToken);
+        return _inner.Subscribe(pattern, cancellationToken);
+    }
+
+    public Task Subscribe(
+        SubscriptionPattern pattern,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default)
+    {
+        _script.Tokens.Record(nameof(Subscribe), cancellationToken);
+        return _inner.Subscribe(pattern, listener, cancellationToken);
+    }
+
+    public Task Subscribe(
+        SubscriptionPattern pattern,
+        IAsyncConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default)
+    {
+        _script.Tokens.Record(nameof(Subscribe), cancellationToken);
+        return _inner.Subscribe(pattern, listener, cancellationToken);
+    }
+
     public Task Unsubscribe(CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Unsubscribe), cancellationToken);
