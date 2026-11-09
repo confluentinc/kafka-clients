@@ -2249,7 +2249,9 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     the header says `unsubscribe` releases the listener (BH:29392-29394 at `3f8a5bc6`), but
     Java's `unsubscribe()` leaves it registered (`SubscriptionState.java:347-355`), and
     Python keeps its context across it (`python/_confluentkafka.c:3870-3879`, `:3947-3954`
-    at `3f8a5bc6`).
+    at `3f8a5bc6`). On `KafkaConsumer` / `AsyncKafkaConsumer` a subscribe to no topics is
+    `unsubscribe`: keep the current and every kept one, and free its own once the call has
+    returned or completed.
   - Destroy the `ConsumerRebalanceListener_t` handle right after the `subscribe_*` call:
     the call copied the registration (BH:29283-29287 at `3f8a5bc6`).
 
@@ -2349,7 +2351,8 @@ synchronous call.
   - **Listener:** the registration survives **N** fires (a churn loop); a replacing
     subscribe frees the old `self_`; a refused subscribe frees neither, its listener is
     the one a mock's next rebalance fires, and the next successful subscribe frees both;
-    an `unsubscribe` frees nothing; destroy frees the current and every kept one after
+    an `unsubscribe` frees nothing; on `KafkaConsumer` / `AsyncKafkaConsumer` a subscribe
+    to no topics frees only its own; destroy frees the current and every kept one after
     it returns; and teardown with a live registration returns without hanging.
   - **Commit callback:** after `on_complete` reports, `self_` is freed once; after an
     initiation error it is kept until destroy, then freed once; a throwing callback's
