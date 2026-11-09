@@ -177,3 +177,25 @@ Notes for the comment-only commit (S4):
    listener-less … included, as does disposing the consumer." (The `<see cref>` of each remark stays as it is.)
 
    Resolved in b829a6ba (ledger row 434).
+
+## PR #326 Copilot comment A (thread PRRT_kwDOQjF7uc61MRCS, ledger row 436, Agreed: A1) — approved for the Actor
+
+1. **must-fix — on a real consumer, an empty-topic subscribe frees registrations the core still holds** —
+   `dotnet/src/Confluent.Kafka/Internal/NativeConsumer.cs` `SettleListener` (~646-680) and its callers (sync ~538-549,
+   ~582-627; async `NativeConsumer.Async.cs` ~112, ~150, ~240). On `KafkaConsumer` / `AsyncKafkaConsumer`, `Subscribe`
+   with an empty topic list is Java's `unsubscribe()`: `rust/src/consumer/internals/async_kafka_consumer.rs`
+   `subscribe_internal_topics` runs `ensure_open`, the `group.id` check, then `return self.unsubscribe().await` for empty
+   topics (~4878-4887), dropping the new listener unused and leaving the app-side mirror (~4932) and `SubscriptionState`
+   (`unsubscribe`, `subscription_state.rs` ~904-912) holding the old one. .NET settles a successful empty subscribe as a
+   success and frees the replaced and every retained registration. Pre-existing for the topics forms; contradicts .NET's
+   own `Unsubscribe`, which keeps the registration. The mocks register the listener on an empty list
+   (`mock_consumer.rs` ~518-527 → `subscription_state.rs` ~712-720), as Java's `MockConsumer`. **Fix (row 436 A1):** on
+   the real consumer only (the binding's mock flag), an empty-topic subscribe, in all four forms (sync and async, with
+   and without a listener, both async listener kinds), is bookkept like `Unsubscribe`: nothing the binding holds is
+   released; a listener-bearing form's new registration is released once the native call has returned (sync) or
+   completed (async); if the core never stores the new listener on the empty path whatever the outcome (verify), this
+   applies on success and failure alike. Mocks unchanged; non-empty subscribes unchanged. Decide from the caller's input
+   (empty topics) and the consumer kind only; no .NET copy of a core check; no Rust/C/Python change. Comment B
+   (pre-registration failures retained, `NativeConsumer.cs:666`) is NOT ruled: do not change the failure path for it.
+
+   Resolved in 53f6fef9 / 61c2ca32.
